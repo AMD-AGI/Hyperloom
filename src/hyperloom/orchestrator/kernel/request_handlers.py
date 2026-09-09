@@ -6187,21 +6187,57 @@ def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
     return stats
 
 
-def _workspace_has_compiled_registry_error(workspace: Path) -> bool:
+_INTEGRATE_LOG_NAMES = ("server.log", "benchmark_stderr.log", "benchmark_stdout.log")
+
+
+def _workspace_log_sizes(workspace: Path) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for name in _INTEGRATE_LOG_NAMES:
+        path = workspace / name
+        try:
+            sizes[name] = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            sizes[name] = 0
+    return sizes
+
+
+def _workspace_has_compiled_registry_error(
+    workspace: Path,
+    *,
+    after_sizes: dict[str, int] | None = None,
+) -> bool:
     """True when an integrate workspace log shows a compiled-registry miss."""
     from ..actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
 
-    for name in ("server.log", "benchmark_stderr.log", "benchmark_stdout.log"):
+    for name in _INTEGRATE_LOG_NAMES:
         path = workspace / name
         if not path.is_file():
             continue
+        start = 0 if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")[-65536:]
+            with path.open("rb") as handle:
+                if after_sizes is None:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    handle.seek(max(0, size - 65536))
+                else:
+                    handle.seek(start)
+                text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             continue
         if is_aiter_jit_registry_mismatch(text):
             return True
     return False
+
+
+def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
+    task = getattr(ctx, "task", None)
+    params = getattr(task, "params", None)
+    if isinstance(params, dict):
+        envs = params.get("extra_envs")
+        if isinstance(envs, dict):
+            return envs
+    return None
 
 
 async def _run_integrate_rebaseline_with_lock_retry(
@@ -6225,10 +6261,10 @@ async def _run_integrate_rebaseline_with_lock_retry(
         return result
 
     if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
-        extra = getattr(ctx, "extra", None) or {}
-        envs = extra.get("extra_envs") if isinstance(extra, dict) else None
+        envs = _integrate_extra_envs(ctx)
+        log_sizes = _workspace_log_sizes(workspace)
         cleanup = drop_serving_so_for_envs(
-            envs if isinstance(envs, dict) else None,
+            envs,
             backup_dir=workspace / "aiter_jit_backup",
         )
         log.warning(
@@ -6244,7 +6280,8 @@ async def _run_integrate_rebaseline_with_lock_retry(
             "retry_succeeded": retry_result.get("status") == "succeeded",
         }
         if result_is_aiter_jit_registry_mismatch(retry_result) or (
-            retry_result.get("status") != "succeeded" and _workspace_has_compiled_registry_error(workspace)
+            retry_result.get("status") != "succeeded"
+            and _workspace_has_compiled_registry_error(workspace, after_sizes=log_sizes)
         ):
             retry_result["error_class"] = "aiter_jit_registry_mismatch"
         return retry_result

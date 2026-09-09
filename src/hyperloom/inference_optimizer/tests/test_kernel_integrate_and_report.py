@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -216,6 +217,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
 @pytest.mark.asyncio
 async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path, monkeypatch):
     dropped: list[dict] = []
+    extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}
 
     def _drop(envs=None, *, backup_dir=None):
         dropped.append({"envs": envs, "backup_dir": backup_dir})
@@ -239,17 +241,67 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
             }
         return {"status": "succeeded", "output_throughput": 100.0}
 
+    ctx = types.SimpleNamespace(
+        extra={},
+        task=types.SimpleNamespace(params={"extra_envs": extra_envs}),
+    )
     result = await krh._run_integrate_rebaseline_with_lock_retry(
         _executor,
-        object(),
+        ctx,
         workspace=tmp_path,
         reason="test integrate registry",
     )
 
     assert calls == 2
     assert dropped
+    assert dropped[0]["envs"] == extra_envs
     assert result["status"] == "succeeded"
     assert result["aiter_jit_registry_mismatch_retry"]["retry_succeeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure(tmp_path, monkeypatch):
+    (tmp_path / "server.log").write_text(
+        "kernel 'k' is not present in the compiled registry\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
+        lambda *args, **kwargs: {"action": "invalidate"},
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_registry_mismatch",
+                "error": "kernel 'k' is not present in the compiled registry",
+            }
+        (tmp_path / "server.log").write_text(
+            "kernel 'k' is not present in the compiled registry\nHIP out of memory\n",
+            encoding="utf-8",
+        )
+        return {"status": "failed", "error_class": "oom", "error": "HIP out of memory"}
+
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        types.SimpleNamespace(
+            extra={},
+            task=types.SimpleNamespace(
+                params={"extra_envs": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}}
+            ),
+        ),
+        workspace=tmp_path,
+        reason="test integrate registry restamp",
+    )
+
+    assert calls == 2
+    assert result["error_class"] == "oom"
 
 
 def test_resolve_integrate_payload_fills_source_when_patch_path_present(

@@ -444,6 +444,23 @@ def test_serving_modules_cover_csv_false_when_name_missing(tmp_path):
     )
 
 
+def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"padding kernel_ck padding")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\nck,kernel_ck\nasm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_64x128E\n",
+        encoding="utf-8",
+    )
+    assert aj.serving_modules_cover_csv(
+        jit_dir,
+        ("module_gemm_a8w8_blockscale_bpreshuffle",),
+        csv_path,
+    )
+
+
 def test_serving_modules_cover_csv_when_so_absent(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
@@ -454,6 +471,25 @@ def test_serving_modules_cover_csv_when_so_absent(tmp_path):
         ("module_gemm_a8w8_blockscale_bpreshuffle",),
         csv_path,
     )
+
+
+def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, monkeypatch):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"kernel_ck")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\nck,kernel_ck\nasm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_64x128E\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        backup_dir=tmp_path / "backup",
+    )
+    assert result["action"] == "skip"
+    assert so_path.is_file()
 
 
 def test_prepare_serving_so_skips_when_registry_covers_csv(tmp_path, monkeypatch):

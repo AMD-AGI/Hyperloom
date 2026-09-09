@@ -382,6 +382,9 @@ def find_aiter_baton_wait(
 
 COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
 
+# kernelName values with these libtypes are not linked into serving ``module_*.so``.
+NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
+
 # Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
 AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
@@ -409,27 +412,38 @@ def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
     return COMPILED_REGISTRY_MARKER in blob
 
 
-def csv_kernel_names(csv_path: Path) -> set[str]:
+def csv_kernel_names(
+    csv_path: Path,
+    *,
+    skip_libtypes: frozenset[str] | None = None,
+) -> set[str]:
     """Return non-empty ``kernelName`` values from a tuned GEMM CSV."""
     names: set[str] = set()
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
             for row in csv.DictReader(handle):
                 name = str(row.get("kernelName") or "").strip()
-                if name:
-                    names.add(name)
+                if not name:
+                    continue
+                libtype = str(row.get("libtype") or "").strip().lower()
+                if skip_libtypes and libtype in skip_libtypes:
+                    continue
+                if skip_libtypes and not libtype and name.startswith("_ZN"):
+                    continue
+                names.add(name)
     except OSError:
         return set()
     return names
 
 
 def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every CSV kernel name appears in at least one serving .so.
+    """True when every JIT ``kernelName`` in the CSV appears in a serving .so.
 
-    Missing .so files mean the next start will compile from the current CSV, so
-    that case is treated as covered.
+    ``libtype=asm`` (and other non-JIT backends) names are not linked into
+    ``module_*.so``; missing .so files mean the next start will compile from the
+    current CSV, so that case is treated as covered.
     """
-    names = csv_kernel_names(csv_path)
+    names = csv_kernel_names(csv_path, skip_libtypes=NON_JIT_SO_LIBTYPES)
     if not names:
         return True
     blobs: list[bytes] = []
@@ -498,7 +512,7 @@ def _invalidate_jit_build(jit_dir: Path, backup_dir: Path) -> dict[str, Any]:
 
 
 def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
-    if not envs:
+    if envs is None:
         modules: list[str] = []
         for names in AITER_ENV_TO_SERVING_MODULES.values():
             modules.extend(names)
@@ -595,6 +609,7 @@ __all__ = [
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
+    "NON_JIT_SO_LIBTYPES",
     "clean_stale_aiter_locks",
     "csv_kernel_names",
     "drop_serving_so_for_envs",
