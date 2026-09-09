@@ -69,6 +69,12 @@ ledger and none needs to.
        --reports-dir <EVAL_DIR>/reports
    ```
 
+   Without `-o` it writes `geak_report.html`. GEAK's own end-of-run step passes a
+   name instead: `geak_run_report_<model>.html` for a standalone run,
+   `hl_run_report_<model>.html` when Hyperloom invoked GEAK as its KERNEL_AGENT
+   phase. One page per run, and the two modes never collide, because their
+   numbers are not comparable.
+
    It needs `geak_calls.jsonl`, so render step 2 with `--include-text` first.
    `geak_outcome.json` is written by GEAK's own outcome report and is optional —
    without it the page says so, and every gain column reads *not measured*

@@ -345,3 +345,21 @@ def test_a_validated_kernel_shows_cost_per_percent(reports: Path):
     html = R._outcome_section(joined, total, outcome)
     assert "+3.54%" in html
     assert "measured A/B of the kernel this run wrote" in html
+
+
+def test_grid_columns_can_shrink_and_scroll_rather_than_overlap(reports):
+    """The per-phase blocks sit in a grid; grid items must be allowed to shrink.
+
+    A grid item defaults to ``min-width:auto``, so a table full of ``nowrap``
+    cells refuses to shrink below its min-content width and paints over the
+    column beside it. The fix is two halves and both must hold: let the item
+    shrink, and give the table its own scroll container so an genuinely wide
+    table scrolls inside its column instead of across its neighbour.
+    """
+    assert ".grid2>*{min-width:0}" in R.CSS
+    html = R.render(reports / "geak_calls.jsonl", reports / "geak_outcome.json", None)
+    body = html.split('<div class="grid2">', 1)[1]
+    for header in ("<th>Position</th>", "<th>Agents</th>", "<th>Tool</th>"):
+        head = body.index(header)
+        opener = body.rindex("<table>", 0, head)
+        assert body[:opener].rstrip().endswith('<div class="scroll">'), header

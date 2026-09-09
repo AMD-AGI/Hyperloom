@@ -495,7 +495,12 @@ summary::before{content:"\\25b8";color:var(--mut);margin-right:8px;transition:tr
 details[open]>summary::before{transform:rotate(90deg);display:inline-block}
 summary .r{color:var(--mut);font-weight:500;font-size:12.5px}
 .body{padding:0 14px 14px}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px}
+/* Grid items default to min-width:auto, so a nowrap table refuses to shrink below its
+   min-content width and bleeds over the next column. Let the item shrink, and let the
+   table scroll inside its own column instead of over its neighbour. */
+.grid2>*{min-width:0}
+.grid2 .scroll{max-width:100%}
 .tag{display:inline-block;background:color-mix(in srgb,var(--accent) 13%,transparent);
 color:var(--accent);border-radius:4px;padding:0 6px;font-size:11px;margin-left:5px}
 .tag.q{background:color-mix(in srgb,var(--mut) 16%,transparent);color:var(--mut)}
@@ -935,8 +940,9 @@ def _anatomy(phase: dict[str, Any]) -> str:
         blocks.append(
             "<div><h3>Cost by position in the conversation</h3>"
             f'<p class="lede">{_esc(lede)}</p>'
-            "<table><thead><tr><th>Position</th><th>Calls</th><th>Median ISL</th><th>Spend</th>"
-            f"<th>Share</th></tr></thead><tbody>{rows}</tbody></table>"
+            '<div class="scroll"><table><thead><tr><th>Position</th><th>Calls</th><th>Median ISL</th>'
+            "<th>Spend</th><th>Share</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
             f'<p class="mut">Median input tokens across the conversation:</p>{_sparkline(isls)}</div>'
         )
     else:
@@ -964,8 +970,8 @@ def _anatomy(phase: dict[str, Any]) -> str:
             "<div><h3>How concentrated the spend is</h3>"
             f'<p class="lede">{half} of this phase\'s {len(conc)} agents account for half its cost, and '
             f"{most} account for 80%. Ranked most expensive first.</p>"
-            f"<table><thead><tr><th>Agents</th><th>Cumulative share</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table></div>"
+            '<div class="scroll"><table><thead><tr><th>Agents</th><th>Cumulative share</th></tr></thead>'
+            f"<tbody>{rows}</tbody></table></div></div>"
         )
 
     if phase["tools"]:
@@ -980,8 +986,8 @@ def _anatomy(phase: dict[str, Any]) -> str:
             f'<p class="lede">{total_tools:,} tool calls across {phase["calls"]:,} API calls '
             f"({total_tools / max(1, phase['calls']):.2f} per call). A phase dominated by one tool is "
             "running a mechanical loop; a varied mix is exploratory work.</p>"
-            f"<table><thead><tr><th>Tool</th><th>Calls</th><th>Share</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table></div>"
+            '<div class="scroll"><table><thead><tr><th>Tool</th><th>Calls</th><th>Share</th></tr></thead>'
+            f"<tbody>{rows}</tbody></table></div></div>"
         )
     return f'<div class="grid2">{"".join(blocks)}</div>'
 
