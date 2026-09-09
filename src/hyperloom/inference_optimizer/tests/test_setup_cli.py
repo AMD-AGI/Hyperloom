@@ -319,6 +319,43 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
     )
 
 
+def _resolve_backend_order(tmp_path: Path, *, in_dotenv: str | None, in_env: str | None) -> str:
+    """Run install_baremetal.sh's own KERNEL_OPT_BACKEND_ORDER resolution."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lines = install_script.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("read_dotenv_var() {"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    reader = "\n".join(lines[start : end + 1])
+    resolution = "\n".join(line.strip() for line in lines if "export" in line and "KERNEL_OPT_BACKEND_ORDER=" in line)
+    assert resolution, "no KERNEL_OPT_BACKEND_ORDER resolution found in install_baremetal.sh"
+    dotenv = tmp_path / ".env"
+    body = "HYPERLOOM_RUN_MODE=baremetal\n"
+    if in_dotenv is not None:
+        body += f"KERNEL_OPT_BACKEND_ORDER={in_dotenv}\n"
+    dotenv.write_text(body, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "KERNEL_OPT_BACKEND_ORDER"}
+    if in_env is not None:
+        env["KERNEL_OPT_BACKEND_ORDER"] = in_env
+    script = f'set -euo pipefail\nDOTENV="{dotenv}"\n{reader}\n{resolution}\nprintf "%s" "$KERNEL_OPT_BACKEND_ORDER"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=True)
+    return proc.stdout.strip()
+
+
+def test_setup_keeps_the_forge_backend_the_skill_wrote_to_dotenv(tmp_path: Path):
+    """The setup skill writes the backend to .env before this runs; it must not be clobbered."""
+    assert _resolve_backend_order(tmp_path, in_dotenv="forge", in_env=None) == "forge"
+
+
+def test_setup_backend_order_lets_the_process_env_win(tmp_path: Path):
+    """An explicit export still outranks .env, matching USER_DATA_PATH's precedence."""
+    assert _resolve_backend_order(tmp_path, in_dotenv="forge", in_env="geak") == "geak"
+
+
+def test_setup_backend_order_defaults_to_geak(tmp_path: Path):
+    """With neither source set the default is unchanged."""
+    assert _resolve_backend_order(tmp_path, in_dotenv=None, in_env=None) == "geak"
+
+
 def _baremetal_credential_functions() -> str:
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")

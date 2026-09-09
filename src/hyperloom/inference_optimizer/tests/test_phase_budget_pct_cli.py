@@ -96,35 +96,80 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
 
 
 def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
-    """The 3h demo budget stays normalized after disabling framework/kernel."""
+    """Pin the 3h demo's framework-on, kernel-off budget shape.
+
+    Values mirror its SKILL.md; phase budgets are independent caps, so their
+    total may exceed 1.0.
+    """
     args = _parse_optimize(
         [
             "--max-hours",
             "3",
             "--max-minutes-framework-pct",
-            "0.44",
+            "0.50",
             "--max-minutes-sweep-pct",
             "0.01",
-            "--no-framework-agent",
             "--no-kernel",
             "--no-enable-conc-sweep",
         ]
     )
+    assert not args.no_framework_agent
     normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
-    assert sum(normalized.values()) == pytest.approx(1.0)
+    # Every override survived the range check — none fell back to a default.
+    assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.50)
+    assert normalized["SWEEP"] == pytest.approx(0.01)
 
     out = redistribute_budget_pct(
         normalized,
         kernel_enabled=not args.no_kernel,
         optimize_enabled=not args.no_framework_agent,
     )
-    assert out[PHASE_FRAMEWORK_AGENT] == 0.0
     assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == pytest.approx(0.03)
     assert out["CLOSE"] == pytest.approx(0.02)
-    # SWEEP is the only work phase left, so it absorbs both freed shares.
-    assert out["SWEEP"] == pytest.approx(0.95)
-    assert sum(out.values()) == pytest.approx(1.0)
+    # FRAMEWORK_AGENT and SWEEP split the freed KERNEL share by base weight,
+    # so FRAMEWORK_AGENT ends up with essentially the whole wall clock.
+    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.9902, abs=1e-4)
+    assert out["SWEEP"] == pytest.approx(0.0198, abs=1e-4)
+    # The redistributed value must survive the downstream re-normalize instead
+    # of being dropped back to the default.
+    assert normalize_budget_pct(out)[PHASE_FRAMEWORK_AGENT] == pytest.approx(out[PHASE_FRAMEWORK_AGENT])
+
+
+def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
+    """An override that over-absorbs is capped, not silently defaulted.
+
+    ``--max-minutes-framework-pct 0.90`` plus the share freed by ``--no-kernel``
+    sums past ``1.0``. Before the cap that value failed
+    :func:`normalize_budget_pct`'s range check downstream and reverted to the
+    FRAMEWORK_AGENT default — handing the caller *less* budget than the smaller
+    override would have. Clamp at a full wall clock and discard the excess.
+    """
+    args = _parse_optimize(
+        [
+            "--max-hours",
+            "3",
+            "--max-minutes-framework-pct",
+            "0.90",
+            "--max-minutes-sweep-pct",
+            "0.01",
+            "--no-kernel",
+        ]
+    )
+    normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
+    out = redistribute_budget_pct(
+        normalized,
+        kernel_enabled=not args.no_kernel,
+        optimize_enabled=not args.no_framework_agent,
+    )
+    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(1.0)
+    assert out[PHASE_KERNEL_AGENT] == 0.0
+
+    # The regression this guards: surviving the re-normalize rather than being
+    # dropped back to a default that is *below* the requested override.
+    renormalized = normalize_budget_pct(out)
+    assert renormalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(1.0)
+    assert renormalized[PHASE_FRAMEWORK_AGENT] > DEFAULT_PHASE_BUDGET_PCT[PHASE_FRAMEWORK_AGENT]
 
 
 def test_optimize_path_is_wired_to_helper() -> None:

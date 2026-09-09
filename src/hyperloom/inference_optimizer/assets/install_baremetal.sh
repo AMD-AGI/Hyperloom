@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.0}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.
@@ -48,13 +48,22 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.18, ROCm 7.2.4).
+# Framework versions track docs/compatibility.rst (SGLang 0.5.18, ROCm 7.2.4).
+# SGLANG_REF is the 0.5.18 pre-release commit the lmsysorg ROCm images are built
+# from, not the v0.5.18 tag: upstream removed `detailed_annotations` from
+# io_struct.py between the two, and TraceLens' annotation patches need that field.
+# On the tag, three of the ten patches fail `git apply --check`, the atomic set
+# rolls back, and kernel-shape profiling is silently unavailable.
 # vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
 # vllm/vllm-openai-rocm:v0.27.1 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-v0.5.18}"
+SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
+# The pin is an untagged commit, so setuptools_scm has nothing to derive from and
+# would fall back to 0.0.0.*, which the patch-set version gate refuses. Declare the
+# version the patch sets target; it moves together with SGLANG_REF.
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm724}"
@@ -536,11 +545,20 @@ install_sglang_from_source() {
 
   log "installing SGLang from source at ${sglang_root} (ref=${SGLANG_REF}, arch=${arch})"
   if [ ! -d "${sglang_root}/.git" ]; then
-    mkdir -p "$(dirname "$sglang_root")"
-    git clone --recursive --branch "$SGLANG_REF" "$SGLANG_REPO" "$sglang_root"
+    # Fetch the ref rather than `clone --branch`: --branch takes a branch or tag
+    # only, and SGLANG_REF is a commit. GitHub serves an arbitrary commit only
+    # for a full 40-char SHA.
+    mkdir -p "$sglang_root"
+    git init -q "$sglang_root"
+    git -C "$sglang_root" remote add origin "$SGLANG_REPO"
+    git -C "$sglang_root" fetch --depth 1 origin "$SGLANG_REF"
+    git -C "$sglang_root" checkout -q FETCH_HEAD
+    git -C "$sglang_root" submodule update --init --recursive --depth 1
   else
-    git -C "$sglang_root" fetch --all --tags --prune
-    git -C "$sglang_root" checkout "$SGLANG_REF"
+    git -C "$sglang_root" fetch --depth 1 origin "$SGLANG_REF" \
+      || git -C "$sglang_root" fetch --all --tags --prune
+    git -C "$sglang_root" checkout -q FETCH_HEAD 2>/dev/null \
+      || git -C "$sglang_root" checkout "$SGLANG_REF"
     git -C "$sglang_root" submodule sync
     git -C "$sglang_root" submodule update --init --recursive
   fi
@@ -555,6 +573,8 @@ install_sglang_from_source() {
   # ROCm editable installs only need multimodal Rust crates for VLM serving.
   export SGLANG_BUILD_RUST_EXTS="${SGLANG_BUILD_RUST_EXTS:-none}"
   log "SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS}"
+  export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"
+  log "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG}"
   "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[srt_hip]"
   rm -f "$constraint_file"
 }
@@ -2062,6 +2082,9 @@ _default_workspace_root() {
 }
   user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"
+  # Same precedence as USER_DATA_PATH above: the setup skill writes the backend
+  # into .env before this runs, so an unread .env would silently reset it to geak.
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
   if [ -n "$DEPS_ROOT_ARG" ]; then

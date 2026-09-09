@@ -314,6 +314,10 @@ DEFAULT_MAX_MACRO_CYCLES: int = 1000
 # Share of a bounded session's total budget that must remain to open a cycle.
 _CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
 
+# Ceiling on the floor once it is raised to cover one granted variant round, so a
+# session too short to fund a round is not treated as exhausted from tick one.
+_CYCLE_RELOOP_MAX_BUDGET_SHARE: float = 0.5
+
 
 def _default_cycle_reloop_min_remaining_sec() -> float:
     """Absolute reloop floor in seconds; env-overridable via ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``."""
@@ -383,6 +387,63 @@ def target_was_reached(state: Any) -> bool:
     return bool(str(getattr(state, "target_reached_at", "") or "").strip())
 
 
+def _one_variant_grant_sec(state: Any) -> float:
+    """Seconds a single variant round is actually granted, for budget arithmetic.
+
+    Prices the round the way the sweep's admission check does rather than at the
+    declared timeout, so both sides agree on what a cycle costs.
+
+    Args:
+        state (Any): Frozen SharedState view exposing the declared variant timeout.
+
+    Returns:
+        float: The granted per-variant cap in seconds, or ``0.0`` when unknown.
+    """
+    declared = getattr(state, "conc_sweep_variant_timeout_sec", 0) or 0
+    try:
+        declared_sec = int(declared)
+    except (TypeError, ValueError):
+        return 0.0
+    if declared_sec <= 0:
+        return 0.0
+    try:
+        from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
+    except ImportError:  # grid runner unavailable; price at the declared timeout
+        return float(declared_sec)
+    return float(agentx_variant_timeout_sec(declared_sec, shared_state=state))
+
+
+def _cycle_reloop_min_remaining_sec(
+    state: Any,
+    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
+) -> float:
+    """Session-scaled floor on the seconds that must remain to justify a new cycle.
+
+    The session-scaled share keeps a short run from being blocked by a threshold
+    it can never satisfy, but that share can fall below the cost of the cheapest
+    unit of work in a cycle. The floor is therefore raised back to one granted
+    variant round, so a cycle is never opened with budget it cannot spend. That
+    raise is itself capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the
+    session so a run too short to fund a round does not read as exhausted from
+    its first tick.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``.
+        min_remaining_sec (float): Absolute floor before session scaling.
+
+    Returns:
+        float: The effective floor in seconds.
+    """
+    effective = float(min_remaining_sec)
+    max_minutes = _max_minutes(state)
+    if max_minutes > 0:
+        budget_sec = max_minutes * 60.0
+        effective = min(effective, budget_sec * _CYCLE_RELOOP_BUDGET_RATIO)
+        grant = min(_one_variant_grant_sec(state), budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
+        effective = max(effective, grant)
+    return effective
+
+
 def should_reloop_to_explore(
     state: Any,
     *,
@@ -432,14 +493,8 @@ def should_reloop_to_explore(
         evidence["reloop_blocked"] = "global_converged"
         return False, evidence
 
-    # Budget remaining must justify a fresh cycle.
-    effective_min_remaining = float(min_remaining_sec)
-    max_minutes = _max_minutes(state)
-    if max_minutes > 0:
-        effective_min_remaining = min(
-            effective_min_remaining,
-            max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO,
-        )
+    # Require a session-scaled floor that can still fund one variant round.
+    effective_min_remaining = _cycle_reloop_min_remaining_sec(state, min_remaining_sec)
     evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
     remaining = session_remaining_seconds(state, now_unix=now_unix)
     if remaining is not None and remaining < effective_min_remaining:
@@ -584,7 +639,11 @@ def redistribute_budget_pct(
     optimize_enabled: bool = True,
     kernel_enabled: bool = True,
 ) -> dict[str, float]:
-    """Reallocate disabled phases' budget shares to the enabled work phases."""
+    """Move disabled work-phase shares to enabled work phases.
+
+    FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
+    1.0; PRELUDE and CLOSE never absorb.
+    """
     out = dict(base)
     disabled: list[str] = []
     if not optimize_enabled:
@@ -604,6 +663,18 @@ def redistribute_budget_pct(
     else:
         # No weighted absorber left → park the freed share on SWEEP (always on).
         out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
+    # Own our output: a share above a full wall clock is unspendable, and
+    # leaving it in place makes the downstream re-normalize drop it back to the
+    # phase default (i.e. *less* budget than asked for). Discard the excess.
+    for p in absorbers:
+        if float(out.get(p, 0.0)) > 1.0:
+            log.warning(
+                "phase budget: capping %s at 1.0 (redistribution reached %.4f); "
+                "lower its --*-pct override to reclaim the excess elsewhere",
+                p,
+                float(out[p]),
+            )
+            out[p] = 1.0
     return out
 
 
@@ -1071,9 +1142,7 @@ def compute_plateau_kernel(
     }
 
 
-# Statuses on last_conc_sweep that exit_normal_sweep already treats as SWEEP closeout. skip_to_close must not override
-# those: the LLM emits it when the sweep was refused, and mapping that to robustness_escalated turns a successful run
-# into a CI failure.
+# Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
 _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
@@ -1087,16 +1156,30 @@ def _sweep_has_recorded_closeout(state: Any) -> bool:
 
 # terminal / abort (global)
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop."""
+    """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
+
+    A recorded SWEEP closeout wins; otherwise skip_to_close maps to
+    time_exhausted or robustness_escalated before the coordinator stop reason.
+    """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
         current = (getattr(state, "phase", "") or "").strip().upper()
         if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
             return None
-        return "robustness_escalated", {
-            "evidence": "llm_escalation",
-            "hint": hint,
-        }
+        evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
+        # The robustness label is only justified by a robustness signal; record the
+        # crash count alongside the budget so the two can be told apart after the run.
+        evidence["crash_count"] = int(getattr(state, "crash_count", 0) or 0)
+        floor = _cycle_reloop_min_remaining_sec(state)
+        evidence["min_remaining_sec_effective"] = round(floor, 2)
+        remaining = session_remaining_seconds(state)
+        if remaining is not None:
+            evidence["session_remaining_seconds"] = round(remaining, 2)
+            # Too little left for another cycle means the budget ran out; that is
+            # the honest terminal, not a robustness abort.
+            if remaining < floor:
+                return "time_exhausted", evidence
+        return "robustness_escalated", evidence
     sr = (getattr(state, "stop_reason", "") or "").strip()
     if sr:
         # Coordinator-set stop_reason takes precedence over phase exits.

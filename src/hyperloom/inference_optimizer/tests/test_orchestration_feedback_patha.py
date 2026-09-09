@@ -701,7 +701,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
 
 
 def test_short_session_reloop_boundary():
-    """A 2h session uses a 1080s floor; just above → True, just below → False."""
+    """A 2h session uses an 1800s floor; just above → True, just below → False."""
     from datetime import datetime, timedelta, timezone
     from hyperloom.orchestrator.phases import machine_state as ps
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -719,12 +719,12 @@ def test_short_session_reloop_boundary():
     st.last_conc_sweep = {"status": "succeeded"}
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
-    # Effective floor for 2h = min(10800, 2*3600*0.15) = 1080s.
+    # The 2h floor is max(1080s session share, one 1800s variant grant).
     reloop, ev = ps.should_reloop_to_explore(st, now_unix=start_unix + 3600)
     assert reloop is True, f"expected reloop True, got evidence: {ev}"
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1080.0, abs=1.0)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
 
-    # Remaining = 7200 - 6121 = 1079s (just below floor) → should not reloop.
-    reloop2, ev2 = ps.should_reloop_to_explore(st, now_unix=start_unix + 6121)
+    # Remaining = 7200 - 5401 = 1799s (just below floor) → should not reloop.
+    reloop2, ev2 = ps.should_reloop_to_explore(st, now_unix=start_unix + 5401)
     assert reloop2 is False
     assert ev2["reloop_blocked"] == "insufficient_remaining"

@@ -1171,8 +1171,7 @@ class DispatcherCollaborator:
                 "dispatcher: could not record time-budget denial for task=%s",
                 task.task_id,
             )
-        # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP would idle until the LLM emits
-        # skip_to_close and CI would read that as robustness_escalated.
+        # Stamp a cancelled conc_sweep so SWEEP closes as sweep_done instead of idling.
         if str(task.kind or "") == "conc_sweep":
             try:
                 self._record_session_budget_conc_sweep_skip(denied=denied)

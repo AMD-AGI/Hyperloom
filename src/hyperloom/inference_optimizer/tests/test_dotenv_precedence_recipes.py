@@ -22,6 +22,7 @@ RECIPE_DOCS = (
     REPO_ROOT / "examples" / "hyperloom-custom-advanced" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-8b-3h" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
+    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md",
 )
 
 # Loads only credential vars, so the path-variable assertions above do not apply, but .env must still not outrank a
