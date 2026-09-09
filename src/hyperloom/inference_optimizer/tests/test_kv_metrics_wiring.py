@@ -141,6 +141,45 @@ def test_counter_delta_credits_only_the_post_restart_count():
     assert counter_delta({}, {"a": 5.0}) == 5.0
 
 
+def test_counter_delta_does_not_multiply_lockstep_ranks():
+    """Eight ranks reporting 48 describe 48 retracts, not 384."""
+    first = {f'tp_rank="{i}"': 0.0 for i in range(8)}
+    last = {f'tp_rank="{i}"': 48.0 for i in range(8)}
+
+    assert counter_delta(first, last) == 48.0
+
+
+def test_downsampling_respects_the_cap():
+    """Integer division gave a stride of 1 for anything under twice the cap, so
+    5001 rows downsampled to 5001."""
+    rec = KvMetricsRecorder(poller=_StubPoller([]))
+    rec._rows = [{"i": i} for i in range(5001)]
+
+    assert len(rec.rows()) <= 5000
+
+
+def test_prefix_cache_counters_reach_the_artifact():
+    """They were parsed and then dropped: read at cost, stored nowhere."""
+    poller = _StubPoller([_sample(prefix_cache_queries=1000.0, prefix_cache_hits=529.0)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+
+    assert rec.summary()["prefix_cache"] == {
+        "prefix_cache_queries": 1000.0,
+        "prefix_cache_hits": 529.0,
+    }
+
+
+def test_capacity_provenance_and_series_count_reach_the_artifact():
+    poller = _StubPoller([_sample(capacity_tokens=32768.0, capacity_derived=True, series_count=8)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+
+    summary = rec.summary()
+    assert summary["capacity_derived"] is True
+    assert summary["series_count"] == 8
+
+
 def test_summary_availability_is_tristate():
     """Never reached is not the same as reached and found quiet."""
     unknown = KvMetricsRecorder(poller=_StubPoller([], available=None)).summary()
@@ -171,7 +210,8 @@ def test_close_never_raises_on_an_unwritable_path(tmp_path):
     # Parent dirs are created by the writer; make that impossible instead.
     (tmp_path / "nope").write_text("not a directory", encoding="utf-8")
 
-    assert rec.close()["schema_version"] == 1
+    payload = rec.close()
+    assert payload["schema_version"] == 1
 
 
 def test_sampling_failure_does_not_propagate():
@@ -249,9 +289,13 @@ def test_no_scraping_before_the_server_is_up():
     assert rec.ticks == 0
 
 
-def test_warm_reuse_rounds_scrape_immediately():
-    """A round re-attaching to a live server writes no ready marker, so gating on
-    that marker alone would collect nothing for the entire round."""
+def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
+    """A round re-attaching to a live server writes no ready marker.
+
+    Gating on that marker alone collected nothing; gating only the *scrape* on
+    it was worse -- samples were taken but left in ``boot``, the one phase that
+    never enters a comparison, so the whole round aggregated to empty.
+    """
     rec = _Recorder()
     sk._communicate_with_soft_deadline(
         _DoneProc(),
@@ -262,6 +306,66 @@ def test_warm_reuse_rounds_scrape_immediately():
     )
 
     assert rec.ticks >= 1
+    assert rec.phases == ["measured"]
+
+
+def test_marker_split_across_a_read_boundary_is_still_seen(tmp_path):
+    """Half a marker is in neither chunk, so without a carried tail the phase
+    boundary is lost outright -- not seen late, never seen."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text("Phase profiling (prof", encoding="utf-8")
+
+    residuals: dict[str, str] = {}
+    first = sk._scan_server_log_increment(str(log_path), 0, residuals.get("k", ""))
+    residuals["k"] = first.residual
+    assert first.saw_measured_begin is False
+
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write("iling) started | phase_index=0\n")
+    second = sk._scan_server_log_increment(str(log_path), first.offset, residuals["k"])
+
+    assert second.saw_measured_begin is True
+
+
+def test_residual_is_held_per_path(tmp_path):
+    """The resolved logs have different writers; splicing one's tail into
+    another's next read would invent a line neither of them wrote."""
+    bench = tmp_path / "benchmark_sglang"
+    bench.mkdir()
+    (bench / "server.log").write_text("Phase profiling (prof", encoding="utf-8")
+    (bench / "benchmark_stderr.log").write_text("iling) started\n", encoding="utf-8")
+
+    offsets: dict[str, int] = {}
+    residuals: dict[str, str] = {}
+    scan = sk._scan_logs_increment(str(tmp_path / "server.log"), offsets, residuals)
+
+    assert scan.saw_measured_begin is False
+    assert len(residuals) >= 2
+
+
+def test_truncation_drops_the_carried_tail(tmp_path):
+    """The tail belonged to a file that no longer exists."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text("Phase profiling (prof", encoding="utf-8")
+    first = sk._scan_server_log_increment(str(log_path), 0)
+    assert first.residual
+
+    log_path.write_text("iling) started\n", encoding="utf-8")
+    after = sk._scan_server_log_increment(str(log_path), 10_000, first.residual)
+
+    assert after.saw_measured_begin is False
+
+
+def test_scope_identifies_the_round_without_another_file(tmp_path):
+    """A consumer must not have to join against something else to know which
+    variant and action produced the artifact."""
+    workspace = tmp_path / "runs" / "explore" / "task-abc" / "variant_03_fp8" / "benchmark_sglang"
+    workspace.mkdir(parents=True)
+
+    rec = sk._build_kv_recorder(str(workspace / "server.log"), {})
+
+    assert rec._scope["workspace"] == "benchmark_sglang"
+    assert rec._scope["run_path"] == "explore/task-abc/variant_03_fp8/benchmark_sglang"
 
 
 def test_recorder_is_closed_as_aborted_when_a_gate_raises():

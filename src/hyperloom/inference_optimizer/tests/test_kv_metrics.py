@@ -165,6 +165,79 @@ def test_exposition_without_kv_metrics_has_no_readings():
     assert not s.has_readings()
 
 
+def test_sharded_engine_gauges_are_maxed_not_summed():
+    """Eight ranks describe one pool from eight sides, not eight pools.
+
+    Summed, an 85%-full TP=8 pool reports an occupancy of 6.8 and eight times
+    its real capacity -- the same mistake the log path avoids by de-duplicating
+    capacity lines per rank.
+    """
+    text = "".join(
+        f'sglang:token_usage{{tp_rank="{i}"}} 0.85\nsglang:kv_used_tokens{{tp_rank="{i}"}} 27876.0\n' for i in range(8)
+    )
+    s = sample_from_families(parse_prometheus_text(text))
+
+    assert s.active_pool_usage == pytest.approx(0.85)
+    assert s.used_tokens == 27876.0
+    assert s.series_count == 8
+
+
+def test_imbalanced_ranks_report_the_most_pressured_one():
+    """The rank that will retract is the one worth reporting."""
+    text = 'sglang:token_usage{tp_rank="0"} 0.20\nsglang:token_usage{tp_rank="1"} 0.97\n'
+
+    assert sample_from_families(parse_prometheus_text(text)).active_pool_usage == pytest.approx(0.97)
+
+
+def test_capacity_prefers_the_engines_own_gauge():
+    """used + available + evictable can fall short: reserved tokens belong to
+    none of the three, so deriving understates the pool and overstates how full
+    it is."""
+    text = (
+        "sglang:max_total_num_tokens 40000.0\n"
+        "sglang:kv_used_tokens 27876.0\n"
+        "sglang:kv_available_tokens 2888.0\n"
+        "sglang:kv_evictable_tokens 2004.0\n"
+    )
+    s = sample_from_families(parse_prometheus_text(text))
+
+    assert s.capacity_tokens == 40000.0
+    assert s.capacity_derived is False
+    assert s.physical_pool_usage == pytest.approx(29880 / 40000)
+
+
+def test_derived_capacity_is_flagged_as_such():
+    s = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
+
+    assert s.capacity_tokens == 32768.0
+    assert s.capacity_derived is True
+
+
+def test_other_pools_evictable_does_not_leak_into_the_main_pool_ratio():
+    """SWA and Mamba pools have their own capacities. Folding their evictable
+    tokens into a ratio whose numerator is main-pool-only mixes denominators."""
+    text = (
+        "sglang:kv_used_tokens 100.0\n"
+        "sglang:kv_available_tokens 100.0\n"
+        "sglang:kv_evictable_tokens 0.0\n"
+        "sglang:swa_evictable_tokens 500.0\n"
+        "sglang:mamba_evictable_tokens 500.0\n"
+    )
+    s = sample_from_families(parse_prometheus_text(text))
+
+    assert s.evictable_tokens == 0.0
+    assert s.capacity_tokens == 200.0
+    assert s.physical_pool_usage == pytest.approx(0.5)
+
+
+def test_prefix_cache_counters_are_read():
+    s = sample_from_families(parse_prometheus_text(VLLM_METRICS))
+    assert (s.prefix_cache_queries, s.prefix_cache_hits) == (1000.0, 529.0)
+
+    sg = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
+    assert sg.cached_tokens_total == 4600439.0
+
+
 def test_canonical_label_key_is_order_independent():
     assert canonical_label_key({"b": "2", "a": "1"}) == canonical_label_key({"a": "1", "b": "2"})
     assert canonical_label_key({}) == ""

@@ -833,6 +833,13 @@ class _IncrementScan(NamedTuple):
     saw_eval_start: bool
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
+    residual: str = ""
+
+
+#: Cap on the carried-over tail. A writer that never emits a newline would
+#: otherwise grow this without bound; a marker longer than this is not one we
+#: match on.
+_RESIDUAL_MAX_CHARS = 8192
 
 
 def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
@@ -869,12 +876,21 @@ def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
     return sizes
 
 
-def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogScan:
+def _scan_logs_increment(
+    server_log_path: str,
+    offsets: dict[str, int],
+    residuals: dict[str, str] | None = None,
+) -> _LogScan:
     """Scan every resolved log for markers, advancing ``offsets`` in place.
 
     Args:
         server_log_path: The ``<output_dir>/server.log`` path from the caller.
         offsets: Per-path byte offsets already consumed; mutated in place.
+        residuals: Per-path unterminated tails carried from the previous scan;
+            mutated in place. Held per path rather than as one shared tail
+            because the resolved logs are written by different processes and
+            interleaving one's tail into another's next read would invent lines
+            neither of them wrote.
 
     Returns:
         _LogScan: The markers seen in the newly appended bytes, plus who — if
@@ -884,8 +900,10 @@ def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogS
     saw_warmup_begin = saw_measured_begin = False
     for path in _resolve_scan_logs(server_log_path):
         prev = offsets.get(path, 0)
-        scan = _scan_server_log_increment(path, prev)
+        scan = _scan_server_log_increment(path, prev, "" if residuals is None else residuals.get(path, ""))
         offsets[path] = scan.offset
+        if residuals is not None:
+            residuals[path] = scan.residual
         saw_ready = saw_ready or scan.saw_ready
         saw_progress = saw_progress or scan.saw_progress
         saw_eval_start = saw_eval_start or scan.saw_eval_start
@@ -905,7 +923,7 @@ def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogS
     )
 
 
-def _scan_server_log_increment(path: str, from_offset: int) -> _IncrementScan:
+def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") -> _IncrementScan:
     """Incrementally scan the bytes appended to ``server.log`` since
     ``from_offset`` for ready / generation-progress / eval-start markers.
 
@@ -929,18 +947,30 @@ def _scan_server_log_increment(path: str, from_offset: int) -> _IncrementScan:
     try:
         size = os.path.getsize(path)
     except OSError:
-        return _IncrementScan(from_offset, False, False, False)
+        return _IncrementScan(from_offset, False, False, False, residual=residual)
     start = from_offset
+    carried = residual
     if size < start:  # truncated / rotated — rescan from the top.
         start = 0
+        carried = ""  # the tail belonged to a file that no longer exists
     if size <= start:  # nothing new appended
-        return _IncrementScan(start, False, False, False)
+        return _IncrementScan(start, False, False, False, residual=carried)
     try:
         with open(path, "rb") as fh:
             fh.seek(start)
             chunk = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return _IncrementScan(from_offset, False, False, False)
+        return _IncrementScan(from_offset, False, False, False, residual=carried)
+    # Splice the previous read's unterminated tail back on before matching. A
+    # marker straddling a read boundary appears in neither half, so without this
+    # it is not merely seen late -- it is never seen at all, and the phase it
+    # announced is silently attributed to the wrong window for the whole round.
+    chunk = carried + chunk
+    tail_at = chunk.rfind("\n")
+    next_residual = "" if tail_at < 0 else chunk[tail_at + 1 :]
+    if tail_at < 0:
+        next_residual = chunk
+    next_residual = next_residual[-_RESIDUAL_MAX_CHARS:]
     saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
     # Progress is the rate on the periodic decode-throughput line, not the
     # line's presence: some vLLM builds log ``Avg generation throughput: 0.0
@@ -956,15 +986,17 @@ def _scan_server_log_increment(path: str, from_offset: int) -> _IncrementScan:
     # :func:`_communicate_with_soft_deadline`.
     saw_progress = bool(parse_server_log_throughput(chunk))
     saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
-    # Phase boundaries are matched the same way the markers above are, and share
-    # their one weakness: a marker split across two reads is missed. That is
-    # tolerable for a transition -- the phase simply starts at the next scrape,
-    # half a second late in a window measured in minutes -- but it is not
-    # tolerable for per-line extraction, which is why the log-parsing fallback
-    # needs a residual buffer this scan deliberately does not have.
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
-    return _IncrementScan(size, saw_ready, saw_progress, saw_eval_start, saw_warmup_begin, saw_measured_begin)
+    return _IncrementScan(
+        size,
+        saw_ready,
+        saw_progress,
+        saw_eval_start,
+        saw_warmup_begin,
+        saw_measured_begin,
+        residual=next_residual,
+    )
 
 
 def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
@@ -1046,14 +1078,43 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     try:
         from ._kv_metrics import KV_ARTIFACT_NAME, KvMetricsPoller, KvMetricsRecorder
 
+        workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
             poller=KvMetricsPoller(config_envs=dict(env or {})),
-            output_path=str(Path(server_log_path).parent / KV_ARTIFACT_NAME),
-            scope={"server_log_path": str(server_log_path)},
+            output_path=str(workspace / KV_ARTIFACT_NAME),
+            # Self-sufficient on purpose: a consumer must be able to say which
+            # round produced this without joining against another file. The
+            # workspace directory name carries the variant, and the path under
+            # ``runs/`` carries the action and task that spawned it.
+            scope={
+                "server_log_path": str(server_log_path),
+                "workspace": workspace.name,
+                "run_path": _run_relative_path(workspace),
+                "session_id": os.environ.get("INFERENCE_OPTIMIZER_SESSION_ID", ""),
+            },
         )
     except Exception:  # noqa: BLE001 - collection is never worth a failed round
-        log.debug("kv_metrics: recorder unavailable", exc_info=True)
+        # Warning, not debug: this is the difference between "no KV data because
+        # the engine had none" and "no KV data because nothing ever asked", and
+        # the artifact's absence cannot tell them apart.
+        log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
         return None
+
+
+def _run_relative_path(workspace: Path) -> str:
+    """Path of a round workspace relative to the session's ``runs/`` root.
+
+    Args:
+        workspace (Path): The round's output directory.
+
+    Returns:
+        str: e.g. ``explore/<task>/<variant>/<benchmark>``, or the bare
+        directory name when no ``runs`` component is present.
+    """
+    parts = workspace.parts
+    if "runs" in parts:
+        return "/".join(parts[parts.index("runs") + 1 :])
+    return workspace.name
 
 
 def run_with_session_kill(
@@ -1415,6 +1476,16 @@ def _communicate_with_soft_deadline(
         # does not exist yet, so it is discovered later at offset zero, which is
         # correct: all of its bytes are this round's.
         scan_offsets.update(_stale_scan_log_sizes(server_log_path))  # type: ignore[arg-type]
+    # Unterminated tails carried between scans, per path. Without them a marker
+    # landing across a read boundary is in neither half and is lost outright.
+    scan_residuals: dict[str, str] = {}
+    # A warm-reuse round re-attaches to a server that is already up, so no ready
+    # marker is ever written and the phase would otherwise sit at ``boot`` for
+    # the whole round -- putting every measured sample in the one bucket that
+    # never enters a comparison. The caller telling us the server is ready is
+    # the same statement the marker would have made.
+    if kv_recorder is not None and server_already_ready:
+        kv_recorder.note_phase("measured", start)
     server_ready_since: float | None = None
     last_activity_at: float | None = None
     # Latched once the accuracy eval starts: the soft deadline bounds the
@@ -1455,6 +1526,7 @@ def _communicate_with_soft_deadline(
                 scan = _scan_logs_increment(
                     server_log_path,  # type: ignore[arg-type]
                     scan_offsets,
+                    scan_residuals,
                 )
                 if scan.saw_ready and server_ready_since is None:
                     server_ready_since = now
