@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX switch (``HYPERLOOM_AGENTX``) materialization tests.
-
-Contract:
-- OFF (unset / falsey / unrecognized) -> default synthetic path, byte-for-byte
-  unchanged (zero regression). No ``AGENTX_*`` leakage.
-- ON -> authoritative overwrite of ``benchmark_script`` to ``aiperf_client.sh``
-  (even when the gpu_type block pre-pinned a synthetic script), plus
-  ``MODEL`` / ``RUN_EVAL`` defaults and ``AGENTX_*`` / ``AIPERF_BIN``
-  pass-through into ``benchmark.envs``.
-- Parsing is defensive: an unrecognized value is treated as OFF, never raises.
-"""
+"""AgentX switch (``HYPERLOOM_AGENTX``) materialization tests."""
 
 from __future__ import annotations
 
@@ -65,13 +55,7 @@ def test_switch_off_keeps_synthetic_script(tmp_path, monkeypatch):
 
 
 def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
-    """OFF output must carry no trace of the AgentX feature.
-
-    Byte-for-byte zero-regression vs the shipped baseline is separately locked by
-    test_workload_envs_golden_lock; here we assert no AgentX/aiperf key or value
-    leaks into the default synthetic materialization (a stronger check than
-    comparing two identical OFF runs, which determinism alone would satisfy).
-    """
+    """OFF output must carry no trace of the AgentX feature."""
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
@@ -157,13 +141,7 @@ def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
 
 
 def test_switch_forwards_weka_loader_override(tmp_path, monkeypatch):
-    """Upstream's own corpus pin has no ``AGENTX_`` prefix.
-
-    ``aiperf_client.sh`` documents ``WEKA_LOADER_OVERRIDE`` as a supported knob,
-    but the prefix loop would drop it -- leaving it to work only when the
-    benchmark process happens to inherit the full parent environment, which is
-    the class of silent difference this path exists to remove.
-    """
+    """Upstream's own corpus pin has no ``AGENTX_`` prefix."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
@@ -201,9 +179,7 @@ def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
 
 # ── Regression: the shared grid/baseline/profile rebuild path (E1 bug) ────────
 def test_runtime_overrides_honor_agentx_on(monkeypatch):
-    """apply_runtime_benchmark_overrides must apply the switch, else the
-    gpu_type-derived synthetic script silently reverts a materialize-time swap
-    (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
+    """apply_runtime_benchmark_overrides must apply the switch, else the gpu_type-derived synthetic script silently reverts a materialize-time swap (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     from hyperloom.orchestrator.actions.executors._grid_server_args import (
@@ -256,14 +232,7 @@ print("OFF_OK")
 
 
 def test_agentx_package_not_imported_on_off_path(tmp_path):
-    """A2: the default (OFF) benchmark path must never import the agentx package.
-
-    ``sys.modules`` is process-global and sibling tests import the agentx
-    package, so a same-process assertion would false-negative. A fresh
-    interpreter runs the OFF materialize path (importing the core executor
-    modules too) and proves the agentx deploy/preflight/runtime imports stay
-    lazy behind ``agentx_enabled`` -- a default install loads none of them.
-    """
+    """A2: the default (OFF) benchmark path must never import the agentx package."""
     src = tmp_path / "base.yaml"
     out = tmp_path / "out"
     src.write_text("benchmark:\n  framework: vllm\n  model: /m\n  envs: {}\n", encoding="utf-8")
@@ -290,8 +259,7 @@ print("CONTRAST_OK")
 
 
 def test_agentx_package_importable_contrast():
-    """Contrast: the agentx package is real and importable (the ON _grid_runner
-    branch does exactly this lazy import), so the OFF assertion is not vacuous."""
+    """Contrast: the agentx package is real and importable (the ON _grid_runner branch does exactly this lazy import), so the OFF assertion is not vacuous."""
     r = subprocess.run(
         [sys.executable, "-c", _PROBE_CONTRAST],
         env=dict(os.environ),
@@ -304,9 +272,7 @@ def test_agentx_package_importable_contrast():
 
 # ── Finding 1: framework injected so the wrapper delegates to the right builtin ─
 def test_switch_on_injects_framework_for_delegation(tmp_path, monkeypatch):
-    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so
-    aiperf_client.sh delegates to ``{framework}_{gpu}.sh``. Without it an sglang
-    task falls back to the wrapper default and would boot vllm."""
+    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so aiperf_client.sh delegates to ``{framework}_{gpu}.sh``."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     for fw in ("sglang", "vllm"):

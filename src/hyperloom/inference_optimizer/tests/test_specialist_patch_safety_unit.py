@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the universal patch-safety contract (diff structural checks,
-git grounding, missing-target detection, and quantitative-claim guards)."""
+"""Unit tests for the universal patch-safety contract (diff structural checks, git grounding, missing-target detection,
+and quantitative-claim guards).
+"""
 
 from __future__ import annotations
 
@@ -223,10 +224,7 @@ def test_scan_numeric_claims_empty():
 
 
 def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
-    """It used to return the same ``keys & FORBIDDEN_*`` intersection
-    ``strip_forbidden_proposal_fields`` computes, for a caller that discarded
-    it: one question with two implementations, free to drift apart. The numbers
-    in the prose are what this scan alone finds."""
+    """It used to return the same ``keys & FORBIDDEN_*`` intersection ``strip_forbidden_proposal_fields`` computes, for a caller that discarded it: one question with two implementations, free to drift apart."""
     payload = {
         "expected_gain": 12.0,
         "summary": "gives 20% boost",
@@ -238,10 +236,7 @@ def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
 
 # ---- strip_forbidden_proposal_fields --------------------------------------
 def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
-    """The output schema asks for a round-level self-assessment and the round
-    audit records it, so stripping it at the top level only made our own
-    template a violation. Per proposal it is the ranking claim the guard is
-    about, and one function now decides both."""
+    """The output schema asks for a round-level self-assessment and the round audit records it, so stripping it at the top level only made our own template a violation."""
     payload = {"confidence": 0.6, "proposal_set": [{"confidence": 0.4}]}
 
     assert ps.strip_forbidden_proposal_fields(payload) == ["confidence"]
@@ -271,9 +266,7 @@ def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
 
 
 def test_a_gain_claim_under_the_coordinators_own_field_name_is_stripped_too():
-    """``predicted_gain_pct`` is the Coordinator's estimate on a propose_action
-    intent, which is exactly what made it a convenient place for a specialist
-    to put a number the guard was meant to strip."""
+    """``predicted_gain_pct`` is the Coordinator's estimate on a propose_action intent, which is exactly what made it a convenient place for a specialist to put a number the guard was meant to strip."""
     payload = {"proposal_set": [{"name": "v1", "predicted_gain_pct": 12.0, "reason": "keep me"}]}
 
     removed = ps.strip_forbidden_proposal_fields(payload)
@@ -296,8 +289,7 @@ def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
 
 # ---- quantitative_claim_rule_descriptor ------------------------------------
 def test_the_rule_the_critic_gets_lists_exactly_what_the_runner_strips():
-    """A hand-copied field list in the prompt is how the Critic came to reject
-    over a field the runner never enforced."""
+    """A hand-copied field list in the prompt is how the Critic came to reject over a field the runner never enforced."""
     rule = ps.quantitative_claim_rule_descriptor()
 
     assert set(rule["forbidden_proposal_fields"]) == set(ps.FORBIDDEN_PROPOSAL_FIELDS)
@@ -343,16 +335,13 @@ def test_the_codes_carry_no_blank_entry():
 # ---- advisory_rules_govern -------------------------------------------------
 @pytest.mark.parametrize("action_name", ["specialist", "explore"])
 def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
-    """``proposal_set[*]`` reaches review as a specialist proposal or the explore
-    grid it is materialised into; the framework candidate is the one the
-    quantitative-claim rule names by exception."""
+    """``proposal_set[*]`` reaches review as a specialist proposal or the explore grid it is materialised into; the framework candidate is the one the quantitative-claim rule names by exception."""
     assert ps.advisory_rules_govern(action_name) is True
 
 
 @pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep", "baseline", "", None])
 def test_integrate_patch_is_never_governed_by_an_advisory_rule(action_name):
-    """None of these carries a specialist ``proposal_set``, and holding an
-    ``integrate_patch`` reject to ``advise`` would land the refused patch."""
+    """None of these carries a specialist ``proposal_set``, and holding an ``integrate_patch`` reject to ``advise`` would land the refused patch."""
     assert ps.advisory_rules_govern(action_name) is False
 
 
@@ -483,13 +472,7 @@ def test_grounding_root_declines_for_an_empty_set():
 
 
 def test_a_deleted_line_that_looks_like_a_header_is_not_a_path():
-    """A hunk body line is not a header, whatever it starts with.
-
-    Deleting a source line that begins with ``--`` renders as ``--- ...`` in
-    the diff. Reading lines independently cannot tell that from a header, and
-    a comment naming an absolute path got the whole patch rejected as a
-    traversal.
-    """
+    """A hunk body line is not a header, whatever it starts with."""
     for body in ("-- /etc/hosts is read at startup", "-- ../legacy/foo is gone"):
         diff = f"--- a/x.sql\n+++ b/x.sql\n@@ -1,2 +1,1 @@\n-{body}\n keep\n"
         assert ps.patch_escapes_tree(diff) is None

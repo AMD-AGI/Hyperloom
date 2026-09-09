@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -45,18 +39,7 @@ _LEVER_BY_PHASE_BUCKET = {
 
 
 def _normalize_specialist_key(provenance: str) -> str:
-    """Map a raw ``provenance`` to a stable specialist key.
-
-    ``specialist:<domain>`` → bare ``<domain>``; ``legacy:<action>`` →
-    ``legacy_<action>``; ``default_grid`` / ``llm_direct`` pass through;
-    empty/unknown → ``"unknown"`` (so by_domain is never keyed by ``""``).
-
-    Args:
-        provenance (str): The raw provenance label.
-
-    Returns:
-        str: The normalized specialist key.
-    """
+    """Map a raw ``provenance`` to a stable specialist key."""
     s = (provenance or "").strip()
     if not s:
         return "unknown"
@@ -67,10 +50,7 @@ def _normalize_specialist_key(provenance: str) -> str:
     return s
 
 
-# Ordered ``(predicate, family)`` table for :func:`_action_family`. Matched
-# top-to-bottom on the lowercased action label; the FIRST hit wins, so the
-# order is load-bearing (e.g. the ``kernel_opt`` prefix must precede the exact
-# ``==`` checks below it). Falls through to ``"other"`` when nothing matches.
+# Ordered ``(predicate, family)`` table for :func:`_action_family`.
 _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     (
         lambda s: s.startswith("kernel_opt") or s in {"integrate", "fusion"},
@@ -84,40 +64,20 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # merged explore family subsuming the legacy backends + params buckets.
     (lambda s: s == "explore", "explore"),
     # REPLAY_WARM_RECIPE: warm-recipe / recipe KB best_config replay (a prep action).
-    # Its own headline row so its gain reconciles against validated_total_pct
-    # instead of vanishing into the non-emitted ``other`` family. The label may
-    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
-    # FRAMEWORK: exact legacy action label. ``integrate_patch`` serves both
-    # levers and pre-baseline enablement, so ``_entry_family`` resolves it from
-    # entry metadata rather than blanket-crediting it here.
+    # FRAMEWORK: exact legacy action label.
     (lambda s: s == "framework", "framework"),
-    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
-    # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
+    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic ``kernel`` so the dashboard can split
+    # tuner vs source-level rewrite gain.
     (lambda s: s == "gemm_tuning", "gemm_tuning"),
-    # COLLECTIVE: Coordinator-gated forge collective campaigns, bucketed apart
-    # from generic ``kernel`` so multi-rank communication gain gets a dedicated
-    # row instead of falling through to ``other``.
-    (lambda s: s == "collective", "collective"),
-    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
-    # from generic ``kernel`` so its gain gets a dedicated row instead of vanishing into
-    # ``other`` or being mis-credited to a backend.
+    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart from generic ``kernel`` so its gain gets a
+    # dedicated row instead of vanishing into ``other`` or being mis-credited to a backend.
     (lambda s: s == "geak_e2e", "geak"),
 )
 
 
 def _action_family(action: str) -> str:
-    """Map an action label to a family for source_breakdown bucketing.
-
-    Args:
-        action (str): A stack-entry / gain-ledger action label.
-
-    Returns:
-        str: One of ``kernel_agent`` / ``backends`` / ``params`` /
-        ``validate`` / ``sweep`` / ``explore`` / ``replay_warm_recipe`` /
-        ``framework`` / ``gemm_tuning`` / ``collective`` / ``geak``, or
-        ``"other"`` when unrecognized.
-    """
+    """Map an action label to a family for source_breakdown bucketing."""
     s = (action or "").lower()
     for predicate, family in _ACTION_FAMILY_TABLE:
         if predicate(s):
@@ -126,18 +86,7 @@ def _action_family(action: str) -> str:
 
 
 def _geak_provenance_names() -> frozenset[str]:
-    """Return the provenance labels that mark an entry as GEAK-owned.
-
-    Read from the executor that stamps them
-    (:data:`~hyperloom.orchestrator.actions.executors.explore._CONFIG_REPLAY_PROVENANCE`)
-    so there is exactly one list of these names in the tree. Collectors also
-    run offline against a tarball, where the orchestrator package may not be
-    importable at all; that case falls back to the same literal rather than
-    dropping GEAK entries on the floor.
-
-    Returns:
-        frozenset[str]: The lowercased GEAK provenance labels.
-    """
+    """Return the provenance labels that mark an entry as GEAK-owned."""
     try:
         from hyperloom.orchestrator.actions.executors.explore import (
             _CONFIG_REPLAY_PROVENANCE,
@@ -148,19 +97,7 @@ def _geak_provenance_names() -> frozenset[str]:
 
 
 def _geak_name_resolver() -> Any:
-    """Return the one resolver that turns an acceptance entry into a name.
-
-    The canonical implementation lives beside the ledger that writes these
-    entries
-    (:func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_spec_name`).
-    Importing it here keeps the collector and the ledger from drifting into two
-    spellings of the same kernel. Collectors also run offline against a
-    tarball, where the orchestrator package may not be importable at all; that
-    case falls back to the same field order rather than dropping names.
-
-    Returns:
-        Any: A callable taking one acceptance entry and returning its name.
-    """
+    """Return the one resolver that turns an acceptance entry into a name."""
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import _geak_spec_name
     except Exception:  # pragma: no cover - offline replay without orchestrator
@@ -176,18 +113,7 @@ def _geak_name_resolver() -> Any:
 
 
 def _geak_env_test() -> Any:
-    """Return the one test for "this acceptance is an env selection".
-
-    Same sourcing rule as :func:`_geak_name_resolver`: the ledger owns the
-    definition, the collector borrows it, and the offline fallback repeats the
-    rule rather than inventing a looser one. The rule is deliberately
-    one-sided — an acceptance is env only when it *says* ``kind: env``. A
-    missing ``kind`` is unknown, and unknown is admitted.
-
-    Returns:
-        Any: A callable taking one acceptance entry and returning ``True``
-        only when that entry is known to be an env selection.
-    """
+    """Return the one test for \"this acceptance is an env selection\"."""
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import geak_spec_is_env
     except Exception:  # pragma: no cover - offline replay without orchestrator
@@ -201,34 +127,7 @@ def _geak_env_test() -> Any:
 
 
 def _geak_kernel_names(entry: dict[str, Any]) -> list[str]:
-    """Return the authored-kernel names an entry carries, in row order.
-
-    Two things were wrong with reading ``accepted_kernels`` alone.
-
-    An acceptance lands in one of two lanes, ``accepted_kernels`` or
-    ``accepted_heads``, and which one it lands in is not a property of the
-    kernel. Measured over ``/shared_nfs/hyperloom-claw``, all 7 stack entries
-    with ``action=geak_e2e`` have ``accepted_kernels`` empty and 4 of them
-    carry their kernel in ``accepted_heads`` alone. Reading one lane did not
-    under-count the gain — the gain is on the entry either way — it mislabelled
-    it: :func:`_geak_contribution` returned ``"config"`` for a row that had a
-    kernel running. Both lanes are read here, in the same order the ledger
-    reads them.
-
-    ``kind == "env"`` entries are excluded. Those select an existing library or
-    server flag; no kernel was authored, so they are config gain and counting
-    them as kernels would double-book the same win.
-
-    Both written shapes are accepted: the ``geak_e2e`` promotion copies GEAK's
-    list of dicts, the revalidation path carries a flat list of names. Anything
-    unnamed is dropped rather than keyed as ``"?"``.
-
-    Args:
-        entry (dict[str, Any]): A stack / gain-ledger entry.
-
-    Returns:
-        list[str]: The kernel names, de-duplicated, order preserved.
-    """
+    """Return the authored-kernel names an entry carries, in row order."""
     resolve = _geak_name_resolver()
     is_env = _geak_env_test()
     lanes = list(entry.get("accepted_kernels") or []) + list(entry.get("accepted_heads") or [])
@@ -243,25 +142,9 @@ def _geak_kernel_names(entry: dict[str, Any]) -> list[str]:
 
 
 def _geak_contribution(entry: dict[str, Any]) -> str:
-    """Classify what a GEAK-family entry actually had running.
-
-    The stack rebench measures flags, env and overlay together against
-    ``baseline_tput``, so a row that carried both cannot be decomposed. Saying
-    which of the three cases a row is beats inventing a share for each.
-
-    Args:
-        entry (dict[str, Any]): A stack / gain-ledger entry.
-
-    Returns:
-        str: ``"kernel"`` when only an authored kernel was in play,
-        ``"config"`` when only server arguments or env were, and ``"joint"``
-        when both were and the measurement cannot separate them.
-    """
-    # A stack entry can name kernels that never ran: the promote path copies GEAK's
-    # self-reported lanes, and a rebench that stripped a dead overlay still promotes on
-    # its config gain. ``overlay_loaded is False`` is proof of absence, so the row is
-    # config gain whatever the lanes say -- the same call the per-kernel ledger makes.
-    # A missing key means the writer predates the stamp; those are left to the lanes.
+    """Classify what a GEAK-family entry actually had running."""
+    # A stack entry can name kernels that never ran: the promote path copies GEAK's self-reported lanes, and a rebench
+    # that stripped a dead overlay still promotes on its config gain.
     kernels = [] if entry.get("overlay_loaded") is False else _geak_kernel_names(entry)
     has_config = bool(
         str(entry.get("candidate_extra_server_args") or "").strip()
@@ -322,20 +205,11 @@ def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
 
 
 def _entry_family(entry: dict[str, Any]) -> str:
-    """Resolve attribution family using phase/ownership metadata when needed.
-
-    ``integrate_patch`` lands every patch source, so the action name says
-    nothing about which lever moved. The source arm owns explicitly marked
-    entries; the config arm owns its own patch applications; PRELUDE
-    baseline-enablement entries are prerequisites and remain non-attributable.
-    Missing ownership stays unattributed rather than inferred from the phase.
-    """
+    """Resolve attribution family using phase/ownership metadata when needed."""
 
     action = str(entry.get("action") or "").strip().lower()
-    # The GEAK revalidation dispatches as a plain ``explore`` task, so its
-    # action label says ``explore`` and only its provenance says GEAK. Reading
-    # the label alone files every GEAK credit under the explore family — the
-    # exact mis-crediting the ``geak`` bucket was added to prevent.
+    # The GEAK revalidation dispatches as a plain ``explore`` task, so its action label says ``explore`` and only its
+    # provenance says GEAK.
     if action == "explore":
         provenance = str(entry.get("provenance") or "").strip().lower()
         if provenance in _geak_provenance_names():
@@ -354,20 +228,7 @@ def _promote_legacy_gain_entries(
     state_entries: list[Any],
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Lift a pre-v0.7 ``list[float | None]`` gain ledger into the V1 schema.
-
-    Recovers action/variant/ts/args from the parallel
-    ``optimization_stack`` and computes ``delta_pct`` against the prior
-    entry; ``None`` ledger entries stay ``None`` to keep index alignment.
-
-    Args:
-        state_entries (list[Any]): The legacy numeric gain ledger.
-        state (dict[str, Any]): Parsed ``state.json`` (supplies the parallel
-            ``optimization_stack``).
-
-    Returns:
-        list[dict[str, Any]]: The promoted V1 ``StackGainEntry`` rows.
-    """
+    """Lift a pre-v0.7 ``list[float | None]`` gain ledger into the V1 schema."""
     stack = state.get("optimization_stack") or []
     out: list[dict[str, Any]] = []
     prev_cum = 0.0
@@ -422,21 +283,7 @@ def collect_attribution(
     warnings: list[str],
     forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Attribute end-to-end gains to individual optimization-stack entries.
-
-    Prefers the authoritative ``gain_per_stack_entry`` ledger and falls back to
-    reconstructing attribution from the optimization stack.
-
-    Args:
-        state: Session state mapping.
-        geak_invocations: GEAK backend invocation records.
-        adopted_kernels: Kernels adopted into the optimized stack.
-        warnings: Mutable list that collected warnings are appended to.
-        forge_invocations: Forge backend invocation records (own lane).
-
-    Returns:
-        An attribution dict mapping stack entries to their measured gains.
-    """
+    """Attribute end-to-end gains to individual optimization-stack entries."""
     forge_invocations = forge_invocations or []
     # Prefer the authoritative ledger; else reconstruct from optimization_stack.
     state_entries = state.get("gain_per_stack_entry")
@@ -483,7 +330,6 @@ def collect_attribution(
         "framework": 0.0,
         "replay_warm_recipe": 0.0,
         "gemm_tuning": 0.0,
-        "collective": 0.0,
         "geak": 0.0,
     }
     unattributed_actions: set[str] = set()
@@ -509,9 +355,7 @@ def collect_attribution(
         gain = _to_float(k.get("e2e_gain_pct")) or 0.0
         if kid in forge_kept_kids:
             forge_total += gain
-    # No Forge KEEP evidence => do NOT credit Forge. Kernel-lane gain that is
-    # not tied to a Forge KEEP stays unattributed instead of being reverse-
-    # inferred onto Forge (which may not have run at all this session).
+    # No Forge KEEP evidence => do NOT credit Forge.
     kernel_unattributed = max(kernel_total - forge_total, 0.0)
     unattributed_total = family_totals.get("unattributed", 0.0) + family_totals.get("other", 0.0)
 
@@ -538,10 +382,7 @@ def collect_attribution(
         notes.append(note)
         warnings.append(f"attribution: {note}")
 
-    # Per-phase gain breakdown (buckets each KEEP by its active phase), and the
-    # same total split by lever instead. They are two views of one number: the
-    # phase view answers "when", the lever view answers "what was changed", and
-    # only the second survives a phase being merged away.
+    # Per-phase gain breakdown (buckets each KEEP by its active phase), and the same total split by lever instead.
     phase_breakdown, lever_breakdown = _collect_phase_breakdown(state, entries, warnings)
 
     return {
@@ -549,15 +390,14 @@ def collect_attribution(
         "method": method,
         "source_breakdown": {
             "forge_pct_of_total": round(forge_total, 2),
-            # Kernel-lane gain with no Forge KEEP evidence; surfaced honestly
-            # instead of being credited to a backend that produced no KEEP.
+            # Kernel-lane gain with no Forge KEEP evidence; surfaced honestly instead of being credited to a backend
+            # that produced no KEEP.
             "kernel_unattributed_pct_of_total": round(kernel_unattributed, 2),
             "unattributed_pct_of_total": round(unattributed_total, 2),
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
             "replay_warm_recipe_pct_of_total": round(family_totals.get("replay_warm_recipe", 0.0), 2),
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
-            "collective_pct_of_total": round(family_totals.get("collective", 0.0), 2),
             "geak_pct_of_total": round(family_totals.get("geak", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
@@ -576,31 +416,11 @@ def _collect_phase_breakdown(
     entries: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Per-phase gain attribution.
-
-    Assigns each KEEP entry to the phase active at its acceptance
-    timestamp (explore further splits by domain, kernel by kernel_id), except
-    ``integrate_patch`` which follows explicit proposal ownership.
-    Missing phase_history → everything lands under ``unattributed``.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        entries (list[dict[str, Any]]): The per-stack gain-ledger entries.
-        warnings (list[str]): Shared warnings list (mutated in place when
-            ``phase_history`` is empty).
-
-    Returns:
-        tuple[dict[str, Any], dict[str, float]]: Per-phase gain buckets
-        (prelude / framework / explore / kernel / gemm_tuning / sweep / close,
-        plus a conditional ``unattributed``), each with a ``total_gain_pct``
-        and phase-specific sub-breakdowns; and the same total split by lever
-        kind instead of by phase.
-    """
+    """Per-phase gain attribution."""
     # Phase timeline: for an entry ts, pick the latest row with ts_unix <= ts.
     timeline = _phase_timeline(state)
 
     # Explore provenance: map fingerprint -> provenance from winners_history.
-    # ``scope_by_fp`` carries the specialist dial as an additive analytics tag.
     explore_search = state.get("explore_search") or {}
     provenance_by_fp: dict[str, str] = {}
     scope_by_fp: dict[str, str] = {}
@@ -644,27 +464,24 @@ def _collect_phase_breakdown(
         phase = _phase_at(_entry_ts(e), timeline).lower()
         action = str(e.get("action") or "").lower()
         fam = _entry_family(e)
-        # Both levers run inside FRAMEWORK_AGENT, so the live phase no longer
-        # says which one moved a KEEP. The entry's own family does.
+        # Both levers run inside FRAMEWORK_AGENT, so the live phase no longer says which one moved a KEEP.
         if phase == "framework_agent":
             phase = "framework" if fam == "framework" else "explore"
         if action.startswith("integrate_patch"):
-            # For this delayed application mechanism, proposal ownership is the
-            # attribution phase; the acceptance timestamp is only execution
-            # context and must not manufacture a kernel_agent/"?" row.
+            # For this delayed application mechanism, proposal ownership is the attribution phase; the acceptance
+            # timestamp is only execution context and must not manufacture a kernel_agent/"?" row.
             phase = fam if fam in {"framework", "explore"} else "unattributed"
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"
-        # So does GEAK. Its own bucket keeps the gain out of ``unattributed``,
-        # where the KERNEL phase name (absent from these buckets) sent it.
+        # So does GEAK.
         elif fam == "geak":
             phase = "geak"
         # Fall back to action family when phase_history isn't usable.
         elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
                 phase = "explore"
-            elif fam in ("kernel_agent", "collective"):
+            elif fam == "kernel_agent":
                 phase = "kernel_agent"
             elif fam == "sweep":
                 phase = "sweep"
@@ -677,10 +494,7 @@ def _collect_phase_breakdown(
             float(bucket["total_gain_pct"]) + float(delta),
             2,
         )
-        # Lever split, accumulated from the same rows and the same deltas as the
-        # phase split above. It is the phase-free view of the identical total:
-        # a phase says when a KEEP landed, which a delayed application makes a
-        # lie; the lever says what was changed, which stays true.
+        # Lever split, accumulated from the same rows and the same deltas as the phase split above.
         lever = patch_lever_kind(e) or _LEVER_BY_PHASE_BUCKET.get(phase, "")
         if lever:
             lever_buckets[lever] = round(
@@ -739,9 +553,7 @@ def _collect_phase_breakdown(
             )
             by_kid = bucket.setdefault("by_kernel_id", {})
             for key in _geak_kernel_names(e):
-                # One kernel per row is the normal case. When a row names
-                # several, each is named at the row's whole gain — the rebench
-                # measured them together and cannot say who earned what.
+                # One kernel per row is the normal case.
                 by_kid[key] = round(
                     float(by_kid.get(key, 0.0)) + float(delta),
                     2,
@@ -771,18 +583,7 @@ def _reconstruct_gain_ledger(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (kept for signature
-            symmetry; not mutated here).
-
-    Returns:
-        list[dict[str, Any]]: One reconstructed gain-ledger row per stack
-        entry, with cumulative gain and ``delta_pct``. Empty when there is no
-        ``optimization_stack``.
-    """
+    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it."""
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
         return []

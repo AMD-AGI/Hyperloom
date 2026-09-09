@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-stack validation handler: draining pending KEEP integrates and
-running/recovering the positive-needs-review stack e2e validation."""
+"""Kernel-stack validation handler: draining pending KEEP integrates and running/recovering the positive-needs-review stack e2e validation."""
 
 from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from typing import Any
+from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_graded_comparison
@@ -87,12 +87,7 @@ class KernelStackPhase(PhaseHandler):
             )
 
     def _positive_needs_review_integrates(self) -> list[dict[str, Any]]:
-        """Return positive NEEDS_REVIEW integrate entries eligible for stack validation.
-
-        Returns:
-            Integrate-attempt entries with a positive best gain that are not
-            yet stack-resolved or in progress, sorted by gain descending.
-        """
+        """Return positive NEEDS_REVIEW integrate entries eligible for stack validation."""
         out: list[dict[str, Any]] = []
         stack_resolved_ids = self._stack_resolved_kernel_ids()
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
@@ -121,11 +116,7 @@ class KernelStackPhase(PhaseHandler):
         return out
 
     def _stack_resolved_kernel_ids(self) -> set[str]:
-        """Kernel ids already covered by a kept stack validation.
-
-        Returns:
-            The set of kernel ids resolved by kept ``integrate`` stack entries.
-        """
+        """Kernel ids already covered by a kept stack validation."""
         resolved: set[str] = set()
         for item in self.shared_state.optimization_stack or []:
             if not isinstance(item, dict):
@@ -146,13 +137,7 @@ class KernelStackPhase(PhaseHandler):
         entries: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
-        """Mark component NEEDS_REVIEW entries as handled by a kept stack.
-
-        Args:
-            entries: The component integrate entries that formed the stack.
-            result: The stack-validation result; only a ``KEEP`` decision with
-                a stack kernel id triggers marking.
-        """
+        """Mark component NEEDS_REVIEW entries as handled by a kept stack."""
         stack_id = str(result.get("kernel_id") or "")
         decision = str(result.get("decision") or "").upper()
         if decision != "KEEP" or not stack_id:
@@ -187,14 +172,7 @@ class KernelStackPhase(PhaseHandler):
         self,
         entries: list[dict[str, Any]],
     ) -> set[tuple[str, str, str]]:
-        """Return (kernel_id, patch_path, target_file) tuples for stack members.
-
-        Args:
-            entries: The stack component integrate entries.
-
-        Returns:
-            A set of ``(kernel_id, patch_path, target_file)`` identity tuples.
-        """
+        """Return (kernel_id, patch_path, target_file) tuples for stack members."""
         return {
             (
                 str(entry.get("kernel_id") or ""),
@@ -210,12 +188,7 @@ class KernelStackPhase(PhaseHandler):
         entries: list[dict[str, Any]],
         stack_id: str,
     ) -> None:
-        """Persist an in-flight stack guard before applying patches.
-
-        Args:
-            entries: The component integrate entries to guard.
-            stack_id: The combined stack kernel id stamped onto each entry.
-        """
+        """Persist an in-flight stack guard before applying patches."""
         now = datetime.now(timezone.utc).isoformat()
         wanted = self._stack_component_identities(entries)
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
@@ -236,12 +209,7 @@ class KernelStackPhase(PhaseHandler):
         self,
         entries: list[dict[str, Any]],
     ) -> None:
-        """Clear the in-flight stack guard for component integrate entries.
-
-        Args:
-            entries: The component integrate entries whose in-progress guard
-                should be cleared.
-        """
+        """Clear the in-flight stack guard for component integrate entries."""
         wanted = self._stack_component_identities(entries)
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
@@ -261,12 +229,7 @@ class KernelStackPhase(PhaseHandler):
         self.shared_state.pending_stack_validation_apply_results = []
 
     async def _recover_interrupted_stack_validation(self) -> bool:
-        """Resume or abort a stack validation interrupted by crash.
-
-        Returns:
-            ``True`` if an interrupted stack validation was finalized or rolled
-            back, ``False`` when there was nothing to recover.
-        """
+        """Resume or abort a stack validation interrupted by crash."""
         from ..kernel.request_handlers import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
@@ -314,16 +277,7 @@ class KernelStackPhase(PhaseHandler):
         *,
         stack_id: str = "",
     ) -> list[dict[str, Any]]:
-        """Rebuild component integrate ledger rows for a stack id.
-
-        Args:
-            kernel_ids: The component kernel ids to recover.
-            stack_id: Fallback ``+``-joined stack id parsed for component ids
-                when ``kernel_ids`` is empty.
-
-        Returns:
-            The matching integrate-attempt entries, sorted by kernel id.
-        """
+        """Rebuild component integrate ledger rows for a stack id."""
         wanted_ids = {str(kid) for kid in kernel_ids if str(kid)}
         if not wanted_ids and stack_id:
             wanted_ids = {kid for kid in stack_id.split("+") if kid}
@@ -342,13 +296,7 @@ class KernelStackPhase(PhaseHandler):
         stack: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
-        """Record stack validation, promote KEEP, and clear recovery checkpoints.
-
-        Args:
-            stack: The component integrate entries that formed the stack.
-            result: The stack-validation result; a ``KEEP`` decision promotes
-                the stack and marks entries resolved.
-        """
+        """Record stack validation, promote KEEP, and clear recovery checkpoints."""
         self.shared_state.record_kernel_integrate_result(result)
         decision = str(result.get("decision") or "").upper()
         if decision == "KEEP":
@@ -361,12 +309,7 @@ class KernelStackPhase(PhaseHandler):
         self.shared_state.save(self.session_dir)
 
     async def _maybe_validate_positive_needs_review_stack(self) -> None:
-        """Run one E2E stack validation for multiple small positive kernel patches.
-
-        Single-patch ``NEEDS_REVIEW`` is not retried automatically. When two or
-        more pending kernel patches individually show positive but sub-threshold
-        E2E gain, validate their combined effect once before moving to SWEEP.
-        """
+        """Run one E2E stack validation for multiple small positive kernel patches."""
         if await self._recover_interrupted_stack_validation():
             return
         entries = self._positive_needs_review_integrates()
@@ -401,16 +344,7 @@ class KernelStackPhase(PhaseHandler):
         self,
         entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack.
-
-        Args:
-            entries: The component integrate entries whose patches are applied
-                together for the combined benchmark.
-
-        Returns:
-            A result dict with the KEEP/REVERT decision, measured throughput,
-            incremental gain, apply/revert sub-results and stack metadata.
-        """
+        """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
         from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
@@ -459,15 +393,11 @@ class KernelStackPhase(PhaseHandler):
                     "output_dir": str(workspace),
                     "timeout_sec": 20 * 60,
                     "extra_server_args": ((self.shared_state.current_best or {}).get("extra_server_args") or ""),
-                    # Synthetic kind="baseline": validates the stacked kernels
-                    # against the already-anchored baseline on throughput alone.
-                    # Exempt from the genuine-baseline accuracy guard -- this ctx
-                    # carries the live SharedState, so without the exemption a
-                    # missing accuracy here would stamp an eval-failure contract
-                    # and drag a healthy run back into enablement.
+                    # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
+                    # on throughput alone.
                     "quality_ref_exempt": True,
-                    # A sub-step of the KERNEL phase's own event, not a
-                    # dispatched measurement, so it leaves no baseline event.
+                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it leaves no
+                    # baseline event.
                     SBD_INNER_STEP_PARAM: True,
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
@@ -482,6 +412,7 @@ class KernelStackPhase(PhaseHandler):
             )
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
+                graded_verdict = VERDICT_REVERT
                 new_tput = 0.0
                 gain_pct = -100.0
                 incremental_gain_pct = -100.0
@@ -489,20 +420,30 @@ class KernelStackPhase(PhaseHandler):
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
-                # The stack is applied on top of current_best, so the KEEP
-                # decision is the incremental gain over current_best rather than
-                # the total gain over the baseline. Reported ``gain_pct`` stays
-                # on the output axis the stack ledger is denominated in.
-                graded = resolve_graded_comparison(self.shared_state, bench_result)
+                # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
+                # current_best rather than the total gain over the baseline.
+                graded = resolve_graded_comparison(
+                    self.shared_state,
+                    bench_result,
+                    keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+                )
                 if graded.degrade_reason:
                     log.info("stack-validate: %s graded on output throughput (%s)", stack_id, graded.degrade_reason)
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
-                if graded.vetoed:
-                    log.info("stack-validate: %s failed the interactivity constraint", stack_id)
-                clears = incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
-                decision = "KEEP" if clears and not graded.vetoed else "REVERT"
+                if graded.verdict != VERDICT_KEEP:
+                    log.info(
+                        "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
+                        stack_id,
+                        graded.verdict,
+                        graded.reference,
+                        graded.candidate,
+                        graded.tput_reference,
+                        graded.tput_candidate,
+                    )
+                graded_verdict = graded.verdict
+                decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
@@ -511,9 +452,8 @@ class KernelStackPhase(PhaseHandler):
                         bench_result,
                         session_dir=self.session_dir,
                         workspace=workspace,
-                        # The args the bench server ran under, so a serving
-                        # context too small to host an eval is not read as a
-                        # broken eval.
+                        # The args the bench server ran under, so a serving context too small to host an eval is not
+                        # read as a broken eval.
                         server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
                     )
                     if accuracy_gate.get("blocked"):
@@ -563,6 +503,9 @@ class KernelStackPhase(PhaseHandler):
                 "gain_pct": gain_pct,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
+                # A stack cannot be left half-applied, so RECORDED reverts like
+                # REVERT does; the verdict says which one it was.
+                "graded_verdict": graded_verdict,
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
                 "apply_result": {"status": "ok", "stack_apply_results": apply_results},
@@ -596,16 +539,7 @@ class KernelStackPhase(PhaseHandler):
             }
 
     async def _auto_enqueue_pending_integrations(self) -> None:
-        """Auto-dispatch integrate for KEEP'd kernels awaiting integration.
-
-        The candidate set is :meth:`SharedState.pending_kernel_integration_records`,
-        which includes kernels whose only prior integrate attempts were un-exhausted
-        (retryable) faults. Duplicate dispatch is guarded per ``integration_id``
-        (falling back to ``kernel_id`` when absent) by the recorded
-        integrate-attempt count (``_auto_integrate_attempt_marks``): a
-        kernel is re-dispatched only once its prior integrate has been recorded,
-        never while one is in flight. Idempotent.
-        """
+        """Auto-dispatch integrate for KEEP'd kernels awaiting integration."""
         state = self.shared_state
         pending_records = state.pending_kernel_integration_records()
         if not pending_records:
@@ -646,6 +580,7 @@ class KernelStackPhase(PhaseHandler):
                         "task_group_key": str(pending.get("task_group_key") or ""),
                         "identity_route": str(pending.get("identity_route") or ""),
                         "source": "auto_integrate_after_kernel_opt",
+                        "mode": "patch",
                     },
                     priority=2,
                 )

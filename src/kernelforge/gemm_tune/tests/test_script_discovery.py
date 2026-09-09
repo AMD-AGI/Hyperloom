@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for aiter tuner script discovery.
-
-The hardcoded-path design is what broke: aiter moved the bf16 dense tuner from
-``gradlib/`` to ``csrc/gemm_a16w16/`` and the constant kept pointing at the old
-location. These tests pin that a move is survivable, that the preference order
-is honoured, and that "aiter ships no such script" stays distinguishable from
-"we have not wired it up" -- only the former justifies dropping a tier.
-"""
+"""Tests for aiter tuner script discovery."""
 
 from __future__ import annotations
 
@@ -49,15 +42,14 @@ class TestHintedResolution:
 
 class TestSearchSurvivesRelocation:
     def test_finds_script_moved_to_a_new_directory(self, tmp_path):
-        # Exactly the failure mode that started this work, in the other
-        # direction: the hinted path is empty, the file lives elsewhere.
+        # Exactly the failure mode that started this work, in the other direction: the hinted path is empty, the file
+        # lives elsewhere.
         moved = _make(tmp_path, "some_new_layout/v2/gemm_a8w8_tune.py")
         assert sd.discover_tuner_script("a8w8", tmp_path) == moved
 
     def test_search_does_not_confuse_batched_variant(self, tmp_path):
         _make(tmp_path, "elsewhere/batched_gemm_a8w8_tune.py")
-        # batched_* is a different tuner; matching it here would silently tune
-        # the wrong operator.
+        # batched_* is a different tuner; matching it here would silently tune the wrong operator.
         assert sd.discover_tuner_script("a8w8", tmp_path) is None
 
     def test_search_does_not_confuse_blockscale_variant(self, tmp_path):

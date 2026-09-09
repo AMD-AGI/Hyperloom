@@ -5,11 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the shared trace-health gate helpers (_idle_gate).
-
-Locks threshold resolution (default + env override + bad-value fallback) and
-the warning shapes for both the high-idle and low-compute gates.
-"""
+"""Unit tests for the shared trace-health gate helpers (_idle_gate)."""
 
 from __future__ import annotations
 
@@ -56,9 +52,7 @@ def test_high_idle_warning_shape():
     assert "parameter optimization" in w["message"]
 
 
-# ---------------------------------------------------------------------------
 # Low-compute gate
-# ---------------------------------------------------------------------------
 
 
 def test_min_compute_threshold_default(monkeypatch):
@@ -96,8 +90,8 @@ def test_low_compute_warning_shape():
     assert w["source"] == "/tmp/analysis.md"
     assert "Only 3.99% of trace wall time is compute" in w["message"]
     assert "95.99%" in w["message"]
-    # The warning must name the spin-wait failure mode, since a near-zero idle
-    # share is exactly what lets this trace slip past the idle gate.
+    # The warning must name the spin-wait failure mode, since a near-zero idle share is exactly what lets this trace
+    # slip past the idle gate.
     assert "spin-waiting collective" in w["message"]
 
 

@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic verification of the dual-path measurement driver contract.
-
-A rewrite driver must compare the source against the FlyDSL candidate on the
-same cases, time the source alone under ``--ref-bench-mode``, and time the
-candidate alone under ``--bench-mode``. An ordinary forge-loop driver has
-neither bench mode, and since drivers conventionally ignore unknown arguments
-it answers a bench request by silently running its correctness path — a
-mismatch that, unchecked, only surfaces after PORT has spent its budget.
-
-This module is the one place the driver is executed and the one place its
-output is read, so every stage sees the same timing, case ids, and correctness
-verdict, and every rejection names a failure class rather than an opaque error.
-"""
+"""Deterministic verification of the dual-path measurement driver contract."""
 
 from __future__ import annotations
 
@@ -46,8 +34,7 @@ CASE_COVERAGE_MISMATCH = "case_coverage_mismatch"
 REF_BENCH_FLAG = "--ref-bench-mode"
 BENCH_FLAG = "--bench-mode"
 
-# The canonical aggregate timing key. ``mean_ms`` predates it and is still read,
-# but a driver emitting it is reported so the spelling can be migrated.
+# The canonical aggregate timing key.
 CANONICAL_TIMING_METRIC = "median_ms"
 DEPRECATED_TIMING_METRIC = "mean_ms"
 
@@ -177,13 +164,7 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 
 def export_driver_environment(spec: RewriteSpec) -> None:
-    """Publish the producer-owned variables to every driver forge launches.
-
-    The correctness suite and the nested loop's own bench and test tools spawn
-    the driver with the ambient environment, so exporting once here is what
-    makes the contract hold for those invocations too, not only the ones this
-    module runs directly.
-    """
+    """Publish the producer-owned variables to every driver forge launches."""
     os.environ.update(
         protocol.driver_environment(
             source_kernel=spec.source_kernel,
@@ -238,13 +219,7 @@ def run_driver(
 
 
 def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightReport:
-    """Reject a driver or candidate layout that cannot gate anything.
-
-    The driver must be a file of its own: one that is the source kernel, the
-    generated candidate, or a produced forge artifact would be judging itself. A
-    candidate path equal to the source is the same defect one level down — the
-    port would overwrite the kernel it is measured against.
-    """
+    """Reject a driver or candidate layout that cannot gate anything."""
     driver = Path(driver_path)
     if not driver.is_file():
         return _failed(DRIVER_MISSING, f"measurement driver not found: {driver_path}")
@@ -269,9 +244,8 @@ def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightR
             f"the FlyDSL candidate would overwrite the source kernel it is compared against: {candidate}",
         )
 
-    # Python resolves the driver's own directory before anything the producer
-    # exports, so a same-named module there would be imported instead of the
-    # candidate — typically a kernel left behind by an earlier run.
+    # Python resolves the driver's own directory before anything the producer exports, so a same-named module there
+    # would be imported instead of the candidate — typically a kernel left behind by an earlier run.
     for directory in (resolved_driver.parent, Path(spec.workspace).resolve()):
         if directory == candidate.parent:
             continue
@@ -308,11 +282,7 @@ def preflight_reference(
     iters: int = 30,
     timeout_sec: int,
 ) -> PreflightReport:
-    """Prove the source path is measurable before any PORT budget is spent.
-
-    The returned timing is the speedup baseline, so the contract check and the
-    baseline measurement are one driver invocation rather than two.
-    """
+    """Prove the source path is measurable before any PORT budget is spent."""
     run = run_driver(
         spec,
         driver_path,
@@ -339,8 +309,8 @@ def preflight_reference(
 
     reading = read_driver_output(run.output)
     if not reading.has_timing:
-        # A driver that ignores the flag runs its correctness path instead, which
-        # is a missing mode rather than a broken timing report.
+        # A driver that ignores the flag runs its correctness path instead, which is a missing mode rather than a
+        # broken timing report.
         if reading.has_correctness_verdict:
             return _failed(
                 REF_MODE_UNSUPPORTED,
@@ -359,13 +329,7 @@ def probe_candidate_arguments(
     *,
     timeout_sec: int,
 ) -> PreflightReport:
-    """Check the candidate mode while the candidate is still an unbuilt stub.
-
-    The driver must recognize ``--bench-mode`` here but must not produce a
-    timing: the seeded skeleton cannot run, so a successful measurement proves
-    the driver never reaches the candidate and is timing the source on both
-    paths, which would make every later speedup meaningless.
-    """
+    """Check the candidate mode while the candidate is still an unbuilt stub."""
     run = run_driver(
         spec,
         driver_path,
@@ -401,16 +365,7 @@ def check_case_coverage(
     reference_case_ids: tuple[str, ...],
     candidate_case_ids: tuple[str, ...],
 ) -> PreflightReport:
-    """Require both benchmark paths to report the same cases.
-
-    The cases the driver reports while running are the authority on coverage;
-    the task's shapes are agent context. Timing different case sets on the two
-    paths turns the reported speedup into a comparison between different work.
-
-    A reference reporting no cases carries no coverage claim, so it passes. A
-    candidate reporting none is the mismatch this gate exists to catch: treating it
-    as "nothing to compare" publishes a smaller workload's timing as a speedup.
-    """
+    """Require both benchmark paths to report the same cases."""
     if not reference_case_ids:
         return PreflightReport(ok=True, case_ids=candidate_case_ids)
     missing = sorted(set(reference_case_ids) - set(candidate_case_ids))

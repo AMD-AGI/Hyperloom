@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers:
-presence checks, GPU-count probing, lane ceilings, path allowlists, and the
-free-form task-description guard."""
+"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers: presence checks, GPU-count probing,
+lane ceilings, path allowlists, and the free-form task-description guard.
+"""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ from hyperloom.orchestrator.policy.gate import (
     _delegate_field_present,
     _value_is_present,
     detect_gpu_count,
-    gpu_specialist_ceiling,
     research_lane_ceiling,
 )
+from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Workload-level roofline for diffusion/scriptable traces.
-
-Aggregates per-kernel roofline CSVs into kernel-efficiency and GPU-busy gaps.
-"""
+"""Workload-level roofline for diffusion/scriptable traces."""
 
 from __future__ import annotations
 
@@ -39,14 +36,7 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 def aggregate_unified(rows: list[dict[str, str]]) -> dict[str, Any]:
-    """Aggregate the unified per-kernel summary into workload totals.
-
-    Args:
-        rows: Parsed ``unified_perf_summary.csv`` rows.
-
-    Returns:
-        Dict of workload totals (actual/ideal us, bound split, kernel efficiency).
-    """
+    """Aggregate the unified per-kernel summary into workload totals."""
     sigma_actual_us = 0.0
     sigma_ideal_us = 0.0
     compute_us = 0.0
@@ -78,14 +68,7 @@ def aggregate_unified(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def parse_gpu_timeline(rows: list[dict[str, str]]) -> dict[str, float]:
-    """Extract busy / computation / exposed percentages from gpu_timeline.csv.
-
-    Args:
-        rows: Parsed ``gpu_timeline.csv`` rows (``type``, ``time ms``, ``percent``).
-
-    Returns:
-        Dict keyed by timeline ``type`` -> percent (empty when the file is absent).
-    """
+    """Extract busy / computation / exposed percentages from gpu_timeline.csv."""
     out: dict[str, float] = {}
     for r in rows:
         kind = (r.get("type") or "").strip()
@@ -117,28 +100,7 @@ def dit_analytic_flops(
     num_denoise_steps: int,
     ffn_ratio: float = 4.0,
 ) -> dict[str, float]:
-    """A-priori forward FLOPs for a DiT-style transformer denoise run.
-
-    Standard dense-transformer accounting (2 FLOPs per MAC):
-
-      - linear (QKVO + FFN) per token/layer : 2 * (4 + 2*ffn_ratio) * h^2
-      - attention (scores + context)        : 2 * (2 * num_tokens * h)
-
-    scaled by ``num_layers * num_tokens * num_denoise_steps``. Positional MLPs,
-    adaLN modulation, patch/embed projections and the VAE are ignored, so this
-    is a lower bound on the true DiT compute.
-
-    Args:
-        hidden_size: Transformer hidden dimension ``h``.
-        num_layers: Number of transformer blocks.
-        num_tokens: Sequence length (latent patches) per forward.
-        num_denoise_steps: Per-step divisor: the requested count when one was
-            given, else the count inferred from the trace.
-        ffn_ratio: FFN expansion factor (``intermediate / hidden``).
-
-    Returns:
-        Dict with ``linear_flops``, ``attention_flops`` and ``total_flops``.
-    """
+    """A-priori forward FLOPs for a DiT-style transformer denoise run."""
     h = float(hidden_size)
     per_token_linear = 2.0 * (4.0 + 2.0 * ffn_ratio) * h * h
     per_token_attention = 2.0 * (2.0 * float(num_tokens) * h)
@@ -153,17 +115,7 @@ def dit_analytic_flops(
 
 
 def dit_analytic_ceiling(flops: dict[str, float], achievable_tflops: float) -> dict[str, Any]:
-    """Convert a-priori FLOPs into an achievable-compute time ceiling.
-
-    Args:
-        flops: Output of :func:`dit_analytic_flops`.
-        achievable_tflops: Sustained matrix TFLOPS for the run dtype (from
-            hyperloom's ``HW_SPECS_ACHIEVABLE``); the roofline ceiling divisor.
-
-    Returns:
-        Dict with the total FLOPs, the ceiling TFLOPS and the resulting
-        ideal (compute-bound) microseconds; empty when inputs are non-positive.
-    """
+    """Convert a-priori FLOPs into an achievable-compute time ceiling."""
     total = flops.get("total_flops", 0.0)
     if total <= 0 or achievable_tflops <= 0:
         return {}
@@ -176,24 +128,7 @@ def dit_analytic_ceiling(flops: dict[str, float], achievable_tflops: float) -> d
 
 
 def reconcile(totals: dict[str, Any], analytic: dict[str, Any]) -> dict[str, Any]:
-    """Cross-check the a-priori DiT ceiling against the trace-derived roofline.
-
-    Compares the analytic compute-ideal time (from a-priori FLOPs / achievable
-    TFLOPS) against TraceLens' summed per-kernel ideal + actual times:
-
-      - ``analytic_vs_trace_ideal_ratio`` ~ 1 => model matches the kernels
-        TraceLens modelled; >> 1 => trace under-counts DiT compute; << 1 => the
-        model omits real work.
-      - ``analytic_achieved_efficiency`` = analytic_ideal / trace_actual, the
-        end-to-end HW efficiency implied by the a-priori compute lower bound.
-
-    Args:
-        totals: Aggregated trace totals from :func:`aggregate_unified`.
-        analytic: Output of :func:`dit_analytic_ceiling` (may be empty).
-
-    Returns:
-        Dict of reconciliation ratios; empty when the analytic ceiling is absent.
-    """
+    """Cross-check the a-priori DiT ceiling against the trace-derived roofline."""
     ideal_us = analytic.get("ideal_compute_us", 0.0)
     if ideal_us <= 0:
         return {}
@@ -215,20 +150,7 @@ def build_report(
     dit_geometry: dict[str, Any] | None = None,
     achievable_tflops: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble the workload-level roofline report from a TraceLens CSV dir.
-
-    Args:
-        csv_dir: ``--output_csvs_dir`` from generate_perf_report_pytorch.
-        num_denoise_steps: Per-step divisor: the requested count when one was
-            given, else the count inferred from the trace (enables per-step).
-        top_k: How many hottest kernels to include.
-
-    Returns:
-        The full report dict (also what ``--output`` serializes).
-
-    Raises:
-        FileNotFoundError: When the unified summary CSV is missing.
-    """
+    """Assemble the workload-level roofline report from a TraceLens CSV dir."""
     unified_path = csv_dir / UNIFIED_CSV
     unified_rows = _read_csv_rows(unified_path)
     if not unified_rows:
@@ -259,26 +181,7 @@ def assemble_report(
     achievable_tflops: float | None = None,
     source: str = "tracelens_csv",
 ) -> dict[str, Any]:
-    """Assemble the workload roofline report from pre-aggregated inputs.
-
-    Backend-agnostic single source of truth for the report *shape* (totals +
-    timeline + end-to-end efficiency + per-denoise-step split + optional analytic
-    DiT ceiling). Fed either by ``build_report`` or ``build_report_from_bypass``
-    so both routes emit an identically-shaped ``diffusion_roofline.json``.
-
-    Args:
-        totals: Workload totals (see ``aggregate_unified`` for the key contract).
-        timeline: GPU timeline percentages keyed by type (``busy_time`` etc.).
-        num_denoise_steps: Per-step divisor: the requested count when one was
-            given, else the count inferred from the trace (enables per-step).
-        top_kernels_list: Pre-ranked hottest-kernel summary entries.
-        dit_geometry: Optional DiT geometry enabling the analytic compute ceiling.
-        achievable_tflops: Optional achievable peak enabling the analytic ceiling.
-        source: Provenance label recorded on the report.
-
-    Returns:
-        The full workload-roofline report dict.
-    """
+    """Assemble the workload roofline report from pre-aggregated inputs."""
     busy_pct = timeline.get("busy_time")
     gpu_busy_ratio = (busy_pct / 100.0) if busy_pct is not None else None
     kernel_eff = totals["kernel_roofline_efficiency"]
@@ -300,8 +203,8 @@ def assemble_report(
             "ideal_roofline_us": totals["sigma_ideal_roofline_us"] / num_denoise_steps,
         }
 
-    # Optional a-priori DiT compute ceiling + reconciliation cross-check, only
-    # when model geometry + achievable TFLOPS are supplied.
+    # Optional a-priori DiT compute ceiling + reconciliation cross-check, only when model geometry + achievable TFLOPS
+    # are supplied.
     if dit_geometry and achievable_tflops and num_denoise_steps and num_denoise_steps > 0:
         try:
             flops = dit_analytic_flops(
@@ -323,20 +226,7 @@ def assemble_report(
 
 
 def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate the bypass analytical candidate set into workload totals.
-
-    The bypass backend has no TraceLens perf CSV; it carries the same numbers on
-    each candidate: ``duration_us`` (summed GPU time = the actual side) and
-    ``efficiency_percent`` (ideal/actual) with a ``bound_type`` for the
-    compute/memory split. Placeholder-roofline candidates contribute only to
-    ``no_perf_model_us``. Mirrors ``aggregate_unified``.
-
-    Args:
-        hot_kernels: The bypass candidate dicts (``hot_kernels`` list).
-
-    Returns:
-        Workload totals keyed identically to ``aggregate_unified``.
-    """
+    """Aggregate the bypass analytical candidate set into workload totals."""
     sigma_actual = 0.0
     sigma_ideal = 0.0
     compute_us = 0.0
@@ -395,30 +285,7 @@ def build_report_from_bypass(
     totals: dict[str, Any] | None = None,
     kernels_aggregated: int | None = None,
 ) -> dict[str, Any]:
-    """Build the workload roofline report from the bypass candidate set.
-
-    Produces an identically-shaped report to ``build_report`` (TraceLens CSV
-    path) so downstream consumers read ``diffusion_roofline.json`` the same way
-    regardless of route.
-
-    Args:
-        hot_kernels: The bypass ``hot_kernels`` candidate dicts (used for the
-            top-N summary block).
-        timeline: The bypass ``analyze["timeline"]`` (``busy_pct``/``idle_pct``).
-        num_denoise_steps: Effective denoise steps (enables the per-step split).
-        top_k: How many hottest kernels to include in the summary.
-        dit_geometry: Optional DiT geometry for the analytic compute ceiling.
-        achievable_tflops: Optional achievable peak for the analytic ceiling.
-        totals: Pre-computed WORKLOAD totals over ALL analyzed kernels (from
-            ``_bypass_report.build_workload_roofline_totals``). When omitted,
-            falls back to aggregating the (top-k capped) ``hot_kernels`` only.
-        kernels_aggregated: Count of device kernels the ``totals`` cover (for the
-            ``kernels_aggregated`` metadata under full scope). Defaults to
-            ``len(hot_kernels)`` when omitted.
-
-    Returns:
-        The workload-roofline report dict.
-    """
+    """Build the workload roofline report from the bypass candidate set."""
     full_scope = totals is not None
     if totals is None:
         totals = aggregate_bypass_candidates(hot_kernels)

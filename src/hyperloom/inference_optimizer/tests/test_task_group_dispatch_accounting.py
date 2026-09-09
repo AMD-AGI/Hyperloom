@@ -9,14 +9,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 class TestEnqueueNominatedPatch:
-    """A self-nominated fusion sibling becomes a pending integrate record.
-
-    ``enqueue_nominated_patch`` is the fusion-lane analogue of ``_queue_kernel_keep``:
-    it writes each nomination sibling as ``status="pending"`` so the shared
-    SWEEP-entry drain runs it through the same integrate lane. The record must
-    carry the three fusion-specific facts the generic drain cannot infer (env
-    flag, keep bar, ``fusion`` action label) and must survive the queue rebuild.
-    """
+    """A self-nominated fusion sibling becomes a pending integrate record."""
 
     @staticmethod
     def _patch(name, target, patch_path="", *, env_flag="", micro=1.0, repo="/repo"):
@@ -79,8 +72,8 @@ class TestEnqueueNominatedPatch:
 
         state = SharedState()
         enqueue_nominated_patch(state, patch=self._patch("fuse_a", "/repo/a.py", env_flag="ZAYA_FUSED_A"))
-        # A fusion record has no kernel_opt_task_attempts ledger entry; the
-        # rebuild must keep it anyway (non-terminal is never evicted).
+        # A fusion record has no kernel_opt_task_attempts ledger entry; the rebuild must keep it anyway (non-terminal
+        # is never evicted).
         _ensure_kernel_task_state(state)
 
         records = state.pending_kernel_integration_records()
@@ -127,11 +120,7 @@ class TestEnqueueNominatedPatch:
         )
 
     def test_a_kept_fusion_retires_its_same_source_siblings(self):
-        """A fusion KEEP overwrites the whole file, so the losing sibling is spent.
-
-        Draining it would re-apply the file over the KEEP and spend another e2e
-        measurement on a patch that can no longer be evaluated on its own.
-        """
+        """A fusion KEEP overwrites the whole file, so the losing sibling is spent."""
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
         state = SharedState()
@@ -158,11 +147,7 @@ class TestEnqueueNominatedPatch:
         assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == ["elsewhere"]
 
     def test_a_non_integrating_stack_entry_retires_nothing(self):
-        """Only a whole-file kernel overwrite spends a queued patch.
-
-        A framework or explore entry can name the same path without having
-        rewritten the kernel, and dropping the queue on it strands real work.
-        """
+        """Only a whole-file kernel overwrite spends a queued patch."""
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
         for action in ("explore", "baseline", "specialist", "integrate_patch"):
@@ -178,7 +163,7 @@ class TestEnqueueNominatedPatch:
         """The exclusion follows the whole-file overwrite, not one lane's label."""
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
-        for action in ("integrate", "collective", "fusion"):
+        for action in ("integrate", "fusion"):
             state = SharedState()
             enqueue_nominated_patch(state, patch=self._patch("weak", "/repo/a.py", micro=1.1))
             enqueue_nominated_patch(state, patch=self._patch("strong", "/repo/a.py", micro=1.9))

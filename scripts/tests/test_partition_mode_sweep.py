@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Hardware-free tests for ``scripts/partition_mode_sweep.py``.
-
-The script sits outside the coverage denominator because ``scripts/`` is not
-shipped as a package, but the logic tested here decides which silicon a
-benchmark runs on -- and getting that wrong produces a plausible number
-attributed to the wrong mode. So the parsing, device selection and aggregation
-are pinned here. Nothing below sets a partition mode, shells out, or needs a
-GPU.
-
-Payload shapes are the ones observed on an 8-card MI355X node rather than
-invented: ``amd-smi`` reporting an idle card's ``process_list`` as a bare
-string, ``rocminfo`` putting ``BDFID`` before ``Compute Unit`` in each agent
-block, and HSA enumerating whole cards ahead of partitions.
-"""
+"""Hardware-free tests for ``scripts/partition_mode_sweep.py``."""
 
 from __future__ import annotations
 
@@ -32,9 +19,8 @@ def _load():
     spec = importlib.util.spec_from_file_location("partition_mode_sweep", _SCRIPT)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
-    # Registered before exec: the module's dataclasses resolve their annotations
-    # through sys.modules, and a loader that skips this raises AttributeError on
-    # the first field with a default_factory.
+    # Registered before exec: the module's dataclasses resolve their annotations through sys.modules, and a loader
+    # that skips this raises AttributeError on the first field with a default_factory.
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
@@ -83,13 +69,7 @@ Agent 6
 
 class TestParseHsaAgents:
     def test_cu_is_not_shifted_by_the_field_order(self):
-        """BDFID precedes Compute Unit, so a line-at-a-time parser is off by one.
-
-        Printing on ``BDFID`` with the last-seen CU attributes each agent the
-        previous one's count -- which, on the node this came from, silently
-        turned the first CPX partition into a 256-CU card and would have pointed
-        the benchmark at whole silicon while labelling it CPX.
-        """
+        """BDFID precedes Compute Unit, so a line-at-a-time parser is off by one."""
         agents = pms.parse_hsa_agents(ROCMINFO_CPX)
         by_bdf = {a.bdf: a.cu for a in agents}
         assert by_bdf == {"7c:00.0": 256, "69:00.0": 256, "09:00.0": 32, "09:00.1": 32}
@@ -131,12 +111,7 @@ def _agents(*specs: tuple[int, int, int]) -> tuple:
 
 class TestSelectPartitionDevices:
     def test_whole_cards_enumerate_first_so_indices_are_not_zero_based(self):
-        """The measured trap: under DPX the partitions are HIP devices 7 and 8.
-
-        Seven untouched cards take indices 0-6, so a driver that assumed the
-        partitions of the card it just split start at 0 would benchmark a
-        neighbour and report the number as DPX.
-        """
+        """The measured trap: under DPX the partitions are HIP devices 7 and 8."""
         agents = _agents(*[(256, 0x19 + i, 0) for i in range(7)], (128, 0x09, 0), (128, 0x09, 1))
         layout = pms.layout_for("DPX", cu_per_partition=128)
         assert pms.select_partition_devices(agents, layout, bus=0x09) == (7, 8)
@@ -233,13 +208,7 @@ class TestResidentProcesses:
 
 
 class TestResidentProcessesRefusesDrift:
-    """Schema drift must raise, never read as "nobody is using the node".
-
-    This count is the only thing between an ``amd-smi`` payload this parser does
-    not understand and a partition set that evicts whatever is running. Every
-    case below used to return ``{}`` or silently skip the row, which the sweep
-    read as an idle node and acted on.
-    """
+    """Schema drift must raise, never read as \"nobody is using the node\"."""
 
     @pytest.mark.parametrize(
         "payload",
@@ -389,12 +358,7 @@ class TestPartitionEnv:
         assert env["ROCR_VISIBLE_DEVICES"] == "11"
 
     def test_an_inherited_hip_mask_is_removed_not_kept(self):
-        """Two masks apply in sequence, the second indexing into the first.
-
-        A stale HIP_VISIBLE_DEVICES=0 alongside ROCR would send every
-        partition's work to one device, and the sweep would report the mode as
-        uniformly slow with every process apparently succeeding.
-        """
+        """Two masks apply in sequence, the second indexing into the first."""
         layout = pms.layout_for("CPX", cu_per_partition=32)
         env = pms.partition_env(
             {"HIP_VISIBLE_DEVICES": "0", "CUDA_VISIBLE_DEVICES": "0"},
@@ -487,12 +451,7 @@ class TestModeResult:
 
 
 class TestToFloat:
-    """The canonical coercion from hyperloom.common.coerce, not a local copy.
-
-    Pinned here because the aggregation depends on its rejections: a stray bool
-    becoming 1.0, or an inf reaching the sum, produces a throughput comparison
-    that is wrong rather than absent.
-    """
+    """The canonical coercion from hyperloom.common.coerce, not a local copy."""
 
     def test_a_bool_is_not_a_measurement(self):
         assert pms.to_float(True) is None
@@ -666,12 +625,6 @@ class TestSudoPrefix:
 
 
 # ------------------------------------------------------------ control flow
-#
-# The tests above are pure functions. What follows drives main() end to end
-# against a fake node, because the decisions being pinned -- which card's
-# processes block a set, and what happens on the way out of a failure -- live in
-# its control flow and cannot be reached any other way. Nothing here touches a
-# GPU: every call that would is replaced.
 
 
 IDLE = "No running processes detected"
@@ -735,8 +688,8 @@ def node(monkeypatch, tmp_path):
     monkeypatch.setattr(pms, "read_hsa_agents", _read_hsa_agents)
     monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: 288.0)
     monkeypatch.setattr(pms, "run_mode", _run_mode)
-    # main() installs handlers and never removes them; leaving pytest's own
-    # SIGINT replaced for the rest of the session is not this test's business.
+    # main() installs handlers and never removes them; leaving pytest's own SIGINT replaced for the rest of the
+    # session is not this test's business.
     monkeypatch.setattr(pms.signal, "signal", lambda *a, **k: None)
     return fake
 
@@ -758,12 +711,7 @@ def _sweep(node, *extra, modes="SPX,DPX", gpu=0):
 
 
 class TestBusyCheckScope:
-    """Only the swept card is repartitioned, so only its contexts are at risk.
-
-    The check was node-wide while the set is per-card, so any busy card on a
-    shared node blocked sweeping an idle one -- and the only way past it,
-    ``--allow-busy``, also gave up the protection on the target card itself.
-    """
+    """Only the swept card is repartitioned, so only its contexts are at risk."""
 
     def test_a_busy_neighbour_does_not_block_an_idle_target(self, node):
         """The set never touches card 1, so card 1's tenant is not this sweep's business."""
@@ -853,8 +801,7 @@ class TestExitCodeContract:
         assert "KeyError" in capsys.readouterr().err
 
     def test_a_failed_restore_after_a_clean_sweep_exits_3(self, node):
-        # Entry mode is SPX and only DPX is swept, so the one set of SPX is the
-        # restore itself.
+        # Entry mode is SPX and only DPX is swept, so the one set of SPX is the restore itself.
         node.fail_set_on["SPX"] = pms.SweepError("permission denied")
         assert _sweep(node, modes="DPX") == 3
 

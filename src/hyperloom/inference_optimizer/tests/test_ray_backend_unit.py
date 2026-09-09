@@ -1,20 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the Ray-managed GPU execution backend.
-
-Covers the flag gate and execution-route seam, the visible-device merge
-invariant and YAML device stripping, the ManagedServerProcess reap invariant,
-the ServingLease / GpuSpecialistLease / ServingGroupManager lifecycles, and the
-infeasible-cluster and dead-actor robustness paths. Fake ray modules plus a real
-subprocess; no Ray cluster required.
-"""
+"""Unit tests for the Ray-managed GPU execution backend."""
 
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +151,83 @@ def test_managed_process_start_and_reap():
         time.sleep(0.05)
     assert not mgr.is_alive()
     assert not _pid_alive(pid), "supervised process must not survive stop()"
+
+
+def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
+    """The parent-death signal must be SIGTERM, never SIGKILL.
+
+    The direct child here is the benchmark wrapper, and the server it boots is
+    ``setsid``'d into its own process group -- so the wrapper's own signal trap
+    is the only in-band teardown that can reach the server. SIGKILL cannot be
+    trapped, so arming it kills the wrapper without cleanup and orphans the
+    server. Reads the signal back out of the child with ``PR_GET_PDEATHSIG``.
+    """
+    log_path = tmp_path / "pdeathsig.log"
+    mgr = ManagedServerProcess()
+    mgr.start(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes; v = ctypes.c_int(0); ctypes.CDLL('libc.so.6').prctl(2, ctypes.byref(v)); print(v.value)",
+        ],
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 10.0
+    while time.time() < deadline and mgr.exit_code() is None:
+        time.sleep(0.05)
+    assert mgr.exit_code() == 0
+    assert log_path.read_text(encoding="utf-8").strip() == str(int(signal.SIGTERM))
+
+
+def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
+    """An abrupt owner death leaves no server behind.
+
+    Reproduces the production topology that leaked four GPUs: the wrapper is
+    our direct child, the server is ``setsid``'d into a *different* process
+    group (so a ``killpg`` on the wrapper cannot reach it), and only the
+    wrapper's trap knows the server's pgid. The owner dies via ``os._exit``,
+    standing in for the Ray actor death that triggered the real leak.
+    """
+    pgid_file = tmp_path / "server.pgid"
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'cleanup() { kill -TERM "-$SERVER_PGID" 2>/dev/null; exit 0; }\n'
+        "trap cleanup EXIT INT TERM\n"
+        f"setsid bash -c 'echo $$ > {pgid_file}; while true; do sleep 0.2; done' &\n"
+        "sleep 0.5\n"
+        f"SERVER_PGID=$(cat {pgid_file})\n"
+        "while true; do sleep 0.2; done\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    owner = tmp_path / "owner.py"
+    owner.write_text(
+        "import os, time\n"
+        "from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess\n"
+        f"ManagedServerProcess().start([{str(wrapper)!r}])\n"
+        "time.sleep(1.5)\n"
+        "os._exit(9)\n",
+        encoding="utf-8",
+    )
+    subprocess.run([sys.executable, str(owner)], check=False, timeout=60)
+
+    deadline = time.time() + 20.0
+    while time.time() < deadline and not pgid_file.exists():
+        time.sleep(0.05)
+    assert pgid_file.exists(), "wrapper never launched its server"
+    server_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+
+    try:
+        while time.time() < deadline:
+            if not _pid_alive(server_pgid):
+                break
+            time.sleep(0.1)
+        assert not _pid_alive(server_pgid), "owner death orphaned the setsid'd server"
+    finally:
+        with suppress(OSError, ProcessLookupError):
+            os.killpg(server_pgid, signal.SIGKILL)
 
 
 def test_managed_process_stop_idempotent():
@@ -478,13 +550,7 @@ def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.M
 
 
 def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pytest.MonkeyPatch):
-    """A dead actor degrades to a benchmark failure AND drops the handle.
-
-    Round-level lease reuse means one actor spans every variant in a round, so a
-    mid-round actor death must self-heal: the handle is reset to ``None`` so the
-    next round/variant re-creates a fresh actor via ``ensure()``, rather than
-    cascading the failure to every remaining variant or crashing the session.
-    """
+    """A dead actor degrades to a benchmark failure AND drops the handle."""
     fake = _LeaseFakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = ServingLease(num_gpus=1)
@@ -606,14 +672,7 @@ def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monk
 
 # ── the session budget across the Ray process boundary ───────────────────────
 class TestTheSessionBudgetReachesTheRayWorker:
-    """Production takes the Ray path on a single node; the local path is the test default.
-
-    So the session reaper has to be carried across the boundary explicitly, and
-    as a duration: the absolute deadline is a ``time.monotonic()`` instant, and
-    the worker is another process whose clock starts somewhere else. Without it
-    the hard timeout is the only thing left, and a run that ran out of time gets
-    recorded as a variant that timed out.
-    """
+    """Production takes the Ray path on a single node; the local path is the test default."""
 
     def test_run_magpie_converts_the_deadline_before_handing_it_over(
         self,
@@ -878,8 +937,7 @@ def test_ray_serving_priority_enabled_default_and_off(monkeypatch: pytest.Monkey
 
 
 def test_serving_slot_busy_off_ray_path_is_false(monkeypatch: pytest.MonkeyPatch):
-    """Off the single-node Ray path (pytest default), serving_slot_busy never
-    probes Ray and returns False (no serving-priority pause)."""
+    """Off the single-node Ray path (pytest default), serving_slot_busy never probes Ray and returns False (no serving-priority pause)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     assert rb.serving_slot_busy() is False
 
@@ -927,9 +985,7 @@ def test_gpu_specialist_lease_is_alive_false_before_start():
 
 
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
-    """§3.3 non-blocking start: start_async submits without blocking, and
-    poll_started returns None while pending (ray.wait empty) and the pid once
-    ready."""
+    """§3.3 non-blocking start: start_async submits without blocking, and poll_started returns None while pending (ray.wait empty) and the pid once ready."""
 
     class _FakeRayWait(_FakeRayP2):
         def __init__(self):
@@ -948,8 +1004,7 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     lease = rs.GpuSpecialistLease(num_gpus=2)
     lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
 
-    # Pending: no pid yet, positive pending time, remote call submitted (ref
-    # stored) without blocking on a result.
+    # Pending: no pid yet, positive pending time, remote call submitted (ref stored) without blocking on a result.
     assert lease._start_ref is not None
     assert lease.poll_started() is None
     assert lease.pid() is None
@@ -1038,89 +1093,6 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     lease.start_async(["claude"])
     assert lease.poll_started() == 4242
     assert seen == {"num_gpus": 8.0, "serving_slot": True}
-
-
-# ── P4 (skeleton): ServingGroupManager — placement group + rank actors ───────
-def test_serving_group_manager_lifecycle(monkeypatch: pytest.MonkeyPatch):
-    """start reserves a PG + one rank actor per node; stop/close reap them."""
-    fake = _FakeRayP2()
-    monkeypatch.setitem(sys.modules, "ray", fake)
-    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
-
-    fake_pg = object()
-    pg_calls: dict = {}
-
-    def _fake_make_pg(nodes, gpus, *, serving_slot):
-        pg_calls.update(nodes=nodes, gpus=gpus, serving_slot=serving_slot)
-        return fake_pg
-
-    monkeypatch.setattr(rs, "_make_serving_placement_group", _fake_make_pg)
-
-    made: list = []
-
-    def _fake_make_rank(pg, idx, num_gpus, *, serving_slot):
-        assert pg is fake_pg
-        actor = _FakeGpuActor()
-        made.append((idx, num_gpus, serving_slot, actor))
-        return actor
-
-    monkeypatch.setattr(rs, "_make_rank_actor", _fake_make_rank)
-    removed: dict = {"pg": None}
-    monkeypatch.setattr(rs, "_remove_serving_placement_group", lambda pg: removed.__setitem__("pg", pg))
-
-    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8, serving_slot=True)
-    pids = sgm.start([["srv", "rank0"], ["srv", "rank1"]])
-    assert pids == [4242, 4242]
-    assert pg_calls == {"nodes": 2, "gpus": 8.0, "serving_slot": True}
-    assert [m[0] for m in made] == [0, 1]  # one rank pinned per bundle index
-    assert all(m[1] == 8.0 for m in made)  # num_gpus per rank
-    assert all(m[3].started_with["scrub_benchmark_env"] is True for m in made)
-    assert sgm.ranks_alive() == [True, True]
-    assert sgm.is_alive() is True
-
-    sgm.stop()
-    assert all(m[3].stopped for m in made)
-    assert sgm.is_alive() is False
-
-    sgm.close()
-    assert len(fake.killed) == 2  # both rank actors killed
-    assert removed["pg"] is fake_pg
-    sgm.close()  # idempotent
-
-
-def test_serving_group_manager_start_arity_mismatch():
-    """A rank_cmds count that doesn't match nodes fails fast (before any Ray)."""
-    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
-    with pytest.raises(ValueError):
-        sgm.start([["only-one-rank"]])
-
-
-def test_maybe_serving_group_manager_default_none(monkeypatch: pytest.MonkeyPatch):
-    """P4 is deferred: off by default even multi-node (needs the explicit flag)."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", raising=False)
-    assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
-
-
-def test_maybe_serving_group_manager_flag_on_single_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
-
-
-def test_maybe_serving_group_manager_flag_on_multi_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    sgm = rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8)
-    assert isinstance(sgm, rs.ServingGroupManager)
-
-
-def test_maybe_serving_group_manager_zero_nodes_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rs.maybe_serving_group_manager(nodes=0, gpus_per_node=8) is None
 
 
 def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1245,44 +1217,6 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
     assert lease._actor is None
 
 
-# ── coverage: ServingGroupManager empty + exception branches ─────────────────
-def test_serving_group_manager_empty_before_start(monkeypatch: pytest.MonkeyPatch):
-    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op.
-
-    ``close()`` does ``import ray`` before its (empty) rank loop, so a fake ray
-    is injected to keep the test self-contained: without it the test only passed
-    by accident when another test's ``sys.modules['ray']`` leaked into the same
-    process, which breaks under xdist where tests run in separate workers.
-    """
-    monkeypatch.setitem(sys.modules, "ray", _FakeRay())
-    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
-    assert sgm.pids() == []
-    assert sgm.ranks_alive() == []  # 892-893
-    assert sgm.is_alive() is False
-    sgm.stop()  # 915-916 (no ranks -> return)
-    sgm.close()  # no pg / no ranks -> clean
-
-
-def test_serving_group_manager_rank_errors_degrade(monkeypatch: pytest.MonkeyPatch):
-    """A rank actor that raises reads as not-alive; stop/close swallow errors."""
-    monkeypatch.setitem(sys.modules, "ray", _RaisingRay())
-    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
-    sgm._ranks = [_RaisingActor(), _RaisingActor()]
-    sgm._pids = [1, 2]
-    sgm._pg = object()
-    removed: dict = {"hit": False}
-    monkeypatch.setattr(
-        rs,
-        "_remove_serving_placement_group",
-        lambda pg: removed.__setitem__("hit", (_ for _ in ()).throw(RuntimeError("pg gone"))),
-    )
-    assert sgm.ranks_alive() == [False, False]  # 899-901
-    assert sgm.is_alive() is False
-    sgm.stop()  # 921-923 swallowed
-    sgm.close()  # 931-933 + 939-940 swallowed
-    assert sgm._ranks == [] and sgm._pg is None
-
-
 # ── coverage: ManagedServerProcess pid/exit_code before start ────────────────
 def test_managed_process_pid_exit_code_before_start():
     mgr = ManagedServerProcess()
@@ -1293,9 +1227,7 @@ def test_managed_process_pid_exit_code_before_start():
 
 # ── coverage: ServingActor class body via a pass-through fake ray.remote ─────
 class _PassthroughRay:
-    """Fake ray whose @remote is an identity decorator, so the ServingActor
-    class body runs as plain Python (no cluster) for coverage of start /
-    run_blocking / is_alive / pid / exit_code / stop."""
+    """Fake ray whose @remote is an identity decorator, so the ServingActor class body runs as plain Python (no cluster) for coverage of start / run_blocking / is_alive / pid / exit_code / stop."""
 
     def remote(self, *dargs, **dkw):
         # Support both @ray.remote and @ray.remote(...) forms.
@@ -1309,8 +1241,7 @@ class _PassthroughRay:
 
 
 def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.MonkeyPatch):
-    """Instantiate the ServingActor class directly and drive its lifecycle on a
-    real short-lived subprocess (covers _serving_actor_body's method bodies)."""
+    """Instantiate the ServingActor class directly and drive its lifecycle on a real short-lived subprocess (covers _serving_actor_body's method bodies)."""
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
     actor_cls = rs._serving_actor_body()
     actor = actor_cls()  # plain instance (identity-decorated)
@@ -1465,79 +1396,6 @@ def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
     assert calls["ensure"] == 1
 
 
-# ── coverage: PG + rank-actor factory helpers (fake ray.util modules) ────────
-def test_make_serving_placement_group_and_rank_actor(monkeypatch: pytest.MonkeyPatch):
-    """Cover the placement-group + rank-actor factories via fake ray.util modules."""
-    import types
-
-    seen: dict = {}
-
-    class _FakePG:
-        def ready(self):
-            return "ready-ref"
-
-    def _fake_placement_group(bundles, strategy):
-        seen["bundles"] = bundles
-        seen["strategy"] = strategy
-        return _FakePG()
-
-    class _FakePassRay:
-        def remote(self, *da, **dk):
-            if len(da) == 1 and callable(da[0]) and not dk:
-                return da[0]
-            return lambda cls: cls
-
-        def get(self, ref):
-            return ref
-
-    # Fake ray + ray.util.placement_group + ray.util.scheduling_strategies.
-    monkeypatch.setitem(sys.modules, "ray", _FakePassRay())
-    pg_mod = types.ModuleType("ray.util.placement_group")
-    pg_mod.placement_group = _fake_placement_group
-    pg_mod.remove_placement_group = lambda pg: seen.__setitem__("removed", pg)
-    monkeypatch.setitem(sys.modules, "ray.util.placement_group", pg_mod)
-
-    class _FakeSchedStrat:
-        def __init__(self, *, placement_group, placement_group_bundle_index):
-            seen["bundle_index"] = placement_group_bundle_index
-
-    ss_mod = types.ModuleType("ray.util.scheduling_strategies")
-    ss_mod.PlacementGroupSchedulingStrategy = _FakeSchedStrat
-    monkeypatch.setitem(sys.modules, "ray.util.scheduling_strategies", ss_mod)
-
-    pg = rs._make_serving_placement_group(2, 8, serving_slot=True)
-    assert isinstance(pg, _FakePG)
-    assert seen["strategy"] == "STRICT_SPREAD"
-    assert seen["bundles"][0] == {"GPU": 8.0, "serving_slot": 1}
-    assert len(seen["bundles"]) == 2
-
-    # rank actor: options()(...).remote() — the ServingActor class is identity
-    # under _FakePassRay.remote, so .options must exist. Wrap it.
-    actor_cls = rs._serving_actor_body()
-
-    class _Opts:
-        def options(self, **kw):
-            seen["opts"] = kw
-            return self
-
-        def remote(self):
-            return "rank-actor"
-
-    monkeypatch.setattr(rs, "_serving_actor_body", lambda: _Opts())
-    handle = rs._make_rank_actor(pg, 1, 8, serving_slot=True)
-    assert handle == "rank-actor"
-    assert seen["bundle_index"] == 1
-    assert seen["opts"]["resources"] == {"serving_slot": 1}
-
-    rs._remove_serving_placement_group(pg)
-    assert seen["removed"] is pg
-    # Defensive: drop the injected fake ray.util.* submodules so a later test's
-    # lazy ``import ray`` never sees this test's fakes (belt-and-suspenders on
-    # top of monkeypatch's own setitem teardown).
-    for mod in ("ray.util.scheduling_strategies", "ray.util.placement_group"):
-        sys.modules.pop(mod, None)
-
-
 # ── coverage: ServingLease ensure/context-manager/close + make_serving_actor ─
 def test_serving_lease_context_manager_and_ensure(monkeypatch: pytest.MonkeyPatch):
     """ensure() creates the actor once; __enter__/__exit__ ensure+close it."""
@@ -1645,12 +1503,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
 
 
 def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_double):
-    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first.
-
-    The served process is deliberately started in its own POSIX session, which
-    is exactly what a process-group teardown does not reach, so a lease released
-    without asking can leave a GPU held by a process nothing owns any more.
-    """
+    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first."""
     lease = serving_lease_on_a_ray_double
     lease.ensure()
     pid = lease._actor.start.remote(["sleep", "60"]).result(timeout=10)
@@ -1662,6 +1515,42 @@ def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_doubl
     while time.time() < deadline and _pid_alive(pid):
         time.sleep(0.05)
     assert not _pid_alive(pid), "the served process outlived the lease that owned it"
+    assert lease._actor is None
+
+
+def test_releasing_a_specialist_lease_reaps_its_subprocess(monkeypatch: pytest.MonkeyPatch):
+    """The same invariant on the specialist lease, which used to skip the stop.
+
+    ``ray.kill`` skips ``__ray_terminate__`` and the specialist's subprocess is
+    started in its own POSIX session, so killing the actor without asking it to
+    stop leaves a GPU-holding process nothing owns. Nothing else covers it
+    either: this path writes no pidfile, so the session reaper cannot see it.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_backend as rb
+
+    from .conftest import RayDouble
+
+    monkeypatch.setitem(sys.modules, "ray", RayDouble())
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
+
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease.start_async(["sleep", "60"])
+    deadline = time.time() + 10.0
+    pid: int | None = None
+    while time.time() < deadline and pid is None:
+        pid = lease.poll_started()
+        time.sleep(0.05)
+    assert pid is not None, "the specialist never reported a pid"
+    assert _pid_alive(pid)
+
+    lease.close()
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline and _pid_alive(pid):
+        time.sleep(0.05)
+    assert not _pid_alive(pid), "the specialist subprocess outlived the lease that owned it"
     assert lease._actor is None
 
 

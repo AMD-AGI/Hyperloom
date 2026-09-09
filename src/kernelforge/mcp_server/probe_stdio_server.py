@@ -1,28 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stdio MCP server that lets a read-only specialist measure one variant.
-
-The specialist a round is planned from cannot write to the canonical tree, so a
-question about a constant can only be argued. This server answers it instead of
-a shell: one tool, whose every call times one declared case at one point in the
-dispatch-constant space, and appends the attempt -- refusals and failures
-included -- to a ledger under a scratch root the parent created outside the
-canonical tree and reads back after the session.
-
-Three things bound a call. The round's probe count and wall-clock budget, which
-the round's concurrently running specialists share through one small locked file
-rather than each getting a copy. The specialist's own session clock, which no
-probe may eat into far enough to leave the analysis unwritten. And the
-campaign's device sentinel -- the same file a fan-out lane's driver flocks --
-because the GPU times one thing at a time and a probe that waits for it is
-spending a session that is running out.
-
-The measurement itself belongs to PR-1's ``sweep_case``, resolved by name at
-call time and checked against the keywords this server calls it with. When that
-primitive is absent, or present with a signature the probe cannot call, the tool
-reports the seam; this server never grows a measurement path of its own.
-"""
+"""Stdio MCP server that lets a read-only specialist measure one variant."""
 
 from __future__ import annotations
 
@@ -59,23 +38,18 @@ WORKSPACE_ENV = "FORGE_PROBE_WORKSPACE"
 LEDGER_ENV = "FORGE_PROBE_LEDGER"
 MAX_PROBES_ENV = "FORGE_PROBE_MAX"
 BUDGET_SEC_ENV = "FORGE_PROBE_BUDGET_SEC"
-# The round's shared counters; see ``ProbeBudget``. Absent, the budget is this
-# process's own.
+# The round's shared counters; see ``ProbeBudget``.
 ROUND_BUDGET_ENV = "FORGE_PROBE_ROUND_BUDGET"
 # The campaign-wide sentinel a run must flock before it touches the GPU, from
-# ``kernelforge.loop.fanout.campaign_device_lock_path``. Absent, the probe
-# refuses to measure rather than timing against whatever else is running.
+# ``kernelforge.loop.fanout.campaign_device_lock_path``.
 DEVICE_LOCK_ENV = "FORGE_PROBE_DEVICE_LOCK"
 # Unix timestamp at which the specialist session this server serves is killed.
-# Absent, only the configured probe budget bounds a probe.
 SESSION_DEADLINE_ENV = "FORGE_PROBE_SESSION_DEADLINE"
 
 PRIMITIVE_MODULE = "kernelforge.mcp_server.tools.bench"
 PRIMITIVE_ATTR = "sweep_case"
 PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
-# The keywords this server calls the primitive with. Checked rather than
-# assumed: a primitive that landed under this name with a different signature
-# would otherwise fail once per probe, as a TypeError inside a compile report.
+# The keywords this server calls the primitive with.
 PRIMITIVE_KEYWORDS = (
     "driver_script",
     "case_id",
@@ -84,9 +58,7 @@ PRIMITIVE_KEYWORDS = (
     "prefix_constants",
 )
 
-# Ledger statuses. The parent renders every one of them: a probe that was
-# refused, or one whose primitive is missing, must not read like a probe nobody
-# ran.
+# Ledger statuses.
 MEASURED = "measured"
 FAILED = "failed"
 BUDGET_EXHAUSTED = "budget_exhausted"
@@ -95,31 +67,20 @@ REFUSED = "refused"
 DEVICE_BUSY = "device_busy"
 
 DEFAULT_PROBE_TIMEOUT_SEC = 300
-# Seconds the server waits past a probe's own ceiling before abandoning it, so
-# a primitive that is a moment late is reported as late rather than lost. The
-# MCP client's ``tool_timeout_sec`` is given the same grace: a client that timed
-# out first would kill the call before ``_record`` appended anything, and the
-# ledger is the only channel this server has back to the parent.
+# Seconds the server waits past a probe's own ceiling before abandoning it, so a primitive that is a moment late is
+# reported as late rather than lost.
 PROBE_TOOL_GRACE_SEC = 5
 # One probe's report; a compile log can be arbitrarily long.
 MAX_DETAIL_CHARS = 2_000
 
-# Seconds of the specialist's session that no probe may take. This is about
-# whether there is time to PRODUCE the analysis, not about a reserve of the
-# probe's own: a session killed mid-probe returns no analysis at all, and a
-# round whose specialists all probed themselves to death is a dead round rather
-# than a degraded one. Same reasoning as ``lessons.SUMMARY_MIN_SECONDS``.
+# Seconds of the specialist's session that no probe may take.
 ANALYSIS_RESERVE_SEC = 120.0
-# The most of what is left of a session one probe budget may claim. The probe
-# is there to settle a question the analysis turns on, so it may take a large
-# share -- but never the share that leaves reading and writing no room.
+# The most of what is left of a session one probe budget may claim.
 SESSION_PROBE_FRACTION = 0.5
 # How often a probe waiting for the device retries the sentinel.
 DEVICE_LOCK_POLL_SEC = 1.0
 
-# Attempts one ledger holds. ``max_probes`` bounds the probes; nothing else
-# bounds a session that keeps calling a tool which refuses it, and the parent
-# reads this file back in full. See ``_append_line``.
+# Attempts one ledger holds.
 MAX_LEDGER_RECORDS = 200
 
 
@@ -128,21 +89,12 @@ class ProbeSandboxError(RuntimeError):
 
 
 def wall_clock() -> float:
-    """Now, on the clock the session deadline is expressed in.
-
-    A function rather than a call site so a test can drive the budget
-    arithmetic without sleeping.
-    """
+    """Now, on the clock the session deadline is expressed in."""
     return time.time()
 
 
 def monotonic_clock() -> float:
-    """Elapsed-time clock for the device wait and a probe's own duration.
-
-    A function for the same reason ``wall_clock`` is: the gate that re-runs
-    after a device wait is arithmetic, and a test must be able to drive it
-    without holding the device for two minutes.
-    """
+    """Elapsed-time clock for the device wait and a probe's own duration."""
     return time.monotonic()
 
 
@@ -155,14 +107,11 @@ class ProbeSandbox:
     ledger_path: Path
     max_probes: int
     budget_sec: float
-    # Shared counters for the round this session belongs to; None keeps them
-    # in this process.
+    # Shared counters for the round this session belongs to; None keeps them in this process.
     budget_path: Path | None = None
-    # The campaign's device sentinel. None means no probe may measure: timing
-    # against whatever else holds the GPU produces a number, not a measurement.
+    # The campaign's device sentinel.
     device_lock: Path | None = None
-    # When the specialist session is killed. None means unbounded, which only
-    # happens when the parent did not say.
+    # When the specialist session is killed.
     session_deadline: float | None = None
 
     def session_remaining_sec(self) -> float:
@@ -173,14 +122,7 @@ class ProbeSandbox:
 
 
 def probe_budget_sec(*, configured_remaining: float, session_remaining: float) -> float:
-    """What is really left to spend on probing, given the session's own clock.
-
-    The configured budget is a ceiling, not an entitlement: a specialist that
-    spent it in full could be killed by its session timeout before writing
-    anything, and a round in which every specialist did that raises rather than
-    degrades. So the budget is capped at a fraction of what is left of the
-    session, and it shrinks as the session does.
-    """
+    """What is really left to spend on probing, given the session's own clock."""
     return max(0.0, min(configured_remaining, session_remaining * SESSION_PROBE_FRACTION))
 
 
@@ -190,17 +132,10 @@ def probe_timeout_sec(
     session_remaining: float,
     requested: Any = None,
 ) -> int:
-    """Ceiling for one probe: the budget, the session, and what was asked for.
-
-    ``int()`` on a fractional budget would truncate to zero, which some backends
-    read as "time out immediately", so the result is never below one second --
-    a probe that cannot fit is refused by the caller's gate rather than started
-    with an impossible ceiling.
-    """
+    """Ceiling for one probe: the budget, the session, and what was asked for."""
     allowed = min(budget_remaining, session_remaining - ANALYSIS_RESERVE_SEC)
-    # ``requested > 0`` belongs in this test, not under it: a numeric zero or a
-    # negative -- both of which an agent can send -- would otherwise match the
-    # outer branch, fail the inner one, and escape every clamp.
+    # ``requested > 0`` belongs in this test, not under it: a numeric zero or a negative -- both of which an agent can
+    # send -- would otherwise match the outer branch, fail the inner one, and escape every clamp.
     if isinstance(requested, (int, float)) and not isinstance(requested, bool) and requested > 0:
         allowed = min(allowed, float(requested))
     else:
@@ -234,30 +169,14 @@ def _locked_json(path: Path):
 
 @dataclass
 class ProbeBudget:
-    """Track what one ROUND has already spent against its two ceilings.
-
-    The unit of account is the round, not one assignment. A round's specialists
-    run concurrently behind one server process each, and how many assignments a
-    round has is chosen by a model at runtime -- so a per-assignment budget
-    bounds nothing an operator can predict. The counters therefore live in one
-    small JSON file under the round's scratch root, read and written under an
-    ``fcntl.flock``; with no ``path`` they are this process's own, which is what
-    a session run outside a round gets.
-
-    ``attempts`` counts every attempt that reached the ledger, refusals and
-    unavailable primitives included -- see ``_record``. An outcome that cost
-    nothing could be asked for again for the whole session.
-    """
+    """Track what one ROUND has already spent against its two ceilings."""
 
     path: Path | None = None
     attempts: int = 0
     seconds_used: float = 0.0
-    # Attempts THIS process made, which is this assignment's ledger's own
-    # numbering. ``attempts`` is the round's and skips whatever a sibling
-    # spent, so a single ledger numbered with it read 1, 3, 4.
+    # Attempts THIS process made, which is this assignment's ledger's own numbering.
     own_attempts: int = 0
-    # Why the round's shared counters could not be reached. Non-empty means no
-    # probe may measure; see ``_apply``.
+    # Why the round's shared counters could not be reached.
     shared_error: str = ""
 
     def refresh(self) -> None:
@@ -283,14 +202,7 @@ class ProbeBudget:
                 self.attempts = state["attempts"]
                 self.seconds_used = state["seconds_used"]
         except (OSError, ValueError) as error:
-            # Two failure modes, one choice. Falling back to this process's own
-            # counters would give every specialist of the round a full
-            # ``max_probes`` and ``budget_sec`` of its own, so N concurrent
-            # specialists would overspend N-fold with nothing in the log. So
-            # this file makes the same call it makes for a missing device
-            # sentinel: report the probe unavailable rather than measure under
-            # a budget nobody is counting. The local counters still move, which
-            # is what stops a session repeating a free attempt.
+            # Two failure modes, one choice.
             self.attempts += attempts
             self.seconds_used += seconds
             if not self.shared_error:
@@ -392,13 +304,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 
 def resolve_probe_primitive() -> Any:
-    """Return PR-1's single-case sweep primitive, or None if absent.
-
-    Anything the primitive's module raises at import time other than a missing
-    module propagates to ``probe_primitive_status``, which reports it as an
-    unavailable seam; a server that crashed on it would take the specialist
-    session with it.
-    """
+    """Return PR-1's single-case sweep primitive, or None if absent."""
     try:
         module = importlib.import_module(PRIMITIVE_MODULE)
     except ImportError:
@@ -468,11 +374,8 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
     budget_raw = str(env.get(ROUND_BUDGET_ENV) or "").strip()
     device_raw = str(env.get(DEVICE_LOCK_ENV) or "").strip()
     deadline_raw = str(env.get(SESSION_DEADLINE_ENV) or "").strip()
-    # An absent deadline is fail-open on purpose -- the configured probe budget
-    # still bounds every probe, and a session run outside a round has no
-    # deadline to declare. A deadline that is PRESENT and nonsense is not: nan
-    # made ``min(600, nan)`` return 600 and the session constraint disappear,
-    # and a zero or past value refused every probe for the rest of the session.
+    # An absent deadline is fail-open on purpose -- the configured probe budget still bounds every probe, and a
+    # session run outside a round has no deadline to declare.
     session_deadline: float | None = None
     if deadline_raw:
         try:
@@ -494,13 +397,7 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
 
 
 def _append_line(path: Path, record: dict[str, Any]) -> None:
-    """Append one attempt to a ledger, unless that ledger is already full.
-
-    ``max_probes`` bounds the probes but not the calls: a tool that refuses
-    every call refuses as many as the session makes, and the parent reads this
-    file back in full. At the cap the record is dropped and one final line says
-    so, so a truncated ledger cannot be misread as a short one.
-    """
+    """Append one attempt to a ledger, unless that ledger is already full."""
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = 0
     if path.exists():
@@ -527,13 +424,7 @@ def append_ledger(sandbox: ProbeSandbox, record: dict[str, Any]) -> None:
 
 
 def _try_device_lock(path: Path):
-    """Take the device sentinel without waiting, or return None.
-
-    Opened without creating it. A sentinel this process made is a fresh private
-    file that serializes nothing, so a misconfigured ``FORGE_PROBE_DEVICE_LOCK``
-    would have produced a number labelled ``measured`` while a lane was on the
-    device. The caller checks the path exists and refuses when it does not.
-    """
+    """Take the device sentinel without waiting, or return None."""
     try:
         handle = path.open("r+", encoding="utf-8")
     except OSError:
@@ -547,14 +438,7 @@ def _try_device_lock(path: Path):
 
 
 async def acquire_device_lock(path: Path, *, timeout_sec: float):
-    """Hold the campaign's device sentinel, or give up before the wait costs more.
-
-    The same ``fcntl.flock`` on the same file a fan-out lane's serialized driver
-    takes (``fanout.campaign_device_lock_path``), so a probe queues behind a
-    lane and a lane behind a probe. Polled rather than blocked on, because the
-    waiting session's own clock keeps running: a wait that outlasts the probe's
-    budget is a probe that must be abandoned, not one that blocks.
-    """
+    """Hold the campaign's device sentinel, or give up before the wait costs more."""
     deadline = monotonic_clock() + max(0.0, timeout_sec)
     while True:
         handle = await asyncio.to_thread(_try_device_lock, path)
@@ -584,13 +468,7 @@ async def probe_variant(
     sandbox: ProbeSandbox,
     budget: ProbeBudget,
 ) -> dict[str, Any]:
-    """Run one bounded probe and record it, whatever the outcome.
-
-    Three clocks bound a probe and every one of them can refuse it: the round's
-    probe count, the round's wall-clock budget, and what is left of THIS
-    specialist's session once the time to write the analysis is set aside.
-    Waiting for the device counts against the second.
-    """
+    """Run one bounded probe and record it, whatever the outcome."""
     label = str(arguments.get("label") or "").strip()
     case_id = str(arguments.get("case_id") or "").strip()
     if not label or not case_id:
@@ -613,8 +491,7 @@ async def probe_variant(
         session_remaining=session_remaining,
     )
     base = {
-        # This ledger's own numbering: ``budget.attempts`` is the round's and
-        # skips what a sibling specialist spent.
+        # This ledger's own numbering: ``budget.attempts`` is the round's and skips what a sibling specialist spent.
         "probe_index": budget.own_attempts + 1,
         "label": label,
         "case_id": case_id,
@@ -650,10 +527,9 @@ async def probe_variant(
             },
         )
 
-    # Gated on whether there is time to PRODUCE the analysis, not on a reserve
-    # of the probe's own: a session killed mid-probe returns nothing at all, and
-    # the round treats that as infrastructure failure rather than as a thin
-    # answer. Said in the refusal so the agent stops asking.
+    # Gated on whether there is time to PRODUCE the analysis, not on a reserve of the probe's own: a session killed
+    # mid-probe returns nothing at all, and the round treats that as infrastructure failure rather than as a thin
+    # answer.
     if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
         return _record(
             sandbox,
@@ -727,9 +603,8 @@ async def probe_variant(
         )
 
     started = monotonic_clock()
-    # The wait is bounded by the probe's own budget, and what it costs is
-    # charged to the budget: a specialist that blocked here until the device
-    # came free would spend its session doing nothing.
+    # The wait is bounded by the probe's own budget, and what it costs is charged to the budget: a specialist that
+    # blocked here until the device came free would spend its session doing nothing.
     handle = await acquire_device_lock(sandbox.device_lock, timeout_sec=budget_remaining)
     waited = monotonic_clock() - started
     if handle is None:
@@ -747,10 +622,7 @@ async def probe_variant(
             },
         )
 
-    # The gate again, on what the wait left. Recomputing only the ceiling let a
-    # probe start under the ``max(1, ...)`` clamp it could not possibly meet,
-    # and the ledger then read "the probe was too slow" for a session that had
-    # run out -- after the wait had held the device the whole time.
+    # The gate again, on what the wait left.
     budget_remaining -= waited
     session_remaining -= waited
     if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
@@ -815,9 +687,8 @@ async def probe_variant(
         release_device_lock(handle)
 
     payload = result if isinstance(result, dict) else {}
-    # The primitive omits every timing field on failure rather than reporting a
-    # zero, so a result carrying no ``case_ms`` is a failure whatever else it
-    # says.
+    # The primitive omits every timing field on failure rather than reporting a zero, so a result carrying no
+    # ``case_ms`` is a failure whatever else it says.
     case_ms = payload.get("case_ms")
     succeeded = bool(payload.get("success")) and isinstance(case_ms, (int, float))
     record = {
@@ -829,14 +700,11 @@ async def probe_variant(
     if succeeded:
         record["case_ms"] = case_ms
         record["kind"] = payload.get("kind", "")
-        # ``narrowed`` false means other cases were timed too, so the cost was
-        # not one case and the reported spread is not this case's;
-        # ``case_selection`` says whether the flag is what narrowed it.
+        # ``narrowed`` false means other cases were timed too, so the cost was not one case and the reported spread is
+        # not this case's; ``case_selection`` says whether the flag is what narrowed it.
         record["narrowed"] = bool(payload.get("narrowed", True))
         record["case_selection"] = str(payload.get("case_selection", ""))
-        # Which overrides the source was seen to read. A verbatim-named knob
-        # that echoed nothing leaves the number unconfirmed, and a ledger entry
-        # that dropped this would read exactly like a confirmed one.
+        # Which overrides the source was seen to read.
         consumption = payload.get("override_consumption")
         if isinstance(consumption, dict) and consumption:
             record["override_consumption"] = consumption
@@ -848,12 +716,7 @@ def _record(
     budget: ProbeBudget,
     record: dict[str, Any],
 ) -> dict[str, Any]:
-    """Charge one attempt to the round, persist it, and return it.
-
-    Every recorded attempt is charged, and every outcome is recorded: a refused
-    or unavailable probe that cost nothing could be asked for again for the
-    whole session, and the ledger it appends to is unbounded in nothing else.
-    """
+    """Charge one attempt to the round, persist it, and return it."""
     budget.spend(attempts=1, seconds=float(record.get("duration_sec") or 0.0))
     record = {
         **record,
@@ -862,9 +725,7 @@ def _record(
             configured_remaining=sandbox.budget_sec - budget.seconds_used,
             session_remaining=sandbox.session_remaining_sec(),
         ),
-        # The third number the tool description promises. ``seconds_remaining``
-        # already folds the session in, so without this one the model cannot
-        # tell a spent round budget from a session that is nearly over.
+        # The third number the tool description promises.
         "session_seconds_remaining": max(0.0, sandbox.session_remaining_sec()),
     }
     append_ledger(sandbox, record)
@@ -878,13 +739,7 @@ def refuse_to_ledger(
     record: dict[str, Any],
     environ: dict[str, str] | None = None,
 ) -> str:
-    """Record a refusal the sandbox itself could not, and say if that failed.
-
-    A refusal is the one outcome that arrives with no validated sandbox to write
-    it to, and the parent reads an empty ledger as "the probe was offered and
-    never called". So the refusal goes to the raw ``LEDGER_ENV`` path, ahead of
-    any validation; the returned string is empty when it landed there.
-    """
+    """Record a refusal the sandbox itself could not, and say if that failed."""
     env = os.environ if environ is None else environ
     raw = str(env.get(LEDGER_ENV) or "").strip()
     if not raw:
@@ -924,16 +779,12 @@ class ProbeServer:
             raise InvalidParamsError(f"unknown tool: {name}")
         sandbox = self._resolve_sandbox()
         if sandbox is None:
-            # A refusal costs a count of its own: there is no sandbox to charge
-            # it to, and a free refusal is one the session can repeat until it
-            # ends. Past the cap the tool still answers, but records nothing --
-            # ``_append_line`` has already said so on the ledger's last line.
+            # A refusal costs a count of its own: there is no sandbox to charge it to, and a free refusal is one the
+            # session can repeat until it ends.
             self._refusals += 1
             if self._refusals > MAX_LEDGER_RECORDS:
-                # One last line first, on the call that crosses the cap: a
-                # ledger that stops without saying it is full cannot be told
-                # from a session that simply made few calls, which is the whole
-                # point of the marker. ``_append_line`` substitutes it.
+                # One last line first, on the call that crosses the cap: a ledger that stops without saying it is full
+                # cannot be told from a session that simply made few calls, which is the whole point of the marker.
                 if self._refusals == MAX_LEDGER_RECORDS + 1:
                     refuse_to_ledger(
                         {

@@ -25,17 +25,9 @@ class TunerSpec:
     skip_reason: str | None = None  # If set, tuner is skipped with this explanation
     priority: int = 0  # Lower = run first
     estimated_minutes: float = 10.0  # Estimated runtime for budget allocation
-    # Token counts this tuner is responsible for, when the log says it serves
-    # only part of the range. Two MoE backends can split one run between them,
-    # and tuning the half the other backend serves is time spent on a table
-    # nothing will read. ``None`` means the run's full token coverage.
+    # Token counts this tuner is responsible for, when the log says it serves only part of the range.
     token_hint: list[int] | None = None
-    # A fallback tuner runs only when no earlier non-fallback tuner produced a
-    # deployable candidate. It exists so the fp8-barren -> bf16-dense retry that
-    # Hyperloom used to launch as a second subprocess happens inside this one
-    # call instead: the bf16 dense pass is selected up front but executed only if
-    # the fp8 tuning came back empty, so a run whose fp8 tuning won never spends
-    # budget tuning a bf16 table it may not even dispatch.
+    # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
     fallback: bool = False
 
     @property
@@ -46,9 +38,7 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Map known GPU type strings to their gfx architecture. FP4/MXFP4 GEMM is only
-# supported by aiter on gfx950 (CDNA4 / MI355X). gfx942 (CDNA3 / MI300X family)
-# hard-rejects FP4 GEMM at runtime and its dense/MoE FP4 tuners are gfx950-only.
+# Map known GPU type strings to their gfx architecture.
 _GPU_TYPE_TO_GFX = {
     "mi300x": "gfx942",
     "mi308x": "gfx942",
@@ -69,12 +59,7 @@ _FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires 
 
 
 def _detect_local_gfx_arch() -> str:
-    """Best-effort detect the local AMD gfx arch via ``rocminfo``.
-
-    Returns the first ``gfxNNN`` token reported (e.g. ``gfx942`` / ``gfx950``),
-    or ``""`` when ``rocminfo`` is missing/unparseable so callers fail open
-    (never skip a tuner on an undetectable host).
-    """
+    """Best-effort detect the local AMD gfx arch via ``rocminfo``."""
     try:
         out = subprocess.run(
             ["rocminfo"],
@@ -90,11 +75,7 @@ def _detect_local_gfx_arch() -> str:
 
 
 def resolve_gpu_type(gpu_type: str) -> str:
-    """Resolve a CLI GPU value to a stable KB-compatible identifier.
-
-    Automatic detection is intentionally fail-closed so ``auto`` can never
-    leak into artifact names, plans, or knowledge fingerprints.
-    """
+    """Resolve a CLI GPU value to a stable KB-compatible identifier."""
     key = str(gpu_type or "").strip().lower()
     if key in ("", "auto"):
         key = _detect_local_gfx_arch()
@@ -110,13 +91,7 @@ def resolve_gpu_type(gpu_type: str) -> str:
 
 
 def _resolve_gfx_arch(gpu_type: str) -> str:
-    """Map a GPU type string (e.g. 'mi300x') to its gfx arch (e.g. 'gfx942').
-
-    Accepts a marketing name ('mi300x', 'mi355x'), a raw gfx string ('gfx942'),
-    or ``"auto"``/``""`` to probe the local host via ``rocminfo``. Returns ``""``
-    for unrecognized inputs (and undetectable hosts) so callers fail open and
-    preserve existing behavior rather than skipping tuners by mistake.
-    """
+    """Map a GPU type string (e.g. 'mi300x') to its gfx arch (e.g. 'gfx942')."""
     key = gpu_type.strip().lower()
     if key in ("", "auto"):
         return _detect_local_gfx_arch()
@@ -131,19 +106,7 @@ def _fp4_unsupported_on(gfx_arch: str) -> bool:
 
 
 def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
-    """Which MoE stages the runtime dispatched, and over which token counts.
-
-    A model does not pick one stage and keep it: aiter dispatches 1-stage ASM at
-    some token counts and CK 2-stage at others, in the same run. Collapsing that
-    into "did we see 1stage anywhere?" throws away the token range 2-stage
-    actually serves -- observed covering tokens 1-32 -- and skips tuning for all
-    of it.
-
-    Returns ``{"stages_seen": [...], "tunable_ck_2stage": bool,
-    "tokens_by_stage": {stage: [tokens]}, "missed_ck_keys": int}``; empty when
-    there is nothing to read. ``tunable_ck_2stage`` describes dispatch capability;
-    ``missed_ck_keys`` says whether that capability actually needs tuning.
-    """
+    """Which MoE stages the runtime dispatched, and over which token counts."""
     if not log_path:
         return {}
     path = Path(log_path)
@@ -167,18 +130,13 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
 
 
 def _detect_1stage_from_log(log_path: str | None) -> bool:
-    """True only when 1-stage ASM is the *only* MoE path the runtime used.
-
-    Kept as the routing predicate, but no longer a "saw it once" flag: seeing
-    1-stage alongside 2-stage means part of the token range is CK-served and
-    therefore tunable, so skipping the CK tuner would forfeit it.
-    """
+    """True only when 1-stage ASM is the *only* MoE path the runtime used."""
     stages = (moe_stage_coverage(log_path) or {}).get("stages_seen") or []
     if stages:
         # 2-stage present anywhere => there is CK work to tune, so do not skip.
         return not any(s.startswith("2stage") for s in stages) and any(s.startswith("1stage") for s in stages)
-    # Nothing structured to read (older log format, unreadable file): fall back
-    # to the substring probe so behaviour never regresses to "always tune".
+    # Nothing structured to read (older log format, unreadable file): fall back to the substring probe so behaviour
+    # never regresses to "always tune".
     path = Path(log_path) if log_path else None
     if path is None or not path.is_file():
         return False
@@ -188,8 +146,8 @@ def _detect_1stage_from_log(log_path: str | None) -> bool:
         return False
 
 
-# Normalize non-canonical quant-type spellings callers may pass (e.g. a runtime
-# --quantization value or a tuner name) to the router's canonical vocabulary.
+# Normalize non-canonical quant-type spellings callers may pass (e.g. a runtime --quantization value or a tuner name)
+# to the router's canonical vocabulary.
 _QUANT_TYPE_ALIASES: dict[str, str] = {
     "w8a8_fp8": "per_token",
     "fp8_w8a8": "per_token",
@@ -227,12 +185,7 @@ def _resolve_quant_type(
     profile: ModelProfile,
     kernel_signature_log: str | None,
 ) -> str:
-    """Resolve the effective quant type from CLI args, model config, or log.
-
-    Returns one of: none, per_token, blockscale, bpreshuffle,
-    blockscale_bpreshuffle, awq, gptq, fp4, mxfp4, auto.
-    (per_tensor is accepted as input but normalized to per_token, never returned.)
-    """
+    """Resolve the effective quant type from CLI args, model config, or log."""
     if quant_type_arg and quant_type_arg != "auto":
         return _normalize_quant_type(quant_type_arg)
 
@@ -282,26 +235,7 @@ def select_tuners(
     has_tunableop_input: bool = False,
     demand_report: dict[str, Any] | None = None,
 ) -> list[TunerSpec]:
-    """Select which tuner(s) to run based on model + framework + precision.
-
-    Args:
-        profile: Analyzed model profile.
-        framework: "sglang" or "vllm".
-        precision: "bf16", "fp8", "fp4", "int8", "awq", etc.
-        quant_type: Explicit quant type or "auto" for inference.
-        gpu_type: Target GPU type ("mi300x", "mi355x", ...). Used to gate
-            arch-specific tuners (e.g. FP4 GEMM is gfx950-only).
-        kernel_signature_log: Optional server log to detect 1-stage ASM.
-        has_untuned_csv: Whether --untuned-csv was provided.
-        has_shapes_json: Whether --shapes-json was provided.
-        has_tunableop_input: Whether --tunableop-input was provided.
-        demand_report: Parsed demand.json from the serving run, when one was
-            recorded. Names the tables the runtime actually consulted, and
-            widens the framework branch when the runtime names another tuner.
-
-    Returns:
-        List of TunerSpec in execution order.
-    """
+    """Select which tuner(s) to run based on model + framework + precision."""
     resolved_qt = _resolve_quant_type(precision, quant_type, profile, kernel_signature_log)
     gfx_arch = _resolve_gfx_arch(gpu_type)
     tuners: list[TunerSpec] = []
@@ -338,8 +272,7 @@ def select_tuners(
     else:
         log.warning("Unknown framework %r; no tuners selected", framework)
 
-    # Last, so it sees everything the framework branch decided and can only
-    # widen it.
+    # Last, so it sees everything the framework branch decided and can only widen it.
     tuners.extend(_tuners_the_demand_says_are_needed(demand_report, tuners))
 
     # Sort by priority
@@ -352,20 +285,7 @@ def _moe_tuners_the_log_says_are_needed(
     already: list[TunerSpec],
     profile: ModelProfile,
 ) -> list[TunerSpec]:
-    """Add CK MoE tuning when a 2-stage key actually missed in the log.
-
-    A vLLM run is routed by framework alone, which assumes the MoE is served by
-    vLLM's Triton path. It is not always: aiter's CK fused-MoE can serve some or
-    all of the token range in the same process, and its table is written by
-    ``fmoe_ck``, not by ``vllm_moe_triton``. When both appear in one log the
-    answer is not to pick a side -- each serves the range it serves, and dropping
-    either forfeits that range. This is the same "one boolean cannot describe a
-    mixed runtime" mistake that made a single 1-stage sighting disable CK tuning
-    for the token counts 2-stage was actually serving.
-
-    Only ever adds. Selection stays with the framework branch; this is the log
-    saying that branch's assumption did not hold for the whole run.
-    """
+    """Add CK MoE tuning when a 2-stage key actually missed in the log."""
     if not profile.is_moe or not kernel_signature_log:
         return []
     moe = moe_stage_coverage(kernel_signature_log) or {}
@@ -373,8 +293,7 @@ def _moe_tuners_the_log_says_are_needed(
         return []
     if any(t.name == "fmoe_ck" for t in already):
         return []
-    # Only the tokens CK actually served. The rest of the range is Triton's, and
-    # a CK table keyed on those token counts is one nothing ever reads.
+    # Only the tokens CK actually served.
     by_stage = moe.get("tokens_by_stage") or {}
     ck_tokens = sorted(
         {int(tok) for stage, tokens in by_stage.items() if stage.startswith("2stage") for tok in (tokens or [])}
@@ -400,23 +319,7 @@ def _tuners_the_demand_says_are_needed(
     demand_report: dict[str, Any] | None,
     already: list[TunerSpec],
 ) -> list[TunerSpec]:
-    """Add the tuners that own tables the serving run actually looked up.
-
-    Every other input to selection is an inference about what the runtime will
-    do -- a precision label, a framework name, a config field. A demand report
-    is not: ``AITER_LOG_TUNED_CONFIG`` makes the serving process name the tables
-    it consulted and the keys it asked for, so ``demands[].tuner`` is the
-    runtime's own answer to the question the router is guessing at.
-
-    Where the two disagree, the log wins, for the same reason it wins on the MoE
-    side (:func:`_moe_tuners_the_log_says_are_needed`): a table with thousands
-    of recorded misses is being read, whatever the precision label implies.
-
-    Only ever adds. Selection stays with the framework branch; this is the run
-    saying that branch left out a table it spends its time in. A tuner already
-    present keeps its spec -- including a skip_reason, which is a capability
-    statement (wrong arch, unsupported combo) that demand does not overturn.
-    """
+    """Add the tuners that own tables the serving run actually looked up."""
     demands = (demand_report or {}).get("demands") or []
     if not demands:
         return []
@@ -424,8 +327,8 @@ def _tuners_the_demand_says_are_needed(
     added: list[TunerSpec] = []
     for entry in demands:
         name = str(entry.get("tuner") or "")
-        # A demand with no registered owner is a coverage gap, not a selection:
-        # tier3 handles those, and inventing a TunerSpec here would shadow it.
+        # A demand with no registered owner is a coverage gap, not a selection: tier3 handles those, and inventing a
+        # TunerSpec here would shadow it.
         if not name or name in have:
             continue
         have.add(name)
@@ -510,14 +413,8 @@ def _select_sglang_tuners(
                 )
             )
 
-    # --- Dense GEMM tuning ---
-    # Dense fp8/fp4 tuners no longer require an externally-recorded CSV: when
-    # none is supplied they derive GEMM shapes from the model config (same as
-    # the bf16 dense path). A real --untuned-csv / --shapes-json is still
-    # preferred when available because recorded shapes are more accurate. Only
-    # when NO shape source is obtainable at all (no csv/shapes AND a config
-    # without hidden_size+intermediate_size) do we skip gracefully instead of
-    # surfacing a hard validation failure.
+    # --- Dense GEMM tuning --- Dense fp8/fp4 tuners no longer require an externally-recorded CSV: when none is
+    # supplied they derive GEMM shapes from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
         if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
             return TunerSpec(name, priority=20, estimated_minutes=20)
@@ -537,17 +434,11 @@ def _select_sglang_tuners(
         elif quant_type == "per_token":
             tuners.append(_dense_spec("a8w8"))
         elif quant_type == "bpreshuffle":
-            # Per-token bpreshuffle serves via aiter's gemm_a8w8_bpreshuffle op,
-            # which reads AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE. The dedicated
-            # a8w8_bpreshuffle tuner writes exactly that config table, so the
-            # tuned result is picked up at serving time.
+            # Per-token bpreshuffle serves via aiter's gemm_a8w8_bpreshuffle op, which reads
+            # AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE.
             if gfx_arch == "gfx950":
-                # On gfx950 the CK a8w8_bpreshuffle tuner crashes on the
-                # FNUZ/OCP fp8 dtype mismatch (gfx950 fp8 is e4m3fn/OCP). The
-                # blockscale+bpreshuffle tuner *runs* but writes a DIFFERENT
-                # table (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE) that the
-                # per-token bpreshuffle serving op never reads — tuning it is
-                # silently ineffective. Skip honestly rather than fake success.
+                # On gfx950 the CK a8w8_bpreshuffle tuner crashes on the FNUZ/OCP fp8 dtype mismatch (gfx950 fp8 is
+                # e4m3fn/OCP).
                 tuners.append(
                     TunerSpec(
                         "a8w8_bpreshuffle",
@@ -579,9 +470,7 @@ def _select_sglang_tuners(
         else:
             tuners.append(_dense_spec("a4w4_blockscale"))
 
-    # Deliberately not an ``elif``: bf16 dense is not the alternative to
-    # quantized dense, it runs alongside it. See _dense_bf16_is_dispatched.
-    # Shapes are computed from config.json (no --untuned-csv needed).
+    # Deliberately not an ``elif``: bf16 dense is not the alternative to quantized dense, it runs alongside it.
     if _dense_bf16_is_dispatched(profile, precision, quant_type):
         tuners.append(
             TunerSpec(
@@ -591,14 +480,7 @@ def _select_sglang_tuners(
             )
         )
     elif precision == "fp8" and not any(t.name == "sglang_dense_bf16" for t in tuners):
-        # fp8 -> bf16 dense retry, pushed down from Hyperloom's old second
-        # subprocess. When the model config gives no positive signal that bf16
-        # dense GEMMs are dispatched (fully-quantized checkpoint, or lm_head-only
-        # exclusion), the fp8 dense tuner may still come back empty -- and on
-        # such a run the excluded projections do run in bf16. Rather than launch
-        # a fresh gemm session for that case, select the bf16 dense pass now as a
-        # fallback: it runs in this same call only if every fp8 tuner produced
-        # no candidate, so the "fp8 won" path pays nothing for it.
+        # fp8 -> bf16 dense retry, pushed down from Hyperloom's old second subprocess.
         tuners.append(
             TunerSpec(
                 "sglang_dense_bf16",
@@ -616,31 +498,11 @@ def _dense_bf16_is_dispatched(
     precision: str,
     quant_type: str,
 ) -> bool:
-    """Whether this run issues bf16/fp16 dense GEMMs worth tuning.
-
-    ``precision`` describes the format of the quantized weights, which is a
-    different question from which dense GEMM operators get dispatched, and on a
-    quantized MoE model the two answers disagree almost completely. The experts
-    carry ~99% of the weight bytes and are served by the fused MoE kernel, not
-    by a dense GEMM at all; the attention projections and lm_head carry ~1% and
-    are excluded from quantization, so they are essentially the entire dense
-    GEMM traffic -- in bf16, against ``bf16_tuned_gemm.csv``.
-
-    An exclusion containing only ``lm_head`` is not enough evidence: on a
-    dense-only quantized model that is one GEMM per forward, while the quantized
-    projections dominate the workload. Actual bf16 misses still override this
-    heuristic through the demand report.
-
-    Reading the scalar as if it partitioned the operator set is what left that
-    table untuned while a4w4 dense, an operator the model never dispatches, was
-    tuned instead.
-    """
+    """Whether this run issues bf16/fp16 dense GEMMs worth tuning."""
     if profile.keeps_dense_layers_at_model_dtype:
-        # A quantized checkpoint with substantial excluded linear layers still
-        # runs those modules at the model dtype. lm_head alone is one GEMM per
-        # forward and does not justify competing with the quantized dense tuner
-        # for the shared budget; an observed bf16 miss can still add the tuner
-        # through demand_report.
+        # A quantized checkpoint with substantial excluded linear layers still runs those modules at the model dtype.
+        # lm_head alone is one GEMM per forward and does not justify competing with the quantized dense tuner for the
+        # shared budget; an observed bf16 miss can still add the tuner through demand_report.
         return profile.model_dtype.lower() in ("bfloat16", "bf16", "float16", "fp16")
     return precision in ("bf16", "fp16") and quant_type == "none"
 

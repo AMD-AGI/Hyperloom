@@ -91,6 +91,8 @@ test = [
     "hyperloom-inference_optimizer[runtime]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    # Property-based tests over the bring-up ladder.
+    "hypothesis>=6.0",
     "respx>=0.21",
     "requests>=2.28",
     # psutil-based live-compiler probe in _aiter_jit.
@@ -184,6 +186,12 @@ exclude = [
     # importable top-level modules. They ship as package-data instead.
     "kernelforge.data",
     "kernelforge.data.*",
+    # Scripted launch/specialist backends and a virtual clock: scaffolding a
+    # test drives, not a runtime component. Nothing in the shipped tree imports
+    # it, and the production launch boundary it substitutes
+    # (``actions/executors/launch_backend.py``) ships as normal.
+    "hyperloom.orchestrator.rehearsal",
+    "hyperloom.orchestrator.rehearsal.*",
 ]
 
 [tool.setuptools.data-files]
@@ -269,7 +277,7 @@ hyperloom = [
     "scripts/*.sh",
 ]
 # Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
-# read at runtime by classify_patchability()/forge_submit.py, so it must ship.
+# read at runtime by classify_patchability(), so it must ship.
 "hyperloom.agents.kernel.tools" = [
     "vendor_operator_playbooks.json",
 ]
@@ -364,7 +372,6 @@ omit = [
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
-    "src/hyperloom/agents/kernel/tools/_collective_names.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent

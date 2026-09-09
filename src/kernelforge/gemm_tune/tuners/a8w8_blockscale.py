@@ -34,11 +34,6 @@ class A8W8BlockscaleTuner(BaseTuner):
             env_var=self.env_var,
             ctx=self.ctx,
             work_dir=self.work_dir,
-            # --splitK enables aiter's split-K search. Without it the tuner sets
-            # maxsplitK=0 and never evaluates split-K>0 (see
-            # gemm_a8w8_blockscale_tune.py: `maxsplitK = compute_gemm_SplitK(...)
-            # if args.splitK else 0`). split-K>0 is the fastest config for
-            # small-M (decode) GEMMs and carries the measured e2e throughput
-            # gain; omitting the flag silently loses it.
+            # --splitK enables aiter's split-K search.
             extra_args=["--libtype", "all", "--splitK"],
         )

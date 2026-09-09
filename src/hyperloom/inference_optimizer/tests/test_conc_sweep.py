@@ -369,8 +369,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like
-    every other executor — not state.gpu_type's real type."""
+    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -584,13 +583,7 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
 
 class TestTheAgentXLadderIsDefaultOn:
-    """The sweep is what an agentic session produces; it used to default off.
-
-    It was disabled under AgentX because sixteen synthetic rungs would spend the
-    whole session without tuning a server parameter. The ladder is now the
-    deliverable rather than a postscript to one, and it is seven rungs, not
-    sixteen.
-    """
+    """The sweep is what an agentic session produces; it used to default off."""
 
     def test_the_state_default_is_on(self):
         assert SharedState().conc_sweep_enabled is True
@@ -757,8 +750,7 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     assert payload["skip_reason"] == "no_time_budget_remaining"
     assert payload["total_budget_sec"] == 0
     assert mock_run.call_count == 0
-    # Nothing ran, so this reads as a sweep that declined rather than one that
-    # spent its budget.
+    # Nothing ran, so this reads as a sweep that declined rather than one that spent its budget.
     assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
 
 
@@ -1148,13 +1140,12 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     assert coord.shared_state.save.call_count >= 2
 
 
-# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``;
-# covered by test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
+# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``; covered by
+# test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 2 extras: _order_concs_desc / _build_arm_grid
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 2 extras: _order_concs_desc /
+# _build_arm_grid ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_order_concs_desc_deduplicates_and_sorts():
@@ -1201,9 +1192,8 @@ def test_build_arm_grid_optimized_arm_carries_args():
     assert int(grid[0].extra_envs["NUM_PROMPTS"]) >= 4
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: soft switch + arm-major orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: soft switch + arm-major
+# orchestration ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_single_server_arm_major_order(
@@ -1263,9 +1253,8 @@ def test_run_conc_sweep_single_server_concs_descending(
     assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 5: _flush_conc_sweep_report / _flush_partial_conc_sweep_report
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report /
+# _flush_partial_conc_sweep_report ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
@@ -1292,26 +1281,32 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
 
 
 class TestTheSummaryIsTakenOnTheChartsAxis:
-    """The headline speedup and the curve beside it have to be one quantity.
-
-    On the agentic corpus output throughput is about 1% of the token budget, so
-    a summary left on that axis reports a number the chart contradicts.
-    """
+    """The headline speedup and the curve beside it have to be one quantity."""
 
     def _pts(self, arm: str, out: float, total: float) -> list[dict[str, Any]]:
         return [
             {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
         ]
 
-    def test_agentx_grades_on_total_token_throughput(self):
-        comparison, summary = _build_comparison(
-            self._pts("baseline", 183.0, 20000.0),
-            self._pts("optimized", 183.0, 26000.0),
+    def _intvty_pts(self, arm: str, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_agentx_grades_on_e2e_norm_intvty_p90(self):
+        """AgentX grades on the slow-tail interactivity axis."""
+        _comparison, summary = _build_comparison(
+            self._intvty_pts("baseline", 22.5, 20000.0),
+            self._intvty_pts("optimized", 24.0, 21000.0),
             metric_key=graded_metric_key(benchmark_mode="agentx"),
         )
-        assert summary["metric"] == "total_token_throughput"
-        assert summary["best_speedup"] == pytest.approx(26000.0 / 20000.0)
-        assert comparison[0]["baseline_tput"] == pytest.approx(20000.0)
+        assert summary["metric"] == "e2e_norm_intvty_p90"
 
     def test_synthetic_stays_on_output_throughput(self):
         _comparison, summary = _build_comparison(
@@ -1323,8 +1318,8 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert summary["best_speedup"] == pytest.approx(1.3)
 
     def test_the_key_follows_the_mode(self):
-        assert graded_metric_key(benchmark_mode="agentx") == "total_token_throughput"
-        assert graded_metric_key(benchmark_mode="AgentX") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="agentx") == "e2e_norm_intvty_p90"
+        assert graded_metric_key(benchmark_mode="AgentX") == "e2e_norm_intvty_p90"
         assert graded_metric_key(benchmark_mode="synthetic") == "output_throughput"
         assert graded_metric_key(benchmark_mode="") == "output_throughput"
 
@@ -1332,14 +1327,16 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         """The summary follows the axis the KEEP verdicts were taken on."""
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
-        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
-        assert graded_metric_key(benchmark_mode="synthetic") == "total_token_throughput"
+        from hyperloom.common.perf_metric import INTVTY_V1
+
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+        assert graded_metric_key(benchmark_mode="synthetic") == "e2e_norm_intvty_p90"
 
     def test_the_ambient_agentx_signal_reaches_the_summary(self, monkeypatch):
-        """A session whose mode never persisted still grades on the total axis."""
+        """A session whose mode never persisted still grades on the interactivity axis."""
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        assert graded_metric_key(benchmark_mode="") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
 
 
 class TestAnUnreportedTotalComesFromItsHalves:
@@ -1373,13 +1370,7 @@ class TestAnUnreportedTotalComesFromItsHalves:
 
 
 class TestTheCurveCarriesBothAxisPairs:
-    """A point has to carry whichever pair its mode is plotted on.
-
-    Synthetic is plotted on output throughput against ``output_throughput/conc``;
-    an agentic run on token throughput per chip against p90 interactivity. Both
-    pairs live on the same record because the mode is a property of the session,
-    not of the point.
-    """
+    """A point has to carry whichever pair its mode is plotted on."""
 
     def _variant(self, **kw: Any) -> VariantResult:
         base: dict[str, Any] = {
@@ -1397,13 +1388,14 @@ class TestTheCurveCarriesBothAxisPairs:
                 output_throughput=183.44,
                 total_token_throughput=25984.8,
                 input_throughput=25801.36,
-                intvty_p90=447.2,
+                intvty_p90=447.2,  # VariantResult field name
                 tpot_p90_ms=2.4,
             ),
             arm="optimized",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
-        assert point["intvty_p90"] == pytest.approx(447.2)
+        # _point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
+        assert point["e2e_norm_intvty_p90"] == pytest.approx(447.2)
         assert point["input_throughput"] == pytest.approx(25801.36)
         assert point["tpot_p90_ms"] == pytest.approx(2.4)
 
@@ -1414,7 +1406,7 @@ class TestTheCurveCarriesBothAxisPairs:
         )
         assert point["output_throughput"] == pytest.approx(1200.0)
         assert point["e2el_mean_ms"] == pytest.approx(850.0)
-        assert point["intvty_p90"] is None
+        assert point["e2e_norm_intvty_p90"] is None
 
     def test_the_csv_carries_the_agentic_axes_too(self, session_dir: Path):
         """The CSV is the download button; it has to draw the same chart."""
@@ -1438,7 +1430,7 @@ class TestTheCurveCarriesBothAxisPairs:
             session_dir,
         )
         row = next(iter(csv.DictReader(csv_path.open())))
-        assert row["intvty_p90"] == "447.2"
+        assert row["e2e_norm_intvty_p90"] == "447.2"
         assert row["total_token_throughput"] == "25984.8"
 
 
@@ -1497,8 +1489,7 @@ def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
     assert loaded["status"] == "in_progress"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 3: plotting
+# ───────────────────────────────────────────────────────────────────────────── Change 3: plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1560,11 +1551,7 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
 
 
 class TestTheChartFollowsTheGradedAxis:
-    """The chart has to show the ranking the session was scored by.
-
-    A chart drawn on a different axis from the summary beside it invites
-    reading off a rung the grading did not pick.
-    """
+    """The chart has to show the ranking the session was scored by."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -1576,7 +1563,7 @@ class TestTheChartFollowsTheGradedAxis:
                         "conc": 8,
                         "output_throughput": 183.44,
                         "total_token_throughput": 25984.8,
-                        "intvty_p90": 447.2,
+                        "e2e_norm_intvty_p90": 447.2,
                     }
                 ]
             },
@@ -1614,13 +1601,12 @@ class TestTheChartFollowsTheGradedAxis:
             ("agentx", {}),
             ("synthetic", {}),
             ("agentx", {"HYPERLOOM_PERF_METRIC": "output_throughput"}),
-            ("synthetic", {"HYPERLOOM_PERF_METRIC": "composite_v1"}),
+            ("synthetic", {"HYPERLOOM_PERF_METRIC": "intvty_v1"}),
             ("", {"HYPERLOOM_AGENTX": "1"}),
         ],
     )
     def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
-        """Binds both sides: whichever way the session resolved its axis, the
-        curve reads the same point field the summary took its speedups on."""
+        """Binds both sides: whichever way the session resolved its axis, the curve reads the same point field the summary took its speedups on."""
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -1630,11 +1616,20 @@ class TestTheChartFollowsTheGradedAxis:
 
         metric = graded_metric_key(benchmark_mode=mode)
         payload = self._payload(mode, metric)
-        axes = plot._axes_for_metric(plot._graded_metric_of(payload), tp_eff=8.0)
-
+        chart_metric = plot._graded_metric_of(payload)
+        axes = plot._axes_for_metric(chart_metric, tp_eff=8.0)
         _xs, ys = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
 
-        assert ys == [pytest.approx(payload["baseline"]["points"][0][metric] / 8.0)]
+        # AgentX chart: x = interactivity, y = total_token_throughput / tp.
+        # Synthetic chart: x = output_throughput / conc, y = output_throughput / tp.
+        from hyperloom.common.perf_metric import GRADED_OUTPUT
+
+        if chart_metric != GRADED_OUTPUT:
+            # AgentX: y is total throughput per chip
+            assert ys == [pytest.approx(25984.8 / 8.0)]
+        else:
+            # Synthetic: y is output throughput per TP
+            assert ys == [pytest.approx(183.44 / 8.0)]
 
     def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
@@ -1642,7 +1637,7 @@ class TestTheChartFollowsTheGradedAxis:
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=1.0)
         points = [
             {"conc": 8, "total_token_throughput": 25984.8},
-            {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
+            {"conc": 4, "total_token_throughput": 20000.0, "e2e_norm_intvty_p90": 500.0},
         ]
         xs, ys = plot._arm_series(points, 1.0, axes)
         assert xs == [pytest.approx(500.0)]
@@ -1650,8 +1645,7 @@ class TestTheChartFollowsTheGradedAxis:
 
 
 class TestTheRooflineNeedsBothItsAxisAndARealShape:
-    """``_ceiling_series`` returns a decode-only output-throughput bound, in the
-    output pair's units, computed from the session's ISL/OSL."""
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the output pair's units, computed from the session's ISL/OSL."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -1664,7 +1658,7 @@ class TestTheRooflineNeedsBothItsAxisAndARealShape:
                         "conc": 8,
                         "output_throughput": 183.44,
                         "total_token_throughput": 25984.8,
-                        "intvty_p90": 447.2,
+                        "e2e_norm_intvty_p90": 447.2,
                     }
                 ]
             },
@@ -1754,11 +1748,7 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
 
 
 def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Render through a stand-in pyplot and return what the chart asked it to do.
-
-    Lets a chart's decisions be asserted where matplotlib is not installed,
-    which is most CI shards.
-    """
+    """Render through a stand-in pyplot and return what the chart asked it to do."""
     calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
 
     class _FakePatch:
@@ -1870,16 +1860,14 @@ def test_format_conc_sweep_curve_section_with_png():
 
     lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
     embed = next(line for line in lines if line.startswith("!["))
-    # final.md lives in reports/, so the embed must use the basename, not the
-    # session-root-relative "reports/conc_sweep_curve.png" (which would resolve
-    # to reports/reports/... and 404).
+    # final.md lives in reports/, so the embed must use the basename, not the session-root-relative
+    # "reports/conc_sweep_curve.png" (which would resolve to reports/reports/... and 404).
     assert embed == "![Concurrency sweep curve](conc_sweep_curve.png)"
     assert "reports/conc_sweep_curve.png" not in embed
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: single-server Option A boot/reuse path (lifecycle-eligible)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: single-server Option A
+# boot/reuse path (lifecycle-eligible) ─────────────────────────────────────────────────────────────────────────────
 
 
 def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
@@ -2223,12 +2211,7 @@ def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
 
 
 def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
-    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for.
-
-    The round is then clamped back to the remaining budget and killed mid-warmup
-    -- the failure the cap-raise exists to prevent, moved into the sweep's own
-    admission check.
-    """
+    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for."""
     from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
 
     for k in (
@@ -2252,9 +2235,8 @@ def test_the_admission_price_never_lowers_an_operator_raised_cap(
     assert _granted_cap_sec(99_999) == 99_999.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
+# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
@@ -2262,11 +2244,7 @@ def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """After both arms finish (happy path), run_conc_sweep must reap any
-    lingering server via the same broad /proc scan used elsewhere: a
-    per-variant timeout that fires before a server_lifecycle pidfile is
-    written leaves nothing for that pidfile-based teardown to find, so this
-    is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
+    """After both arms finish (happy path), run_conc_sweep must reap any lingering server via the same broad /proc scan used elsewhere: a per-variant timeout that fires before a server_lifecycle pidfile is written leaves nothing for that pidfile-based teardown to find, so this is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2294,11 +2272,7 @@ def test_run_conc_sweep_reaps_stale_servers_even_when_an_arm_raises(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The reap must fire from a ``finally`` -- even when an arm blows up
-    with an exception that escapes its own internal handling, not just on
-    the happy path. ``_sweep_one_arm_single_server`` itself is mocked out
-    (rather than the ``run_grid`` it calls) so its own per-variant error
-    handling can't swallow the exception before it reaches run_conc_sweep."""
+    """The reap must fire from a ``finally`` -- even when an arm blows up with an exception that escapes its own internal handling, not just on the happy path."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2325,9 +2299,7 @@ def test_run_conc_sweep_skips_reap_under_pytest(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
-    set (pytest always sets it for a running test), mirroring the guard on
-    the per-launch preclean in ``_grid_runner.py``."""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):

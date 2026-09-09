@@ -18,7 +18,11 @@ from kernelforge.kernel_rewrite_controller.forge_runner import (
     run_forge_loop,
 )
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
-from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
+from kernelforge.kernel_rewrite_controller.worktree import (
+    DRIVER_STAGE_PREFIX,
+    OperatorWorktree,
+    stage_operator_driver,
+)
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -47,7 +51,6 @@ def _task_and_worktree(tmp_path: Path):
     kernel.write_text("VALUE = 1\n", encoding="utf-8")
     task = parse_task_payload(
         {
-            "schema_version": 1,
             "identity": identity_mapping,
             "base_commit": "a" * 40,
             "repo_root": str(repo),
@@ -83,12 +86,18 @@ def test_invocation_maps_task_to_named_kernel_forge_loop(tmp_path: Path) -> None
         task_dir=task_dir,
         worktree=worktree,
         deadline_unix=deadline,
+        driver=stage_operator_driver(task, task_dir, worktree),
     )
 
     command = list(invocation.command)
     assert command[:4] == [sys.executable, "-m", "kernelforge.cli", "forge-loop"]
     assert command[command.index("--kernel") + 1] == str(worktree.kernel_path)
-    assert command[command.index("--driver") + 1] == str(driver)
+    # The workspace copy, not the published task file: forge-loop hands the
+    # driver's directory to the preparation agent, whose guard requires a repo.
+    dispatched_driver = Path(command[command.index("--driver") + 1])
+    assert dispatched_driver.parent.parent == worktree.workspace
+    assert dispatched_driver.parent.name.startswith(DRIVER_STAGE_PREFIX)
+    assert dispatched_driver.read_text(encoding="utf-8") == driver.read_text(encoding="utf-8")
     assert command[command.index("--workspace") + 1] == str(worktree.workspace)
     assert command[command.index("--operator-name") + 1] == task.operator_name
     assert command[command.index("--framework") + 1] == task.identity.framework
@@ -97,6 +106,46 @@ def test_invocation_maps_task_to_named_kernel_forge_loop(tmp_path: Path) -> None
     assert command[command.index("--kernel-backend") + 1] == task.identity.backend
     assert "--auto" not in command
     assert "--nomination-input" not in command
+
+
+def test_invocation_forwards_world_size_as_nproc_per_node(tmp_path: Path) -> None:
+    task, task_dir, driver, worktree = _task_and_worktree(tmp_path)
+    task = parse_task_payload(
+        {
+            "schema_version": 1,
+            "identity": {
+                "producer": "forge-loop",
+                "kernel_name": "custom_all_reduce_tp8",
+                "framework": "sglang",
+                "framework_version": "0.5.0",
+                "backend": "aiter",
+                "gpu": "mi355x",
+            },
+            "base_commit": "a" * 40,
+            "repo_root": str(tmp_path / "repo"),
+            "kernel_path": "sglang/kernels/fused_moe.py",
+            "operator_name": "custom_all_reduce_tp8",
+            "driver_path": "driver.py",
+            "source_files": ["sglang/kernels/fused_moe.py"],
+            "target_functions": ["fused_moe"],
+            "shape_cases": [],
+            "priority": 0,
+            "reason": "",
+            "evidence": [],
+            "world_size": 8,
+        },
+        task_dir=task_dir,
+        enforce_directory_identity=False,
+    )
+    invocation = build_forge_loop_invocation(
+        task,
+        task_dir=task_dir,
+        worktree=worktree,
+        deadline_unix=time.time() + 3600,
+        driver=stage_operator_driver(task, task_dir, worktree),
+    )
+    command = list(invocation.command)
+    assert command[command.index("--nproc-per-node") + 1] == "8"
 
 
 def test_runner_prefers_the_result_json_written_by_the_child(tmp_path: Path) -> None:
@@ -203,9 +252,7 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     tmp_path: Path,
     caplog,
 ) -> None:
-    # The probe fires about once a second for up to ninety minutes. A per-tick
-    # line would bury the run, and none at all is what let a probe fail for a
-    # whole campaign while every interim patch went unpublished.
+    # The probe fires about once a second for up to ninety minutes.
     invocation = ForgeLoopInvocation(
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         workspace=tmp_path,

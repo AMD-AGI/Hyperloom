@@ -100,6 +100,7 @@ runtime-env/
 # framework-specific; not part of the product). Keep them out of the repo.
 run_kernel_forge.sh
 resume_kernel_forge.sh
+sample.script
 vllm_mi355x_kimik3.sh
 
 # Sky-segmentation model HY-World-2.0 downloads at run time. inference_utils
@@ -109,9 +110,11 @@ skyseg.onnx
 .prompt-audit/
 # Scratch plan and revision files
 *.plan.md
+*.issue.md
 # Experiment and repro artefacts
 /prefix_cache_repro/
 kimi-k3-agentx-repro
+dsa-repro
 inferencex-upstream-recipes
 kimik3-wares
 # Operator analysis output written at the repo root: session/cost/tuning exports
@@ -119,3 +122,4 @@ kimik3-wares
 /*.csv
 /*.pptx
 /*.html
+audit.md

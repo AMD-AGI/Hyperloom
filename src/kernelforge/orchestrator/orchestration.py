@@ -58,13 +58,11 @@ log = logging.getLogger(__name__)
 
 PLAN_REVISION_MAX_TURNS = 100
 PLAN_REVISION_TIMEOUT_SEC = 600
-# The round partition divides ground the analyses already name, so it is given
-# no tools and a bound short enough that a slow answer costs the round its
-# partition rather than its planning window. Overrunning falls back to dealing
-# the analyses out, which is what the round did before this step existed.
+# The round partition divides ground the analyses already name, so it is given no tools and a bound short enough that
+# a slow answer costs the round its partition rather than its planning window.
 ROUND_PARTITION_MAX_TURNS = 8
-# Dividing ground the analyses already name is a reading task, not the deepest
-# reasoning the round does; the plans behind it keep the maximum.
+# Dividing ground the analyses already name is a reading task, not the deepest reasoning the round does; the plans
+# behind it keep the maximum.
 ROUND_PARTITION_EFFORT = "high"
 ROUND_PARTITION_TIMEOUT_SEC = 900
 
@@ -74,14 +72,7 @@ def _phase_timer(
     target: MutableMapping[str, float],
     name: str,
 ) -> Iterator[None]:
-    """Record one planning phase's wall-clock against ``name``.
-
-    Repeat entries accumulate, so a phase that runs in more than one place --
-    synthesis, which has a single-lane path and a fan-out path -- is one number
-    rather than the last one to finish. Recorded in ``finally``: a phase that
-    raised still cost the round its wall-clock, and a round that died is exactly
-    when the question of where the window went gets asked.
-    """
+    """Record one planning phase's wall-clock against ``name``."""
     started_at = time.monotonic()
     try:
         yield
@@ -90,22 +81,7 @@ def _phase_timer(
 
 
 def _as_bool(value: object) -> tuple[bool, bool]:
-    """Read a JSON field that was asked for as a boolean and may not be one.
-
-    ``bool("false")`` is ``True``, so a model that quoted its answer would mark
-    every lane joint -- and joint is the flag that widens ground. Returns the
-    flag and whether the answer was readable as one.
-
-    A JSON string is read as the boolean it spells, so ``"true"`` and ``"0"``
-    are both answers; a string that spells no boolean, and any other non-bool
-    value, is not read at all and reads as not joint. That is narrower than
-    ``bool``, and deliberately: ``joint: 1`` is a shape models emit constantly,
-    and putting it through ``bool`` stored the opposite of the note the caller
-    then wrote about the same lane. ``joint: 0`` is unread for the same reason
-    -- it lands on the narrow ground by luck rather than by an answer -- and it
-    gets the same note, which is the only thing that distinguishes it from a
-    lane the partition deliberately left narrow.
-    """
+    """Read a JSON field that was asked for as a boolean and may not be one."""
     if isinstance(value, str):
         text = value.strip().lower()
         if text in {"true", "yes", "1"}:
@@ -321,10 +297,7 @@ class OrchestrationAgent:
         self.max_turns = max_turns
         self.min_assignments = min_assignments
         self.structured_output_diagnostics: dict[str, dict] = {}
-        # What each planning phase cost this round, in the units the round is
-        # budgeted in. Kept beside the structured-output diagnostics because it
-        # is the same kind of thing -- what the round did, readable afterwards
-        # without a log -- and filled by the phases themselves.
+        # What each planning phase cost this round, in the units the round is budgeted in.
         self.phase_durations_sec: dict[str, float] = {}
 
     async def plan_dispatch(
@@ -690,33 +663,7 @@ class OrchestrationAgent:
         lanes: int,
         usage=None,
     ) -> list[SynthesizedPlan]:
-        """Partition the round into plans that do not compete for one another's ground.
-
-        Fusing every analysis into a single plan spends the round on one bet and
-        yields one measurement, which cannot say which of the fused ideas earned
-        the result. Splitting the round buys one measured score per direction,
-        and only disjoint changes can be stacked afterwards, so the partition is
-        what the whole round structure rests on.
-
-        The partition is over the code, decided by a step that has read every
-        analysis, and each lane is then given the whole round's evidence to plan
-        its own share from. Dealing the analyses out instead -- one specialist
-        report per lane -- divides nothing: the roles are three readings of one
-        kernel, so two lanes holding different reports still reach for the same
-        lines, and a lane holding a report about ground it does not own can only
-        discard it.
-
-        What the partition may hand one lane is wider than a region where the
-        code is: a change and the launch configuration it invalidates are one
-        ground, and so is a move spanning what no single lane would own. The
-        lanes stay disjoint under that width, because a launch site two bodies
-        share is given to one of them by name. That lane's gain cannot be
-        attributed to either part, which is what its fallback pays for.
-
-        A partition that cannot be bought collapses the round to a single lane,
-        because a round that divides no code is not worth its N sessions. A
-        pending REPLACE keeps that one lane as its challenger.
-        """
+        """Partition the round into plans that do not compete for one another's ground."""
         analyses = [outcome for outcome in specialist_outcomes if outcome.content is not None]
         width = max(1, min(int(lanes), len(analyses)))
         if width <= 1:
@@ -741,11 +688,8 @@ class OrchestrationAgent:
         )
         challenged = context.last_critic_verdict == "REPLACE"
         if len(grounds) <= 1 and not (challenged and grounds):
-            # One real direction is a single-lane round, planned the way one has
-            # always been planned rather than as a fan-out of width one. A
-            # challenger ground is the exception: the ordinary synthesis would
-            # refine the route the critic dominated, so its one lane runs over
-            # the challenge instead.
+            # One real direction is a single-lane round, planned the way one has always been planned rather than as a
+            # fan-out of width one.
             with _phase_timer(self.phase_durations_sec, "synthesis"):
                 return [
                     await self._synthesize_optimization_plan_result(
@@ -808,11 +752,7 @@ class OrchestrationAgent:
                 fallback=grounds[index].fallback,
             )
 
-        # Each lane is an independent call, so one that fails is one lane lost
-        # and not the round. Letting it propagate would discard the siblings
-        # that already answered -- and, because the loop reads a raised
-        # synthesis as a planning outage, would multiply the chance of tripping
-        # the orchestration circuit breaker by the number of lanes asked for.
+        # Each lane is an independent call, so one that fails is one lane lost and not the round.
         with _phase_timer(self.phase_durations_sec, "synthesis"):
             answers = await asyncio.gather(
                 *(_lane(index) for index in range(width)),
@@ -830,10 +770,7 @@ class OrchestrationAgent:
                 )
                 continue
             if answer is None:
-                # A lane that returned nothing is a lane the round paid for and
-                # cannot use. Said out loud, because silently narrowing the
-                # round makes an empty answer indistinguishable from having
-                # asked for fewer lanes.
+                # A lane that returned nothing is a lane the round paid for and cannot use.
                 log.warning("lane %d of %d returned an empty plan", index + 1, width)
                 continue
             plans.append(answer)
@@ -847,25 +784,7 @@ class OrchestrationAgent:
         *,
         challenged: bool = False,
     ) -> list[LaneGround]:
-        """Collapse a round that could not be divided by code to a single lane.
-
-        A fan-out round is worth its N sessions only when each lane edits code
-        no other lane edits, so each candidate earns a score that can be
-        attributed to it and stacked on the others. When the partition times
-        out or comes back unparseable there is no such division: dealing the
-        analyses out by role divides the evidence without dividing the code --
-        observed in production before the partition existed, one lane's edited
-        files a subset of its sibling's -- so a wide round spends N Implementer
-        sessions and may get one answer for them. A round that cannot be divided
-        runs as a single lane instead.
-
-        A pending REPLACE still lands on its own challenger lane. The verdict
-        says the current route is dominated, so a single ordinary lane would
-        refine that very route -- the one outcome the verdict exists to stop.
-        The fallback cannot name the alternative, but the review that named it
-        is in the lane's payload, so the ground points there rather than
-        restating it.
-        """
+        """Collapse a round that could not be divided by code to a single lane."""
         if challenged:
             return [
                 LaneGround(
@@ -900,13 +819,7 @@ class OrchestrationAgent:
         ]
 
     def _parse_lane_grounds(self, response: str, *, lanes: int) -> tuple[list[LaneGround], dict, list[str]]:
-        """Read lane grounds and the round's cross-cutting move out of one answer.
-
-        Reports what it dropped, and reports the move separately from the
-        lanes: a move nobody owns is the one part of a partition that cannot be
-        read off the lanes, because what makes it unowned is that it is not
-        there.
-        """
+        """Read lane grounds and the round's cross-cutting move out of one answer."""
         notes: list[str] = []
         try:
             payload = extract_json_object(response, "round partition")
@@ -940,8 +853,8 @@ class OrchestrationAgent:
             grounds.append(ground)
             if not joint_readable:
                 unreadable_joint[ground.lane_id] = entry.get("joint")
-        # Before the move is read, so a move can never be recorded as owned by
-        # a lane the round is over its ceiling to run.
+        # Before the move is read, so a move can never be recorded as owned by a lane the round is over its ceiling to
+        # run.
         grounds = grounds[:lanes]
         for ground in grounds:
             if ground.lane_id in unreadable_joint:
@@ -965,16 +878,7 @@ class OrchestrationAgent:
         payload: Mapping[str, object],
         grounds: Sequence[LaneGround],
     ) -> tuple[dict, list[str]]:
-        """Read the largest move that fits no one region, and who owns it.
-
-        Four outcomes, and they are kept apart because an operator acts on
-        each differently: the move is owned by a lane this round will run, the
-        move exists and no lane took it, the partition never named one, or the
-        field came back in a shape no move can be read out of. Only the first
-        needs nothing further; the rest are the shape that cost four kernels a
-        mechanism -- named in an analysis, filed under nobody's ground, and
-        absent from every artifact the next round reads.
-        """
+        """Read the largest move that fits no one region, and who owns it."""
         notes: list[str] = []
         raw = payload.get("cross_cutting_move")
         reason = ""
@@ -1047,38 +951,7 @@ class OrchestrationAgent:
         lanes: int,
         usage=None,
     ) -> list[LaneGround]:
-        """Decide, once and with every analysis in view, what each lane owns.
-
-        One call rather than one per lane, because the only question here is
-        where the boundaries fall, and that cannot be answered from a slice. The
-        expensive part of the round -- the plans, and the sessions that execute
-        them -- stays parallel behind it.
-
-        Given no workspace tools and a short bound. The analyses in the payload
-        already name the files and functions they are about, so a partition that
-        goes reading source is re-deriving the analysis rather than dividing it,
-        and this call sits on the critical path where every lane waits for it.
-        Measured before that bound existed: one partition over three analyses
-        was still exploring after eighteen minutes.
-
-        Lanes stay disjoint, with one exception: a change and the launch
-        configuration it invalidates are one lane's ground, because the
-        alternative is not two attributable measurements but one measurement of
-        a body at a configuration tuned for the body it replaced. The exception
-        widens one lane, never two -- a launch site shared by two bodies is
-        owned by exactly one of them and named there -- so disjointness holds
-        under it. Such a lane is marked joint and carries a fallback, so the
-        width it buys cannot cost the round its candidate.
-
-        The largest move that fits no one region is recorded whether or not a
-        lane took it. A partition can only divide the code it is dividing, so a
-        move spanning what no lane owns has nowhere to land -- and unrecorded,
-        it is indistinguishable from a round that never found one.
-
-        Any failure falls back to a round collapsed to one lane. This step
-        exists to make a round's lanes disjoint, not to be another way for a
-        round to die.
-        """
+        """Decide, once and with every analysis in view, what each lane owns."""
         challenged = context.last_critic_verdict == "REPLACE"
         system_prompt = _PARTITION_SYSTEM_PROMPT + (_PARTITION_CHALLENGER_BLOCK if challenged else "")
         payload = {
@@ -1200,22 +1073,16 @@ class OrchestrationAgent:
         revision_task = (
             "Revise the draft into the final optimization plan. Address the critic's substantive concerns exactly once."
         )
-        # A resume re-enters the lane's own synthesis session, which already
-        # holds the dispatch, every specialist analysis and the whole synthesis
-        # conversation. Re-sending that bundle in the feedback ran the revision
-        # out of context: one 12-hour run compacted the revision 17 times across
-        # 7 rounds, once per lane, dropping the recap it went on to answer over.
-        # The revision instructions are the resume's system prompt, so they are
-        # not copied back into the payload either. The resumed session carries
-        # only what the critic added and the draft it is revising.
+        # A resume re-enters the lane's own synthesis session, which already holds the dispatch, every specialist
+        # analysis and the whole synthesis conversation.
         resumed_payload = {
             "task": revision_task,
             "draft_plan": draft_plan,
             "critic_verdict": critic_verdict,
             "critic_review": critic_review,
         }
-        # The fresh-session fallback holds no prior context, so it genuinely
-        # needs the whole planning bundle to revise from.
+        # The fresh-session fallback holds no prior context, so it genuinely needs the whole planning bundle to revise
+        # from.
         fresh_payload = {
             **resumed_payload,
             "revision_instructions": _REVISION_SYSTEM_PROMPT.strip(),
@@ -1384,13 +1251,7 @@ class OrchestrationAgent:
         tools: bool = True,
         reasoning_effort: str = "max",
     ) -> AgentRunSpec:
-        """One read-only orchestration turn.
-
-        ``tools`` off is for a step whose whole input is already in its payload.
-        A step that may read the workspace will, and reading is unbounded work
-        on a critical path -- worth it where the answer needs evidence the
-        payload does not carry, and only there.
-        """
+        """One read-only orchestration turn."""
         return AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1463,12 +1324,7 @@ class OrchestrationService:
         usage=None,
         lanes: int = 1,
     ) -> OrchestrationRunResult:
-        """Produce a plan unless an explicit infrastructure outage prevents one.
-
-        ``lanes`` above 1 partitions the round instead of fusing it, so each
-        lane's Implementer works ground no other lane owns and every candidate
-        earns its own measurement.
-        """
+        """Produce a plan unless an explicit infrastructure outage prevents one."""
         self._agent.structured_output_diagnostics = {}
         self._agent.phase_durations_sec = {}
         phase_durations = self._agent.phase_durations_sec
@@ -1489,12 +1345,8 @@ class OrchestrationService:
             )
         specialist_outcomes = specialist_run.outcomes
         if specialist_run.contended:
-            # A probe that outlived its specialist is on the same GPU the
-            # caller's canonical measurement is about to use. Reported in the
-            # diagnostics because that is the channel that reaches the loop
-            # in-process and in this same iteration, which is the iteration
-            # whose measurement it has to stop; the loop is where it becomes a
-            # recorded hazard, so ownership of that log stays in one place.
+            # A probe that outlived its specialist is on the same GPU the caller's canonical measurement is about to
+            # use.
             diagnostics["probe_device_hazard"] = {
                 "describe": specialist_run.reaped.describe(),
                 "pids": list(specialist_run.reaped.blockers),
@@ -1541,12 +1393,7 @@ class OrchestrationService:
                     "status": "unavailable",
                     "message": f"{type(error).__name__}: {error}",
                 }
-        # Whatever synthesis recorded on the way through, which the snapshot
-        # above was taken too early to hold. The round partition is the one
-        # that matters: how the round was divided, whether the division was
-        # bought or fallen back to, and whether a challenger was asked for are
-        # answerable after the fact only from here, and a round is audited
-        # after the fact or not at all.
+        # Whatever synthesis recorded on the way through, which the snapshot above was taken too early to hold.
         diagnostics.update(self._agent.structured_output_diagnostics)
         optimization_plan_executable = bool(synthesized_plans)
         if synthesized_plans:
@@ -1561,10 +1408,7 @@ class OrchestrationService:
                 )
             ]
         planned_lanes = len(plans)
-        # Every round a synthesis produced is reviewed, at any width. A wide
-        # round is the one that most needs it: it commits several Implementer
-        # sessions at once, and the question of whether the division earns them
-        # exists only there.
+        # Every round a synthesis produced is reviewed, at any width.
         critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable)
         draft_plan = ""
         critic_outcome = None
@@ -1579,8 +1423,8 @@ class OrchestrationService:
                 usage=usage,
             )
             diagnostics["plan_critic"] = critic_outcome.to_dict()
-            # Narrowing before revision, so the round does not spend a revision
-            # turn on a lane it has already decided not to run.
+            # Narrowing before revision, so the round does not spend a revision turn on a lane it has already decided
+            # not to run.
             synthesized_plans, narrowing_diagnostics = self._narrow_round(
                 synthesized_plans,
                 critic_outcome=critic_outcome,
@@ -1588,8 +1432,8 @@ class OrchestrationService:
             )
             plans = [plan.text for plan in synthesized_plans]
             diagnostics["lane_narrowing"] = narrowing_diagnostics
-            # The draft the loop records is one of the plans that will run, so
-            # it is read after narrowing and before revision.
+            # The draft the loop records is one of the plans that will run, so it is read after narrowing and before
+            # revision.
             draft_plan = plans[0]
             if critic_outcome.requires_revision:
                 revised, revision_diagnostics = await self._revise_round(
@@ -1602,8 +1446,8 @@ class OrchestrationService:
                     usage=usage,
                 )
                 plans = [plan.text for plan in revised]
-                # A fallback also rewrites the text, so what was revised is read
-                # from what the revision did, not from the text having changed.
+                # A fallback also rewrites the text, so what was revised is read from what the revision did, not from
+                # the text having changed.
                 plan_revised = revision_diagnostics["status"] in {
                     "revised",
                     "partially_revised",
@@ -1618,9 +1462,7 @@ class OrchestrationService:
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,
-            # What the round actually hands to Implementer sessions, which is
-            # the number the round is billed for. It differs from ``planned``
-            # only when the review narrowed the round.
+            # What the round actually hands to Implementer sessions, which is the number the round is billed for.
             "published": len(plans),
         }
         diagnostics["phase_durations_sec"] = self._phase_durations(
@@ -1647,56 +1489,7 @@ class OrchestrationService:
         critic_outcome,
         challenged: bool,
     ) -> tuple[list[SynthesizedPlan], dict]:
-        """Apply the review's per-lane width ruling to this round's drafts.
-
-        Three decisions can move a round's width, and they are ordered here so
-        they cannot contradict each other:
-
-        1. The partition decides how wide the round is *planned*, and its
-           collapse fallback is the floor it falls back to.
-        2. This narrowing decides how many of those planned lanes are
-           *published*. It runs last and reads the same drafts the review read,
-           so on width it wins: a lane it drops does not reach an Implementer.
-        3. A pending REPLACE outranks both. When the previous round's verdict
-           challenged this one, exactly one drafted lane is validating the
-           alternative that verdict named, and nothing downstream records which
-           one -- so a drop here could silently spend the challenge. The whole
-           narrowing is refused, with its reasons kept.
-
-        A joint lane is not a fourth decision. The partition widened it because
-        a body and the configuration it invalidates cannot be measured apart,
-        and the review is told so -- ``joint`` and ``fallback`` reach it with
-        the draft -- so a drop naming that lane is a ruling made in full view of
-        the width, and it is carried out like any other. Refusing it would not
-        recover the width, which the partition already spent; it would spend an
-        additional Implementer session on a lane the review judged not worth
-        one, and, with nothing bounding it, a partition that marked every lane
-        joint would switch narrowing off. Dropping a joint lane breaks no
-        invariant either: the other lanes were divided around it and stay
-        disjoint without it. What is left is a cost, so the round records it --
-        widened ground published nowhere and therefore never measured.
-
-        Under all of them, one lane is the floor: a round that publishes nothing
-        has spent its planning window for no measurement at all, so a ruling
-        that would empty the round is refused whole rather than applied down to
-        an arbitrary survivor the review never ranked.
-
-        ``status`` records what happened to the ruling and ``block`` records
-        where the ruling came from, because no count of drops distinguishes
-        them: a round that kept every lane may have been asked to, or may have
-        been handed a width block nobody could read. ``not_requested`` is
-        reserved for the first -- a review that answered and named no lane --
-        and anything the round could not carry out reports ``not_applied`` with
-        the note saying why.
-
-        Every note here says what was seen -- what the review asked for, what
-        the round is carrying -- and stops there, because ``status`` and
-        ``dropped`` are what say how it ended. The joint-lane cost is the one
-        note written afterwards: it reports not how the ruling ended but what
-        carrying it out spent, and no other field would carry it. This is also the only place that
-        knows how it ended, so it is the only place entitled to log a narrowing
-        as not applied.
-        """
+        """Apply the review's per-lane width ruling to this round's drafts."""
         requested = list(critic_outcome.lane_drops)
         notes = list(critic_outcome.narrowing_notes)
 
@@ -1711,10 +1504,6 @@ class OrchestrationService:
                 "kept": len(drafts) - len(applied),
                 "dropped": [drop.to_dict() for drop in applied],
                 # The widened lanes this round carries, and the ones it dropped.
-                # Empty lists are the ordinary round: a reader can tell "no
-                # joint lane" from "a joint lane the round published" without
-                # leaving this block, and ``dropped_joint`` is the width the
-                # partition bought and the round then never measured.
                 "joint": joint_lanes,
                 "dropped_joint": dropped_joint,
                 "notes": notes,
@@ -1724,15 +1513,7 @@ class OrchestrationService:
             status: str,
             note: str = "",
         ) -> tuple[list[SynthesizedPlan], dict]:
-            """Publish every planned lane, at the severity that outcome earns.
-
-            ``not_requested`` is the one outcome that lost nothing: the review
-            was read and named no lane, which is the answer that means "run
-            every lane". Every other one runs a lane the review asked about and
-            the round could not act on, which is what an operator has to see.
-            A round that was never held to a block -- one lane -- has nothing
-            to report either way, so it says nothing.
-            """
+            """Publish every planned lane, at the severity that outcome earns."""
             if note:
                 notes.append(note)
             if status != "not_requested":
@@ -1749,9 +1530,7 @@ class OrchestrationService:
             return list(drafts), _diagnostics(status, [])
 
         if not requested:
-            # Nothing to apply. Which of the two reasons for that -- the review
-            # named no lane, or nothing it named could be used -- is the whole
-            # point of the notes, so the status follows them.
+            # Nothing to apply.
             return _kept_whole("not_requested" if not notes else "not_applied")
         if challenged:
             return _kept_whole(
@@ -1782,10 +1561,9 @@ class OrchestrationService:
         dropped_ids = {drop.lane_id for drop in applied}
         dropped_joint = sorted(dropped_ids & set(joint_lanes))
         if dropped_joint:
-            # The drop stands -- the review was shown the width and ruled
-            # anyway -- but the width is spent either way, and a round that
-            # bought wider ground and then measured none of it has to say so
-            # where the drops themselves are read.
+            # The drop stands -- the review was shown the width and ruled anyway -- but the width is spent either way,
+            # and a round that bought wider ground and then measured none of it has to say so where the drops
+            # themselves are read.
             listed = ", ".join(str(lane_id) for lane_id in dropped_joint)
             notes.append(
                 f"the round dropped joint lane(s) {listed}, so the wider "
@@ -1815,20 +1593,7 @@ class OrchestrationService:
         revision_diagnostics: Mapping[str, object] | None,
         run_started_at: float,
     ) -> dict[str, float]:
-        """Report what each planning phase of this round cost, in order.
-
-        Every number here was already being measured; only the reporting is
-        new. Ten production campaigns spent a median 21.6 minutes per round on
-        planning, of which about a third could only be arrived at by
-        subtracting the phases that did persist their timings from the round's
-        total -- which is to say the second most expensive phase of the
-        planning window was the one nobody could see.
-
-        ``total`` is this call's own wall-clock, not the sum of the parts, so
-        what the named phases do not account for stays visible as the
-        difference. Publishing the plans happens in the loop that called this
-        and is not measured here.
-        """
+        """Report what each planning phase of this round cost, in order."""
         durations: dict[str, float] = {}
         for name in ("dispatch", "specialists", "partition", "synthesis"):
             if name in measured:
@@ -1851,19 +1616,7 @@ class OrchestrationService:
         coverage: Mapping[str, object],
         usage=None,
     ) -> tuple[list[SynthesizedPlan], dict]:
-        """Apply one round-level verdict to every lane it covers.
-
-        Each lane resumes its own synthesis session, so a revision costs a short
-        follow-up turn on context that already exists rather than a fresh plan,
-        and the lanes revise concurrently for the same reason they were planned
-        concurrently.
-
-        A single-lane round that cannot be revised publishes the non-executable
-        fallback, which is what a plan the critic distrusted and nobody could
-        correct is worth. A wide round does not: the verdict was about the round,
-        not about that lane being dangerous, and its siblings were revised. That
-        lane keeps its draft and the diagnostics name it.
-        """
+        """Apply one round-level verdict to every lane it covers."""
         started_at = time.monotonic()
 
         async def _revise(draft: SynthesizedPlan) -> tuple[SynthesizedPlan, str]:
@@ -1905,8 +1658,8 @@ class OrchestrationService:
             revised.append(plan)
             modes.add(mode)
         duration_sec = time.monotonic() - started_at
-        # One mode when every revised lane agreed, which is always so for a
-        # single-lane round and usually so for a wide one.
+        # One mode when every revised lane agreed, which is always so for a single-lane round and usually so for a
+        # wide one.
         revision_mode = modes.pop() if len(modes) == 1 else "mixed"
         if not unrevised:
             log.info(
@@ -2074,28 +1827,12 @@ def default_specialist_definitions() -> dict[str, SpecialistDefinition]:
 
 
 def _overlaps(one: Path, other: Path) -> bool:
-    """Whether either path is the other or contains it.
-
-    Both directions: a scratch root under the workspace would break the
-    read-only guarantee, and a workspace under the scratch root would be
-    removed with the round's tree.
-    """
+    """Whether either path is the other or contains it."""
     return one == other or one in other.parents or other in one.parents
 
 
 def _specialist_probe_config(config: Config) -> SpecialistProbeConfig | None:
-    """Resolve where and how much the round's specialists may measure.
-
-    The scratch root is the campaign's experiments directory by default, or
-    whatever ``specialist_probe_scratch_root`` names. In the default CLI path
-    ``experiments_dir`` *is* ``<workspace>/forge_experiments`` -- inside the
-    canonical tree, which is the one place the probe refuses to run -- and the
-    fallback there is a sibling of the workspace, said out loud in the log
-    rather than silently disabling the feature on every default campaign.
-
-    Returns None when the probe is turned off, or when no placement outside the
-    canonical tree can be found.
-    """
+    """Resolve where and how much the round's specialists may measure."""
     if not config.specialist_probe:
         return None
     workspace_raw = str(config.workspace or "").strip()
@@ -2132,9 +1869,8 @@ def _specialist_probe_config(config: Config) -> SpecialistProbeConfig | None:
         if not _overlaps(workspace, candidate):
             return _bounded(candidate)
     fallback = workspace.parent / f"{workspace.name}.probe_scratch"
-    # At warning level, like ``_no_probe`` and ``_probe_round``: ``forge_loop``
-    # never calls ``logging.basicConfig``, so an info line about the campaign's
-    # default layout is written nowhere at all -- and this docstring's promise
+    # At warning level, like ``_no_probe`` and ``_probe_round``: ``forge_loop`` never calls ``logging.basicConfig``,
+    # so an info line about the campaign's default layout is written nowhere at all -- and this docstring's promise
     # that the placement is "said out loud in the log" would be false.
     log.warning(
         "specialist probe scratch root placed at %s: the campaign experiments "

@@ -1,21 +1,4 @@
-"""Project the three Recipe KB touchpoints into additive V6 timeline events.
-
-``warm_start``     which identity was asked for, and what the KB returned.
-``warm_replay``    whether replaying that record reproduced its gain, and --
-                   only when it did -- the configuration that was running.
-``kb_write_back``  whether this session's own Recipe reached the KB Store.
-
-Every value is read back from evidence the run already persisted, so these
-events add no runtime cost and survive an offline re-export.
-
-Recipe material follows the three published columns (``config`` / ``patch`` /
-``kernel``). The retired ``patch_timeline`` is never read: an overlay ref's
-lexicographic order is the replay order.
-
-A replay that did not reproduce records why, not what it was carrying. The
-configuration is only meaningful once something ran with it end to end, and a
-rejected replay has already rolled its material back.
-"""
+"""Project the three Recipe KB touchpoints into additive V6 timeline events."""
 
 from __future__ import annotations
 
@@ -49,9 +32,7 @@ from .schema import (
 )
 
 
-# ---------------------------------------------------------------------------
 # warm_start
-# ---------------------------------------------------------------------------
 
 # recipe_kb_t0 publishes one of these four; anything else is treated as a miss.
 _WARM_START_STATUS = {
@@ -88,14 +69,7 @@ def _matched_scope(recipe: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _requested_canonical_id(state: dict[str, Any], matched_id: str) -> str:
-    """Resolve the identity this session asked the KB for.
-
-    Read rather than rebuilt: the hardware dimension is topology-aware and
-    resolved from the runtime environment, so recomputing it at export time
-    could disagree with what the run actually queried. CLOSE derives the
-    session's own identity through the same helper T0 used, which makes
-    ``recipe_finalize`` the authority; an exact match is the same string.
-    """
+    """Resolve the identity this session asked the KB for."""
     finalize = _mapping(state.get("recipe_finalize_outcome"))
     recorded = str(finalize.get("canonical_id") or "").strip()
     if recorded:
@@ -116,13 +90,7 @@ def _warm_start_origin(recipe: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> V6WarmStartReads | None:
-    """Per-source attribution of this session's Recipe KB reads.
-
-    Read back from the recipe-snapshot audit log: how each T0 lookup resolved,
-    which backend served it, and which source supplied the champion config.
-    ``None`` when the session recorded no readable read, so the block is only
-    attached to ``warm_start`` when it carries something.
-    """
+    """Per-source attribution of this session's Recipe KB reads."""
     path = recipe_snapshot_audit_jsonl(session_dir)
     if not path.exists():
         return None
@@ -161,8 +129,8 @@ def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> V6WarmStar
         "by_remote": by_remote,
         "by_source": by_source,
         "best_config_by_source": best_config_by_source,
-        # A short tail of the raw rows: downstream champion-config and donor
-        # resolution read the most recent hit's own result off these.
+        # A short tail of the raw rows: downstream champion-config and donor resolution read the most recent hit's own
+        # result off these.
         "tail": rows[-10:],
     }
 
@@ -195,8 +163,7 @@ def collect_warm_start_event(
         },
     }
     if raw_status and raw_status not in {"hit"}:
-        # ``seed_only`` is a hit that could not be executed; keeping the raw
-        # value stops it reading as a plain miss.
+        # ``seed_only`` is a hit that could not be executed; keeping the raw value stops it reading as a plain miss.
         ext["match_status"] = raw_status
 
     if status == "matched":
@@ -229,8 +196,8 @@ def collect_warm_start_event(
             matched["origin"] = origin
         ext["matched"] = matched
 
-    # Read attribution belongs to the T0 read regardless of whether it matched:
-    # a miss still records which backends were consulted and how each resolved.
+    # Read attribution belongs to the T0 read regardless of whether it matched: a miss still records which backends
+    # were consulted and how each resolved.
     if reads:
         ext["reads"] = reads
 
@@ -245,15 +212,13 @@ def collect_warm_start_event(
     }
 
 
-# ---------------------------------------------------------------------------
 # warm_replay
-# ---------------------------------------------------------------------------
 
 _REPRODUCED_STATUSES = frozenset({"reproduced", "reproduced_but_no_params"})
 _PASS_THROUGH_STATUSES = frozenset({"drift", "skipped", "in_flight"})
 
-# Ordered: the first substring that appears in the raw reason wins, so the
-# specific codes must precede the generic ones.
+# Ordered: the first substring that appears in the raw reason wins, so the specific codes must precede the generic
+# ones.
 _SKIP_REASONS: tuple[tuple[str, str], ...] = (
     ("disabled_by_flag", "disabled_by_flag"),
     ("no_warm_start_recipe", "no_warm_start_recipe"),
@@ -328,13 +293,7 @@ def _replay_result_type(raw_status: str, reason: str, outcome: dict[str, Any]) -
 
 
 def _replay_before_tput(state: dict[str, Any], after: float | None, gain: float | None) -> float | None:
-    """The baseline the replay was judged against.
-
-    The outcome records the measurement and the gain but not the anchor it was
-    taken against, so the session baseline stands in. It is reconstructed from
-    the pair only when the baseline is unavailable, which keeps a re-baselined
-    session from reporting an anchor it never used.
-    """
+    """The baseline the replay was judged against."""
     baseline = _optional_float(state.get("baseline_tput"))
     if baseline and baseline > 0:
         return baseline
@@ -353,12 +312,7 @@ def _replay_stack_entry(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _replay_applied(state: dict[str, Any], outcome: dict[str, Any]) -> V6WarmReplayApplied | None:
-    """What was running when the replay reproduced its gain.
-
-    One merged configuration, not a per-column split: the columns are applied
-    together and measured together, so attributing the gain to one of them
-    would be a guess.
-    """
+    """What was running when the replay reproduced its gain."""
     entry = _replay_stack_entry(state)
     args = str(entry.get("candidate_extra_server_args") or "")
     envs = dict(_mapping(entry.get("candidate_extra_envs")))
@@ -412,8 +366,7 @@ def collect_warm_replay_event(state: dict[str, Any]) -> dict[str, Any] | None:
             "eval_ran": _optional_bool(outcome.get("eval_ran")),
             "baseline": _optional_float(outcome.get("baseline_accuracy")),
             "replay": _optional_float(outcome.get("replay_accuracy")),
-            # No explicit verdict is stored; the gate is the only thing that
-            # can end a replay as ``accuracy_failed``.
+            # No explicit verdict is stored; the gate is the only thing that can end a replay as ``accuracy_failed``.
             "passed": (
                 False
                 if raw_status == "accuracy_failed"
@@ -459,8 +412,8 @@ def collect_warm_replay_event(state: dict[str, Any]) -> dict[str, Any] | None:
     start = str(outcome.get("enqueued_at") or "")
     end = str(outcome.get("settled_at") or "")
     if not start:
-        # Skips are decided inline during PRELUDE, before a task exists; the
-        # warm-start read is the closest instant the run recorded.
+        # Skips are decided inline during PRELUDE, before a task exists; the warm-start read is the closest instant
+        # the run recorded.
         start = str(state.get("warm_start_ts") or "")
     return {
         "type": "warm_replay",
@@ -472,9 +425,7 @@ def collect_warm_replay_event(state: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-# ---------------------------------------------------------------------------
 # kb_write_back
-# ---------------------------------------------------------------------------
 
 _WRITE_BACK_REASONS: tuple[tuple[str, str], ...] = (
     ("no_new_keep", "no_new_keep_or_pure_warm_replay"),
@@ -490,10 +441,9 @@ _WRITE_BACK_REASONS: tuple[tuple[str, str], ...] = (
     ("no_recipe_backend", "kb_disabled"),
     ("configuration:", "configuration_failed"),
     ("remoterecipevalidationerror", "bundle_build_failed"),
-    # ``agentx`` is a short, collision-prone needle -- it appears inside
-    # exception class names such as ``configuration:AgentXConfigError`` -- so it
-    # stays last: the more specific rules above claim their reasons first, and
-    # ``_bucket`` is first-match-wins.
+    # ``agentx`` is a short, collision-prone needle -- it appears inside exception class names such as
+    # ``configuration:AgentXConfigError`` -- so it stays last: the more specific rules above claim their reasons
+    # first, and ``_bucket`` is first-match-wins.
     ("agentx", "agentx_blocked"),
 )
 _WRITE_BACK_STATUS = {"written": "written", "skipped": "skipped", "disabled": "skipped"}
@@ -530,8 +480,8 @@ def collect_kb_write_back_event(
     if not outcome and not raw_status:
         return None
     if raw_status == "pending":
-        # A run that died mid-publish leaves the marker behind; reporting it as
-        # a write would claim an outcome the KB never confirmed.
+        # A run that died mid-publish leaves the marker behind; reporting it as a write would claim an outcome the KB
+        # never confirmed.
         raw_status = "failed"
 
     reason = str(outcome.get("reason") or "")
@@ -558,8 +508,8 @@ def collect_kb_write_back_event(
         ext["result_type"] = result_type
         ext["raw_reason"] = reason or None
     if status == "failed":
-        # The publisher surfaces transport and build failures as the exception
-        # class name, so the reason doubles as the class.
+        # The publisher surfaces transport and build failures as the exception class name, so the reason doubles as
+        # the class.
         ext["failure"] = {"error_class": reason or None, "error": reason or None}
 
     ts = str(outcome.get("updated_at") or "")

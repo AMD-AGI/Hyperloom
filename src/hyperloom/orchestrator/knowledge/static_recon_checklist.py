@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Seed checklist for the static-recon specialist.
-
-The static-recon specialist is a read-only PRELUDE sub-agent that greps the
-framework source tree (vLLM / SGLang) for *un-bridged capability switches* —
-fast paths that *should* be enabled for the current ``(model_class, gpu_type,
-precision)`` but are silently disabled by a predicate (e.g. a CUDA-only
-``*_supported()`` helper returning ``False`` on ROCm). This module seeds the
-specialist with a curated list of known patterns to look for.
-
-Each :class:`ChecklistEntry` describes one known "bridge opportunity":
-- ``id`` — stable slug, used to build the gap canonical id.
-- ``applies_when`` — coarse predicate over ``{gpu, precision}`` (``"*"`` = any)
-  so an entry is only handed to a run where it could plausibly fire.
-- ``detect`` — what to grep for and how to confirm the path is disabled.
-- ``consequence`` — what regression the disabled path causes.
-- ``bridge`` — advisory sketch of the fix.
-- ``domain_hint`` — which specialist domain should pick up the gap.
-- ``evidence`` — provenance (PR / session) the pattern was distilled from.
-
-A small, hand-curated starter set keyed to validated findings.
-"""
+"""Seed checklist for the static-recon specialist."""
 
 from __future__ import annotations
 
@@ -31,20 +11,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ChecklistEntry:
-    """One known un-bridged-capability pattern the static-recon specialist hunts.
-
-    Attributes:
-        id: Stable slug; used to build ``gap.static_recon.<id>``.
-        applies_when: Coarse match dict over ``{"gpu": ..., "precision": ...}``.
-            Values are lower-cased substrings; ``"*"`` (or absent) matches any.
-        detect: Grep target + confirmation instruction handed to the specialist.
-        consequence: The regression caused while the path stays disabled.
-        bridge: Advisory sketch of the fix.
-        domain_hint: Specialist domain to route the seeded gap to.
-        source_dirs: Source subdirectories to point the specialist at (relative
-            to a framework source root); rendered as ``source_hint_directories``.
-        evidence: Provenance refs (PR / session) the pattern was distilled from.
-    """
+    """One known un-bridged-capability pattern the static-recon specialist hunts."""
 
     id: str
     applies_when: dict[str, str]
@@ -206,14 +173,7 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
 
 
 def _matches(entry_val: str, run_val: str) -> bool:
-    """Return True when a checklist ``applies_when`` value matches the run value.
-
-    ``"*"`` / empty matches anything. Otherwise the run value is tokenized on
-    non-alphanumeric boundaries (so ``"fp8_e4m3"`` -> ``{"fp8", "e4m3"}``) and
-    the entry value matches iff it equals the whole run value or is one of its
-    tokens. This is deliberately NOT a loose substring match, so ``"fp8"`` does
-    NOT match ``"mxfp8"`` and vice versa (they are distinct precisions).
-    """
+    """Return True when a checklist ``applies_when`` value matches the run value."""
     entry_val = (entry_val or "").strip().lower()
     if not entry_val or entry_val == "*":
         return True
@@ -227,12 +187,7 @@ def _matches(entry_val: str, run_val: str) -> bool:
 
 
 def _gpu_family(gpu_type: str) -> str:
-    """Map a GPU type label to a coarse family token used by ``applies_when``.
-
-    AMD Instinct parts (``MI300X`` / ``MI325X`` / ``MI355X`` / ``gfx94*`` /
-    ``gfx95*``) map to ``"rocm"``; everything else passes through lower-cased so
-    a CUDA/NVIDIA entry could match in the future.
-    """
+    """Map a GPU type label to a coarse family token used by ``applies_when``."""
     g = (gpu_type or "").strip().lower()
     if g.startswith("mi") or g.startswith("gfx") or "rocm" in g or "amd" in g:
         return "rocm"
@@ -264,20 +219,7 @@ def workload_precision(state: object) -> str:
 
 
 def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
-    """Return the checklist entries applicable to a ``(model_class, gpu, precision)``.
-
-    ``model_class`` is currently advisory (entries gate on gpu/precision only);
-    it is accepted now so the signature is stable when model-class-specific
-    entries are added.
-
-    Args:
-        model_class: Categorical model class (advisory; reserved for future use).
-        gpu_type: GPU type label (e.g. ``"MI300X"``), normalized to a family.
-        precision: Workload precision (e.g. ``"fp8"`` / ``"mxfp8"``).
-
-    Returns:
-        The matching :class:`ChecklistEntry` list (possibly empty).
-    """
+    """Return the checklist entries applicable to a ``(model_class, gpu, precision)``."""
     gpu_fam = _gpu_family(gpu_type)
     out: list[ChecklistEntry] = []
     for e in _CHECKLIST:
@@ -290,19 +232,7 @@ def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "
 
 
 def source_hint_directories_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
-    """Return the de-duplicated source subdirectories to point the specialist at.
-
-    Built from the ``source_dirs`` of every applicable checklist entry, in first
-    -seen order so the prompt's navigation hint is stable.
-
-    Args:
-        model_class: Categorical model class (advisory; reserved for future use).
-        gpu_type: GPU type label.
-        precision: Workload precision.
-
-    Returns:
-        Ordered tuple of relative source subdirectories (possibly empty).
-    """
+    """Return the de-duplicated source subdirectories to point the specialist at."""
     seen: set[str] = set()
     out: list[str] = []
     for e in entries_for(model_class=model_class, gpu_type=gpu_type, precision=precision):
@@ -315,14 +245,7 @@ def source_hint_directories_for(*, model_class: str = "", gpu_type: str = "", pr
 
 
 def render_checklist_for_prompt(entries: list[ChecklistEntry]) -> str:
-    """Render checklist entries as a Markdown block for the specialist prompt.
-
-    Args:
-        entries: The applicable checklist entries (from :func:`entries_for`).
-
-    Returns:
-        A Markdown string, or ``""`` when there are no entries.
-    """
+    """Render checklist entries as a Markdown block for the specialist prompt."""
     if not entries:
         return ""
     lines: list[str] = []
@@ -339,14 +262,7 @@ def render_checklist_for_prompt(entries: list[ChecklistEntry]) -> str:
 
 
 def checklist_as_dicts(entries: list[ChecklistEntry]) -> list[dict[str, object]]:
-    """Serialize checklist entries to plain dicts (for task params / persistence).
-
-    Args:
-        entries: The applicable checklist entries.
-
-    Returns:
-        A JSON-serializable list of dicts mirroring the dataclass fields.
-    """
+    """Serialize checklist entries to plain dicts (for task params / persistence)."""
     out: list[dict[str, object]] = []
     for e in entries:
         out.append(
@@ -365,20 +281,7 @@ def checklist_as_dicts(entries: list[ChecklistEntry]) -> list[dict[str, object]]
 
 
 def filter_entries_for_model(entries: list[ChecklistEntry], model_info: dict) -> list[ChecklistEntry]:
-    """Filter checklist entries based on model metadata.
-
-    Currently gates ``rocm.moe.shared_expert_fusion`` on
-    ``model_info["has_shared_expert"]`` so the entry does not appear for
-    ROCm + MXFP8 runs whose model has no always-on shared expert.
-
-    Args:
-        entries: Candidate entries (typically from :func:`entries_for`).
-        model_info: The session ``model_info`` dict (may be empty).
-
-    Returns:
-        Filtered list; entries not requiring model-level gating pass through
-        unchanged.
-    """
+    """Filter checklist entries based on model metadata."""
     if model_info.get("has_shared_expert"):
         return list(entries)
     return [e for e in entries if e.id != "rocm.moe.shared_expert_fusion"]

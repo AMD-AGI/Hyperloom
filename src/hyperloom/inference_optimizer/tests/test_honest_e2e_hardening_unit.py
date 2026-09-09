@@ -1,11 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the HL_HONEST_E2E hardening helpers:
-umbrella-flag resolution, VRAM util guard, import-grep source confirmation,
-op-fanout de-dup in candidate batching, and umbrella-driven GEAK promotion.
-
-Honest-E2E defaults ON (umbrella); the "off" tests opt out with HL_HONEST_E2E=0.
+"""Unit coverage for the HL_HONEST_E2E hardening helpers: umbrella-flag resolution, VRAM util guard, import-grep source
+confirmation, op-fanout de-dup in candidate batching, and umbrella-driven GEAK promotion.
 """
 
 from __future__ import annotations

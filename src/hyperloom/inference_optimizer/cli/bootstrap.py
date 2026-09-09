@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session bootstrap + summary helpers for the CLI.
-
-Seeds SharedState, snapshots system prompts, prints the session skeleton /
-final summary, and resolves reference-recipe / target-summary inputs. Must not
-import ``cli`` (one-way dependency).
-"""
+"""Session bootstrap + summary helpers for the CLI."""
 
 from __future__ import annotations
 
@@ -46,15 +41,7 @@ log = logging.getLogger(__name__)
 
 
 def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
-    """Parse ``--extra-env NAME=VALUE`` pins into a mapping.
-
-    Args:
-        args: Parsed CLI args carrying the repeatable ``extra_env`` list.
-
-    Returns:
-        The pins as a mapping; entries without an ``=`` or with a blank name are
-        dropped.
-    """
+    """Parse ``--extra-env NAME=VALUE`` pins into a mapping."""
     pins: dict[str, str] = {}
     for item in getattr(args, "extra_env", None) or []:
         key, sep, value = str(item).partition("=")
@@ -64,47 +51,19 @@ def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
 
 
 def resolve_model_display_name(args: argparse.Namespace) -> str:
-    """Resolve the canonical model identity used for session naming / display.
-
-    The quantization prelude rewrites ``args.model`` to an export dir whose
-    basename is always ``quantized``, so it pins the source identity on
-    ``args.model_display_name``; this helper prefers that and otherwise falls
-    back to the model-path basename.
-
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        The pinned display name when set, else ``Path(args.model).name``.
-    """
+    """Resolve the canonical model identity used for session naming / display."""
     override = (getattr(args, "model_display_name", "") or "").strip()
     if override:
         return override
     return Path(str(getattr(args, "model", "") or "")).name
 
 
-# Bump when a change makes previously recorded AgentX measurements
-# incomparable. Epoch 1: aligned to the InferenceX leaderboard invocation
-# (upstream scenario + 062126 corpus + native context window + error-rate gate);
-# everything measured before it used a context-truncated corpus with no error
-# gate, so those numbers describe a different workload.
+# Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
 def agentx_state_is_stale(state: Any) -> str:
-    """Return why a resumed session's AgentX state is unusable, or ``""``.
-
-    Two independent reasons, both of which would otherwise corrupt the KEEP
-    ledger silently: the session was measured in the other benchmark mode (the
-    ledger is keyed on server args alone, so rows collide), or it was measured
-    in an older AgentX epoch (same knobs, different workload).
-
-    Args:
-        state: The loaded :class:`SharedState`.
-
-    Returns:
-        A human-readable reason, or ``""`` when the state may be reused.
-    """
+    """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
     want_mode = "agentx" if _agentx_enabled() else "synthetic"
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
     if had_mode and had_mode != want_mode:
@@ -124,6 +83,28 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
+def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
+    """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.inference_optimizer.agentx.mapping import (
+        CANONICAL_CORPUS_DURATION_S,
+        CANONICAL_CORPUS_ENTRIES,
+        CANONICAL_CORPUS_LOADER,
+        CANONICAL_ISL,
+        CANONICAL_OSL,
+        CANONICAL_PREFIX_CACHE_HIT,
+    )
+
+    return {
+        "corpus_loader": CANONICAL_CORPUS_LOADER,
+        "corpus_entries": CANONICAL_CORPUS_ENTRIES,
+        "duration_s": float(CANONICAL_CORPUS_DURATION_S),
+        "isl": dict(CANONICAL_ISL),
+        "osl": dict(CANONICAL_OSL),
+        "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
+        "source": "canonical",
+    }
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -131,25 +112,7 @@ def _seed_shared_state(
     session_id: str,
     compute_partition: dict[str, Any] | None = None,
 ) -> SharedState:
-    """Construct and persist the initial :class:`SharedState` for a run.
-
-    Seeds the state from parsed CLI args, clamping the research-lane
-    capacity to a safe range to protect quota and the PR-Monitor.
-
-    Args:
-        session_dir: Directory for the new session.
-        args: Parsed CLI arguments.
-        session_id: Identifier assigned to the session.
-        compute_partition: The shape the launch validated, passed in rather than
-            re-read because the environment carries a lossy subset of it: the
-            published variables cannot express where the CU count came from, and
-            an absent provenance flag would be reported as a board-table guess
-            when the device was in fact probed. Falls back to the published
-            variables when a caller has no verdict to hand over.
-
-    Returns:
-        The seeded :class:`SharedState` instance.
-    """
+    """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
     from hyperloom.orchestrator.policy.gate import (
         detect_gpu_count,
@@ -188,20 +151,9 @@ def _seed_shared_state(
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
 
-    # Resolve int workload knobs from the CLI arg, applying the shared fallback
-    # default when unset. Inherited env is NOT a config source (issue #903); the
-    # CLI resolver (`_resolve_workload_knobs`) has already folded any resume
-    # state into ``args`` before this seed runs.
+    # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:
-        """Resolve an int workload knob from ``args``, else the fallback default.
-
-        Args:
-            arg_name (str): Attribute name to read off ``args``.
-            default (int): Fallback applied when the arg is unset/0.
-
-        Returns:
-            int: The resolved value, or ``default`` when the arg is unset/invalid.
-        """
+        """Resolve an int workload knob from ``args``, else the fallback default."""
         val = getattr(args, arg_name, None)
         if val is None:
             return int(default)
@@ -212,11 +164,7 @@ def _seed_shared_state(
         return resolved if resolved > 0 else int(default)
 
     def _resolve_framework_version(args_in: Any) -> str:
-        """Resolve ``framework_version`` for the recipe-snapshot canonical id.
-
-        Ladder: explicit CLI/$FRAMEWORK_VERSION -> auto-detect package version
-        -> "". Auto-detect runs only when both CLI and env are empty.
-        """
+        """Resolve ``framework_version`` for the recipe-snapshot canonical id."""
         explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
             os.environ.get("FRAMEWORK_VERSION", "") or ""
         ).strip()
@@ -285,8 +233,7 @@ def _seed_shared_state(
     # Persisted for the session breakdown; the runtime reads the env directly.
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
-    # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
-    # base for the baseline server args.
+    # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
     _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
@@ -325,14 +272,17 @@ def _seed_shared_state(
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         target_summary=args.target_summary or _default_target_summary(args),
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
+        # overwritten by the measured shape after every aiperf run.
+        agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
         reference_model=_ref_model,
         reference_source=_ref_source,
-        # Operator launch shape; the process env carries it for one process only,
-        # so a resume re-exports it from here rather than from argv.
+        # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
+        # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
@@ -358,15 +308,7 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
-        # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
-        # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
-        # explicitly rejects "RUN_EVAL=false in a YAML" as an excuse and would
-        # stamp the baseline as an eval failure -- which blocks it from anchoring
-        # ``baseline_tput``, leaving every variant's gain None and stalling or
-        # stopping the session. Routing AgentX through the same channel as
-        # ``--no-eval`` is what makes the opt-out legible to that guard.
-        eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
+        eval_disabled=bool(getattr(args, "no_eval", False)),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
@@ -374,8 +316,10 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase concurrency sweep flags (on by default, both workloads).
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
+        # rung is a 3600s window and the session grades at a fixed CONC.
+        # Pass --enable-conc-sweep explicitly to override.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
@@ -396,17 +340,7 @@ def _snapshot_system_prompts(
     prompts: dict[str, str],
     orchestration_phase: str = "",
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
-
-    The boot orchestration prompt is also written under its phase suffix; the
-    Coordinator adds one file per later phase it re-scopes into.
-
-    Args:
-        session_dir (Path): The session root directory.
-        prompts (dict[str, str]): Effective system prompt per agent role.
-        orchestration_phase (str): Phase the boot orchestration prompt was
-            scoped to; ``""`` writes only the unsuffixed snapshot.
-    """
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -418,12 +352,7 @@ def _snapshot_system_prompts(
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
-    """Echo the freshly-created skeleton so launchers see the exact layout.
-
-    Args:
-        session_dir (Path): The session root directory whose skeleton
-            subdirectories are listed.
-    """
+    """Echo the freshly-created skeleton so launchers see the exact layout."""
     print(f"Session layout under {session_dir}:")
     for sub in _SESSION_SKELETON:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
@@ -436,24 +365,7 @@ def _print_final_summary(
     stop_reason: str,
     session_dir: Path | None = None,
 ) -> None:
-    """Print the end-of-run summary block to stdout.
-
-    Reports the stop reason, session id, model, baseline throughput, the
-    validated cumulative gain (with a staleness warning when the optimization
-    stack grew after the last validation), the current best config, pruned
-    families, and crash count.
-    On ``baseline_failed`` it also surfaces the real terminal root cause from
-    ``reports/final.json``.
-
-    Args:
-        state (SharedState): The final shared state after the run completes.
-        stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
-        session_dir (Path | None): Session root, used to read the
-            ``failure_summary`` block on failure runs.
-
-    Returns:
-        None
-    """
+    """Print the end-of-run summary block to stdout."""
     print()
     print("================ Final summary ================")
     print(f"  stop_reason          : {stop_reason}")
@@ -495,127 +407,75 @@ def _print_final_summary(
 
 
 def _bank_previous_leg_phase_segment(state: SharedState) -> None:
-    """Bank the phase time the stopped leg spent but never recorded.
-
-    Per-phase totals are banked at each transition out of a phase, so a leg that
-    stopped mid-phase left its last segment live — and the resume boundary is
-    about to floor that segment away as the idle gap it mostly is.
-    :attr:`SharedState.stop_ts` is the only recorded evidence of when the leg
-    ended; a clean stop or a crash leaves none, and then the segment stays
-    unbanked. That under-charges the phase, which is the direction the phase
-    clock tolerates: over-charging ends a phase early.
-
-    The end is clamped to the present for the same reason: no leg can have run
-    past the moment it is being resumed, so a ``stop_ts`` stamped ahead of now
-    would bank the difference as spend the phase never had.
-
-    Must run before ``resumed_ts`` is restamped, which would floor the segment
-    to nothing.
-
-    Args:
-        state (SharedState): The loaded session state, mutated in place.
-    """
+    """Bank the phase time the stopped leg spent but never recorded."""
     stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
     if stop_unix <= 0.0:
         return
     bank_phase_segment(state, until_unix=stop_unix)
 
 
-def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
+def _begin_resume_leg(state: SharedState) -> str:
     """Mark the start of a resumed run leg on ``state`` (caller persists).
 
-    Every resume stamps :attr:`SharedState.resumed_ts`. The previous leg's
-    CLOSE transition stays in ``phase_history`` and would otherwise keep
-    speaking for the resumed run — a report reads it as the session's stop
-    reason and end time — and this boundary is what dates it as a previous
-    leg's. It is also what stops the phase clock charging the gap between the
-    two legs to whichever phase the session stopped in.
+    Stamps :attr:`SharedState.resumed_ts`, which dates the previous leg's CLOSE
+    transition in ``phase_history`` as a previous leg's and stops the phase
+    clock charging the gap between the two legs to the phase it stopped in.
+    Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
+    makes Orchestration heartbeats think the work is done, and a stale closing
+    flag resumes straight into a wind-down already finished.
 
-    Only a previous leg that stopped for a recorded reason, or crashed
-    repeatedly, re-anchors the wall-clock budget. That also clears
-    ``deadline_unix`` so ``Coordinator.run`` can stamp a new one from the
-    reset ``start_ts``; keeping the spent stamp would make ``--force-resume``
-    after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
-    and the stamp are deliberately kept, so remaining wall-clock is the
-    persisted deadline, not this invocation's ``--max-hours``. Raising that
-    flag on this path does not extend the stamp. The phase clock moves on
-    either branch: the two answer different questions, and neither answer
-    includes time nothing was running.
+    The wall-clock budget is untouched. Elapsed time is summed forward across
+    legs, so this leg starts from whatever the session has already spent;
+    :meth:`SharedState.extend_budget_minutes` is the only way to lengthen it.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
-        reanchor_budget (bool): Whether the budget restarts from this leg.
 
     Returns:
         str: The timestamp stamped as this leg's boundary.
     """
     _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
-    if reanchor_budget:
-        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats
-        # forever think the work is done.
-        state.stop_reason = ""
-        state.stop_ts = ""
-        state.closing_phase = False
-        state.closing_started_unix = 0.0
-        state.closing_report_task_id = ""
-        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
-        state.crash_count = 0
-        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
-        state.start_ts = state.resumed_ts
-        # The stamp is the loop's budget. Leaving a spent one in place after
-        # resetting start_ts would make this leg look already exhausted.
-        state.deadline_unix = 0.0
-        state.teardown_timings_sec = {}
+    state.stop_reason = ""
+    state.stop_ts = ""
+    state.closing_phase = False
+    state.closing_started_unix = 0.0
+    state.closing_report_task_id = ""
+    state.crash_count = 0
+    state.teardown_timings_sec = {}
+    state.begin_leg()
     return state.resumed_ts
 
 
-def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
-    """Operator-facing resume notes when the wall-clock stamp is kept.
-
-    Remaining time is :meth:`SharedState.remaining_minutes` (the stamp), not
-    this invocation's ``--max-hours``. Raising that flag here does not extend
-    the deadline.
+def _resume_budget_lines(state: SharedState, *, extend_hours: float) -> list[str]:
+    """Operator-facing notes about what budget the resumed leg actually has.
 
     Args:
         state: Loaded session state after :func:`_begin_resume_leg`.
-        max_hours: This invocation's ``--max-hours``.
+        extend_hours: Hours this invocation granted via ``--extend-hours``.
 
     Returns:
         Lines to print, each already prefixed with ``  → ``.
     """
     elapsed_h = state.elapsed_minutes() / 60.0
     remaining_min = state.remaining_minutes()
-    lines = [
-        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): the persisted deadline is kept",
-    ]
+    lines = [f"  → {elapsed_h:.2f}h charged to this session across every leg so far"]
     if remaining_min is None:
-        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        lines.append("  → budget: unbounded")
         return lines
-    remaining_h = remaining_min / 60.0
-    lines.append(f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp")
-    cli_hours = float(max_hours or 0.0)
+    lines.append(f"  → budget: {float(state.max_minutes) / 60.0:.2f}h total, {remaining_min / 60.0:.2f}h left")
+    if extend_hours > 0.0:
+        lines.append(f"  → --extend-hours added {extend_hours:.2f}h to the session budget")
     if remaining_min <= 0.0:
         lines.append(
-            "  → WARNING: the stamped deadline is already spent; start a fresh "
-            "session, or the run stops almost immediately"
+            "  → WARNING: the budget is spent; this leg will close almost "
+            "immediately. Pass --extend-hours to grant more, or start a fresh session"
         )
-        lines.append(
-            "  → raising --max-hours on a clean-stop resume does not extend the "
-            "stamp; a recorded stop_reason re-anchors the budget"
-        )
-    elif cli_hours > 0.0:
-        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
-        if abs(cli_left_min - remaining_min) > 1.0:
-            lines.append(f"  → this invocation's --max-hours {cli_hours:.2f} does not extend or shrink that stamp")
     return lines
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
-    """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value.
-
-    Only ever raises the persisted value (max), never lowers it; best-effort, never fatal.
-    """
+    """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value."""
     live = int(getattr(state, "crash_count", 0) or 0)
 
     # state.json: reload, bump if stale, atomic re-save.
@@ -673,24 +533,7 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:
-    """Compose a human-readable objective summary from the CLI target flags.
-
-    Used as the fallback ``target_summary`` when the operator did not pass an
-    explicit ``--target-summary``. The phrasing depends on which target flag is
-    set: ``--target-gain`` (percentage), ``--target-roofline`` (percentage of
-    the modelled ceiling, which composes with the others), ``--target-tput``
-    (tok/s/GPU for
-    serving; for scriptable xDiT the target throughput is img/s and is shown as
-    the equivalent per-image latency e2el_mean_ms), or neither (open-ended
-    optimization within the time budget).
-
-    Args:
-        args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
-            ``target_gain``, ``target_tput``, ``max_hours``, ``framework``).
-
-    Returns:
-        str: A one-sentence description of the run's objective.
-    """
+    """Compose a human-readable objective summary from the CLI target flags."""
     roofline = getattr(args, "target_roofline", None)
     also = f" or {roofline}% of the roofline ceiling" if roofline else ""
     if args.target_gain:
@@ -713,12 +556,7 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 
 def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
-    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped.
-
-    An unset flag falls back to *benchmark_mode*'s own ladder, which is why the
-    flag defaults to ``None`` rather than to a ladder string: a typed value must
-    be distinguishable from an omitted one.
-    """
+    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
 
     fallback = default_concs_for_mode(benchmark_mode)
@@ -738,12 +576,7 @@ def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> li
 
 
 def _read_failure_summary(session_dir: Path) -> dict | None:
-    """Read ``reports/final.json``'s ``failure_summary`` block, if present.
-
-    Best-effort: returns ``None`` when the file is missing/unreadable or the
-    block is absent (e.g. non-failure runs). Used to surface the real terminal
-    root cause in the end-of-run summary on ``baseline_failed``.
-    """
+    """Read ``reports/final.json``'s ``failure_summary`` block, if present."""
     try:
         from ..session.session_paths import reports_dir
 
@@ -758,12 +591,7 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 def _resolve_reference_recipe(
     args: argparse.Namespace,
 ) -> tuple[str, dict[str, str], str, str]:
-    """Resolve the reference launch recipe for a fresh launch.
-
-    Returns ``(server_args, envs, model, source)``, empty when
-    ``--reference-script`` was not given. A flag pointing at a recipe that cannot
-    be read or yields nothing usable exits with ``SystemExit(2)``.
-    """
+    """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
         return ("", {}, "", "")

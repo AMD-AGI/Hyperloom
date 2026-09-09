@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SQLite schema for the unified Coordinator state DB
-(``$SESSION_DIR/storage/coordinator.db``).
-
-Tables: ``leases`` (composite PK ``(lane, holder_id)`` for multi-holder
-lanes), ``lane_capacity``, ``events`` (A2A bus), ``cursors`` (idempotent
-replay), ``tasks`` (lifecycle state machine), ``gpu_leases`` (specialist GPU
-pool, separate from serving lanes).
-
-No FK constraints between ``tasks`` and ``leases``/``events``: lifetimes
-differ (a task's leases may be reaped before its events are pruned), so
-``leases.task_id`` / ``events.in_reply_to`` are advisory only.
-"""
+"""SQLite schema for the unified Coordinator state DB (``$SESSION_DIR/storage/coordinator.db``)."""
 
 from __future__ import annotations
 
@@ -22,13 +11,10 @@ import sqlite3
 # version already in the DB, so a database written by an older version keeps its
 # own columns and is read as-is. Rows are addressed by column name, so a column
 # this version no longer writes is inert rather than a migration hazard.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
-# Default lane capacities; ``--research-lane-capacity`` overrides research_lane
-# at boot. ``gpu_research_lane`` carries GPU specialists and is mutually
-# exclusive with the serving lanes (LANE_CONFLICTS); it is capacity-1 so a
-# single GPU specialist holds the machine at a time.
+# Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "server_lifecycle": 1,
     "workspace_mutation": 1,
@@ -121,6 +107,41 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
+    # bringup_rounds — the durable mutex deciding whether another round may
+    # start. Admission reads state and expires_unix, so exclusion is bounded by
+    # the lease: a round nobody settles stops excluding on its own.
+    """
+    CREATE TABLE IF NOT EXISTS bringup_rounds (
+        round_id             TEXT    PRIMARY KEY,
+        state                TEXT    NOT NULL CHECK (state IN ('open','settled')),
+        outcome              TEXT    NOT NULL DEFAULT '',
+        holder_task_id       TEXT    NOT NULL,
+        fence                INTEGER NOT NULL DEFAULT 1,
+        opened_unix          REAL    NOT NULL,
+        renewed_unix         REAL    NOT NULL,
+        expires_unix         REAL    NOT NULL,
+        settled_unix         REAL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_state ON bringup_rounds(state, opened_unix)",
+    # round_events — append-only audit trail. Every attempt lands here with
+    # its outcome, evidence and request id, applied or rejected.
+    """
+    CREATE TABLE IF NOT EXISTS round_events (
+        event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id      TEXT    NOT NULL,
+        request_id    TEXT    NOT NULL,
+        op            TEXT    NOT NULL,
+        result        TEXT    NOT NULL CHECK (result IN ('applied','rejected','duplicate')),
+        outcome       TEXT    NOT NULL DEFAULT '',
+        fence         INTEGER NOT NULL DEFAULT 0,
+        actor_task_id TEXT    NOT NULL DEFAULT '',
+        reason        TEXT    NOT NULL DEFAULT '',
+        evidence      TEXT    NOT NULL DEFAULT '{}',
+        recorded_unix REAL    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_round_events_round ON round_events(round_id, event_id)",
     # schema_version — tracks future migrations
     """
     CREATE TABLE IF NOT EXISTS schema_version (
@@ -138,17 +159,14 @@ _MANAGED_TABLES = (
     "events",
     "cursors",
     "tasks",
+    "bringup_rounds",
+    "round_events",
     "schema_version",
 )
 
 
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
-    """Idempotently insert default capacity rows; existing rows are left
-    alone so a resume preserves the operator's choice.
-
-    Args:
-        cur: Open SQLite cursor within the caller's transaction.
-    """
+    """Idempotently insert default capacity rows; existing rows are left alone so a resume preserves the operator's choice."""
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
         cur.execute(
             "INSERT OR IGNORE INTO lane_capacity(lane, capacity) VALUES (?, ?)",
@@ -161,17 +179,7 @@ def set_lane_capacity(
     lane: str,
     capacity: int,
 ) -> None:
-    """Upsert one ``lane_capacity`` row.
-
-    Called by the CLI / Coordinator boot path once
-    :data:`SharedState.research_lane_capacity` is known. Runs in its
-    own ``BEGIN IMMEDIATE`` transaction.
-
-    Args:
-        conn (sqlite3.Connection): Open database connection.
-        lane (str): Lane name to set capacity for.
-        capacity (int): New capacity value.
-    """
+    """Upsert one ``lane_capacity`` row."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
@@ -189,19 +197,7 @@ def set_lane_capacity(
 
 
 def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
-    """Return capacity for ``lane``, falling back to defaults.
-
-    Falls back to :data:`DEFAULT_LANE_CAPACITIES` (and finally ``1``
-    for unknown lanes — defensive, since ``ensure_schema`` already
-    seeds every known lane).
-
-    Args:
-        conn (sqlite3.Connection): Open database connection.
-        lane (str): Lane name to look up.
-
-    Returns:
-        int: Configured capacity, or the default for the lane.
-    """
+    """Return capacity for ``lane``, falling back to defaults."""
     cur = conn.cursor()
     try:
         cur.execute(
@@ -217,16 +213,7 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently create all tables, seed lane_capacity defaults, and
-    record the schema version. Single transaction so readers never see an
-    intermediate schema.
-
-    Args:
-        conn: Open database connection.
-
-    Returns:
-        The current (max) recorded schema version.
-    """
+    """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
@@ -249,14 +236,7 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
 
 
 def reset_schema(conn: sqlite3.Connection) -> None:
-    """Drop and recreate every managed table. Test-only convenience.
-
-    Drops all tables in :data:`_MANAGED_TABLES` in one transaction,
-    then re-runs :func:`ensure_schema` to rebuild them.
-
-    Args:
-        conn (sqlite3.Connection): Open database connection.
-    """
+    """Drop and recreate every managed table. Test-only convenience."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")

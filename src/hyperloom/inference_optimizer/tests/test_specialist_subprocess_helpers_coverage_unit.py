@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for specialist_subprocess helpers: worktree pick/setup/teardown,
-claude argv assembly, patch discovery, and done-file parse/unwrap."""
+"""Coverage for specialist_subprocess helpers: worktree pick/setup/teardown, claude argv assembly, patch discovery, and
+done-file parse/unwrap.
+"""
 
 from __future__ import annotations
 
@@ -42,15 +43,7 @@ def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
 
 
 def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: Path) -> None:
-    """The session's own framework wins over whatever trusted root sorts first.
-
-    ``roots`` is the source-file allowlist — a *permission* list whose order
-    carries no information about which framework the session is optimising.
-    Choosing the base from it by position is how a WorldPlay session ended up
-    with an aiter worktree: the pod shipped aiter as a git checkout, so it
-    sorted first, and every patch the specialist wrote against ``hyvideo/``
-    paths was dropped by patch-safety as ``missing_target``.
-    """
+    """The session's own framework wins over whatever trusted root sorts first."""
     other = tmp_path / "aiter"
     other.mkdir()
     (other / ".git").mkdir()
@@ -66,8 +59,7 @@ def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: P
 def test_pick_worktree_base_ignores_a_preferred_root_that_is_not_a_checkout(
     tmp_path: Path,
 ) -> None:
-    """A framework that is pip-installed rather than checked out must not
-    disable isolation; the allowlist order still supplies a usable base."""
+    """A framework that is pip-installed rather than checked out must not disable isolation; the allowlist order still supplies a usable base."""
     other = tmp_path / "aiter"
     other.mkdir()
     (other / ".git").mkdir()
@@ -232,8 +224,8 @@ def test_read_done_non_dict(tmp_path: Path) -> None:
 
 def test_read_done_flat_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
-    p.write_text(json.dumps({"empty": True, "proposal_set": []}), encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) == {"empty": True, "proposal_set": []}
+    p.write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(p) == {"proposal_set": []}
 
 
 def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
@@ -243,7 +235,7 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
             {
                 "intent_type": "specialist_done",
                 "domain": "kernel_switch_specialist",
-                "payload": {"proposal_set": [{"name": "v1"}], "empty": False},
+                "payload": {"proposal_set": [{"name": "v1"}]},
             }
         ),
         encoding="utf-8",

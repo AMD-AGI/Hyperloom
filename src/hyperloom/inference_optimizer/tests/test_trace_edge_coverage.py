@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Edge-path coverage for the trace parsers and Langfuse mapping helpers.
-
-Exercises the tolerant/degenerate branches (blank lines, malformed JSON,
-non-dict rows, unreadable paths, and non-numeric fields) so a parse miss
-degrades to an empty/``None`` result instead of raising.
-"""
+"""Edge-path coverage for the trace parsers and Langfuse mapping helpers."""
 
 from __future__ import annotations
 
@@ -88,14 +83,6 @@ def test_summarize_tool_input_unserializable_dict_falls_back_to_str():
 def test_summarize_tool_input_non_dict_values():
     assert pu._summarize_tool_input(None) == ""
     assert pu._summarize_tool_input(123) == "123"
-
-
-def test_forge_usage_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_usage("FORGE_LLM_USAGE") is None
-
-
-def test_forge_steps_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_steps("FORGE_STEPS") is None
 
 
 def test_parse_ts_missing_and_unparseable():

@@ -14,7 +14,6 @@ from hyperloom.agents.robustness.role.envelope import (
     build_alert,
     build_delegate,
     build_escalate,
-    build_heartbeat,
     build_prune_branch,
     build_send_message,
     build_update_state,
@@ -29,8 +28,8 @@ def policy() -> PolicyAware:
 # Happy path — every builder output should be emit-safe
 
 
-def test_heartbeat_passes(policy: PolicyAware):
-    policy.assert_payload_complete(build_heartbeat())
+def test_idle_observation_passes(policy: PolicyAware):
+    policy.assert_payload_complete(build_send_message("observation", body_md="ok (robustness-agent)"))
 
 
 def test_send_message_observation_passes(policy: PolicyAware):

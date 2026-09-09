@@ -33,8 +33,8 @@ _CLI_STUB = SimpleNamespace(
     _model_is_moe=lambda _model: False,
     _model_moe_runner_requires_aiter=lambda _model: False,
     _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
-    # Supported, i.e. leave the server args alone: these tests assert what the
-    # trust/tokenizer path writes, not what the aiter MoE shape gate strips.
+    # Supported, i.e. leave the server args alone: these tests assert what the trust/tokenizer path writes, not what
+    # the aiter MoE shape gate strips.
     model_supports_aiter_ck_fused_moe=lambda _model, _tp: True,
 )
 
@@ -577,8 +577,8 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
 
 
 def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
-    # params has no model_path and MODEL_PATH is unset: without the SharedState
-    # fallback the bare YAML model name leaks into --model-path.
+    # params has no model_path and MODEL_PATH is unset: without the SharedState fallback the bare YAML model name
+    # leaks into --model-path.
     monkeypatch.delenv("MODEL_PATH", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
@@ -613,8 +613,8 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monke
 
 
 def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_path, monkeypatch):
-    # Production form: the executor is a module-level singleton and live state
-    # arrives via ctx.extra; without reading it the bare YAML model name leaks.
+    # Production form: the executor is a module-level singleton and live state arrives via ctx.extra; without reading
+    # it the bare YAML model name leaks.
     monkeypatch.delenv("MODEL_PATH", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
@@ -687,19 +687,14 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Default RESULT_DIR is the per-task workspace: this fixture omits
-    # benchmark_script so the cold-start double-run is not eligible and the
-    # single-round path runs directly in output_dir.
+    # Default RESULT_DIR is the per-task workspace: this fixture omits benchmark_script so the cold-start double-run
+    # is not eligible and the single-round path runs directly in output_dir.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
     assert "OPENAI_API_KEY" not in captured["env"]
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
-    """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
-
-    The mirror is disabled here so the asserted path is exactly the configured
-    ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
-    """
+    """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/path/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
@@ -804,11 +799,7 @@ def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
 
 
 def _seed_reference(tmp_path, monkeypatch, *, server_args: str = "", envs: dict | None = None) -> None:
-    """Pin a session whose SharedState carries the reference recipe.
-
-    ``materialize_config_with_envs`` reads the recipe from the session rather than
-    from its arguments, so every caller gets the same base.
-    """
+    """Pin a session whose SharedState carries the reference recipe."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     sd = tmp_path / "session"
@@ -840,12 +831,7 @@ def test_reference_base_seeds_lowest_priority(tmp_path, monkeypatch):
 
 
 def test_reference_base_reaches_a_caller_that_renders_its_own_yaml(tmp_path, monkeypatch):
-    """Every caller gets the recipe, not just the one that used to forward it.
-
-    ``explore`` / ``sweep`` / ``conc_sweep`` / ``integrate_patch`` /
-    ``framework_agent`` / ``rebench`` render their own YAML and pass no recipe;
-    they must still benchmark on the operator's base.
-    """
+    """Every caller gets the recipe, not just the one that used to forward it."""
     _seed_reference(
         tmp_path,
         monkeypatch,

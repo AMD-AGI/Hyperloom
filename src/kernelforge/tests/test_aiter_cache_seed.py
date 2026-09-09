@@ -1,10 +1,4 @@
-"""Unit tests for seed_prebuilt_modules symlink/skip/error/empty branches.
-
-seed_prebuilt_modules symlinks the package's warm ``.so`` into a pristine
-baseline shard so the preflight skips the multi-minute cold CK compile. The
-warm source is resolved from FORGE_AITER_WARM_JIT_DIR (or the installed aiter
-package), so we point it at a tmp dir here and exercise every branch.
-"""
+"""Unit tests for seed_prebuilt_modules symlink/skip/error/empty branches."""
 
 from __future__ import annotations
 
@@ -60,8 +54,7 @@ def test_seed_empty_warm_dir_warns(monkeypatch, tmp_path, caplog):
 
 
 def test_seed_missing_source_returns_early(monkeypatch, tmp_path):
-    # Override points at a nonexistent dir -> _global_aiter_jit_dir is None ->
-    # early return, no crash, nothing seeded.
+    # Override points at a nonexistent dir -> _global_aiter_jit_dir is None -> early return, no crash, nothing seeded.
     monkeypatch.setenv("FORGE_AITER_WARM_JIT_DIR", str(tmp_path / "nope"))
     stats = aiter_cache.seed_prebuilt_modules(tmp_path / "shard")
     assert stats["seeded"] == 0

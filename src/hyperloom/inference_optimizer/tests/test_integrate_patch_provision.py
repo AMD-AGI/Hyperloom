@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the attempt-runtime provision-stage wiring in integrate_patch.
-
-Exercises _stage_provision_attempt_runtime and the YAML-layer runtime activation
-in isolation, plus the KEEP/rearm stack-action survival and GC. All subprocess /
-adapter calls are mocked so no ROCm / network / real venv is needed.
-"""
+"""Tests for the attempt-runtime provision-stage wiring in integrate_patch."""
 
 from __future__ import annotations
 
@@ -84,20 +79,13 @@ def _executor(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _neutralize_disk_preflight(monkeypatch):
-    """Stop the real disk_preflight from leaking the runner's free-space into
-    these tests. The provision stage runs disk_preflight before consulting the
-    adapter; on a space-constrained CI runner (< 20 GB free on /tmp) it would
-    raise DiskPreflightError and short-circuit provision-logic tests that never
-    intend to exercise it. Tests that DO exercise it re-patch disk_preflight
-    themselves (that patch wins over this autouse no-op)."""
+    """Stop the real disk_preflight from leaking the runner's free-space into these tests."""
     import hyperloom.agents.framework.isolation as iso
 
     monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)
 
 
-# ---------------------------------------------------------------------------
 # provision stage: no candidate / skip paths
-# ---------------------------------------------------------------------------
 
 
 async def test_no_candidate_is_noop(_executor):
@@ -125,9 +113,7 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
     assert called["n"] == 0  # adapter never consulted in multi-node
 
 
-# ---------------------------------------------------------------------------
 # provision ok / fail
-# ---------------------------------------------------------------------------
 
 
 async def test_provision_ok_sets_ctx(_executor, monkeypatch):
@@ -187,9 +173,7 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
     assert called["n"] == 0  # never reached the adapter
 
 
-# ---------------------------------------------------------------------------
 # decision gate: runtime lands in materialized YAML, not os.environ
-# ---------------------------------------------------------------------------
 
 
 def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch):
@@ -228,12 +212,11 @@ def test_opt_venv_path_never_replaced(tmp_path):
     assert "/opt/venv/bin" in parts  # shared venv still present, not replaced
 
 
-# ---------------------------------------------------------------------------
 # rearm: KEEP'd stack action survives one rearm cycle
-# ---------------------------------------------------------------------------
 
 
-def test_kept_stack_action_survives_rearm(monkeypatch):
+@pytest.mark.asyncio
+async def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.enablement.params import _maybe_build_runtime_candidate  # noqa: F401
 
@@ -241,6 +224,11 @@ def test_kept_stack_action_survives_rearm(monkeypatch):
     state = SharedState()
     coord = types.SimpleNamespace(shared_state=state, session_dir=Path("/tmp/does-not-matter"))
     coord.save = lambda *a, **k: None
+
+    async def _no_round(*_a, **_k):
+        """No round is open, so the rearm's settle is a no-op."""
+
+    coord._settle_enablement_round = _no_round
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()
@@ -255,7 +243,7 @@ def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     monkeypatch.setattr(state, "save", lambda *a, **k: None, raising=False)
-    Coordinator._maybe_rearm_enablement(coord, res)
+    await Coordinator._maybe_rearm_enablement(coord, res)
 
     assert state.enablement.kept_stack_action == action_state
     assert state.enablement.active_runtime == runtime_state

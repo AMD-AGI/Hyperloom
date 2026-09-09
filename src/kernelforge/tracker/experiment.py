@@ -26,11 +26,7 @@ from kernelforge.durable_io import atomic_write_text
 
 
 class ExperimentTracker:
-    """Manages experiment lifecycle and persistence.
-
-    Each experiment is stored as a single JSON file in the experiments directory.
-    Files are named {experiment_id}.json.
-    """
+    """Manages experiment lifecycle and persistence."""
 
     def __init__(self, experiments_dir: str | Path):
         self.dir = Path(experiments_dir)
@@ -250,12 +246,7 @@ class ExperimentTracker:
             return iteration
 
     def set_llm_usage(self, experiment_id: str, usage: dict) -> None:
-        """Persist the run's total LLM token spend onto the experiment.
-
-        ``usage`` is the canonical totals dict from
-        :class:`~kernelforge.tracker.usage.UsageAccumulator`. No-op on an
-        empty/falsy usage so a no-agent run leaves the field unset.
-        """
+        """Persist the run's total LLM token spend onto the experiment."""
         if not usage:
             return
         with self._experiment_lock(experiment_id):
@@ -281,11 +272,7 @@ class ExperimentTracker:
         self._save(exp)
 
     def set_baseline(self, experiment_id: str, baseline_wall_ms: float) -> None:
-        """Persist an auto-measured baseline onto an experiment.
-
-        No-op if the experiment already has a baseline — task-supplied
-        baselines take precedence over the measured anchor.
-        """
+        """Persist an auto-measured baseline onto an experiment."""
         with self._experiment_lock(experiment_id):
             exp = self._load(experiment_id)
             if exp.baseline_wall_ms is None:

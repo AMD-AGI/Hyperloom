@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the quality-reference establish gate.
-
-Only a genuine ``baseline`` task may establish/overwrite the image-quality
-reference; other kinds (e.g. ``replay_warm_recipe``) compare against it.
-"""
+"""Unit tests for the quality-reference establish gate."""
 
 from __future__ import annotations
 
@@ -37,12 +33,7 @@ def test_missing_or_empty_kind_does_not_establish():
 
 
 def test_quality_ref_exempt_baseline_does_not_establish():
-    """Synthetic kernel-lane re-baselines opt out of establishing the ref.
-
-    Integrate re-baseline and stack validation both carry ``kind="baseline"``
-    literally, but are throughput-only probes against
-    an already-anchored baseline.
-    """
+    """Synthetic kernel-lane re-baselines opt out of establishing the ref."""
     assert _should_establish_quality_ref("baseline", {"quality_ref_exempt": True}) is False
 
 

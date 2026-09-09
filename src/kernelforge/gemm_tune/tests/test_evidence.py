@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for serving-log evidence parsing.
-
-Two parsing rules carry most of the weight:
-
-* the wide key group (dtype/otype/bias/scaleAB/bpreshuffle) is **optional** --
-  the bf16 op prints it, the a8w8_blockscale op prints M/N/K only. Requiring it
-  dropped 252 of 440 misses in the first version;
-* zero hit lines means *unknown*, not zero hits -- hit logging is gated behind
-  ``AITER_LOG_TUNED_CONFIG=1`` while miss logging is unconditional. Reading it
-  as zero would REVERT every arm that did not set the flag.
-"""
+"""Tests for serving-log evidence parsing."""
 
 from __future__ import annotations
 
@@ -67,6 +57,29 @@ class TestApplyVerdict:
         rep = ev.parse_log(_BF16_MISS)
         assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
 
+    def test_misses_with_hit_logging_on_is_a_real_zero(self):
+        # A caller that set the flag itself resolves the ambiguity, and the
+        # distinction matters: an op with genuinely zero shipped coverage is the
+        # strongest reason to tune it, while "not recorded" is no reason at all.
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        av = rep["apply_verdict"]
+        assert av["hit"] == 0 and av["miss"] == 1
+        assert av["verdict"] == "zero_hit"
+
+    def test_hit_logging_unknown_stays_inconclusive(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=None)
+        assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
+
+    def test_hit_logging_flag_cannot_manufacture_a_hit(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        assert rep["apply_verdict"]["hit"] == 0
+        assert rep["apply_verdict"]["hit_ratio"] == 0.0
+
+    def test_hit_logging_flag_is_irrelevant_once_something_hit(self):
+        for flag in (None, True, False):
+            rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]), hit_logging=flag)
+            assert rep["apply_verdict"]["verdict"] == "served"
+
     def test_any_hit_means_served(self):
         rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]))
         av = rep["apply_verdict"]
@@ -100,9 +113,8 @@ class TestDemandAggregation:
 
 class TestMoEDispatch:
     def test_stage_tokens_are_kept_per_stage(self):
-        # A model dispatches different stages at different token counts; a single
-        # "saw 1stage" boolean collapses that away and suppresses tuning for the
-        # range 2stage actually serves.
+        # A model dispatches different stages at different token counts; a single "saw 1stage" boolean collapses that
+        # away and suppresses tuning for the range 2stage actually serves.
         log = "\n".join(
             [
                 "[aiter] [fused_moe] using 1stage default for (304, 1, 4096, 1536, 256, 6)",
@@ -147,18 +159,16 @@ class TestDemandConsumption:
         assert [s["M"] for s in got] == [65536]
 
     def test_shapes_default_to_the_padded_M_a_row_must_be_written_at(self):
-        # aiter reaches a tuned row at the exact M, else at the padded M. 65536
-        # is past the 8192 clamp, so a row for it lives at 8192; writing it at
-        # 65536 produces a table no lookup can reach.
+        # aiter reaches a tuned row at the exact M, else at the padded M. 65536 is past the 8192 clamp, so a row for
+        # it lives at 8192; writing it at 65536 produces a table no lookup can reach.
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
         shapes = ev.demand_shapes(entry)
         assert shapes[0]["M"] == 8192
         assert shapes[0]["observed_M"] == [65536]
 
     def test_keys_sharing_a_bucket_cost_one_slot_not_several(self):
-        # The whole point of bucketing: three raw keys in one padded bucket are
-        # served by a single tuned row, so they must not eat three of the budget.
-        # Listed most-requested first, as parse_log emits them.
+        # The whole point of bucketing: three raw keys in one padded bucket are served by a single tuned row, so they
+        # must not eat three of the budget.
         entry = {
             "keys": [
                 {"M": "64", "N": "4096", "K": "4096", "requests": 11},
@@ -170,8 +180,8 @@ class TestDemandConsumption:
         shapes = ev.demand_shapes(entry)
         assert [(s["M"], s["requests"]) for s in shapes] == [(512, 12), (64, 11)]
         assert shapes[0]["observed_M"] == [300, 400, 512]
-        # ...and with one slot, the bucket worth 12 requests wins over the raw
-        # key worth 11, which the raw ordering would have picked first.
+        # ...and with one slot, the bucket worth 12 requests wins over the raw key worth 11, which the raw ordering
+        # would have picked first.
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
 

@@ -51,7 +51,6 @@ def _prepared_workspace(tmp_path: Path):
     (task_dir / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity_mapping,
                 "base_commit": base_commit,
                 "repo_root": str(repo),
@@ -161,10 +160,8 @@ def test_recovery_ignores_uncommitted_workspace_edits(tmp_path: Path) -> None:
 
 
 def test_a_stale_sidecar_does_not_pull_the_published_patch_backwards(tmp_path: Path) -> None:
-    # The two views are not equally attested: a manifest is trusted only once
-    # describes_current_best has confirmed a complete bundle, while the sidecar
-    # needs an improved flag and a commit. Preferring the sidecar whenever the
-    # commits differed let an earlier keep's result.json publish the older patch.
+    # The two views are not equally attested: a manifest is trusted only once describes_current_best has confirmed a
+    # complete bundle, while the sidecar needs an improved flag and a commit.
     layout, task_dir, worktree, older_commit = _prepared_workspace(tmp_path)
     worktree.kernel_path.write_text("VALUE = 3\n", encoding="utf-8")
     _git(worktree.workspace, "add", ".")

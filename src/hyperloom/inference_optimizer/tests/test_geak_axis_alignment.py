@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK must measure the axis Hyperloom grades on.
+"""GEAK must measure the throughput axis Hyperloom reads.
 
-An agentic replay is graded on total token throughput; a fixed-ISL/OSL run is
+An agentic replay is guarded on total token throughput; a fixed-ISL/OSL run is
 graded on output. GEAK measures whichever axis ``E2E_METRIC`` names and records
-the matching ``metric_basis``, so the flag has to follow the grader rather than
-sit pinned to one value.
+the matching ``metric_basis``, so the flag has to follow the workload rather
+than sit pinned to one value. ``E2E_METRIC`` chooses between output and total
+token throughput, so it cannot name the interactivity axis AgentX is graded on;
+total is the throughput half of that 2-D verdict.
 
 Two failure modes these cover:
 
@@ -33,6 +35,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import INTVTY_V1
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
 from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
@@ -68,7 +71,7 @@ def test_an_explicit_override_wins_in_both_directions(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert geak_metric_axis(benchmark_mode="agentx")[0] == "output"
 
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
     assert geak_metric_axis(benchmark_mode="synthetic")[0] == "total"
 
 

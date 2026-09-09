@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a ``state=running`` status file still describes a living process.
-
-In-flight kernels are read off the filesystem rather than from state, so a
-subprocess killed by a signal never gets to clear its own marker. Without a
-liveness check that stale marker makes its kernel look permanently busy, and the
-kernel is skipped for the rest of the session -- and across a resume, since the
-markers outlive the process that wrote them.
-
-Two independent signals, either of which is enough to call a marker stale: the
-recorded pid is gone, or the file has not been touched for longer than a
-subprocess could plausibly go without a heartbeat.
-"""
+"""Whether a ``state=running`` status file still describes a living process."""
 
 from __future__ import annotations
 
@@ -47,20 +36,7 @@ def evaluate_marker(
     max_silence_sec: float = DEFAULT_MAX_SILENCE_SEC,
     pid_alive: object = None,
 ) -> LivenessVerdict:
-    """Decide whether one status marker still represents a running subprocess.
-
-    Args:
-        state: The marker's ``state`` field; only ``running`` can be in flight.
-        pid: Recorded process id, when the writer supplied one.
-        mtime: Marker's last-modified time, in epoch seconds.
-        now: Current time, injected for testability.
-        max_silence_sec: How long a marker may go untouched before it is stale.
-        pid_alive: Predicate used to test the pid; defaults to a signal-0 probe.
-
-    Returns:
-        The verdict. A marker that is not ``running`` is simply not in flight and
-        carries no stale reason -- it completed normally.
-    """
+    """Decide whether one status marker still represents a running subprocess."""
     if str(state or "").strip().lower() != "running":
         return LivenessVerdict(False)
     probe = pid_alive if callable(pid_alive) else _pid_is_alive
@@ -75,11 +51,7 @@ def evaluate_marker(
 
 
 def _as_pid(value: object) -> int | None:
-    """Coerce a recorded pid; anything unusable means "cannot check by pid".
-
-    A non-integral number is refused rather than truncated: rounding 1.5 to 1
-    would probe an unrelated process and answer confidently about the wrong one.
-    """
+    """Coerce a recorded pid; anything unusable means \"cannot check by pid\"."""
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, float) and not value.is_integer():
@@ -100,7 +72,6 @@ def _pid_is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        # Cannot tell; assume alive so a probe failure never frees a kernel that
-        # is genuinely still being worked on.
+        # Cannot tell; assume alive so a probe failure never frees a kernel that is genuinely still being worked on.
         return True
     return True

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -211,6 +212,96 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
     assert calls == 1
     assert result["error_class"] == "stale_jit_lock"
     assert result["stale_jit_lock"]["retry_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path, monkeypatch):
+    dropped: list[dict] = []
+    extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}
+
+    def _drop(envs=None, *, backup_dir=None):
+        dropped.append({"envs": envs, "backup_dir": backup_dir})
+        return {"action": "invalidate"}
+
+    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
+        _drop,
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_registry_mismatch",
+                "error": "kernel 'k' is not present in the compiled registry",
+            }
+        return {"status": "succeeded", "output_throughput": 100.0}
+
+    ctx = types.SimpleNamespace(
+        extra={},
+        task=types.SimpleNamespace(params={"extra_envs": extra_envs}),
+    )
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        ctx,
+        workspace=tmp_path,
+        reason="test integrate registry",
+    )
+
+    assert calls == 2
+    assert dropped
+    assert dropped[0]["envs"] == extra_envs
+    assert result["status"] == "succeeded"
+    assert result["aiter_jit_registry_mismatch_retry"]["retry_succeeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure(tmp_path, monkeypatch):
+    (tmp_path / "server.log").write_text(
+        "kernel 'k' is not present in the compiled registry\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
+        lambda *args, **kwargs: {"action": "invalidate"},
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_registry_mismatch",
+                "error": "kernel 'k' is not present in the compiled registry",
+            }
+        (tmp_path / "server.log").write_text(
+            "kernel 'k' is not present in the compiled registry\nHIP out of memory\n",
+            encoding="utf-8",
+        )
+        return {"status": "failed", "error_class": "oom", "error": "HIP out of memory"}
+
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        types.SimpleNamespace(
+            extra={},
+            task=types.SimpleNamespace(
+                params={"extra_envs": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}}
+            ),
+        ),
+        workspace=tmp_path,
+        reason="test integrate registry restamp",
+    )
+
+    assert calls == 2
+    assert result["error_class"] == "oom"
 
 
 def test_resolve_integrate_payload_fills_source_when_patch_path_present(
@@ -598,11 +689,7 @@ async def test_integrate_handler_keeps_when_accuracy_holds(session_dir, tmp_path
 
 @pytest.mark.asyncio
 async def test_integrate_handler_reverts_on_accuracy_regression(session_dir, tmp_path):
-    """A throughput win that loses accuracy beyond tolerance must REVERT.
-
-    This is the gate the kernel path was missing: the patch is faster, so the
-    throughput-only decision would have KEEPed it.
-    """
+    """A throughput win that loses accuracy beyond tolerance must REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     _seed_baseline_accuracy(session_dir, 0.80)
@@ -1005,12 +1092,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     session_dir,
     tmp_path,
 ):
-    """A failed re-baseline must route through the fault retry budget.
-
-    An invalid re-baseline yields ``status=failed`` + ``decision=REVERT`` with a
-    top-level fault ``error_class``; ``record_kernel_integrate_result`` must mark
-    it retryable rather than discarding it as a genuine REVERT.
-    """
+    """A failed re-baseline must route through the fault retry budget."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
@@ -1038,8 +1120,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    # error_class here is deliberately NOT in the fault whitelist, proving the
-    # status-based check saves the patch.
+    # error_class here is deliberately NOT in the fault whitelist, proving the status-based check saves the patch.
     assert res["status"] == "failed"
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
@@ -1460,8 +1541,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     tmp_path,
     monkeypatch,
 ):
-    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts)
-    # by opting out of the honest-E2E path, which widens the cap.
+    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts) by opting out of the honest-E2E
+    # path, which widens the cap.
     monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -1567,8 +1648,8 @@ async def test_report_executor_writes_md_and_json(session_dir):
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore
-        # requires baseline_tput > 0 (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
+        # (execution_order) to be proposable next.
         c.shared_state.baseline_tput = 800.0
         await c._handle_intent(
             "orchestration",

@@ -1,10 +1,4 @@
-"""SGLang MXFP8 grouped GEMM source kernel for the FlyDSL rewrite example.
-
-This is the focused kernel and launcher extracted from
-``sglang/kernels/ops/moe/mxfp8_moe_amd_gfx95.py``. The rewrite pipeline treats
-this file as a protected Triton oracle and writes the FlyDSL port to
-``kernel.py``.
-"""
+"""SGLang MXFP8 grouped GEMM source kernel for the FlyDSL rewrite example."""
 
 from __future__ import annotations
 

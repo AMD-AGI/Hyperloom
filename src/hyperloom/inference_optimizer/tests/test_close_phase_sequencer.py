@@ -67,8 +67,7 @@ class _StubTaskRow:
     state: str
     params: dict
     idempotency_key: str
-    # Mirrors the real ``Task``: the dispatch path reads both before running a
-    # row. Closing steps take no lanes.
+    # Mirrors the real ``Task``: the dispatch path reads both before running a row.
     requires_lanes: list = field(default_factory=list)
     lease_ttl_sec: int = 0
 
@@ -271,12 +270,7 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_replaces_a_cancelled_one(coord):
-    """A report the deadline path enqueued and then cancelled cannot be run; the sequencer needs a live one.
-
-    Regression for the ``cannot transition from 'cancelled' to 'running'``
-    crash: the helper used to answer "was one enqueued?" when the caller needs
-    "is one runnable?".
-    """
+    """A report the deadline path enqueued and then cancelled cannot be run; the sequencer needs a live one."""
     dead = _StubTaskRow(
         task_id="wallclock-report",
         kind="report",
@@ -381,12 +375,7 @@ def _running_report_row(coord, *, kind: str = "report") -> _StubTaskRow:
 
 
 def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> None:
-    """Give the CLOSE module a monotonic clock that jumps ``step_sec`` per read.
-
-    The wait under test is measured in minutes, so a test that spent it would
-    be a test nobody runs. Only the CLOSE module's view of the clock is
-    replaced, which leaves the event loop's own timekeeping alone.
-    """
+    """Give the CLOSE module a monotonic clock that jumps ``step_sec`` per read."""
     from hyperloom.orchestrator.phases import close as close_mod
 
     now = 0.0
@@ -406,12 +395,7 @@ def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> Non
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_state", ["succeeded", "failed"])
 async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: str):
-    """``running -> running`` is not a transition the registry has; asking for it kills the step.
-
-    The deadline path dispatches the report before CLOSE is entered, so the
-    sequencer routinely meets its own step already under way. It was documented
-    as "the sequencer will wait for it" and implemented as a second dispatch.
-    """
+    """``running -> running`` is not a transition the registry has; asking for it kills the step."""
     coord.tasks = _FinishesWhileWaiting(terminal_state)
     coord._dispatcher_poll_sec = 0.01
     coord.shared_state.max_minutes = 60
@@ -484,20 +468,13 @@ async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
     coord,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds.
-
-    Bounding the wait by the reserve made it a wait on paper only — the step
-    the deadline path dispatched was declared failed while it was still
-    running, and the session that ran out of time is the one whose report is
-    worth the most. The bound belongs to the work, so it is the report's own
-    expected runtime.
-    """
+    """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds."""
     coord.tasks = _FinishesWhileWaiting("succeeded", lands_on=5)
     coord._dispatcher_poll_sec = 0.0
     coord.shared_state.max_minutes = 10
     assert coord.shared_state.closing_reserve_sec() == pytest.approx(12.0)
-    # Five looks at five simulated seconds apiece: past the reserve, inside the
-    # two minutes the catalogue prices a report at.
+    # Five looks at five simulated seconds apiece: past the reserve, inside the two minutes the catalogue prices a
+    # report at.
     _clock_advancing_by(monkeypatch, step_sec=5.0)
 
     state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
@@ -594,8 +571,8 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
-    # fact_finalize now runs first and writes optimization_journal.json, so the
-    # artifact package has a curated file to include.
+    # fact_finalize now runs first and writes optimization_journal.json, so the artifact package has a curated file to
+    # include.
     assert by_step["artifact_package"]["status"] == "done"
     assert by_step["fact_finalize"]["status"] == "done"
     assert "status=written" in by_step["fact_finalize"]["detail"]
@@ -808,25 +785,95 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     assert "done" in steps
 
 
+class TestEveryTerminalReachesAWrittenReport:
+    """The close sequence must not depend on the phase machine advancing.
+
+    A run that cannot advance a phase -- because the machine has no next phase,
+    because the step raised, or because the deadline it would have advanced at
+    has already passed -- used to end with no report at all, since the sequencer
+    was reachable only as a side effect of entering CLOSE.
+    """
+
+    @staticmethod
+    def _coordinator(session_dir: Path) -> Coordinator:
+        """A coordinator whose roles say nothing, so only the loop drives it."""
+        session_dir.mkdir(exist_ok=True)
+        idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+        return Coordinator(
+            session_dir=session_dir,
+            backends={name: MockBackend(idle) for name in ("orchestration", "critic", "robustness")},
+            role_registry=default_role_registry(),
+            recipe_kb=None,
+            knowledge_plane=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_never_advances_a_phase_still_closes(self, tmp_path: Path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+
+        async def _cannot_advance() -> None:
+            raise RuntimeError("the phase machine has no next phase")
+
+        monkeypatch.setattr(coord, "_advance_phase_if_needed", _cannot_advance)
+        try:
+            reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+        finally:
+            await coord.stop()
+
+        assert reason == "max_ticks"
+        assert coord.shared_state.close_sequence_done is True
+
+    @pytest.mark.asyncio
+    async def test_a_spent_session_closes_even_though_every_step_is_skipped(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.max_minutes = 60
+        coord.shared_state.elapsed_charged_sec = 120 * 60.0
+
+        try:
+            reason = await coord.run(max_minutes=60, closing_grace_sec=0.0, max_ticks=4)
+        finally:
+            await coord.stop()
+
+        assert reason == "time_exhausted"
+        assert coord.shared_state.close_sequence_done is True
+
+    @pytest.mark.asyncio
+    async def test_the_close_sequence_runs_once_and_not_again(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.record_phase_transition(
+            to_phase="CLOSE",
+            reason="sweep_done",
+            evidence={"trigger": "test"},
+        )
+        await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+        assert coord.shared_state.close_sequence_done is True
+
+        assert await coord.ensure_close_sequence(reason="terminal") is False
+
+    @pytest.mark.asyncio
+    async def test_a_closing_phase_with_no_report_task_does_not_wait_on_one(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.closing_phase = True
+        coord.shared_state.closing_report_task_id = ""
+
+        # Absence is finished, not pending: waiting on a task nobody created is
+        # how a session sat in CLOSE until its grace ran out with no report.
+        assert await coord._closing_report_terminal() is True
+        await coord.stop()
+
+
 @pytest.mark.asyncio
 async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The package, not the session dir, is what external sync ships.
-
-    ``session_breakdown`` is step 2, so the copy it writes describes the
-    close-out only as far as itself, and the artifact package built at step 5
-    bundles that partial copy. The sequencer's last act patches the ``close``
-    key and rebuilds the bundle; this asserts on the two copies a consumer
-    actually reads — inside the zip, and the loose tree beside it.
-    """
+    """The package, not the session dir, is what external sync ships."""
     dest_root = tmp_path / "dest"
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(dest_root))
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    # Stand in for the step-2 breakdown task, which does not run under the mock
-    # backends: a payload whose ``close`` key stops where step 2 can see.
+    # Stand in for the step-2 breakdown task, which does not run under the mock backends: a payload whose ``close``
+    # key stops where step 2 can see.
     (session_dir / "session_breakdown.json").write_text(
         json.dumps(
             {
@@ -862,11 +909,8 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     loose = json.loads((dest_root / "session_breakdown.json").read_text(encoding="utf-8"))
 
     for delivered in (zipped["close"], loose["close"]):
-        # The steps recorded after step 2 are the whole point: they are what
-        # the bundled copy was missing before the rebuild. The stage status is
-        # not asserted here because the internal tasks do not run under mock
-        # backends; ``test_sbd_v6_stages.py`` pins the ``succeeded`` ladder on
-        # a finished sequence.
+        # The steps recorded after step 2 are the whole point: they are what the bundled copy was missing before the
+        # rebuild.
         assert delivered["close_sequence_done"] is True
         assert {"artifact_package", "ndjson_drain", "done"} <= {step["step"] for step in delivered["steps"]}
 

@@ -104,12 +104,7 @@ def test_only_measured_gains_the_gate_turned_down_are_eligible():
 
 
 def test_a_candidate_that_no_longer_beats_the_incumbent_is_dropped():
-    """The incumbent moves on; an old gain below it is no longer a gain.
-
-    No separate staleness test does this. The reference the candidate is
-    measured against is the live incumbent, so a gain the campaign has since
-    banked stops being ground anyone owns.
-    """
+    """The incumbent moves on; an old gain below it is no longer a gain."""
     metas = [_meta(1, speedup=1.02, case_times={"prefill": 0.9})]
 
     assert eligible_candidates(metas, {"prefill": 0.5}) == []
@@ -205,12 +200,7 @@ def test_an_ordinary_plan_is_never_read_as_an_attempted_pair():
 
 
 def test_a_prefixed_plan_naming_anything_but_two_iterations_is_not_a_pair():
-    """Only the two-integer form records a measured stack.
-
-    Reading a malformed line as a pair would retire a combination that was never
-    measured, so anything that is not exactly two integers is discarded rather
-    than guessed at.
-    """
+    """Only the two-integer form records a measured stack."""
     assert (
         attempted_pairs(
             [
@@ -251,9 +241,7 @@ def test_a_covered_pair_is_rejected_whichever_side_does_the_covering():
 
 # ── Per-case near misses: a candidate that beat the incumbent on one case ─────
 
-# The 2026-08 GQA campaign's incumbent, per case. `m3-prefill-b2-q8073p60` is
-# one of the two cases carrying the whole deficit against the competing agent;
-# iteration 21 won 2.0% on it, lost the equal-weight mean, and left no trace.
+# The 2026-08 GQA campaign's incumbent, per case.
 GQA_INCUMBENT = {
     "m3-decode-q61": 0.010369,
     "m3-prefill-b2-q8131p60": 0.700000,
@@ -352,12 +340,7 @@ def _incumbent_runs(*, faster_case: str, factor: float) -> list[dict]:
 
 
 def test_an_aggregate_winner_owns_what_it_took_from_the_incumbent():
-    """Not the broad pristine ground it shares with every candidate in the archive.
-
-    Both of these beat pristine on every case, which is what any candidate looks
-    like once the campaign has banked a few KEEPs. Ranking them on that shared
-    set leaves neither owning ground the other lacks.
-    """
+    """Not the broad pristine ground it shares with every candidate in the archive."""
     metas = [
         _per_case_meta(
             21,
@@ -380,13 +363,7 @@ def test_an_aggregate_winner_owns_what_it_took_from_the_incumbent():
 
 
 def test_an_aggregate_winner_holding_no_ground_of_its_own_is_dropped():
-    """What the incumbent reference costs, stated as a test.
-
-    Its conservative mean led the incumbent, but no single case moved further
-    than that case's own runs disagreed, so it brings a stack nothing to
-    combine. On the 2026-08 archives this loses one pair; measuring ownership
-    against the incumbent gains twenty-three.
-    """
+    """What the incumbent reference costs, stated as a test."""
     runs = [
         {case_id: time_ms * jitter for case_id, time_ms in GQA_INCUMBENT.items()}
         # Every case level with the incumbent to within its own 0.07% spread.
@@ -398,14 +375,7 @@ def test_an_aggregate_winner_holding_no_ground_of_its_own_is_dropped():
 
 
 def test_two_reverts_beating_the_incumbent_on_different_cases_form_a_pair():
-    """The reason this mechanism never ran, admission through to selection.
-
-    Both candidates are twice as fast as pristine on every case, so a
-    pristine-relative ownership hands them identical sets and the selector's
-    mutual-complementarity test rejects the pair. Measured against the
-    incumbent they own one case each, which is the pair the mechanism exists to
-    measure.
-    """
+    """The reason this mechanism never ran, admission through to selection."""
     metas = [
         _per_case_meta(
             21,
@@ -433,15 +403,7 @@ def test_two_reverts_beating_the_incumbent_on_different_cases_form_a_pair():
 
 
 def test_a_stack_that_reverted_is_not_itself_stackable():
-    """Two is the cap, and a reverted stack is archived like any other REVERT.
-
-    Without this the pair selector picks up a previous stack and produces three
-    diffs under a record naming two, which is exactly what ``merge_attempt_
-    staged`` and ``merge_attempt_kept`` are counting. Nothing measurable is
-    given up: across the thirty archived runs of 2026-08-22 and 08-23, a
-    mutually-complementary triple exists at 2 of the 121 consulted iterations,
-    and at neither does it cover more cases than the best available pair.
-    """
+    """Two is the cap, and a reverted stack is archived like any other REVERT."""
     metas = [
         _meta(1, speedup=1.003, case_times={"prefill": 0.9}),
         _meta(2, speedup=1.004, case_times={"decode": 1.8}),

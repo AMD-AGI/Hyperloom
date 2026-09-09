@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch-coverage tests for shared workload-env materialization: GPU-count
-detection, profile-window math, per-model work-arounds, and NUM_PROMPTS
-sizing."""
+"""Branch-coverage tests for shared workload-env materialization: GPU-count detection, profile-window math, per-model work-arounds, and NUM_PROMPTS sizing."""
 
 from __future__ import annotations
 
@@ -73,7 +71,6 @@ def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
-    monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
 
 
 def test_validate_server_args_rejects_bare_positionals():
@@ -83,26 +80,16 @@ def test_validate_server_args_rejects_bare_positionals():
 
 
 def test_validate_server_args_allows_multi_value_flags():
-    """argparse ``nargs="+"`` flags carry several values; the sink must accept them.
-
-    ``--cuda-graph-bs`` is a real sglang invocation and is already listed in
-    ``_MULTI_VALUE_FLAGS``. Rejecting the second value here made the integrate
-    sink refuse recipes the explore side had already run.
-    """
+    """argparse ``nargs=\"+\"`` flags carry several values; the sink must accept them."""
     args = "--cuda-graph-bs 1 2 4 8 16 24 32 48 64"
     assert validate_server_args_shell_safe(args) == args
-    # A flag not on the whitelist still gets its value plus a numeric list, so
-    # an nargs="+" flag nobody has enumerated yet is not rejected either.
+    # A flag not on the whitelist still gets its value plus a numeric list, so an nargs="+" flag nobody has enumerated
+    # yet is not rejected either.
     assert validate_server_args_shell_safe("--a 1 2 --b=3 --c x") == "--a 1 2 --b=3 --c x"
 
 
 def test_validate_server_args_still_catches_positionals_after_a_flag():
-    """The multi-value relaxation must not become "one flag opens the gates".
-
-    A first pass tracked only "have we seen any flag", so every bare token after
-    the first flag was accepted -- which is no check at all for the argv shapes
-    this guard exists to reject.
-    """
+    """The multi-value relaxation must not become \"one flag opens the gates\"."""
     with pytest.raises(ValueError, match="bare positional"):
         # --port=8000 already carries its value; run.sh is positional.
         validate_server_args_shell_safe("--port=8000 run.sh")
@@ -110,9 +97,8 @@ def test_validate_server_args_still_catches_positionals_after_a_flag():
         # --foo consumes bar; payload.json after it is not a value list.
         validate_server_args_shell_safe("--foo bar payload.json")
     with pytest.raises(ValueError, match="bare positional"):
-        # Being on the multi-value whitelist widens how MANY values a flag
-        # takes, not what they may look like: every entry on that list is a
-        # list of batch sizes.
+        # Being on the multi-value whitelist widens how MANY values a flag takes, not what they may look like: every
+        # entry on that list is a list of batch sizes.
         validate_server_args_shell_safe("--cuda-graph-bs 1 2 run.sh")
 
 
@@ -153,7 +139,9 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
-    assert envs["SGLANG_REMOVE_ME"] == "override"
+    # Named in both extra_envs and unset_envs: the removal is the more specific
+    # intent and wins, so the bare-string unset_envs form is proven to apply.
+    assert "SGLANG_REMOVE_ME" not in envs
 
 
 def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path, monkeypatch):
@@ -397,11 +385,7 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
 
 
 def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, name="model"):
-    """Write a minimal model dir whose config.json declares a sparse block size.
-
-    ``nested`` places ``sparse_attention_config`` under ``text_config`` (the
-    multimodal-wrapper layout) to exercise the merged-scope read path.
-    """
+    """Write a minimal model dir whose config.json declares a sparse block size."""
     d = tmp_path / name
     d.mkdir(exist_ok=True)
     sparse = {"sparse_attention_config": {"sparse_block_size": sparse_block_size}}
@@ -412,8 +396,8 @@ def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, na
 
 
 def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path):
-    # Config-derived: any model declaring sparse_attention_config.sparse_block_size
-    # gets that value as vLLM --block-size (default 16 aborts KV-cache init).
+    # Config-derived: any model declaring sparse_attention_config.sparse_block_size gets that value as vLLM
+    # --block-size (default 16 aborts KV-cache init).
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -423,8 +407,8 @@ def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path)
 
 
 def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
-    # sparse_attention_config nested under text_config (multimodal wrapper); the
-    # value is model-derived, not hardcoded (here 64 to prove it is read).
+    # sparse_attention_config nested under text_config (multimodal wrapper); the value is model-derived, not hardcoded
+    # (here 64 to prove it is read).
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=64, nested=True)
@@ -446,8 +430,8 @@ def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
 
 
 def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
-    # --block-size is a vLLM flag; sglang rejects it, so the injection is
-    # vLLM-scoped and must never touch a sglang run.
+    # --block-size is a vLLM flag; sglang rejects it, so the injection is vLLM-scoped and must never touch a sglang
+    # run.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -458,8 +442,7 @@ def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
 
 
 def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path):
-    # An explicit operator/explore --block-size wins; we must not append a
-    # second conflicting --block-size.
+    # An explicit operator/explore --block-size wins; we must not append a second conflicting --block-size.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -585,8 +568,8 @@ def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
 
 
 def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog):
-    # Low CONC pushes the steady-state floor above the cap, so the auto path
-    # lowers the profile OSL until the floor fits the 128-step cap.
+    # Low CONC pushes the steady-state floor above the cap, so the auto path lowers the profile OSL until the floor
+    # fits the 128-step cap.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -615,8 +598,7 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
 
 
 def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
-    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is,
-    # but a warning is emitted.
+    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is, but a warning is emitted.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -645,8 +627,7 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
 
 
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
-    # A non-baseline scriptable variant must COMPARE against the operator
-    # reference and must NOT write.
+    # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -702,8 +683,7 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
 
 
 def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
-    # No operator reference: a stable per-session reference is derived so the
-    # gate stays active. A variant COMPAREs against it, never writes.
+    # No operator reference: a stable per-session reference is derived so the gate stays active.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -716,8 +696,8 @@ def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tm
 
 
 def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_path):
-    # The baseline writes the derived per-session reference (compare off) so a
-    # subsequent variant has something to gate against.
+    # The baseline writes the derived per-session reference (compare off) so a subsequent variant has something to
+    # gate against.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"

@@ -1,30 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
-
-Runs the Magpie CLI as a subprocess, parses ``benchmark_report.json``,
-and returns the result on the bus as a ``delegated_result`` event.
-
-RunnerContext.task.params keys (all optional; defaults from
-default_baseline_config()): ``config_path``, ``output_dir``, ``timeout_sec``.
-
-Returns ``error_class`` on failure so the coordinator can route to
-Robustness RCA later.
-"""
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark."""
 
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import ExitStack, suppress
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -61,17 +55,15 @@ from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
+    is_aiter_jit_registry_mismatch,
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
-# The grid module is the namespace the helpers both benching arms share ended up
-# in: how a sentinel returncode reads back, how a round's cap is clamped to the
-# budget, how the two session bounds are resolved, and the hygiene every launch
-# needs. Imported rather than restated here so a baseline round and a grid round
-# are priced the same way. The returncode decoder's class-side sibling is in
-# ``..stop_attribution``, which says why the two sides sit where they do.
+# The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
+# back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
+# launch needs.
 from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
@@ -109,6 +101,7 @@ from ._inferencex_patcher import (
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
+    failed_patch_anchors_in,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from ._patch_snapshot import (
@@ -145,8 +138,7 @@ _RECORDER_PRODUCER = "orchestrator"
 SBD_INNER_STEP_PARAM = "sbd_inner_step"
 
 
-# Markers identifying an InferenceX ``run_eval`` (lm-eval) failure as the root
-# cause of a benchmark non-zero exit.
+# Markers identifying an InferenceX ``run_eval`` (lm-eval) failure as the root cause of a benchmark non-zero exit.
 _EVAL_FAILURE_MARKERS = (
     "run_eval failed with exit code",
     "ERROR: run_eval failed",
@@ -154,31 +146,20 @@ _EVAL_FAILURE_MARKERS = (
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
-# The measured pass ran as the first traffic against a freshly restarted server,
-# because the warmup that exists to drive it did not. Its throughput is a cold
-# number, and the session anchors every later gain on it.
+# The measured pass ran as the first traffic against a freshly restarted server, because the warmup that exists to
+# drive it did not.
 _MN_WARMUP_DID_NOT_WARM_WARNING = "baseline_mn_warmup_did_not_run"
-# The round kept its warmup pass as the baseline because the budget could not
-# pay for the measured pass after it. Same consequence as the warning above --
-# a cold anchor -- reached from the other direction, and carried on the result
-# so a reader of the session's gains knows the denominator is depressed.
+# The round kept its warmup pass as the baseline because the budget could not pay for the measured pass after it.
 MEASURE_ROUND_DROPPED_WARNING = "baseline_measure_round_dropped_low_budget"
 
-# The cold-start guard's two round directories. The warmup round is the only one
-# that measures accuracy (``RUN_EVAL=true``); the measured round is hot
-# throughput alone, so it carries no accuracy by construction.
+# The cold-start guard's two round directories.
 _WARMUP_ROUND_DIR = "warmup_round"
 _MEASURE_ROUND_DIR = "measure_round"
 _DOUBLE_RUN_ROUND_DIRS = (_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR)
 
-# Markers identifying a MoE quant scheme with no implementation for the
-# ``--moe-runner-backend`` in use: ``create_moe_runner`` falls through without
-# building a runner and the first forward pass dies (e.g. Quark MXFP4 on
-# triton). Both a missing-runner marker AND a MoE-scheme marker must appear, so
-# an unrelated AttributeError mentioning some other ``runner`` attribute does
-# not burn a full benchmark retry. Deliberately not keyed on Quark: sglang has
-# other aiter-only MoE schemes (quark_int4fp8_moe, the mxfp4 dynamic-quant
-# method) that fail exactly the same way.
+# Markers identifying a MoE quant scheme with no implementation for the ``--moe-runner-backend`` in use:
+# ``create_moe_runner`` falls through without building a runner and the first forward pass dies (e.g. Quark MXFP4 on
+# triton).
 _MOE_RUNNER_MISSING_MARKERS = (
     "has no attribute 'runner'",
     'has no attribute "runner"',
@@ -192,8 +173,7 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 )
 
 
-# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
-# should not consume the slow-baseline retry budget.
+# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
@@ -213,10 +193,7 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
     "unknown",
 )
 
-# KV-cache OOM: weights loaded but no room left for the KV cache. Kept distinct
-# from a generic nonzero exit so it's attributed to an over-aggressive
-# --mem-fraction-static. Surfaces after weight load, so matched regardless of
-# the fast-exit elapsed threshold.
+# KV-cache OOM: weights loaded but no room left for the KV cache.
 _KV_CACHE_OOM_MARKERS = (
     "no gpu memory for the kv cache",
     "leave no gpu memory",
@@ -224,26 +201,23 @@ _KV_CACHE_OOM_MARKERS = (
 )
 
 
-# Strong cuda-graph capture markers: stream-capture incompatibility, reliably
-# recoverable by disabling cuda-graph.
+# Strong cuda-graph capture markers: stream-capture incompatibility, reliably recoverable by disabling cuda-graph.
 _CUDA_GRAPH_STRONG_MARKERS = (
     "operation not permitted when stream is capturing",
     "hiperrorstreamcaptureunsupported",
 )
-# Weak marker: bare "Capture cuda graph failed" carries no root cause. Trusted
-# only when the nearby context is neither OOM nor a compile/lowering error.
+# Weak marker: bare "Capture cuda graph failed" carries no root cause.
 _CUDA_GRAPH_WEAK_MARKER = "capture cuda graph failed"
 
-# Profile-cuda-graph shape discovery triggers a recoverable AssertionError that
-# must win over the generic assertionerror non-recoverable gate below. Both
-# markers are required so a generic AssertionError never matches.
+# Profile-cuda-graph shape discovery triggers a recoverable AssertionError that must win over the generic
+# assertionerror non-recoverable gate below.
 _CUDA_GRAPH_PROFILE_ASSERT_MARKERS = (
     "get_num_new_pages",
     "seq_lens.device == cpu_device",
 )
 
-# OOM-rooted capture failures are NOT recoverable by disabling cuda-graph
-# (eager peaks can be higher); compile/lowering errors are not either.
+# OOM-rooted capture failures are NOT recoverable by disabling cuda-graph (eager peaks can be higher);
+# compile/lowering errors are not either.
 _OOM_MARKERS = (
     "out of memory",
     "outofmemoryerror",
@@ -253,29 +227,175 @@ _NON_RECOVERABLE_MARKERS = (
     "assertionerror",
     "compilationerror",
 )
-# Strong markers are high-confidence, so OOM exclusion is scoped tight (±1
-# line): only an OOM on/adjacent to the marker line demotes it. The bare weak
-# marker keeps the whole-blob OOM/compile exclusion.
+# Strong markers are high-confidence, so OOM exclusion is scoped tight (±1 line): only an OOM on/adjacent to the
+# marker line demotes it.
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when a cuda-graph capture marker is recoverable by disabling graph.
+#: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
+#: ends are needed: the boot milestones are at the head, the wall at the tail.
+_BRINGUP_LOG_EDGE_BYTES = 65_536
 
-    A strong stream-capture marker arms the fallback unless an OOM sits on its
-    ±1-line context (tight, since the marker itself is high confidence). The
-    bare ``Capture cuda graph failed`` is a weak signal: the WHOLE blob must
-    carry neither OOM nor a compile/lowering error, both unrecoverable by
-    disabling cuda-graph. Strong wins on a line that also matches weak, so the
-    compile/OOM whole-blob gate never demotes a genuine stream-capture failure.
+#: Subdirectory of a round slot holding earlier attempts' server logs.
+_ATTEMPTS_DIRNAME = "attempts"
+
+#: File in that subdirectory holding the slot's next attempt index. An attempt
+#: that produced no log retains nothing, so the index cannot be counted off the
+#: retained directories.
+_ATTEMPT_COUNTER_NAME = "next_index"
+
+# Both timestamp shapes a served model writes: SGLang stamps a full date,
+# vLLM's default formatter omits the year.
+_SERVER_LOG_CLOCK = re.compile(r"(?:(\d{4})-)?(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+
+#: Substituted for a year the log did not print. A leap year, so a Feb-29 line
+#: still parses; only the difference between two stamps is used.
+_CLOCK_ASSUMED_YEAR = 2000
+
+
+@dataclass(frozen=True)
+class BringupLog:
+    """One bring-up log as far as it could be read.
+
+    Attributes:
+        text: The decoded head-and-tail text; empty when no log was written and
+            empty when the log could not be read.
+        degraded: Empty when the read answered for the log's contents;
+            :data:`~hyperloom.orchestrator.bringup.DEGRADED_UNREADABLE` when a
+            log that exists could not be read back.
+    """
+
+    text: str
+    degraded: str = ""
+
+
+def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
+    """Read a server log's head and tail for bring-up classification.
+
+    A log that was never written and a log the mount refuses to serve are
+    different answers, and both are answers: an ESTALE or EIO on the session
+    mount degrades the observation rather than costing the round.
 
     Args:
-        *texts: Log / stdout / stderr blobs to scan for cuda-graph markers.
+        path: The log file to read.
+        edge_bytes: Bytes taken from each end; a log no larger than twice this
+            is read whole.
 
     Returns:
-        ``True`` when a cuda-graph capture failure recoverable by disabling
-        cuda-graph capture is detected, else ``False``.
+        BringupLog: The decoded text, head first, and the degraded outcome when
+        a log that exists could not be read.
     """
+    from ...bringup import DEGRADED_UNREADABLE
+
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            if size <= edge_bytes * 2:
+                handle.seek(0)
+                return BringupLog(handle.read().decode("utf-8", "replace"))
+            handle.seek(0)
+            head = handle.read(edge_bytes)
+            handle.seek(size - edge_bytes)
+            tail = handle.read(edge_bytes)
+    except FileNotFoundError:
+        return BringupLog("")
+    except OSError as exc:
+        log.warning("bringup: server log %s could not be read (%s)", path, exc)
+        return BringupLog("", DEGRADED_UNREADABLE)
+    return BringupLog(head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace"))
+
+
+def server_child_elapsed_sec(server_log_text: str) -> float:
+    """Return how long the server child ran, on the server child's own clock.
+
+    Taken from the log's timestamps rather than the wrapper's spawn-to-return
+    wall-clock, which also covers materialisation, the client and teardown.
+
+    Args:
+        server_log_text: Text read from the server child's log.
+
+    Returns:
+        float: Seconds between the first and last timestamped line, or ``0.0``
+        when fewer than two lines carry a parseable timestamp.
+    """
+    stamps: list[datetime] = []
+    for match in _SERVER_LOG_CLOCK.finditer(server_log_text):
+        year, month, day, hour, minute, second = match.groups()
+        try:
+            stamps.append(
+                datetime(
+                    int(year or _CLOCK_ASSUMED_YEAR),
+                    int(month),
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second),
+                )
+            )
+        except ValueError:
+            continue
+    if len(stamps) < 2:
+        return 0.0
+    return max(0.0, (stamps[-1] - stamps[0]).total_seconds())
+
+
+def open_bringup_attempt(output_dir: Path) -> int:
+    """Retain the previous attempt's ``server.log`` and index this attempt.
+
+    A round slot is reused across retries, so the previous attempt's log is
+    moved into its own attempt directory, gzipped, rather than deleted.
+
+    Args:
+        output_dir: The per-round workspace slot.
+
+    Returns:
+        int: This attempt's zero-based index within the slot.
+
+    Raises:
+        OSError: When the previous log cannot be rotated out; a log left in
+            place would be classified as this attempt's.
+    """
+    attempts = output_dir / _ATTEMPTS_DIRNAME
+    index = _claim_attempt_index(attempts)
+    live = output_dir / "server.log"
+    if not live.exists():
+        return index
+    # The live log is the *previous* attempt's, hence the index below.
+    kept = attempts / f"{max(index - 1, 0):03d}"
+    kept.mkdir(parents=True, exist_ok=True)
+    with live.open("rb") as source, gzip.open(kept / "server.log.gz", "wb") as target:
+        shutil.copyfileobj(source, target)
+    live.unlink()
+    return index
+
+
+def _claim_attempt_index(attempts: Path) -> int:
+    """Claim the next attempt index for a round slot and persist the successor.
+
+    Args:
+        attempts: The slot's attempts directory.
+
+    Returns:
+        int: The claimed zero-based index; ``0`` for the slot's first attempt.
+
+    Raises:
+        OSError: When the counter cannot be read or advanced; two attempts
+            would otherwise claim one index and overwrite one observation.
+        ValueError: When the counter file holds something that is not an index.
+    """
+    counter = attempts / _ATTEMPT_COUNTER_NAME
+    try:
+        index = max(0, int(counter.read_text(encoding="utf-8").strip() or "0"))
+    except FileNotFoundError:
+        index = 0
+    attempts.mkdir(parents=True, exist_ok=True)
+    counter.write_text(f"{index + 1}\n", encoding="utf-8")
+    return index
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph."""
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
@@ -300,13 +420,10 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return False
 
 
-# Startup-time "the GPUs are already occupied" refusals. The server raises these
-# BEFORE loading weights, so they are distinct from a mid-run OOM: the fix is to
-# free VRAM held by somebody else, not to shrink the workload.
+# Startup-time "the GPUs are already occupied" refusals.
 _GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
-    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less
-    # than desired GPU memory utilization (0.95, 273.59 GiB). Decrease GPU
-    # memory utilization or reduce GPU memory used by other processes."
+    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less than desired GPU memory utilization
+    # (0.95, 273.59 GiB).
     "on startup is less than desired gpu memory utilization",
     "reduce gpu memory used by other processes",
     # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
@@ -315,25 +432,12 @@ _GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
 
 
 def _is_insufficient_gpu_memory(*texts: str) -> bool:
-    """True when a server refused to boot because VRAM was already occupied.
-
-    Distinguishes "another process is squatting on the GPUs" from a genuine
-    workload OOM. The former is recoverable by reaping the squatter and
-    retrying; the latter is not, so a naked retry only burns attempts.
-
-    Args:
-        *texts: Log / stdout / stderr blobs to scan.
-
-    Returns:
-        ``True`` when a startup-time GPU-preoccupied refusal is detected,
-        else ``False``.
-    """
+    """True when a server refused to boot because VRAM was already occupied."""
     blob = "\n".join(t for t in texts if t).lower()
     return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
-# vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--enforce-eager",
@@ -357,12 +461,7 @@ def _attach_baseline_launch_evidence(
     output_dir: Path,
     framework: str,
 ) -> None:
-    """Persist the declared and observed server identity for a baseline result.
-
-    Baselines do not run through ``run_grid``, so they need the same evidence
-    contract explicitly. The returned result is later promoted to
-    ``current_best`` and becomes the GEAK handoff reference.
-    """
+    """Persist the declared and observed server identity for a baseline result."""
     from ._grid_runner import _measurement_server_log_path
 
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
@@ -379,11 +478,7 @@ def _attach_baseline_launch_evidence(
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
-    """``server.log`` path for the subprocess watchdogs, or None when server-less.
-
-    A scriptable framework never writes a ``server.log``, so passing one would
-    arm the dead/stall watchdogs against a file that can never exist.
-    """
+    """``server.log`` path for the subprocess watchdogs, or None when server-less."""
     from hyperloom.inference_optimizer import framework_registry
 
     if framework_registry.is_scriptable(framework):
@@ -397,22 +492,7 @@ def _round_post_ready_sec(
     started_unix: float,
     runtime_sec: float,
 ) -> float | None:
-    """How much of a round's wall-clock was the benchmark rather than the boot.
-
-    Splitting the two is what lets later work be priced on what it will actually
-    cost: an explore variant boots its own server and pays both, while a pass
-    that re-attaches to a server already up pays only the second.
-
-    Args:
-        server_log_path: The round's ``server.log``, or ``None`` for a scriptable
-            framework, which runs no server and therefore has no split to make.
-        started_unix: When the round was spawned.
-        runtime_sec: The round's full wall-clock.
-
-    Returns:
-        float | None: Seconds after the server reported ready, or ``None`` when
-        the round has no such boundary or nothing recorded one.
-    """
+    """How much of a round's wall-clock was the benchmark rather than the boot."""
     if not server_log_path:
         return None
     return post_ready_runtime_sec(
@@ -423,20 +503,7 @@ def _round_post_ready_sec(
 
 
 def _logged_session_clamp(timeout_sec: int, clamped: int, *, output_dir: Path) -> int:
-    """Announce a round's cap being cut by the session budget, and return the cut.
-
-    Every pass of a baseline round derives its cap from the same budget but on its
-    own terms, so the line names the round it belongs to.
-
-    Args:
-        timeout_sec: The cap the round would have had on an unbounded budget.
-        clamped: The cap the budget leaves it; equal to ``timeout_sec`` when the
-            budget was never the binding constraint, which logs nothing.
-        output_dir: The round's workspace, whose name identifies the pass.
-
-    Returns:
-        int: ``clamped``, unchanged.
-    """
+    """Announce a round's cap being cut by the session budget, and return the cut."""
     if clamped != timeout_sec:
         log.info(
             "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
@@ -457,37 +524,7 @@ def _stopped_round_result(
     capture_meta: dict[str, Any],
     started: bool = True,
 ) -> dict[str, Any]:
-    """Build the result for a round the run itself stopped.
-
-    The session budget elapsed mid-round, or the orchestrator cancelled the
-    action. Classified apart from every measurement failure -- and checked before
-    them, because the reap leaves exactly the evidence a broken server does (no
-    workspace, no report, a non-zero returncode) and being graded as
-    ``server_init_dead`` or ``subprocess_nonzero`` would put a verdict on the
-    model that this round never reached. Every round the baseline runs goes
-    through here, the discarded multi-node warmup pass included: a stop in the
-    round that warms the server means the round is over, and going on to the
-    measured pass would spend GPU time the run has been told to stop spending.
-    Nothing here arms a retry either: the cause is the run, and a resume meets it
-    again.
-
-    A round the budget stopped *before* it booted anything is the same cause and
-    carries the same class; only the wording and the absent returncode differ, so
-    a reader is told whether GPU time was spent.
-
-    Args:
-        stopped: How to record the cause.
-        round_label: Which round was stopped, for the log line.
-        returncode: The stopped round's returncode, or ``None`` when nothing ran.
-        runtime_sec: Wall-clock seconds the round had run for.
-        output_dir: The task workspace, echoed onto the result.
-        capture_meta: Config/eval-contract facts every failure result carries.
-        started: Whether the round had begun. ``False`` selects the wording for
-            work that never launched.
-
-    Returns:
-        dict[str, Any]: The failed result carrying the stop's own error class.
-    """
+    """Build the result for a round the run itself stopped."""
     detail = stopped.interrupted if started else stopped.never_started
     if started:
         log.warning(
@@ -516,30 +553,7 @@ def _stopped_round_result(
 
 
 def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
-    """Seconds this round's budget may still spend, and the numbers behind it.
-
-    The session's own usable remainder, which is what every other admission
-    decision reads, so a round cannot be judged against a figure the rest of the
-    run disagrees with. Not a share of it: the share held back for the
-    optimization phases
-    (:func:`~...phases.machine_state.prelude_affordable_seconds`) sizes the
-    *optional* arms of preparation, where the question is proportion. A round is
-    a feasibility question, and answering it with a percentage refuses rounds
-    that fit -- a session with ninety minutes left and a twelve-minute pass to
-    run is told it has six.
-
-    Falls back to the session deadline for a caller with no session state at all,
-    and to no bound when there is neither.
-
-    Args:
-        state: The session ``SharedState``, or ``None`` when the caller has no
-            session context (direct executor invocation, tests).
-        session_deadline_sec: Monotonic-clock session deadline, or ``None``.
-
-    Returns:
-        tuple[float | None, dict[str, Any]]: The headroom, or ``None`` when the
-            round is under no budget at all, plus the evidence behind it.
-    """
+    """Seconds this round's budget may still spend, and the numbers behind it."""
     if state is not None:
         usable_sec = _phase_state.session_usable_seconds(state)
         if usable_sec is not None:
@@ -558,23 +572,7 @@ def _cold_anchor_from_warmup(
     *,
     dropped: dict[str, Any],
 ) -> dict[str, Any]:
-    """Keep the warmup's cold figure as the anchor, marked as the cold one.
-
-    Two things end a round once its warmup has already paid for the boot, the
-    compile and the capture: the budget cannot cover a second pass, and the
-    session's budget reaped the second pass mid-flight. Either way a number
-    exists and the GPU time behind it is spent, so it is kept rather than
-    discarded -- a marked cold anchor beats no anchor. The marker is what tells a
-    reader of the session's later gains that their denominator is depressed.
-
-    Args:
-        warmup_result: The succeeded warmup pass's result, mutated in place.
-        dropped: Why the measured round did not produce the figure, recorded so
-            the decision is legible in the result and the session record.
-
-    Returns:
-        dict[str, Any]: ``warmup_result``, marked.
-    """
+    """Keep the warmup's cold figure as the anchor, marked as the cold one."""
     warnings = warmup_result.setdefault("nonfatal_warnings", [])
     if MEASURE_ROUND_DROPPED_WARNING not in warnings:
         warnings.append(MEASURE_ROUND_DROPPED_WARNING)
@@ -583,41 +581,13 @@ def _cold_anchor_from_warmup(
 
 
 def _a_use_must_follow_the_round(state: Any) -> bool:
-    """Whether this round is only worth running if something can be measured after it.
-
-    A PRELUDE baseline is not a result. It is the denominator later results are
-    read against and the anchor their overtime kill uses, so a session that
-    cannot afford one variant after it would spend the wall-clock on a number
-    nothing ever reads.
-
-    A re-baseline in a later phase is the opposite: it re-measures the stack the
-    session has assembled, and that measurement is the deliverable. Requiring a
-    successor would refuse exactly the round that validates the run's own answer,
-    at the point in the budget where it is most likely to be the last thing left.
-
-    Args:
-        state: The session ``SharedState``, or ``None``.
-
-    Returns:
-        bool: ``True`` while the round's worth depends on a successor.
-    """
+    """Whether this round is only worth running if something can be measured after it."""
     phase = str(getattr(state, "phase", "") or "").strip().upper()
     return phase == _phase_state.PHASE_PRELUDE
 
 
 def _positive_seconds(value: Any) -> float | None:
-    """Coerce a duration a round reported to seconds, or ``None`` when it did not.
-
-    Absent, unparseable and zero are one answer: nothing was measured. None of
-    them may read as work that took no time, which is what a plain
-    ``float(... or 0.0)`` would make of them.
-
-    Args:
-        value: The reported duration, from a round's result.
-
-    Returns:
-        float | None: The seconds, or ``None`` when there is no measurement.
-    """
+    """Coerce a duration a round reported to seconds, or ``None`` when it did not."""
     try:
         seconds = float(value or 0.0)
     except (TypeError, ValueError):
@@ -626,16 +596,7 @@ def _positive_seconds(value: Any) -> float | None:
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
-    """Return the framework-correct flag that disables cuda-graph capture.
-
-    Args:
-        framework: Framework name (e.g. ``"sglang"`` or ``"vllm"``); matched
-            case-insensitively.
-
-    Returns:
-        The disable-cuda-graph flag for ``framework``, defaulting to
-        ``--disable-cuda-graph`` for unknown frameworks.
-    """
+    """Return the framework-correct flag that disables cuda-graph capture."""
     return _DISABLE_CUDA_GRAPH_FLAGS.get(
         (framework or "").strip().lower(),
         "--disable-cuda-graph",
@@ -643,19 +604,7 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent).
-
-    Token-level dedup so a longer flag (e.g. ``--disable-cuda-graph-extra``)
-    is not mistaken for an existing ``--disable-cuda-graph``.
-
-    Args:
-        extra_server_args: Existing extra server args string (may be empty).
-        framework: Framework name used to pick the correct disable flag.
-
-    Returns:
-        ``extra_server_args`` with the framework-correct disable-cuda-graph
-        flag appended once; unchanged when the flag is already present.
-    """
+    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
     flag = _disable_cuda_graph_flag(framework)
     if flag in (extra_server_args or "").split():
         return extra_server_args or ""
@@ -665,6 +614,7 @@ def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
 def _classify_subprocess_error(
     elapsed_sec: float,
     stderr_tail: str,
+    returncode: int | None = None,
 ) -> str:
     """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
     validation error, else 'subprocess_nonzero'.
@@ -672,14 +622,16 @@ def _classify_subprocess_error(
     Args:
         elapsed_sec: Subprocess wall-clock runtime in seconds.
         stderr_tail: Tail of the subprocess stderr used for marker matching.
+        returncode: The subprocess returncode, read for the sentinels that
+            name their own cause.
 
     Returns:
-        ``"fast_exit_arg_error"`` for a fast exit caused by argument
-        validation, else ``"subprocess_nonzero"``.
+        The named class for a recognised sentinel, ``"fast_exit_arg_error"``
+        for a fast exit caused by argument validation, else
+        ``"subprocess_nonzero"``.
     """
     tail = (stderr_tail or "").lower()
-    # KV-cache OOM can surface long after weight load; match before the
-    # fast-exit elapsed gate below.
+    # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
@@ -693,74 +645,21 @@ def _classify_subprocess_error(
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 
-# An AgentX baseline does not fit either of the caps above, and the cold-start
-# detector cannot see why. That detector counts .so files across the whole aiter
-# JIT dir and calls it warm above 20 -- but the signature it is really about is
-# (model, dtype, TP, max_model_len), and AgentX is the thing that moves
-# max_model_len (6144 -> the model's native window). So the first AgentX round on
-# any box that has run synthetic work is detected WARM, handed 7800s, and then
-# pays the 30+ minute first-compile for a signature it has never built. Measured
-# rounds are 4774s (SGLang) and 6676s (vLLM) before that compile; adding it, plus
-# a cold corpus mmap (~840s), lands at ~9316s. Neither cap covers it, and neither
-# escape hatch reaches it: the cold-cap env var is only read when the probe says
-# cold, and nothing in the tree writes params["timeout_sec"] for a baseline. So a
-# first AgentX run does not merely risk the timeout -- it hits it, and a baseline
-# timeout kills the session before the search starts.
-#
-# Derived rather than pinned, because the one part of the round that is chosen
-# rather than measured is the measurement window: total = setup + corpus + warmup
-# + AGENTX_DURATION + mapping. Deriving keeps the cap correct when an operator
-# changes the window, instead of leaving a second number to remember.
+# An AgentX baseline does not fit either of the caps above, and the cold-start detector cannot see why.
 AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
 AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
 
-# The warmup share of that overhead is not a constant either, and it is the
-# share that actually varies by model: aiperf_client.sh bounds the warmup drain
-# with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a model
-# whose operator has already had to raise that knob for the round to complete at
-# all. Splitting the flat 7200 at its canonical grace lets the cap follow that
-# same knob instead of asking for a second, independent number that means the
-# same thing -- which is how the constant came to be wrong for Kimi-K3 (a raw
-# aiperf run measured warmup alone at ~12075s, past this entire cap). At
-# canonical settings the sum is unchanged, so the measured GLM-5.2/Qwen3.8
-# calibration this number carries is preserved exactly.
+# The warmup share of that overhead is not a constant either, and it is the share that actually varies by model:
+# aiperf_client.sh bounds the warmup drain with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a
+# model whose operator has already had to raise that knob for the round to complete at all.
 AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
 _AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
 
-# ...and the warmup share does not only vary by model, it varies by CONCURRENCY,
-# which the grace knob cannot express because it is one flat number. The client
-# builds warmup as CANON_WARMUP_PER_LANE requests per lane across CONC lanes, so
-# the work is linear in CONC *by construction*; a grace chosen at one
-# concurrency is arithmetically wrong at another. Measured on Kimi-K3:
-#
-#     conc=8   ->  87 warmup requests, ~3000s        (10.9 req/lane)
-#     conc=16  -> 177 warmup requests, ~5000s        (11.1 req/lane)
-#     conc=64  -> the 12075s warmup the warning below cites
-#
-# Left flat, a conc=32 round derives its cap from a conc=8 budget and is killed
-# mid-warmup -- the exact failure this module's cap-raise exists to prevent, just
-# moved one axis over. So the warmup share carries a CONC-scaled FLOOR.
-#
-# A ratio needs BOTH concurrencies, so the grace has to say which one it was
-# measured at. This is the default answer, not the only one: 8 is the lowest
-# concurrency this repo has a measured agentic warmup for, so defaulting to it
-# leaves every previously-validated round with its exact cap. But an operator
-# who measured at some other concurrency declares that via
-# ``AGENTX_WARMUP_GRACE_CONC`` instead of hand-converting their measurement into
-# an 8-anchored number -- which is what a hardcoded anchor forces, and which
-# silently doubles a conc=16 measurement.
-#
-# The floor only ever RAISES the cap. That asymmetry is deliberate: a cap that is
-# too large costs nothing but a longer wait on a genuinely hung round (and the
-# session budget clamps it anyway via ``session_clamped_timeout_sec``), while a
-# cap that is too small kills a round that would have finished.
+# ...and the warmup share does not only vary by model, it varies by CONCURRENCY, which the grace knob cannot express
+# because it is one flat number.
 AGENTX_CANON_WARMUP_CONC = 8
 
-# Seen (warning, scaling) payloads, so a conc sweep does not reprint them once
-# per rung per arm. Both lines below are derivation commentary: the FIRST one is
-# the diagnosis, the fiftieth is noise that buries the per-variant progress the
-# same session is emitting. Keyed on the formatted payload rather than on a bare
-# flag, so a configuration that actually changes still speaks up.
+# Seen (warning, scaling) payloads, so a conc sweep does not reprint them once per rung per arm.
 _AGENTX_SAID: set[tuple] = set()
 
 
@@ -773,16 +672,7 @@ def _say_once(emit, key: tuple) -> None:
 
 
 def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
-    """Read a positive integer from ``src``; 0 when unset or unusable.
-
-    A whole number written with a decimal point (``"16.0"``, ``"3600.0"``) is
-    accepted. ``int()`` alone rejects it, and rejecting is not a safe default
-    here: these knobs feed a ratio, so discarding a declared anchor of ``16.0``
-    silently re-anchors the grace at 8 and doubles it -- the exact failure
-    ``AGENTX_WARMUP_GRACE_CONC`` exists to prevent. A fractional value
-    (``"8.5"``) is still rejected, because a non-integral concurrency or second
-    count is a typo rather than an intent.
-    """
+    """Read a positive integer from ``src``; 0 when unset or unusable."""
     raw = (src.get(name) or "").strip()
     try:
         value = int(raw)
@@ -803,73 +693,24 @@ def _agentx_conc(src: "Mapping[str, str]") -> int:
 
 
 def agentx_warmup_grace_conc(env: "Mapping[str, str] | None" = None) -> int:
-    """The concurrency ``AGENTX_WARMUP_GRACE_PERIOD`` was measured at.
-
-    Args:
-        env: Environment to read; defaults to the process environment.
-
-    Returns:
-        The declared anchor, or the repo default when unset/unusable.
-    """
+    """The concurrency ``AGENTX_WARMUP_GRACE_PERIOD`` was measured at."""
     src = os.environ if env is None else env
     return _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC") or AGENTX_CANON_WARMUP_CONC
 
 
 def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
-    """The warmup bound for this round: the operator's grace, scaled by CONC.
-
-    ONE function because there are TWO consumers that must agree. This module
-    sizes the subprocess cap that has to outlast the warmup, and
-    ``aiperf_client.sh`` passes ``--warmup-grace-period`` to aiperf, which is
-    what actually cuts the warmup off. They read the same env var, and the
-    docstring of the cap has always claimed they stay consistent -- but the
-    CONC scaling used to live inside the cap's own body, so the client kept
-    seeing the UNSCALED number.
-
-    Measured consequence on a Kimi-K3 conc=32 round: the cap budgeted 14400s of
-    warmup while the client was still bounded at 3600s, so warmup would have
-    been cut at 106 of 354 requests with the working set barely populated --
-    the round survives, and reports a prefix-reuse figure taken before the
-    cache had anything in it. Exporting this value to the client is what makes
-    the two layers agree.
-
-    Args:
-        env: Environment to read; defaults to the process environment.
-
-    Returns:
-        The warmup grace in seconds, never below the operator's own value.
-    """
+    """The warmup bound for this round: the operator's grace, scaled by CONC."""
     src = os.environ if env is None else env
     measured = _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_PERIOD")
     if not measured:
-        # Nothing was measured, so there is nothing to scale. The canonical
-        # 1800s is a CONSTANT, not an observation of this model at this
-        # concurrency, and multiplying it by CONC/anchor would invent a bound
-        # nobody stands behind: at CONC=64 an untuned round would silently get
-        # 14400s of warmup share and a 23400s cap where the documented
-        # canonical total is 10800s. Return it flat so the canonical invariant
-        # holds at EVERY concurrency, and let the "nothing has been tuned for
-        # this model" warning below do the talking.
+        # Nothing was measured, so there is nothing to scale.
         return AGENTX_CANON_WARMUP_GRACE_SEC
     grace = measured
-    # Scaling requires the anchor to be DECLARED, not assumed. A ratio needs two
-    # numbers, and defaulting the second one to 8 turns a grace whose
-    # concurrency nobody stated into a multiplied bound: writing the canonical
-    # AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to yield a 23400s cap at
-    # CONC=64 while leaving it unset yielded 10800s -- the same value meaning two
-    # different things depending on whether it was typed. The conc sweep then
-    # prices every rung against the inflated number and skips most of the ladder.
-    #
-    # So: no anchor, no scaling. An operator who wants the floor says which
-    # concurrency their measurement came from, which is the whole point of
-    # AGENTX_WARMUP_GRACE_CONC and costs them one line.
+    # Scaling requires the anchor to be DECLARED, not assumed.
     if not _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC"):
         return grace
-    # The client's warmup is linear in CONC by construction (per-lane requests x
-    # CONC lanes), but the grace knob is a flat number, so a grace measured at
-    # one concurrency under-budgets every higher one. Scale, never shrink, and
-    # stay identity at or below the anchor so previously-validated rounds keep
-    # their exact bound.
+    # The client's warmup is linear in CONC by construction (per-lane requests x CONC lanes), but the grace knob is a
+    # flat number, so a grace measured at one concurrency under-budgets every higher one.
     anchor = agentx_warmup_grace_conc(src)
     conc = _agentx_conc(src)
     if conc <= anchor:
@@ -893,21 +734,10 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
 
 
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
-    """Resolve the AgentX baseline cap: explicit, else duration + overhead.
-
-    Args:
-        env: Environment to read; defaults to the process environment.
-
-    Returns:
-        The subprocess timeout in seconds for an AgentX baseline launch.
-    """
+    """Resolve the AgentX baseline cap: explicit, else duration + overhead."""
     src = os.environ if env is None else env
 
-    # One parser for every knob in this module. Two of them would drift: a
-    # grace of "3600.0" that ``agentx_warmup_grace_sec`` accepts but a local
-    # ``int()`` rejects would be scaled AND reported as "nothing has been
-    # tuned", which is how the suppressed-warning mismatch got here the first
-    # time.
+    # One parser for every knob in this module.
     def _int(name: str, default: int) -> int:
         return _agentx_positive_int(src, name) or default
 
@@ -918,28 +748,19 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     if explicit:
         return explicit
 
-    # Same validity bar as `_int` itself (parses to a positive int) rather than
-    # "non-empty string" -- otherwise an invalid override (e.g. "abc" or "-1")
-    # both silently falls back to the default AND suppresses the warning meant
+    # Same validity bar as `_int` itself (parses to a positive int) rather than "non-empty string" -- otherwise an
+    # invalid override (e.g. "abc" or "-1") both silently falls back to the default AND suppresses the warning meant
     # to flag exactly that case.
     if _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
         overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
         grace = None
     else:
-        # Derive the warmup share from the same knob that bounds it in the
-        # client, via the same helper the client's value is exported from, so
-        # the cap and the client's --warmup-grace-period cannot drift apart.
+        # Derive the warmup share from the same knob that bounds it in the client, via the same helper the client's
+        # value is exported from, so the cap and the client's --warmup-grace-period cannot drift apart.
         grace = agentx_warmup_grace_sec(src)
         overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
         if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
-            # Nothing has been tuned for this model at all. The derivation
-            # above is only as good as its warmup bound, and at the canonical
-            # grace that bound is the GLM-5.2/Qwen3.8 measurement (4774s/6676s
-            # warmup+compile). A raw aiperf run against Kimi-K3 (conc=64, ISL
-            # ~115k avg) measured warmup alone draining in ~12075s -- past this
-            # whole cap before profiling starts. Nothing here can tell such a
-            # model apart, so say so rather than let the round be killed
-            # mid-warmup by a cap nobody chose.
+            # Nothing has been tuned for this model at all.
             _say_once(
                 lambda: log.warning(
                     "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
@@ -958,12 +779,8 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
             )
     duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
     total = duration + overhead
-    # Log every input, so a timeout in the field can be read back to the value
-    # that produced it instead of guessing which knob was in play. Once per
-    # distinct derivation, not once per call: a concurrency sweep resolves this
-    # for every rung, at each of the cap and budget-gate sites, so an
-    # unconditional line would repeat the same arithmetic tens of times per
-    # ladder and bury the one line per rung that carries information.
+    # Log every input, so a timeout in the field can be read back to the value that produced it instead of guessing
+    # which knob was in play.
     _say_once(
         lambda: log.info(
             "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
@@ -979,12 +796,11 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     return total
 
 
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
-# above for callers/tests that import them from this module.
+# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
+# from this module.
 
 
-# Underscore-prefixed aliases re-exported for callers/tests; canonical
-# names live in `_workload_envs`.
+# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
@@ -1001,13 +817,7 @@ def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
 
 
 def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
-    """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it.
-
-    Magpie is launched with ``cwd=output_dir``. If orchestration supplies a
-    relative ``result_dir``, both the subprocess and Hyperloom's accuracy parser
-    must interpret it relative to that same directory, not relative to the
-    coordinator's process cwd.
-    """
+    """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it."""
     if not override_result_dir:
         return output_dir
     result_dir = Path(override_result_dir)
@@ -1017,37 +827,14 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
 
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
-    """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
-
-    ``replay_warm_recipe`` reuses this executor but is an optimization
-    candidate, so it must compare against the pure baseline reference rather
-    than redefine it (otherwise the gate would mask the warm recipe's own
-    deviation from the baseline output).
-
-    The kernel lane also drives this executor through synthetic tasks that
-    carry ``kind="baseline"`` literally (integrate re-baseline, stack
-    validation). Those are throughput-only A/B probes against an
-    already-anchored baseline -- they never anchor one -- so they opt out via
-    ``params["quality_ref_exempt"]`` and are treated exactly like
-    ``replay_warm_recipe``: compare, never establish.
-
-    Args:
-        task_kind: The task kind (``ctx.task.kind``); ``None`` is treated as
-            "not a baseline".
-        params: The task params (``ctx.task.params``); a truthy
-            ``quality_ref_exempt`` disqualifies an otherwise-genuine baseline.
-
-    Returns:
-        bool: ``True`` only for a ``"baseline"`` task that is not exempt.
-    """
+    """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
     if str(task_kind or "") != "baseline":
         return False
     return not (params or {}).get("quality_ref_exempt")
 
 
-# Above this cold-start delta the measured round is unlikely to have settled
-# either: the observed pathological case climbed 14,202 -> 19,374 -> 22,425
-# tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
+# Above this cold-start delta the measured round is unlikely to have settled either: the observed pathological case
+# climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
 # another +16% into round 3.
 _COLD_START_DELTA_WARN_PCT = 25.0
 
@@ -1056,23 +843,7 @@ def _is_double_run_accuracy_handoff(
     result: dict[str, Any],
     salvaged: dict[str, Any] | None,
 ) -> bool:
-    """Whether accuracy came from the warmup round because that is the design.
-
-    The cold-start guard splits one baseline into a warmup round that measures
-    accuracy and a measured round that measures hot throughput only, then
-    decides on the measured round -- which by construction has no accuracy of
-    its own. Reading the warmup round's score there is the intended handoff,
-    not a recovery, and logging it as one makes every healthy double-run
-    baseline look like it survived a fault.
-
-    Args:
-        result (dict[str, Any]): The deciding round's result dict.
-        salvaged (dict[str, Any] | None): The salvage record, whose
-            ``source_file`` names the round the accuracy came from.
-
-    Returns:
-        bool: ``True`` only for measured-round decision + warmup-round source.
-    """
+    """Whether accuracy came from the warmup round because that is the design."""
     out_dir = str((result or {}).get("output_dir") or "")
     if not out_dir or Path(out_dir).name != _MEASURE_ROUND_DIR:
         return False
@@ -1081,35 +852,7 @@ def _is_double_run_accuracy_handoff(
 
 
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
-    """Mirror an InferenceX checkout onto stable local disk.
-
-    Returns a local-disk path Magpie can ``cd`` into so the sglang server's
-    relative-path cuda-graph snapshot dump survives a network-mount flap. No-op
-    (returns ``src`` unchanged) when:
-
-    * relocation is disabled via
-      ``INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1``,
-    * ``src`` already lives on a local filesystem, or
-    * the copy fails for any reason.
-
-    Best-effort — never raises; on failure it falls back to ``src``.
-    ``mirror_key`` isolates long-running tasks that share the same source
-    checkout so a later overlapping task cannot ``rmtree`` a mirror another
-    server is still ``cd``-ed into.
-
-    The caller relocates BEFORE config materialization and passes the returned
-    path explicitly into materialization, so the ProfileExecutor patch step
-    patches the local mirror in place.
-
-    Args:
-        src: Source InferenceX checkout path (typically on a network mount).
-        mirror_key: Optional key isolating concurrent tasks that share the
-            same source checkout; folded into the mirror destination name.
-
-    Returns:
-        A local-disk mirror path when relocation succeeds, otherwise ``src``
-        unchanged (relocation disabled, already local, or copy failed).
-    """
+    """Mirror an InferenceX checkout onto stable local disk."""
     src = str(src)
     if (
         os.environ.get(
@@ -1148,17 +891,15 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
             exc,
         )
         return src
-    # Lock keyed on dest so concurrent tasks mirroring the same source
-    # serialize their rmtree/replace instead of racing.
+    # Lock keyed on dest so concurrent tasks mirroring the same source serialize their rmtree/replace instead of
+    # racing.
     lock_path = str(local_root / f".{dest.name}.lock")
     staging: Path | None = None
     try:
         with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
             staging = Path(tempfile.mkdtemp(dir=str(local_root)))
             staged_ix = staging / "InferenceX"
-            # Copy the tree fresh every run because the per-task patch step
-            # rewrites the mirror in place. Holding the lock across
-            # rmtree+replace stops a concurrent task swapping ``dest`` out.
+            # Copy the tree fresh every run because the per-task patch step rewrites the mirror in place.
             shutil.copytree(real_src, staged_ix, symlinks=True)
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)
@@ -1213,14 +954,7 @@ def _git_head_sha(repo_path: str) -> str:
 
 
 def _git_toplevel(repo_path: str) -> str:
-    """Return the work-tree root of ``repo_path``, or ``""`` when it is not in one.
-
-    A git-produced diff names paths from the work-tree root, and ``git apply``
-    resolves them the same way -- silently ignoring any that fall outside the
-    directory it runs in. So a recorded root that is a subdirectory of the
-    checkout has to be lifted to the root before applying, or the apply reports
-    success having written nothing.
-    """
+    """Return the work-tree root of ``repo_path``, or ``\"\"`` when it is not in one."""
     if not repo_path:
         return ""
     try:
@@ -1487,20 +1221,12 @@ def _warm_tree_records(
     trees: Mapping[str, Mapping[str, Any]],
     order: Sequence[str],
 ) -> list[dict[str, Any]]:
-    """Return one JSON-safe record per touched tree, in apply order.
-
-    These are persisted into session state and read back by prelude to promote
-    or restore, so they carry only what a restore needs.
-    """
+    """Return one JSON-safe record per touched tree, in apply order."""
     return [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
 
 
 def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Restore every tree that was snapshotted, reporting the combined outcome.
-
-    A tree with neither a snapshot nor backups was never written to, so it is
-    skipped rather than counted as a failed restore.
-    """
+    """Restore every tree that was snapshotted, reporting the combined outcome."""
     errors: list[str] = []
     restored: list[str] = []
     for tree in trees:
@@ -1529,35 +1255,13 @@ def _apply_warm_patches(
     *,
     before_mutation: Any = None,
 ) -> list[dict[str, str]] | dict[str, Any]:
-    """Apply warm-replay code patches, each into the checkout it was taken from.
-
-    Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
-    patch_ref). An entry's ``framework_root`` is the checkout the KEEP was
-    applied into when it was recorded, and it is where that overlay goes, so a
-    Recipe whose KEEPs came from different trees -- a framework patch and,
-    separately, a data file under another root -- replays against each of them.
-
-    ``target_repo`` is only a fallback for an entry that records no root of its
-    own. The current-contract prelude never produces such an entry (it skips a
-    replay whose overlays are not all rooted), so on that path ``target_repo``
-    is always empty; it stays a parameter for direct callers and tests that
-    apply a rootless patch list against one explicit repo.
-
-    Applies each patch via ``git apply`` when its tree is a git work-tree,
-    otherwise via the shared nogit ``patch`` CLI path used by integrate_patch.
-
-    Legacy patch lists return the list of successfully applied patch metadata
-    dicts (best-effort skip semantics). Current-contract timelines set
-    ``required_patch_timeline`` and fail closed: the patches are sequential, the
-    first failure stops the sequence and restores every tree it had reached, and
-    the return is a structured result dict describing the failure.
-    """
+    """Apply warm-replay code patches, each into the checkout it was taken from."""
     patches = params.get("patches") or []
     required_timeline = bool(params.get("required_patch_timeline"))
     if not patches:
         return []
-    # The recorded root is the tree the gain was measured on, so it outranks the
-    # locally resolved one rather than being checked against it.
+    # The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather than
+    # being checked against it.
     patch_roots = [str((patch or {}).get("framework_root") or "").strip() or target_repo for patch in patches]
     if not any(patch_roots):
         if required_timeline:
@@ -1578,14 +1282,13 @@ def _apply_warm_patches(
     patch_log_dir.mkdir(parents=True, exist_ok=True)
     from ._nogit_patch import _apply_patch_no_git, _is_git_tree
 
-    # Two recorded roots inside one checkout are one tree: a git diff's paths are
-    # work-tree-root relative, so both resolve there and applying them
-    # separately would ignore whatever falls outside the narrower one.
+    # Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
+    # resolve there and applying them separately would ignore whatever falls outside the narrower one.
     for idx, root in enumerate(patch_roots):
         if root and (toplevel := _git_toplevel(root)) and Path(toplevel).is_dir():
             patch_roots[idx] = toplevel
-    # Ordered by first use so the primary tree stays the one ``target_repo``
-    # named, which is what the single-tree result fields report.
+    # Ordered by first use so the primary tree stays the one ``target_repo`` named, which is what the single-tree
+    # result fields report.
     tree_order: list[str] = list(dict.fromkeys(root for root in patch_roots if root))
     trees: dict[str, dict[str, Any]] = {}
     for root in tree_order:
@@ -1605,12 +1308,9 @@ def _apply_warm_patches(
             continue
         git_tree = _is_git_tree(Path(root))
         pre_sha = _git_head_sha(root) if git_tree else ""
-        # prelude promotes a required timeline's tree only against a pre_sha and
-        # a git snapshot manifest. nogit produces neither, so serving this path
-        # from it turned a successful replay into
-        # validated_recipe_checkout_incomplete -- worse than the fast failure it
-        # replaced. Refuse up front, as before; nogit serves the legacy list,
-        # where nothing downstream needs a sha.
+        # prelude promotes a required timeline's tree only against a pre_sha and a git snapshot manifest. nogit
+        # produces neither, so serving this path from it turned a successful replay into
+        # validated_recipe_checkout_incomplete -- worse than the fast failure it replaced.
         if required_timeline and not pre_sha:
             return {
                 "required": True,
@@ -1679,17 +1379,14 @@ def _apply_warm_patches(
         resolved_contents[idx] = content
         snapshot_contents[root].append(content)
 
-    # Every tree is snapshotted before any of them is written to, so each
-    # snapshot holds pristine content. Nested roots -- /sglang and
-    # /sglang/python/sglang both being recorded -- can then snapshot the same
-    # file twice, and restoring either still lands on pristine.
+    # Every tree is snapshotted before any of them is written to, so each snapshot holds pristine content.
     for position, root in enumerate(tree_order):
         tree = trees[root]
         if tree["use_nogit"] or not snapshot_contents[root]:
             continue
         try:
-            # _create_patch_snapshot owns one fixed sub-directory per output dir
-            # and clears it, so trees past the first are given their own.
+            # _create_patch_snapshot owns one fixed sub-directory per output dir and clears it, so trees past the
+            # first are given their own.
             tree["snapshot_manifest"] = _create_patch_snapshot(
                 root,
                 snapshot_contents[root],
@@ -1751,8 +1448,7 @@ def _apply_warm_patches(
             status.update(status="failed", reason="apply_root_absent")
             statuses.append(status)
             continue
-        # The patch goes into its own recorded tree, so these are per patch
-        # rather than fixed for the whole sequence.
+        # The patch goes into its own recorded tree, so these are per patch rather than fixed for the whole sequence.
         target_repo = tree["root"]
         target_path = Path(target_repo)
         use_nogit = tree["use_nogit"]
@@ -1801,11 +1497,8 @@ def _apply_warm_patches(
                     break
                 continue
 
-        # Structural safety gate on untrusted KB-sourced patch_content before
-        # it is git-applied to the live checkout: reject non-diff blobs and any
-        # patch whose header path escapes the tree (absolute / ``..``). Stale /
-        # missing-target patches are left to git apply's own check so a
-        # legitimate warm patch is never dropped here.
+        # Structural safety gate on untrusted KB-sourced patch_content before it is git-applied to the live checkout:
+        # reject non-diff blobs and any patch whose header path escapes the tree (absolute / ``..``).
         if not is_unified_diff(patch_content) or "GIT binary patch" in patch_content:
             log.warning(
                 "baseline_executor: skipping warm patch %s — not a unified diff",
@@ -1949,9 +1642,8 @@ def _apply_warm_patches(
 
     if required_timeline:
         if failed_ref:
-            # One overlay failing voids the whole replay, and the sequence may
-            # already have written to trees before this one, so every tree is
-            # restored rather than just the one that failed.
+            # One overlay failing voids the whole replay, and the sequence may already have written to trees before
+            # this one, so every tree is restored rather than just the one that failed.
             restore = _revert_warm_patch_trees(trees.values())
             return {
                 "required": True,
@@ -1987,12 +1679,7 @@ def _stamp_warm_patch_trees(
     patch_application: Mapping[str, Any],
     pre_sha: str,
 ) -> None:
-    """Record which trees this round patched, for prelude to promote or restore.
-
-    ``warm_patch_trees`` is the authority. The singular fields describe the
-    primary tree only, and stay because a resumed run may be read by a prelude
-    that predates the list.
-    """
+    """Record which trees this round patched, for prelude to promote or restore."""
     trees = list(patch_application.get("trees") or [])
     primary = trees[0] if trees else {}
     target = str(patch_application.get("target_repo") or primary.get("root") or "")
@@ -2010,12 +1697,7 @@ def _revert_legacy_warm_patch_trees(
     params: Mapping[str, Any],
     pre_sha: str,
 ) -> dict[str, Any]:
-    """Undo a legacy (non-required) apply so nothing leaks into the next task.
-
-    The legacy path returns a plain list, so the trees it touched are read back
-    off ``params``; a record written before that existed leaves only the single
-    target's state to restore.
-    """
+    """Undo a legacy (non-required) apply so nothing leaks into the next task."""
     if trees := list(params.get("_warm_patch_trees") or []):
         return _revert_warm_patch_trees(trees)
     backups = list(params.get("_warm_patch_nogit_backups") or [])
@@ -2033,19 +1715,7 @@ def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
 ) -> dict[str, Any]:
-    """Rollback kernel mutations and report whether every restore succeeded.
-
-    Restoring the snapshots is not on its own enough: the applies also left
-    backup manifests, and on the multi-node path the patch is on every pod.
-    Both halves have to be undone, which is what the prelude rollback does.
-
-    Args:
-        results (Any): Apply results carrying the backup manifests to revert.
-        snapshots (Any): Pristine copies captured before the mutation.
-
-    Returns:
-        dict[str, Any]: ``ok`` and the accumulated ``errors``.
-    """
+    """Rollback kernel mutations and report whether every restore succeeded."""
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
     from ...phases.prelude import PreludePhase
@@ -2057,12 +1727,7 @@ def _rollback_warm_kernel_apply_results(
 
 
 class BaselineExecutor:
-    """Class form for tests / DI; ``baseline_executor`` is the bare callable.
-
-    ``session_dir`` is the session root for the per-task workspace
-    (``<sd>/runs/baseline/<task_id>/``); used only as a fallback when the
-    SubAgentRunner injects a pre-created workspace via ``ctx.extra``.
-    """
+    """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
     def __init__(
         self,
@@ -2074,25 +1739,10 @@ class BaselineExecutor:
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str | None = None,
     ):
-        """Initialize the baseline executor with launch defaults.
-
-        Args:
-            magpie_python (str | None): Python interpreter used to invoke
-                Magpie; resolved automatically when ``None``.
-            default_config_path (Path | str | None): Default Magpie YAML config
-                path; resolved from ``$FRAMEWORK`` at call time when ``None``.
-            session_dir (Path | str | None): Canonical session root for
-                per-task workspaces; resolved automatically when ``None``.
-            shared_state: Optional live SharedState object. When provided, the
-                eager-fallback one-shot is consumed in memory before saving so
-                Coordinator cannot later re-persist a stale True value.
-            default_timeout_sec (int): Default (warm-start) subprocess timeout.
-            cwd (Path | str | None): Working directory for the Magpie subprocess.
-        """
+        """Initialize the baseline executor with launch defaults."""
         from ._grid_runner import _resolve_session_dir
 
-        # Backend-aware interpreter: bypass uses a plain python3, magpie
-        # uses the Magpie-importable venv.
+        # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         self.magpie_python = magpie_python or resolve_benchmark_interpreter()
@@ -2104,26 +1754,11 @@ class BaselineExecutor:
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
-        """Hook for subclasses (ProfileExecutor) to swap the resolver.
-
-        Returns:
-            Path: The default baseline Magpie YAML config path.
-        """
+        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
         return _default_baseline_config()
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
-        """Pick the per-task workspace dir.
-
-        Order: ``task.params['output_dir']`` → ``ctx.extra['workspace']``
-        → ``runs_dir(...)`` (direct-instantiation fallback for tests).
-
-        Args:
-            ctx: Runner context carrying ``task.params`` and ``extra``.
-            action: Action name used when falling back to ``runs_dir(...)``.
-
-        Returns:
-            The resolved per-task workspace directory.
-        """
+        """Pick the per-task workspace dir."""
         params = ctx.task.params or {}
         if params.get("output_dir"):
             return Path(params["output_dir"])
@@ -2133,15 +1768,7 @@ class BaselineExecutor:
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
     def _resolve_shared_state(self, shared_state: Any | None = None) -> Any:
-        """Resolve the live SharedState for a session-scoped flag read/write.
-
-        Args:
-            shared_state: Optional live SharedState; falls back to
-                ``self.shared_state`` and then a loaded session state.
-
-        Returns:
-            The resolved SharedState instance.
-        """
+        """Resolve the live SharedState for a session-scoped flag read/write."""
         state = shared_state or self.shared_state
         if state is None:
             from ...state.shared_state import SharedState
@@ -2150,19 +1777,7 @@ class BaselineExecutor:
         return state
 
     def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
-        """Peek the one-shot eager fallback flag WITHOUT consuming it.
-
-        Used to keep the flag armed when the framework is unknown (cannot pick
-        a safe disable-cuda-graph flag), so the one-shot is not wasted.
-        Best-effort: missing/unreadable state reads as not armed.
-
-        Args:
-            shared_state: Optional live SharedState; falls back to
-                ``self.shared_state`` and then a loaded session state.
-
-        Returns:
-            ``True`` when the one-shot eager-fallback flag is currently armed.
-        """
+        """Peek the one-shot eager fallback flag WITHOUT consuming it."""
         try:
             state = self._resolve_shared_state(shared_state)
             return bool(getattr(state, "baseline_eager_fallback", False))
@@ -2174,19 +1789,7 @@ class BaselineExecutor:
             return False
 
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
-        """Consume the one-shot cuda-graph eager fallback flag from SharedState.
-
-        Returns True (and clears the flag) when a prior baseline armed it.
-        Best-effort: missing/unreadable state reads as no fallback.
-
-        Args:
-            shared_state: Optional live SharedState; falls back to
-                ``self.shared_state`` and then a loaded session state.
-
-        Returns:
-            ``True`` when the flag was armed (and is now cleared), else
-            ``False``.
-        """
+        """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
         try:
             state = self._resolve_shared_state(shared_state)
             if not getattr(state, "baseline_eager_fallback", False):
@@ -2202,24 +1805,7 @@ class BaselineExecutor:
             return False
 
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
-        """Pick the subprocess timeout for this baseline launch.
-
-        Order: explicit ``task.params['timeout_sec']`` → cold-start cap
-        when the aiter jit probe reports COLD (env-overridable via
-        ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
-        Every path emits one log line for greppability.
-
-        All three are hang backstops sized in hours, with no reference to the
-        session budget; :meth:`_session_capped_timeout` reduces the result to
-        what is actually left, per round, at the point each round launches.
-
-        Args:
-            params: Task params; an explicit ``timeout_sec`` overrides the
-                probe-based selection.
-
-        Returns:
-            The subprocess timeout in seconds for this baseline launch.
-        """
+        """Pick the subprocess timeout for this baseline launch."""
         explicit = params.get("timeout_sec")
         if explicit:
             timeout_sec = int(explicit)
@@ -2229,11 +1815,7 @@ class BaselineExecutor:
             )
             return timeout_sec
 
-        # Ahead of the probe on purpose: the probe cannot answer this case. See
-        # AGENTX_BASELINE_OVERHEAD_SEC -- AgentX moves max_model_len, which is
-        # part of the JIT signature the cold/warm split is really about, while
-        # the probe only counts kernels globally. Asking it first would return
-        # WARM and the 7800s cap that a first AgentX round cannot meet.
+        # Ahead of the probe on purpose: the probe cannot answer this case.
         if agentx_enabled():
             timeout_sec = agentx_baseline_timeout_sec()
             log.info(
@@ -2253,9 +1835,7 @@ class BaselineExecutor:
             )
         )
         if cache["probe_status"] == "found" and cache["is_cold"]:
-            # Before paying the cold-start compile, reap aiter JIT locks left by
-            # a killed hipcc. Gated on "no live compiler" so a concurrent
-            # benchmark's in-flight compile is never disturbed.
+            # Before paying the cold-start compile, reap aiter JIT locks left by a killed hipcc.
             sweep = sweep_stale_aiter_locks_if_dead()
             if sweep.get("skipped_live"):
                 log.info(
@@ -2312,30 +1892,7 @@ class BaselineExecutor:
         *,
         output_dir: Path,
     ) -> int:
-        """``timeout_sec`` reduced to what the session can still pay for.
-
-        The baseline's own timeout is a catastrophic-hang backstop -- two hours
-        by default, four for a cold start -- chosen with no reference to how much
-        of the session is left. A round granted more than the budget has runs
-        past the end of the session and takes the closing phase with it.
-
-        Nothing is held back here, and no pass of a baseline round holds anything
-        back either. That is what keeps every cap sitting past the session
-        deadline, so the watchdog reaches a round before the round's own timeout
-        does and the kill is attributed to the budget rather than to the model.
-        Whether a round should start, and whether its measured pass should follow
-        its warmup, are decided by the gates that price those questions -- not by
-        shortening a cap until the round dies of it.
-
-        Args:
-            timeout_sec: The timeout this round would get on an unbounded budget.
-            session_deadline_sec: Monotonic-clock session deadline, or ``None``
-                when there is no budget to respect.
-            output_dir: The round's workspace, for the log line.
-
-        Returns:
-            int: The hard timeout to grant this round, in seconds.
-        """
+        """``timeout_sec`` reduced to what the session can still pay for."""
         return _logged_session_clamp(
             timeout_sec,
             session_clamped_timeout_sec(timeout_sec, session_deadline_sec),
@@ -2344,18 +1901,7 @@ class BaselineExecutor:
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
-        """Resolve the InferenceX checkout the subprocess will ``cd`` into.
-
-        Prefers the materialized ``benchmark.inferencex_path`` (the task-local,
-        possibly local-disk-mirrored checkout) and falls back to
-        ``$INFERENCEX_PATH``. Returns ``""`` when neither is set.
-
-        Args:
-            config_path: The materialized Magpie YAML config path.
-
-        Returns:
-            The InferenceX checkout path, or ``""`` when unresolved.
-        """
+        """Resolve the InferenceX checkout the subprocess will ``cd`` into."""
         try:
             cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
             bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
@@ -2369,38 +1915,14 @@ class BaselineExecutor:
         config_path: Path,
         output_dir: Path,
     ) -> dict[str, Any] | None:
-        """Hook after YAML materialization, before launch.
-
-        Applies the eval-dest redirect so ``append_lm_eval_summary``'s ``mv ./``
-        writes lm-eval ``results*.json`` into ``$RESULT_DIR`` instead of the
-        process cwd, which is outside the session once InferenceX is mirrored to
-        local disk and would fail the accuracy gate despite a passing eval.
-
-        The patches are re-asserted here rather than at install time because
-        Magpie's ``_prepare_benchmark_scripts`` re-copies its own generic ``*.sh``
-        into ``<inferencex>/benchmarks/`` and :func:`_ensure_local_inferencex`
-        re-mirrors the checkout on every run, so an install-time patch does not
-        survive. Materialization has pinned the exact checkout by this point.
-
-        ProfileExecutor fully REPLACES this hook (it does not call ``super()``)
-        with NUM_PROMPTS / PROFILE_EXTRA_BODY validation, so the eval patches
-        below apply to the baseline path only.
-
-        Args:
-            config_path: The materialized Magpie YAML config path.
-            output_dir: The per-task workspace directory.
-
-        Returns:
-            An early-return result dict to short-circuit the launch, or
-            ``None`` to proceed with the baseline run.
-        """
+        """Hook after YAML materialization, before launch."""
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         if not materialized_run_eval_disabled(config_path):
-            # Target present but unpatchable is a hard stop; target absent is an
-            # unrecognized layout, which warns rather than failing every eval run.
+            # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
+            # rather than failing every eval run.
             probe_root = Path(ix_root) if ix_root else None
             if not ensure_eval_probe_patched(probe_root):
                 msg = (
@@ -2420,11 +1942,9 @@ class BaselineExecutor:
                         "error": msg,
                     }
                 log.warning("baseline_executor: %s", msg)
-            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
-            # be removed AND this run is meant to execute lm-eval: the benchmark is
-            # guaranteed to abort in run_lm_eval, and the accuracy gate then stops
-            # the whole session. Surfacing it here costs seconds instead of a full
-            # doomed server boot + benchmark.
+            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot be removed AND this run is meant
+            # to execute lm-eval: the benchmark is guaranteed to abort in run_lm_eval, and the accuracy gate then
+            # stops the whole session.
             try:
                 compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
             except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
@@ -2461,15 +1981,10 @@ class BaselineExecutor:
                 return anchor_result
         return None
 
-    # Scoped to the line-replacement patches this hook applies. The probe is
-    # judged above by its own target-exists test, and ``num_prompts`` /
-    # ``profile_extra_body`` belong to the profiling path and are
-    # ProfileExecutor's to judge.
+    # Scoped to the line-replacement patches this hook applies.
     _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
-    # Of those, the one whose silent absence corrupts the accuracy gate rather
-    # than degrading it: without ``eval_dest`` the results file lands in the cwd
-    # and no score is ever parsed. ``eval_start`` is a log breadcrumb -- worth
-    # reporting, never worth aborting for.
+    # Of those, the one whose silent absence corrupts the accuracy gate rather than degrading it: without
+    # ``eval_dest`` the results file lands in the cwd and no score is ever parsed.
     _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
 
     def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
@@ -2483,13 +1998,19 @@ class BaselineExecutor:
         this run executes lm-eval; anchors that merely degrade something are
         logged, not fatal.
 
+        Scoped to the checkout Magpie will benchmark. Env-wide discovery also
+        reaches the InferenceX bundled with the installed Magpie, which a run
+        that pins ``benchmark.inferencex_path`` never executes — judging it
+        aborts every eval run on rot in a tree nothing here reads.
+
         Args:
             ix_root: The resolved InferenceX root for this run, if any.
 
         Returns:
             An early-return failure dict, or ``None`` to proceed.
         """
-        broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
+        rotted = failed_patch_anchors_in(ix_root) if ix_root else failed_patch_anchors(None)
+        broken = [s for s in rotted if s.name in self._EVAL_HOOK_ANCHORS]
         if not broken:
             return None
         for status in broken:
@@ -2522,24 +2043,7 @@ class BaselineExecutor:
         markers: tuple[str, ...],
         context_markers: tuple[str, ...] | None = None,
     ) -> bool:
-        """Whether a failed result's error tail, warnings or logs hit a marker.
-
-        Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
-        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``.
-        Recursive so the double-run path is covered (the warmup round's logs
-        carry the marker even when the measure round failed for a downstream
-        reason). Never raises.
-
-        Args:
-            result: A ``status="failed"`` baseline result dict.
-            markers: Substrings identifying the root cause being probed.
-            context_markers: When set, one of these must appear in the SAME
-                blob as a ``markers`` hit, narrowing a generic signature to the
-                subsystem that owns it.
-
-        Returns:
-            ``True`` when the marker (and its context) is found, else ``False``.
-        """
+        """Whether a failed result's error tail, warnings or logs hit a marker."""
 
         def _hit(text: str) -> bool:
             if not any(m in text for m in markers):
@@ -2555,8 +2059,8 @@ class BaselineExecutor:
         if not out_dir:
             return False
         root = Path(out_dir)
-        # Double-run: the failure markers may live in the sibling warmup round,
-        # so climb to the shared task root to scan both rounds.
+        # Double-run: the failure markers may live in the sibling warmup round, so climb to the shared task root to
+        # scan both rounds.
         if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
@@ -2589,20 +2093,7 @@ class BaselineExecutor:
         result: dict[str, Any],
         warmup_tput: Any,
     ) -> None:
-        """Record how steady the baseline anchor actually is.
-
-        The double-run discards round 1 by design, which leaves exactly one
-        usable measurement -- and one measurement cannot be shown to be steady.
-        That is worth stating rather than assuming: the whole gain ledger is
-        graded against this number with a 3% KEEP threshold, and a real session
-        once produced 14,202 -> 19,374 -> 22,425 tok/s from one unchanged
-        configuration. Establishing convergence needs a third round.
-
-        So the verdict is recorded (it will read ``insufficient_rounds``) along
-        with the cold-start delta, and a warning is raised only when that delta
-        is large enough to suggest round 2 had not settled either. Never raises,
-        and never fails the baseline -- halting here would stall the session.
-        """
+        """Record how steady the baseline anchor actually is."""
         try:
             from hyperloom.orchestrator.measurement.convergence import assess_convergence
 
@@ -2630,17 +2121,7 @@ class BaselineExecutor:
 
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
-        """Detect an eval-rooted baseline failure and capture bounded evidence.
-
-        Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
-        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
-        for ``run_eval``-failure markers. Climbs to the shared task root so the
-        double-run warmup logs are covered. Returns the first matched window
-        (marker plus a bounded slice) so callers need not rescan. Never raises.
-
-        Returns:
-            ``(is_eval_rooted, evidence)``; ``evidence`` is empty when not rooted.
-        """
+        """Detect an eval-rooted baseline failure and capture bounded evidence."""
 
         def _window(text: str) -> str | None:
             for m in _EVAL_FAILURE_MARKERS:
@@ -2660,8 +2141,8 @@ class BaselineExecutor:
         if not out_dir:
             return False, ""
         root = Path(out_dir)
-        # Double-run: the failure markers may live in the sibling warmup round,
-        # so climb to the shared task root to scan both rounds.
+        # Double-run: the failure markers may live in the sibling warmup round, so climb to the shared task root to
+        # scan both rounds.
         if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
@@ -2692,30 +2173,12 @@ class BaselineExecutor:
 
     @staticmethod
     def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
-        """Whether a failed baseline result was caused by the accuracy eval.
-
-        Args:
-            result: A ``status="failed"`` baseline result dict.
-
-        Returns:
-            ``True`` when an eval-failure marker is found, else ``False``.
-        """
+        """Whether a failed baseline result was caused by the accuracy eval."""
         return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
-        """Whether a failed baseline died on the MoE runner backend in use.
-
-        The quant scheme's ``runner`` is only built on the backends it actually
-        implements, so an unsupported ``--moe-runner-backend`` surfaces as a
-        missing-attribute crash on the first forward pass.
-
-        Args:
-            result: A ``status="failed"`` baseline result dict.
-
-        Returns:
-            ``True`` when a MoE-runner marker is found, else ``False``.
-        """
+        """Whether a failed baseline died on the MoE runner backend in use."""
         return BaselineExecutor._failure_carries_markers(
             result,
             _MOE_RUNNER_MISSING_MARKERS,
@@ -2723,36 +2186,10 @@ class BaselineExecutor:
         )
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        """Run the Magpie baseline, recording it as a timeline event.
-
-        The event is opened here rather than inside the retry logic so it
-        covers everything the action does, and closed on every exit including
-        a raise. A dangling ``status="running"`` baseline event is then
-        unambiguous: the session was killed mid-measurement.
-
-        The session the context names is bound for the duration of the run
-        whenever it is not the one already bound. The Coordinator binds its own
-        session at startup and every action it dispatches agrees with it, so
-        this normally changes nothing; it is what keeps a caller that reached
-        the executor another way from recording into whichever session was
-        bound last instead of its own.
-
-        Args:
-            ctx (RunnerContext): The runner context carrying ``task.params``
-                (config / model / timeout knobs) and ``extra`` (workspace).
-
-        Returns:
-            dict[str, Any]: The baseline result dict (see :meth:`_run_once`).
-
-        Raises:
-            FileNotFoundError: If the resolved baseline config does not exist.
-        """
+        """Run the Magpie baseline, recording it as a timeline event."""
         from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
 
-        # Only a context that names its session binds one. The bare
-        # ``_resolve_session_dir`` fallback is the working directory, and
-        # writing a session's timeline into whatever directory the process
-        # happens to be in is worse than not recording.
+        # Only a context that names its session binds one.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
             with suppress(Exception):
@@ -2762,14 +2199,7 @@ class BaselineExecutor:
             return await self._run_recorded(ctx)
 
     async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
-        """Open the baseline event, run the action, and close it either way.
-
-        Args:
-            ctx (RunnerContext): The runner context.
-
-        Returns:
-            dict[str, Any]: The baseline result dict.
-        """
+        """Open the baseline event, run the action, and close it either way."""
         params = ctx.task.params or {}
         recorder = make_baseline_recorder(
             self._resolve_sink(ctx),
@@ -2791,17 +2221,7 @@ class BaselineExecutor:
         return result
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
-        """Decide which event this measurement's rows belong to.
-
-        Args:
-            ctx (RunnerContext): The runner context carrying the task params.
-
-        Returns:
-            Any: A sink writing into this action's baseline event, or ``None``
-                to decline -- when there is no session to record into, or when
-                the caller marked the run an inner step of a phase that
-                records it itself (see :data:`SBD_INNER_STEP_PARAM`).
-        """
+        """Decide which event this measurement's rows belong to."""
         from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
         from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
@@ -2832,18 +2252,7 @@ class BaselineExecutor:
             return None
 
     def _resolve_framework(self, ctx: RunnerContext) -> str:
-        """Name the serving framework this measurement runs against.
-
-        Read before the config is materialized, so it takes the task's own
-        declaration and falls back to the session's -- the authoritative
-        answer lives in the materialized YAML, which does not exist yet.
-
-        Args:
-            ctx (RunnerContext): The runner context.
-
-        Returns:
-            str: The framework name, or ``""`` when nothing declared one.
-        """
+        """Name the serving framework this measurement runs against."""
         params = ctx.task.params or {}
         with suppress(Exception):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
@@ -2860,17 +2269,7 @@ class BaselineExecutor:
         attempt_reason: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Run one pass through :meth:`_run_once`, recorded as its own row.
-
-        Args:
-            ctx (RunnerContext): The runner context.
-            recorder (Any): The baseline event recorder, or ``None``.
-            attempt_reason (str): Why this pass ran (a ``RUN_*`` value).
-            **kwargs (Any): The pass's :meth:`_run_once` arguments.
-
-        Returns:
-            dict[str, Any]: The pass's result dict.
-        """
+        """Run one pass through :meth:`_run_once`, recorded as its own row."""
         index = recorder.begin_run(attempt_reason=attempt_reason) if recorder is not None else 0
         try:
             result = await self._run_once(ctx, recorder=recorder, run_index=index, **kwargs)
@@ -2886,48 +2285,10 @@ class BaselineExecutor:
         return result
 
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the Magpie baseline, with a one-shot eval-failure fallback.
-
-        Delegates to :meth:`_run_once`. When the run fails for an eval-rooted
-        reason AND accuracy eval was active, it re-runs **once** with
-        ``RUN_EVAL=false`` so the throughput baseline is salvaged. The retried
-        result is tagged ``accuracy_source="eval_unavailable"`` and carries a
-        ``eval_failed_fallback_no_accuracy`` warning.
-
-        **The salvage retry is skipped for a genuine ``baseline`` task.** A
-        baseline's job is to establish the accuracy reference, so
-        :meth:`_maybe_stop_on_missing_baseline_accuracy` halts the run whenever
-        eval was expected and produced nothing — including after this very
-        fallback (the fallback forces ``RUN_EVAL=false`` but eval was still
-        expected and still broke). Running the retry there therefore burns a
-        second full server boot + benchmark to produce a result that is
-        guaranteed to be discarded, and delays the operator's error by minutes.
-        Fail fast instead: record the same ``baseline_accuracy_failed`` stop
-        immediately. The retry is kept for non-baseline kinds (e.g.
-        ``replay_warm_recipe``), which do not establish the quality reference
-        and for which a throughput-only result IS usable.
-
-        Args:
-            ctx (RunnerContext): The runner context carrying ``task.params``
-                (config / model / timeout knobs) and ``extra`` (workspace).
-            recorder (Any): The baseline event recorder, or ``None`` when the
-                run is not being recorded.
-
-        Returns:
-            dict[str, Any]: The baseline result dict (see :meth:`_run_once`).
-
-        Raises:
-            FileNotFoundError: If the resolved baseline config does not exist.
-        """
+        """Run the Magpie baseline, with a one-shot eval-failure fallback."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
         params = ctx.task.params or {}
-        # A failed required patch timeline means the donor is incompatible with
-        # the current tree. The run restored Recipe + Kernel changes and the
-        # result is returned as a failed warm replay; PRELUDE marks it failed
-        # and the session optimizes from the clean baseline.
-        # "Already off" only when the operator explicitly disabled eval — via
-        # ``--no-eval``, the param, or an extra_envs RUN_EVAL that is PRESENT and
-        # falsey. An absent RUN_EVAL must NOT count.
+        # A failed required patch timeline means the donor is incompatible with the current tree.
         _extra_envs = params.get("extra_envs") or {}
         _explicit_run_eval = (
             "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
@@ -2989,8 +2350,8 @@ class BaselineExecutor:
                 "scheme; retrying once without --moe-runner-backend so the "
                 "framework picks the backend itself."
             )
-            # Carry the eval fallback forward: the eval that broke above must
-            # stay off, and its bookkeeping must survive onto this result.
+            # Carry the eval fallback forward: the eval that broke above must stay off, and its bookkeeping must
+            # survive onto this result.
             retry = await self._run_pass(
                 ctx,
                 recorder=recorder,
@@ -3015,11 +2376,7 @@ class BaselineExecutor:
         return bool(getattr(state, "eval_disabled", False))
 
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
-        """Whether an eval failure should route into enablement this run.
-
-        Only for a genuine baseline, single-node, with the eval lane admitted by
-        the session's enablement mode.
-        """
+        """Whether an eval failure should route into enablement this run."""
         from ._accuracy_gate import eval_enablement_allowed
         from ._multi_node_env import is_multi_node
 
@@ -3039,12 +2396,7 @@ class BaselineExecutor:
         observed_accuracy: float | None,
         evidence: str,
     ) -> dict[str, Any]:
-        """Mark ``result`` as an eval-rooted baseline failure for enablement.
-
-        Records the failure kind, observed accuracy, effective floor, bounded
-        evidence and an eval-contract fingerprint so writeback can persist the
-        trigger and a later enablement round can re-run the same contract.
-        """
+        """Mark ``result`` as an eval-rooted baseline failure for enablement."""
         from ._accuracy_gate import (
             BASELINE_EVAL_ACCURACY_FLOOR_KEY,
             BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -3065,9 +2417,8 @@ class BaselineExecutor:
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
         result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
         result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
-        # Fingerprint derives from the materialized YAML contract fields only —
-        # task/metric are result outputs and may be absent on eval crash, so they
-        # must not participate in the stable identity.
+        # Fingerprint derives from the materialized YAML contract fields only — task/metric are result outputs and may
+        # be absent on eval crash, so they must not participate in the stable identity.
         result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
             config_path=result.get("materialized_config"),
             framework=framework,
@@ -3081,26 +2432,7 @@ class BaselineExecutor:
         ctx: RunnerContext,
         result: dict[str, Any],
     ) -> None:
-        """Halt the run for an eval-rooted baseline failure, fail-fast path.
-
-        :meth:`_maybe_stop_on_missing_baseline_accuracy` only inspects
-        ``succeeded`` results (a plain throughput failure is the Coordinator's
-        ``baseline_failed`` streak business). An eval-rooted *failure* on a
-        genuine baseline is a different animal: the accuracy reference can
-        never be established, so it must produce the same
-        ``baseline_accuracy_failed`` stop the post-fallback path used to
-        produce — just minutes earlier and without the wasted re-benchmark.
-
-        A sibling attempt may already have measured a valid accuracy (the
-        cold-start guard and the Coordinator's retries each get their own
-        ``runs/baseline/<attempt>`` dir), so the same salvage the succeeded
-        path uses is attempted first.
-
-        Args:
-            ctx (RunnerContext): The runner context (task kind + shared_state).
-            result (dict): The failed baseline result dict, mutated in place
-                when a sibling accuracy is salvaged.
-        """
+        """Halt the run for an eval-rooted baseline failure, fail-fast path."""
         from ._accuracy_gate import accuracy_meets_floor, request_baseline_accuracy_stop
 
         params = ctx.task.params or {}
@@ -3110,8 +2442,8 @@ class BaselineExecutor:
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
             acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
-            # ``accuracy_meets_floor`` already means "finite, strictly positive
-            # and >= floor", so floor 0.0 is the legacy "any usable accuracy".
+            # ``accuracy_meets_floor`` already means "finite, strictly positive and >= floor", so floor 0.0 is the
+            # legacy "any usable accuracy".
             if accuracy_meets_floor(acc_val, 0.0):
                 log.warning(
                     "baseline_executor: eval-rooted baseline failure, but salvaged "
@@ -3121,8 +2453,8 @@ class BaselineExecutor:
                     salvaged.get("source_file", ""),
                 )
                 return
-            # A measured zero is a broken baseline, not a usable reference: it
-            # must still reach the stop below, now with the score on record.
+            # A measured zero is a broken baseline, not a usable reference: it must still reach the stop below, now
+            # with the score on record.
             log.warning(
                 "baseline_executor: eval-rooted baseline failure and the sibling "
                 "attempt measured accuracy=%.4f (%s); stopping the run",
@@ -3139,52 +2471,12 @@ class BaselineExecutor:
         ctx: RunnerContext,
         result: dict[str, Any],
     ) -> None:
-        """Halt the run when a genuine baseline produced no accuracy result.
-
-        A baseline is supposed to establish the accuracy reference. If the
-        accuracy test was expected to run but produced no usable result, the
-        setup is fundamentally broken and the whole run stops.
-
-        "No usable result" means a missing or non-positive accuracy: scriptable
-        workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
-        absent, and serving records no accuracy at all, so both are covered.
-
-        Incidental disabling is no opt-out. ``disable_run_eval``, an explicit
-        ``RUN_EVAL=false`` env, or a YAML/reference-env value do not make a
-        missing accuracy acceptable on a genuine baseline -- they only mean the
-        reference was never measured, which is exactly what this guard rejects.
-        Two deliberate opt-outs exist: ``quality_ref_exempt`` (synthetic
-        kernel-lane re-baselines) and ``--no-eval`` (no reference was asked for).
-
-        With eval-on-fail enablement active (the default), the result is stamped
-        as an eval-failure contract -- ``eval_generation_pathology`` when the
-        generation probe tripped, else whatever the score classifies as -- and
-        routed to enablement rather than
-        stopping; ``_is_promotable_result`` then blocks it from anchoring
-        ``baseline_tput`` / ``baseline_accuracy`` / ``baseline_config_path``.
-        Otherwise the run stops. Throughput-level baseline failures are handled
-        by the Coordinator's existing ``baseline_failed`` streak logic.
-
-        Args:
-            ctx (RunnerContext): The runner context (task kind + shared_state).
-            result (dict): The final baseline result dict.
-        """
+        """Halt the run when a genuine baseline produced no accuracy result."""
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
             return
         if self._eval_disabled(ctx):
             return
-        # A failed status must NOT skip straight past the salvage below. An eval
-        # that dies mid-run (e.g. the server vanishes while lm_eval is working
-        # through its requests) makes run_eval exit non-zero, which fails the
-        # whole round -- exactly the case the sibling-accuracy salvage exists to
-        # rescue. Returning here meant the salvage could only ever run when
-        # nothing had gone wrong, so a perfectly good accuracy measured by the
-        # cold-start guard's first round was discarded and the run stopped.
-        #
-        # Throughput-level failures still fall through harmlessly: they leave no
-        # results*.json for the salvage to find, so it returns None and the
-        # normal stop path continues. Those remain the Coordinator's
-        # ``baseline_failed`` streak logic to handle.
+        # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
         acc = result.get("accuracy")
@@ -3209,25 +2501,10 @@ class BaselineExecutor:
 
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
-        # Session-level salvage (complements #942): the cold-start guard and the
-        # coordinator's retries each run in their own ``runs/baseline/<attempt>``
-        # dir. #942 keeps every attempt's eval output inside that attempt's
-        # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding*
-        # attempt -- whose dir can be empty when a prior sibling attempt already
-        # produced a valid ``results*.json``. Before halting, reuse a positive
-        # accuracy measured by any sibling attempt rather than discarding a good
-        # baseline and stopping the whole run.
-        #
-        # This runs BEFORE the enablement branch below, not after it. The
-        # cold-start guard splits one baseline into warmup_round (RUN_EVAL=true
-        # -- the only round that measures accuracy) and measure_round
-        # (RUN_EVAL=false -- hot throughput only), then decides on the
-        # measure_round result, which by construction carries no accuracy. With
-        # enablement active the branch below used to fire first and dispatch a
-        # specialist to chase a quality regression that never happened, while
-        # the sibling warmup_round held a perfectly good score (gsm8k 0.8954 on
-        # Kimi-K3, 2026-07-29). Only a genuinely missing or below-floor accuracy
-        # should reach enablement.
+        # Session-level salvage (complements #942): the cold-start guard and the coordinator's retries each run in
+        # their own ``runs/baseline/<attempt>`` dir. #942 keeps every attempt's eval output inside that attempt's
+        # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding* attempt -- whose dir can be empty
+        # when a prior sibling attempt already produced a valid ``results*.json``.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
             expected_handoff = _is_double_run_accuracy_handoff(result, salvaged)
@@ -3252,17 +2529,16 @@ class BaselineExecutor:
                     acc_val,
                     salvaged.get("source_file", ""),
                 )
-            # Floor 0.0 reproduces the non-enablement "any positive accuracy is
-            # usable" rule; ``accuracy_meets_floor`` rejects zero either way.
+            # Floor 0.0 reproduces the non-enablement "any positive accuracy is usable" rule; ``accuracy_meets_floor``
+            # rejects zero either way.
             if accuracy_meets_floor(acc_val, floor if eval_enablement else 0.0):
                 return
-            # Salvaged, but unusable (zero or still under the floor): that is a
-            # real quality signal, so fall through with the observed value
-            # rather than reporting it as a missing measurement.
+            # Salvaged, but unusable (zero or still under the floor): that is a real quality signal, so fall through
+            # with the observed value rather than reporting it as a missing measurement.
             acc = acc_val
 
-        # Route into enablement instead of stopping: the throughput baseline
-        # stays for diagnostics but is blocked from anchoring.
+        # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
+        # anchoring.
         if eval_enablement:
             kind = classify_accuracy_failure(acc, floor)
             observed = float(acc) if isinstance(acc, (int, float)) else None
@@ -3271,8 +2547,8 @@ class BaselineExecutor:
                 f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
                 f"source={result.get('accuracy_source')}"
             )
-            # A tripped probe means the eval was cut short because the model
-            # never stopped generating, not that it answered and got them wrong.
+            # A tripped probe means the eval was cut short because the model never stopped generating, not that it
+            # answered and got them wrong.
             probe = result.get("eval_probe")
             if probe:
                 kind = EVAL_KIND_GENERATION_PATHOLOGY
@@ -3301,29 +2577,7 @@ class BaselineExecutor:
         *,
         expected_handoff: bool = False,
     ) -> float:
-        """Record a salvaged sibling accuracy, publishing it as the gate
-        reference only when it can serve as one.
-
-        ``result`` carries the score whatever its value: that is evidence.
-        ``SharedState.baseline_accuracy`` is the reference later gates compare
-        against, where ``<= 0`` is :func:`accuracy_passed`'s "no baseline, skip
-        the check" sentinel -- a measured zero there bypasses the gate for every
-        later candidate.
-
-        Args:
-            result: The baseline result dict, mutated in place.
-            salvaged: The parsed eval dict from
-                :meth:`_salvage_sibling_baseline_accuracy`.
-            shared_state: The live SharedState, or ``None``.
-            expected_handoff: Whether this read is the double-run design
-                (see :func:`_is_double_run_accuracy_handoff`) rather than a
-                recovery. The structured warning is for the recovery only;
-                raising it on every healthy double-run baseline leaves the
-                record claiming a fault the run never hit.
-
-        Returns:
-            float: The salvaged accuracy.
-        """
+        """Record a salvaged sibling accuracy, publishing it as the gate reference only when it can serve as one."""
         from ._accuracy_gate import accuracy_meets_floor
 
         acc_val = float(salvaged["accuracy"])
@@ -3346,26 +2600,7 @@ class BaselineExecutor:
         result: dict[str, Any],
         framework: str | None,
     ) -> dict[str, Any] | None:
-        """Return a measured accuracy from a sibling baseline attempt, if any.
-
-        A measured ``0.0`` is returned like any other score: it is evidence,
-        not an absent measurement. The caller decides whether the value is
-        usable; filtering zeros here would make a real quality failure
-        indistinguishable from "the eval never ran".
-
-        Scans the shared ``runs/baseline`` root (the parent of this attempt's
-        ``output_dir``) so eval output written by any sibling attempt is seen.
-        Discarded warmup rounds are excluded by :func:`parse_eval_results`.
-        Best-effort: any error yields ``None`` (the caller then stops as before).
-
-        Args:
-            result: The final baseline result dict (carries ``output_dir``).
-            framework: Framework name threaded into the eval parser.
-
-        Returns:
-            The parsed eval dict when a finite accuracy is found, else
-            ``None``.
-        """
+        """Return a measured accuracy from a sibling baseline attempt, if any."""
         out = result.get("output_dir")
         if not out:
             return None
@@ -3392,53 +2627,16 @@ class BaselineExecutor:
         recorder: Any = None,
         run_index: int = 0,
     ) -> dict[str, Any]:
-        """Run the Magpie baseline benchmark and parse its result.
-
-        Materializes the workload config, resolves the timeout (with cold-start
-        detection), restarts the multi-node server when required, launches
-        Magpie via ``run_with_session_kill``, harvests leaked artifacts, parses
-        ``benchmark_report.json`` and the accuracy eval, and returns a result
-        dict the Coordinator promotes into SharedState.
-
-        Args:
-            ctx (RunnerContext): The runner context carrying ``task.params``
-                (config / model / timeout knobs) and ``extra`` (workspace).
-            force_disable_eval: When True, force ``RUN_EVAL=false`` into the
-                materialized config (the eval-failure fallback path); also set
-                by the ``disable_run_eval`` task param.
-            force_drop_moe_runner_backend: When True, strip any inherited
-                ``--moe-runner-backend`` and skip the AMD MoE injection (the
-                one-shot fallback after the backend killed the server).
-            recorder: The baseline event recorder, or ``None`` when the run is
-                not being recorded. Passed through to the rounds so each is
-                recorded under the pass it belonged to.
-            run_index: The 1-based index of this pass within the action, which
-                the rounds are recorded under.
-
-        Returns:
-            dict[str, Any]: On success, a ``status="succeeded"`` dict with
-                throughput / latency / accuracy measurements and artifact
-                paths; on failure, a ``status="failed"`` dict with an
-                ``error_class`` (``timeout``, ``subprocess_nonzero``,
-                ``no_workspace``, ``no_report``, ``invalid_measurement`` ...).
-
-        Raises:
-            FileNotFoundError: If the resolved baseline config does not exist.
-        """
+        """Run the Magpie baseline benchmark and parse its result."""
         params = ctx.task.params or {}
-        # Only a genuine ``baseline`` task may establish/overwrite the quality
-        # reference; ``replay_warm_recipe`` reuses this executor but must compare
-        # against the pure baseline reference rather than redefine it.
+        # Only a genuine ``baseline`` task may establish/overwrite the quality reference; ``replay_warm_recipe``
+        # reuses this executor but must compare against the pure baseline reference rather than redefine it.
         is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params)
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
-        # One-shot cuda-graph eager fallback: a prior baseline armed
-        # state.baseline_eager_fallback. Inject the framework-correct
-        # disable-cuda-graph flag and consume the flag so it fires once. Resolve
-        # framework FIRST: an unknown framework leaves the flag armed (not
-        # consumed) for a later baseline instead of burning the one-shot.
+        # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
         effective_extra_server_args = str(params.get("extra_server_args") or "")
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
@@ -3463,35 +2661,26 @@ class BaselineExecutor:
         if force_drop_moe_runner_backend:
             effective_extra_server_args = _remove_moe_runner_backend_arg(effective_extra_server_args)
         if effective_extra_server_args or "extra_server_args" in params:
-            # Keep the task envelope aligned with the materialized runtime so
-            # Roofline fingerprints record one-shot eager fallback accurately.
+            # Keep the task envelope aligned with the materialized runtime so Roofline fingerprints record one-shot
+            # eager fallback accurately.
             params["extra_server_args"] = effective_extra_server_args
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Keep the InferenceX checkout Magpie ``cd``s into on stable local disk
-        # so SGLang's relative-path cuda-graph dump survives a wekafs/NFS flap.
-        # Relocate BEFORE materialize so the rendered ``benchmark.inferencex_path``,
-        # the ProfileExecutor patch step, and Magpie all use the local mirror.
-        # Kept task-local (not process-wide $INFERENCEX_PATH) to avoid races
-        # between overlapping asyncio tasks.
+        # Keep the InferenceX checkout Magpie ``cd``s into on stable local disk so SGLang's relative-path cuda-graph
+        # dump survives a wekafs/NFS flap.
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
-        # Warm patches are prepared after config/runtime preflight, immediately
-        # before the single final benchmark. Each overlay names the checkout it
-        # was recorded against and the apply loop places it there, so nothing is
-        # resolved for the set as a whole -- there is no single target repo, and
-        # a tree found by probing would be one the gain was never measured on.
+        # Warm patches are prepared after config/runtime preflight, immediately before the single final benchmark.
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""
 
         timeout_sec = self._resolve_timeout(params)
-        # Model path: unified resolver (params → $MODEL_PATH → SharedState), then
-        # serving-path normalization (HL_MODEL_BASE / HF cache). If none, leave
-        # the YAML's hardcoded `model:` for fixture-based tests.
+        # Model path: unified resolver (params → $MODEL_PATH → SharedState), then serving-path normalization
+        # (HL_MODEL_BASE / HF cache).
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=str(getattr(live_shared_state, "model_path", "") or ""),
@@ -3501,8 +2690,7 @@ class BaselineExecutor:
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # Orchestration-supplied script + result_dir overrides. Sanitization
-        # turns a malformed override into ``error_class=bad_param``.
+        # Orchestration-supplied script + result_dir overrides.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))
@@ -3513,9 +2701,8 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval``
-        # param and the eval-failure fallback force ``RUN_EVAL=false``. Candidates
-        # template from this materialized YAML, so they inherit it.
+        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
+        # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
         eval_disabled = self._eval_disabled(ctx)
         # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
@@ -3552,9 +2739,8 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
-        # Apply runtime_override from params into the materialized YAML so the
-        # revalidation baseline boots under the same framework runtime as the
-        # KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
+        # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
+        # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
         _rt_from_params = params.get("runtime_override")
         if isinstance(_rt_from_params, dict) and _rt_from_params:
             try:
@@ -3569,18 +2755,8 @@ class BaselineExecutor:
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
             except Exception:  # noqa: BLE001 — runtime overlay is best-effort
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
-        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
-        # capability-preflight aiperf before Magpie runs the materialized config.
-        # Baseline/profile shell out here (not via _run_magpie), so without this the
-        # materialize-time swap to aiperf_client.sh would point at a script that was
-        # never deployed. No-op when HYPERLOOM_AGENTX is off.
-        #
-        # Off-loop: this call can shell out to the installer (the runtime aiperf
-        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
-        # cross-process ``flock`` with no timeout of its own. Run inline it would
-        # freeze the whole orchestrator for as long as that takes -- heartbeats,
-        # cancellation, the wall-clock budget and every bus write stop with it.
-        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
+        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and capability-preflight aiperf before Magpie
+        # runs the materialized config.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
@@ -3595,29 +2771,16 @@ class BaselineExecutor:
                 "error": _agx_err,
                 "output_dir": str(output_dir),
             }
-        # Whether THIS run actually executes lm-eval, read back from the
-        # materialized config the subprocess consumes -- the single source of
-        # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base
-        # YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` (incl. the
-        # eval-failure fallback / ``disable_run_eval`` force-off), and process
-        # ``$RUN_EVAL`` (defaulting to "true"), so deriving from ``extra_envs``
-        # alone would miss the other sources. Threaded into
-        # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
-        # never salvaging a prior attempt's stale ``results*.json`` from the
-        # reused per-round slot.
+        # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess consumes
+        # -- the single source of truth.
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))
             hook_result.setdefault("output_dir", str(output_dir))
             return hook_result
 
-        # Cold-start "warmup artifact" guard: the freshly-booted server's first
-        # benchmark window pays one-time cold costs that inflate later gains into
-        # fictitious "improvements". Run TWICE against the same persistent server
-        # via ``server_lifecycle`` reuse — round 1 pays cold costs, round 2
-        # re-attaches to the hot server and is the clean baseline. Eligibility
-        # (else single round): double-run requested, single-node, built-in
-        # benchmark script, profiler off.
+        # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
+        # costs that inflate later gains into fictitious "improvements".
         lifecycle = self._resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
@@ -3625,17 +2788,14 @@ class BaselineExecutor:
         )
         double_run = double_run_requested and lifecycle["eligible"]
         if defer_accuracy_until_after_measure and double_run:
-            # Only the lifecycle path can reuse the hot server for a staged
-            # accuracy round. A single-round fallback must retain the original
-            # eval contract so a throughput winner still carries accuracy.
+            # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
                 materialized_config_path,
                 enabled=False,
             )
         run_eval_disabled = materialized_run_eval_disabled(materialized_config_path)
 
-        # Asked before the lease, because a round that will not be run should not
-        # hold a GPU while being refused.
+        # Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
         ignitable, ignition_evidence = self._round_affordable_before_ignition(
             double_run=double_run,
             ctx_extra=extra,
@@ -3678,8 +2838,8 @@ class BaselineExecutor:
                 )
             return stopped_result
 
-        # No single pre-apply sha: each overlay's own tree records its pre_sha,
-        # so the singular field is only a fallback for a legacy reader.
+        # No single pre-apply sha: each overlay's own tree records its pre_sha, so the singular field is only a
+        # fallback for a legacy reader.
         before_apply_sha = ""
 
         def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
@@ -3690,8 +2850,8 @@ class BaselineExecutor:
             pending.update(
                 {
                     "status": "preparing_required_recipe",
-                    # The trees are the authority; the singular fields describe
-                    # the primary one so a resumed legacy reader still finds it.
+                    # The trees are the authority; the singular fields describe the primary one so a resumed legacy
+                    # reader still finds it.
                     "recipe_patch_trees": tree_records,
                     "recipe_patch_target": str(primary.get("root") or ""),
                     "recipe_patch_pre_sha": str(primary.get("pre_sha") or before_apply_sha),
@@ -3709,8 +2869,8 @@ class BaselineExecutor:
                 return False
             return True
 
-        # An overlay recording its own root needs no resolved target, so this
-        # only refuses when nothing names a tree at all.
+        # An overlay recording its own root needs no resolved target, so this only refuses when nothing names a tree
+        # at all.
         if params.get("patches") and not any(
             str((entry or {}).get("framework_root") or "").strip()
             for entry in params["patches"]
@@ -3817,26 +2977,16 @@ class BaselineExecutor:
                 len(applied_patches),
                 [p["patch_file"] for p in applied_patches],
             )
-        # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
-        # spans this baseline's benchmark rounds — a double-run's warmup +
-        # measure reuse one persistent server, so both must run under the same
-        # lease. ``None`` on the local path (multi-node / RAY_EXEC off / tests)
-        # keeps the legacy behaviour. The lease is closed on every exit below.
+        # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``) spans this baseline's benchmark
+        # rounds — a double-run's warmup + measure reuse one persistent server, so both must run under the same lease.
         from ._grid_runner import _num_gpus_for_config
         from ._ray_serving import maybe_serving_lease
 
         bench_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(materialized_config_path))
 
-        # Deep-clean any lingering server right before this round actually
-        # boots -- after every earlier gate that can still bail out without
-        # starting a server (budget, warm-patch failure), so a round that
-        # will not run does not pay for a scan it gets no benefit from.
-        # Unconditional (not just double-run): a single-round baseline is the
-        # common path for kernel-phase re-baselining, and it is exactly the
-        # server-start attempt that must not silently OOM against a server a
-        # prior sweep/explore round's timeout left running (setsid'd server
-        # processes escape that round's process-group teardown; see
-        # _grid_runner._kill_stale_servers). Best-effort and idempotent.
+        # Deep-clean any lingering server right before this round actually boots -- after every earlier gate that can
+        # still bail out without starting a server (budget, warm-patch failure), so a round that will not run does not
+        # pay for a scan it gets no benefit from.
         await self._pre_start_cleanup(
             pid_dir=output_dir,
             framework=lifecycle["framework"],
@@ -3878,9 +3028,8 @@ class BaselineExecutor:
                     result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return result
             finally:
-                # A required timeline's tree is promoted by prelude after this
-                # returns, so it must stay patched; reverting here handed prelude
-                # a clean tree and silently lost the replay.
+                # A required timeline's tree is promoted by prelude after this returns, so it must stay patched;
+                # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
                 if bench_lease is not None:
@@ -3888,27 +3037,14 @@ class BaselineExecutor:
 
         framework = lifecycle["framework"]
         port = lifecycle["port"]
-        # pid_dir is shared across both rounds so round 2 discovers round 1's
-        # server; task root keeps it per-task isolated.
+        # pid_dir is shared across both rounds so round 2 discovers round 1's server; task root keeps it per-task
+        # isolated.
         pid_dir = output_dir
         try:
-            # Round 1 (warmup): boot + run, leave running so round 2 can
-            # re-attach. Throughput discarded (cold-contaminated).
+            # Round 1 (warmup): boot + run, leave running so round 2 can re-attach.
             warmup_dir = output_dir / "warmup_round"
-            # A replayed KB config is promoted onto ``current_best`` and becomes
-            # the reference every later measurement in the session is taken
-            # against, so it may not be adopted on throughput alone. The warmup
-            # round is the only round that evaluates, so forcing it here is what
-            # gives the promotion gate a score to judge; inheriting a contract
-            # with RUN_EVAL off would leave the gate with no evidence. The
-            # staged-accuracy lane owns its own eval schedule and is left alone.
-            # ``force_disable_eval`` marks the salvage retry taken when the eval
-            # is itself what aborted the run; forcing it back on there would
-            # reproduce the failure and lose the throughput baseline too.
-            # ``--no-eval`` is the operator saying no eval runs this session, and
-            # forcing one here would spend the time it was passed to save while
-            # silently overriding that. A replay is then promoted unjudged, which
-            # is the trade the flag already makes everywhere else.
+            # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
+            # in the session is taken against, so it may not be adopted on throughput alone.
             force_warmup_eval = (
                 str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
                 and not defer_accuracy_until_after_measure
@@ -3927,11 +3063,8 @@ class BaselineExecutor:
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
                 warmup_dir,
             )
-            # The warmup runs under the round's own cap, which the session clamp
-            # leaves sitting past the session deadline so the watchdog reaches it
-            # first and a budget kill is recorded as one. Whether the measured
-            # round can follow is asked after this pass, priced with what it
-            # actually cost rather than a prediction of what it would.
+            # The warmup runs under the round's own cap, which the session clamp leaves sitting past the session
+            # deadline so the watchdog reaches it first and a budget kill is recorded as one.
             warmup_result = await self._run_reported_round(
                 label=ROUND_WARMUP,
                 config_path=warmup_cfg,
@@ -3941,8 +3074,7 @@ class BaselineExecutor:
                 **common,
             )
             if warmup_result.get("status") != "succeeded":
-                # Warmup failure almost certainly recurs, so skip the
-                # measured round.
+                # Warmup failure almost certainly recurs, so skip the measured round.
                 warmup_result.setdefault("nonfatal_warnings", [])
                 warmup_result["nonfatal_warnings"].append(
                     "baseline_warmup_round_failed",
@@ -4001,14 +3133,6 @@ class BaselineExecutor:
                     return _cold_anchor_from_warmup(warmup_result, dropped=gate_evidence)
 
             # Round 2 (measured): re-attach to the hot server (client only).
-            # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision and their grading anchor) are
-            # measured with a warm prefix cache, keeping them mutually
-            # comparable. Carryover is config-dependent (tracks KV-block
-            # capacity) and is not a uniform offset.
-            #
-            # No accuracy eval: ordinary baselines measured it in round 1;
-            # staged kernel integration defers it until after this gate.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -4039,14 +3163,8 @@ class BaselineExecutor:
                 _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
                 result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
             if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
-                # The gate before this pass admitted it and the run's clock took
-                # it anyway -- the pass overran what it was priced at. Reporting
-                # the round as failed would throw away the warmup's figure too,
-                # leaving the session with nothing from GPU time it has already
-                # spent, so the warmup is kept and marked exactly as a refusal
-                # keeps it. Only a reap is handled this way: a pass that failed
-                # for a reason of its own is a failure worth surfacing, and the
-                # warmup having succeeded does not make it comparable.
+                # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
+                # was priced at.
                 log.warning(
                     "baseline_executor: the run's clock stopped the measured "
                     "round mid-flight, so the warmup stands as the baseline. It "
@@ -4065,10 +3183,7 @@ class BaselineExecutor:
                 result["nonfatal_warnings"].append(
                     "baseline_double_run_discarded_first",
                 )
-                # The measured pass re-attaches to the server launched by the
-                # warmup pass. Its own slot has no fresh launch record, so its
-                # evidence must retain the warmup's observed identity rather
-                # than degrading an otherwise verifiable baseline handoff.
+                # The measured pass re-attaches to the server launched by the warmup pass.
                 for evidence_field in (
                     "launch_evidence",
                     "launch_evidence_path",
@@ -4088,10 +3203,7 @@ class BaselineExecutor:
                     result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
                 self._record_baseline_convergence(result, warmup_tput)
-                # The Coordinator promotes ``subprocess_runtime_sec`` into the
-                # explore soft-kill anchor. Explore variants restart the server,
-                # so report round 1's full boot+client wall-clock; round 2's
-                # client-only time stays under a separate key.
+                # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
                         "subprocess_runtime_sec",
@@ -4100,13 +3212,8 @@ class BaselineExecutor:
                         float(warmup_runtime),
                         2,
                     )
-                    # The split belongs to round 1 for the same reason its
-                    # wall-clock does: round 2 re-attached, so it has no boot to
-                    # separate and its own reading says nothing about what booting
-                    # this workload costs. Assigned with that wall-clock and not
-                    # beside it, so the total and the part of it reported here can
-                    # never come from different rounds -- their difference is
-                    # published as this workload's boot.
+                    # The split belongs to round 1 for the same reason its wall-clock does: round 2 re-attached, so it
+                    # has no boot to separate and its own reading says nothing about what booting this workload costs.
                     result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
                 _hot = result.get("output_throughput") or 0.0
                 _cold = warmup_tput or 0.0
@@ -4184,18 +3291,14 @@ class BaselineExecutor:
                         }
             return result
         finally:
-            # Defensive teardown so no persistent server leaks. Idempotent.
-            # Reap the server BEFORE releasing the Ray lease so no GPU process
-            # outlives it (§4.2).
+            # Defensive teardown so no persistent server leaks.
             self._teardown_lifecycle_server(
                 pid_dir=pid_dir,
                 framework=framework,
                 port=port,
             )
-            # Revert warm-replay patches to prevent state leakage into
-            # subsequent tasks that reuse the same InferenceX checkout. A
-            # required timeline is exempt: prelude promotes that tree after this
-            # returns and needs it still patched.
+            # Revert warm-replay patches to prevent state leakage into subsequent tasks that reuse the same InferenceX
+            # checkout.
             if applied_patches and not isinstance(patch_application, dict):
                 _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
             if bench_lease is not None:
@@ -4207,43 +3310,7 @@ class BaselineExecutor:
         double_run: bool,
         ctx_extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """Whether the budget holds a whole round *and a use for it*, before anything boots.
-
-        The companion to :meth:`_measure_round_affordable`, and the two divide
-        the session's baselines between them. A session's first round is not
-        asked this question, because there is nothing to ask it with: the
-        measured runtimes are written only once an anchor lands, so a gate here
-        would either refuse every first baseline or wave every one through. That
-        round runs, and whether its second pass may follow is settled afterwards
-        against what the first actually cost.
-
-        Every later round is asked, and a resumed session's first round is the
-        case that most needs it: it holds the earlier leg's measurements, so a
-        round that cannot lead anywhere can be refused before a single second of
-        GPU time is spent on it, and the refusal names a number an operator can
-        act on.
-
-        What is required in PRELUDE is the round *plus one further measured
-        variant*, not the round alone. A baseline is not a result there; it is the
-        denominator later results are read against, and one that nothing is ever
-        compared to is wall-clock spent on a number no one uses. A variant's own
-        measurement is a result, which is why the variant gates ask only whether
-        the variant itself fits -- and why a re-baseline in a later phase is asked
-        the same narrower question by :func:`_a_use_must_follow_the_round`.
-
-        The round is priced by
-        :func:`~...phases.machine_state.baseline_round_cost_sec`, which the phase
-        machine also reads to decide whether a session stopped for this reason may
-        try again on a fresh clock. Two definitions would let the executor refuse
-        rounds the phase machine had just decided were affordable.
-
-        Args:
-            double_run: Whether this round will run both passes.
-            ctx_extra: The runner context extras carrying ``shared_state``.
-
-        Returns:
-            tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
-        """
+        """Whether the budget holds a whole round *and a use for it*, before anything boots."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
         return self._round_affordable(
             state,
@@ -4252,38 +3319,14 @@ class BaselineExecutor:
 
     @staticmethod
     def _round_affordable(state: Any, *, round_sec: float | None) -> tuple[bool, dict[str, Any]]:
-        """Whether the budget holds a round costing ``round_sec`` and a use for it.
-
-        The shared half of every before-ignition gate, so the two round shapes a
-        baseline has -- the single-node cold-then-hot double run and the
-        multi-node pair of client passes -- differ only in what they cost, never
-        in what they are asked. Each supplies its own price and this decides.
-
-        Args:
-            state: The session ``SharedState``, or ``None``.
-            round_sec: What this round is expected to cost, or ``None`` when the
-                session has measured nothing to price it from.
-
-        Returns:
-            tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
-        """
+        """Whether the budget holds a round costing ``round_sec`` and a use for it."""
         cold_sec = _phase_state.measured_seconds(state, "baseline_runtime_sec")
         if cold_sec is None or round_sec is None:
             return True, {"reason": "no_measured_round_to_predict_from"}
         use_sec = 0.0
         if _a_use_must_follow_the_round(state):
-            # Without the split, a variant is priced at a whole cold round, which
-            # is what it is: a boot and a benchmark that pays the compile. The
-            # same fallback the phase machine uses, so the two agree on when a
-            # stopped session may try again.
-            #
-            # Known gap: a multi-node variant runs two client passes, not one
-            # (``_grid_runner`` reserves for it as ``x (1 + _mn_warmup_rounds)``),
-            # so one pass is left unreserved here. It needs a multi-node round to
-            # reach PRELUDE with an earlier one already measured, which takes an
-            # enablement round holding the phase open past an anchor that would
-            # otherwise finish it -- narrow enough not to be worth teaching the
-            # phase machine's pricing what shape the cluster is.
+            # Without the split, a variant is priced at a whole cold round, which is what it is: a boot and a
+            # benchmark that pays the compile.
             use_sec = _phase_state.one_more_measurement_sec(state) or cold_sec
         headroom_sec, evidence = _round_headroom_sec(state, None)
         if headroom_sec is None:
@@ -4304,57 +3347,7 @@ class BaselineExecutor:
         warmup_post_ready_sec: Any = None,
         ctx_extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """Whether the budget covers the measured round *and a use for it*.
-
-        Asked after the warmup rather than before it, and priced from what that
-        pass just measured rather than from a prediction. This is the gate every
-        round faces, including the first, which is the one
-        :meth:`_round_affordable_before_ignition` cannot judge.
-
-        The measured round re-attaches to the server the warmup left running, so
-        it costs a benchmark and no boot. A hot pass this session already measured
-        prices it best, being exactly that; before one has ever run, the warmup's
-        post-ready segment stands in -- the same pass, with its boot taken off. The
-        segment over-predicts, since it also paid the first request's kernel
-        compile, but it is far tighter than the warmup's whole wall-clock, which
-        prices a client-only pass as though it booted a server.
-
-        Reading the session's hot figure first is also what keeps this gate and
-        :meth:`_round_affordable_before_ignition` on one ruler. Both price the
-        same second pass, so a round admitted before ignition would otherwise meet
-        a stricter question here and be refused for certain, having spent a whole
-        cold pass to find out.
-
-        In PRELUDE, covering the pass is not enough to justify running it. A hot
-        baseline is an input there, not a result: it is the denominator later
-        variants are read against, and it is what anchors their overtime kill.
-        Neither buys anything if no variant can follow, so what is required is the
-        pass plus one further measured variant -- a boot and a benchmark, because
-        a variant's config differs in the very knobs that decide how a server
-        comes up and it cannot re-attach to anyone else's. A re-baseline in a
-        later phase is its own deliverable and is asked only to cover its pass;
-        :func:`_a_use_must_follow_the_round` draws that line.
-
-        A round that fails here has still produced a number. It is the cold one
-        the double run exists to discard, so the caller keeps it as the anchor and
-        marks it -- the GPU time is spent either way, and a marked cold anchor
-        beats no anchor.
-
-        Args:
-            warmup_runtime_sec: Wall-clock the warmup round took.
-            warmup_post_ready_sec: The part of it that ran after the server was
-                ready. Only a stamp that could not be written leaves this unset,
-                since this path runs a server by definition -- the workloads with
-                no ready boundary to record never reach a double run at all -- so
-                it is a defect rather than a shape, and the gate waves the round
-                through rather than guess. Guessing high is what a gate before
-                ignition may safely do; here a refusal ends the session, and a
-                session ended by a missing timestamp is the worse error.
-            ctx_extra: The runner context extras carrying ``shared_state``.
-
-        Returns:
-            tuple[bool, dict[str, Any]]: ``(affordable, evidence)``.
-        """
+        """Whether the budget covers the measured round *and a use for it*."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
         headroom_sec, evidence = _round_headroom_sec(state, None)
         if headroom_sec is None:
@@ -4386,17 +3379,7 @@ class BaselineExecutor:
         params: dict[str, Any] | None = None,
         ctx_extra: dict[str, Any] | None = None,
     ) -> bool:
-        """Whether baseline double-run is enabled.
-
-        Public CLI/env controls are intentionally unsupported. The session
-        default is on so the warm decision compares hot candidates against a
-        hot baseline. Internal callers may pass
-        ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
-        set the session state directly.
-
-        Returns:
-            ``True`` unless task params or session state explicitly opt out.
-        """
+        """Whether baseline double-run is enabled."""
         params = params or {}
         if "baseline_double_run" in params:
             return is_truthy(params.get("baseline_double_run"))
@@ -4423,15 +3406,7 @@ class BaselineExecutor:
         self,
         materialized_config_path: Path,
     ) -> dict[str, Any]:
-        """Inspect the materialized YAML for server_lifecycle eligibility.
-
-        Args:
-            materialized_config_path: The materialized Magpie YAML config path.
-
-        Returns:
-            Lifecycle params including eligibility, framework, port and the
-            reason a run is ineligible.
-        """
+        """Inspect the materialized YAML for server_lifecycle eligibility."""
         return _lifecycle.resolve_lifecycle_params(materialized_config_path)
 
     def _write_lifecycle_config(
@@ -4444,24 +3419,7 @@ class BaselineExecutor:
         port: int,
         run_eval: bool | None = None,
     ) -> Path:
-        """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
-
-        Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
-        ``cleanup`` and ``run_eval`` can differ between rounds.
-
-        Args:
-            base_config_path: Source materialized YAML to clone and patch.
-            dest_dir: Directory the per-round YAML is written into.
-            cleanup: Whether the server should be torn down after the round.
-            pid_dir: Shared pid/metadata directory keying the persistent
-                server across both rounds.
-            port: Server port shared across both rounds.
-            run_eval: Explicitly forces ``RUN_EVAL`` when set; ``None`` keeps
-                the materialized benchmark contract unchanged.
-
-        Returns:
-            Path to the written per-round lifecycle YAML.
-        """
+        """Render a per-round YAML injecting ``benchmark.server_lifecycle``."""
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         bench = cfg.setdefault("benchmark", {})
@@ -4486,38 +3444,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean, run once before every baseline round.
-
-        Unconditionally reaps any lingering vLLM/SGLang/atom server via
-        _kill_stale_servers(). Hyperloom's own scheduling (``gpu_research_lane``,
-        capacity 1) guarantees at most one server-holding task runs at a time,
-        so nothing matching should still be alive at this point, before this
-        task's own server has even booted. A prior sweep/explore round's
-        timeout can leave one running anyway — its setsid'd server process
-        escapes that round's process-group teardown — and this is the safety
-        net that catches it before the new server OOMs against it
-        (AMD-AGI/Hyperloom#1354).
-
-        This used to gate the scan on a "zombie" heuristic: only fire when the
-        reuse port answered /health but had no matching pid/json metadata.
-        That signal was unreliable in both directions and has been dropped:
-        an eligible server_lifecycle port is a freshly OS-assigned ephemeral
-        port (confirmed free at assignment time), so it always reports
-        unhealthy and the scan would never fire; an ineligible port falls
-        back to a fixed default that can coincide with an unrelated
-        co-tenant's server, so the heuristic could also fire on the wrong
-        target.
-
-        Stale pid/json metadata files are always unlinked first (no signal
-        sent to potentially-recycled PIDs). Skipped under pytest, matching
-        the same guard on the per-launch preclean in ``_grid_runner.py``:
-        real ``/proc`` scanning is unsafe there. Never raises.
-
-        Args:
-            pid_dir: Directory holding the server pid/metadata files.
-            framework: Framework name used to build the server tag.
-            port: Server port used to build the server tag.
-        """
+        """Best-effort startup pre-clean, run once before every baseline round."""
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
         for p in (base / f"{tag}.pid", base / f"{tag}.json"):
@@ -4543,14 +3470,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort teardown of a persistent server left by the
-        double-run rounds. Idempotent and never raises (safe in finally).
-
-        Args:
-            pid_dir: Directory holding the server pid/metadata files.
-            framework: Framework name used to build the server tag.
-            port: Server port used to build the server tag.
-        """
+        """Best-effort teardown of a persistent server left by the double-run rounds."""
         _lifecycle.teardown_lifecycle_server(
             pid_dir=pid_dir,
             framework=framework,
@@ -4567,29 +3487,7 @@ class BaselineExecutor:
         run_index: int = 0,
         **common: Any,
     ) -> dict[str, Any]:
-        """Announce a benchmark round before it blocks, run it, and record it.
-
-        Reported on entry, not on completion: a round can boot a server, warm
-        JIT and bench for the better part of an hour, and one that never
-        returns is exactly the case the heartbeat has to be able to show.
-
-        The single choke point every reported round passes through, which is
-        why the timeline row is written here: the round's start is a fact only
-        this frame holds, and recording it at each of the four call sites would
-        be four chances to record it differently.
-
-        Args:
-            label (str): Round name carried on the progress note and the
-                recorded row (a ``ROUND_*`` value).
-            config_path (Path): The materialized Magpie YAML for this round.
-            output_dir (Path): The per-round workspace slot.
-            recorder (Any): The baseline event recorder, or ``None``.
-            run_index (int): The pass within the action this round belongs to.
-            **common (Any): Remaining :meth:`_run_single_benchmark` arguments.
-
-        Returns:
-            dict[str, Any]: The round's benchmark result, unchanged.
-        """
+        """Announce a benchmark round before it blocks, run it, and record it."""
         await report_progress(unit="baseline_round", label=label, status="started")
         started_at = now_iso("seconds")
         started_monotonic = time.monotonic()
@@ -4613,8 +3511,8 @@ class BaselineExecutor:
                 **common,
             )
         except BaseException as exc:
-            # A round that raised still happened, and its row is the only place
-            # the timeline can say which round the action died in.
+            # A round that raised still happened, and its row is the only place the timeline can say which round the
+            # action died in.
             _record({"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)})
             raise
         _record(result)
@@ -4633,44 +3531,10 @@ class BaselineExecutor:
         round_warnings: list[str],
         ctx_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Run the discarded multi-node client warmup against the restarted server.
-
-        The pass exists because the restart just above it left a cold server and
-        this is the only thing that drives it before the measured pass. So the
-        two are one round: skipping the warmup does not save the round's cost,
-        it moves the round's measurement onto a cold server and anchors the
-        session's every later gain on it.
-
-        Both passes run under the round's own cap, which the session clamp leaves
-        past the session deadline so a budget kill arrives as the watchdog's
-        sentinel rather than as this pass timing out. Nothing is held back for
-        the measured pass: holding back moves the cap in front of the deadline
-        and puts the round back in reach of its own timeout.
-
-        Args:
-            cmd: The measured pass's command, re-pointed at the warmup slot.
-            env: The measured pass's environment, re-pointed the same way.
-            output_dir: The round's workspace; the warmup runs in a slot under it.
-            framework: Framework name, for the watchdog's server log.
-            timeout_sec: The round's cap after the session clamp.
-            session_deadline_sec: Monotonic-clock session deadline, or ``None``.
-            capture_meta: Config/eval-contract facts every failure result carries.
-            round_warnings: Collected onto the round's result, for a warmup that
-                did not run and did not end the round.
-            ctx_extra: The runner context extras carrying ``shared_state``, read
-                to price the pair of passes against what is left of the budget.
-
-        Returns:
-            dict[str, Any] | None: The round's result when the round is over,
-                else ``None`` to go on to the measured pass.
-        """
-        # A multi-node round is two client passes of the same shape against a
-        # server the round did not boot, and the session's measured figure is one
-        # of them -- the round's wall-clock is taken after this pass -- so the pair
-        # costs twice it. Asked before the warmup because that is the pass whose
-        # number nothing may use: spending it and then meeting the deadline in the
-        # measured pass leaves the round with no anchor and the session with the
-        # GPU time gone.
+        """Run the discarded multi-node client warmup against the restarted server."""
+        # A multi-node round is two client passes of the same shape against a server the round did not boot, and the
+        # session's measured figure is one of them -- the round's wall-clock is taken after this pass -- so the pair
+        # costs twice it.
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
         one_pass_sec = _phase_state.measured_seconds(state, "baseline_runtime_sec")
         affordable, evidence = self._round_affordable(
@@ -4699,10 +3563,8 @@ class BaselineExecutor:
             return refused
         warm_dir = output_dir / "mn_warmup"
         started_unix = time.time()
-        # The measurement is discarded, but the returncode is not: this pass is a
-        # full benchmark round, so a stop here ends the baseline round. Going on
-        # to the measured pass would spend a second round of GPU time the run has
-        # already been told to stop spending.
+        # The measurement is discarded, but the returncode is not: this pass is a full benchmark round, so a stop here
+        # ends the baseline round.
         warm_rc: int | None = None
         try:
             warm_dir.mkdir(parents=True, exist_ok=True)
@@ -4746,6 +3608,99 @@ class BaselineExecutor:
             )
         return None
 
+    def _preflight_server_argv(
+        self,
+        *,
+        config_path: Path,
+        framework: str,
+        launch_env: dict[str, str],
+        output_dir: Path,
+        attempt: int,
+        capture_meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Ask the installed framework's parser about this round's argv.
+
+        The argv is read out of the rendered YAML and probed in that file's own
+        benchmark envs, which are what the launch reads. A repaired argv is
+        written back through the same seal.
+
+        Args:
+            config_path: The materialised YAML this round launches.
+            framework: Framework the config serves.
+            launch_env: The environment the benchmark subprocess will get.
+            output_dir: The round slot, for the observation artifact.
+            attempt: This attempt's index within the slot.
+            capture_meta: Result fields echoed onto whatever this round returns.
+
+        Returns:
+            dict | None: A terminal failure result when the argv is refused;
+            ``None`` when the round may proceed -- including every unavailable
+            verdict, which must never cost a round.
+        """
+        from ...bringup import (
+            ARGV_INVALID,
+            argv_invalid_observation,
+            check_server_argv,
+            write_boot_observation,
+        )
+        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE
+        from ._server_argv import config_launch_env, config_server_argv, reseal_config_argv
+
+        sealed = config_server_argv(config_path)
+        if not sealed.tokenized or not sealed.argv:
+            return None
+
+        # ``_resolve_shared_state`` is typed loosely and callers inject partial
+        # doubles, so the round's repair ledger may not be present at all.
+        enablement = getattr(self._resolve_shared_state(), "enablement", None)
+        spent: list[str] = enablement.argv_repairs if enablement is not None else []
+        verdict = check_server_argv(
+            framework=framework,
+            argv=sealed.argv,
+            text=sealed.text,
+            launch_env=config_launch_env(config_path, launch_env),
+            repaired=spent,
+            digest=sealed.digest,
+        )
+
+        if verdict.status == UNAVAILABLE:
+            log.info(
+                "argv preflight unavailable (%s): %s; the launch remains the only verdict",
+                verdict.reason,
+                verdict.detail,
+            )
+            return None
+        if verdict.status == OK:
+            if verdict.reason == PARSED_AFTER_DROP:
+                reseal_config_argv(config_path, verdict.text)
+                if verdict.repaired_digest:
+                    spent.append(verdict.repaired_digest)
+                capture_meta["server_argv_dropped"] = list(verdict.dropped)
+            return None
+
+        observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
+        capture_meta["boot_observation_path"] = write_boot_observation(
+            observation,
+            session_dir=self.session_dir,
+            output_dir=output_dir,
+            attempt=attempt,
+        )
+        excerpt = observation.excerpt
+        log.error(
+            "argv preflight: %s refused the server argv (%s); not launching",
+            framework or "the framework",
+            verdict.reason,
+        )
+        return {
+            "status": "failed",
+            "error_class": ARGV_INVALID,
+            "error": f"{framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
+            "output_dir": str(output_dir),
+            "enablement_launch_log": excerpt.text if excerpt is not None else "",
+            "server_argv": list(verdict.argv),
+            **capture_meta,
+        }
+
     async def _run_single_benchmark(
         self,
         *,
@@ -4762,84 +3717,40 @@ class BaselineExecutor:
         run_eval_disabled: bool = False,
         serving_lease: Any = None,
     ) -> dict[str, Any]:
-        """Run one Magpie benchmark subprocess and parse its result.
-
-        Single-round core extracted from ``__call__`` so the cold-start
-        guard can invoke it twice. ``output_dir`` is the per-round slot.
-
-        Args:
-            config_path: The materialized Magpie YAML config for this round.
-            output_dir: The per-round workspace slot.
-            timeout_sec: Subprocess timeout in seconds.
-            override_result_dir: Optional ``$RESULT_DIR`` override for the
-                benchmark wrapper.
-            resolved_model: Resolved model path for the run.
-            materialized_config_path: The canonical materialized YAML, echoed
-                into the result for downstream reuse.
-            inferencex_path: Task-local InferenceX checkout path pinned via
-                ``MAGPIE_INFERENCEX_PATH``.
-            effective_extra_server_args: Extra server args passed to the
-                multi-node restart helper.
-            params: Task params for this launch.
-            ctx: Runner context carrying ``extra`` (e.g. multi-node round
-                state).
-            run_eval_disabled: When True, this run did not execute the serving
-                lm-eval (RUN_EVAL forced off via the eval-failure fallback,
-                ``disable_run_eval``, or a present-and-falsey ``extra_envs``
-                RUN_EVAL), so the serving GSM8K parse is skipped to avoid reading
-                a prior attempt's stale ``results*.json`` from the reused slot.
-                Scriptable frameworks are unaffected: RUN_EVAL does not gate
-                their per-run image ``quality_gate``, which is still parsed.
-            serving_lease: When set (Ray-managed GPU execution, §12 T1), the
-                Magpie subprocess runs inside the lease's actor — which holds
-                ``num_gpus`` across this run's rounds (double-run warmup +
-                measure share one lease) — instead of a local subprocess. Ray
-                owns ``*_VISIBLE_DEVICES``, so the YAML device list is stripped
-                first (T2). ``None`` keeps the local ``run_with_session_kill``
-                path unchanged.
-
-        Returns:
-            A result dict: ``status="succeeded"`` with measurements on
-            success, or ``status="failed"`` with an ``error_class`` on
-            failure.
-        """
+        """Run one Magpie benchmark subprocess and parse its result."""
         cmd = build_benchmark_command(
             python_exe=self.magpie_python,
             config_path=config_path,
             output_dir=output_dir,
         )
         env = scrub_benchmark_process_env(os.environ.copy())
-        # Put the venv first in PATH so the benchmark script's `python3`
-        # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
+        # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
+        # depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # Pin Magpie's InferenceX resolution to the same per-task
-        # checkout rendered into benchmark.inferencex_path and patched by
-        # ProfileExecutor. Do not re-read process env here; the task-local
-        # explicit value avoids cross-task races on $INFERENCEX_PATH.
+        # Pin Magpie's InferenceX resolution to the same per-task checkout rendered into benchmark.inferencex_path and
+        # patched by ProfileExecutor.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
-        # that ignore it are caught by the salvage pass.
+        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts that ignore it are caught by the
+        # salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
         env["RESULT_DIR"] = str(result_dir)
-        # Config/eval-contract facts echoed onto every failure result so an
-        # eval-rooted failure can be fingerprinted and re-run by enablement.
+        # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be fingerprinted
+        # and re-run by enablement.
         capture_meta = {
             "materialized_config": str(materialized_config_path),
             "result_dir": str(result_dir),
             "run_eval_disabled": bool(run_eval_disabled),
         }
-        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
-        # lm-eval output. Keep it under the task workspace but separate from
-        # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
+        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
         env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
-        # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
+        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
+        # ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
-        # The materialized YAML is authoritative for the framework: params and
-        # $FRAMEWORK are both optional on a baseline task.
+        # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
+        # baseline task.
         framework = (
             _config_framework(materialized_config_path)
             or str(params.get("framework") or "").strip().lower()
@@ -4847,57 +3758,43 @@ class BaselineExecutor:
         )
         watchdog_server_log = _watchdog_server_log_path(output_dir, framework)
 
-        # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client +
-        # BENCHMARK_BASE_URL so Magpie skips its server launch and targets
-        # the RayJob head. No-op ({}) in single-node.
+        # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
+        # launch and targets the RayJob head.
         from ._multi_node_env import magpie_remote_env
 
         env.update(magpie_remote_env())
 
         # Multi-node only: restart sglang/vllm per round for a fresh server.
-        # No-op in single-node. Profile rounds set
-        # ctx.extra["mn_round_restarted"] to claim the restart.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
         )
 
         ctx_extra = getattr(ctx, "extra", None) or {}
-        # The session's wall-clock budget, resolved per round rather than once
-        # per task: a baseline runs up to three of them, and a warmup that
-        # overran has already spent budget the ones after it were counting on.
+        # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
+        # of them, and a warmup that overran has already spent budget the ones after it were counting on.
         _session_state = ctx_extra.get("shared_state") or self.shared_state
         session_deadline_sec, _ = session_grid_bounds(_session_state)
         timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
         if not ctx_extra.get("mn_round_restarted"):
             try:
-                # Merge the reference base UNDER the per-task args (last-wins) so
-                # a multi-node per-round restart carries the same reference flags
-                # the single-node materialized YAML does.
+                # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
+                # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
                 from ._workload_envs import resolve_reference_base
 
                 _mn_ref_args, _mn_ref_envs = resolve_reference_base()
-                # Base on effective_extra_server_args (carries the one-shot
-                # cuda-graph eager-fallback flag when armed) so the MN per-round
-                # restart keeps that fallback too.
+                # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
+                # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
-                # Fold in the operator ``--server-args``
-                # (``INFERENCE_OPTIMIZER_SERVER_ARGS``). Single-node and explore
-                # variants apply it via the materialized YAML's ``EXTRA_*_ARGS``,
-                # but the multi-node baseline server is launched by
-                # launch_multinode (Magpie runs client-only) and never sees the
-                # YAML, so without this the baseline runs a near-default server
-                # while explore variants get the tuned flags — an unfair, skewed
-                # baseline. Priority low->high: reference < operator < per-task.
+                # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
                 _mn_operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
                 _mn_base = _mn_ref_args
                 if _mn_operator_args:
                     _mn_base = merge_server_args(_mn_base, _mn_operator_args) if _mn_base else _mn_operator_args
                 _mn_server_args = merge_server_args(_mn_base, _mn_task_args) if _mn_base else _mn_task_args
                 _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
-                # PD knobs auto-resolved by the helper from $PD_* env, falling
-                # back to state.json.
+                # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
                 await restart_server_for_round(
                     extra_server_args=_mn_server_args,
                     extra_env=_mn_env or None,
@@ -4919,14 +3816,8 @@ class BaselineExecutor:
         log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", cmd, output_dir)
 
-        # Magpie launched via ``run_with_session_kill`` so the whole descendant
-        # tree is torn down on every exit path (plain subprocess.run leaks
-        # daemonized server processes).
-        # Multi-node client warmup: one discarded pass against the persistent
-        # remote server (restarted just above) to warm JIT / steady-state
-        # before the measured pass. Best-effort; MN-only; skipped when another
-        # executor claimed the restart (profile round). Default ON
-        # (INFERENCE_OPTIMIZER_MN_BENCH_WARMUP=0 disables).
+        # Magpie launched via ``run_with_session_kill`` so the whole descendant tree is torn down on every exit path
+        # (plain subprocess.run leaks daemonized server processes).
         from ._multi_node_env import (
             is_multi_node as _mn_imn,
             mn_bench_warmup_enabled as _mn_warm,
@@ -4950,35 +3841,60 @@ class BaselineExecutor:
 
         workspaces_before = snapshot_workspaces(output_dir)
         subprocess_started_unix = time.time()
-        # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
-        # this does NOT keep the server's cuda-graph dump safe on its own —
-        # Magpie re-roots the actual server via ``cd <inferencex>``;
-        # ``_ensure_local_inferencex`` above keeps that checkout on local disk.
+        # Anchor the Magpie parent process cwd to the per-task output_dir.
         output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir may still hold a prior attempt's server.log, whose
-        # terminal init markers would misclassify THIS attempt as
-        # ``server_init_dead``. Clear it so classification only sees this
-        # attempt's log.
-        stale_server_log = output_dir / "server.log"
-        try:
-            stale_server_log.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.warning(
-                "baseline_executor: could not clear stale server.log %s (%s); "
-                "a prior attempt's markers may bias failure classification.",
-                stale_server_log,
-                exc,
+        # A reused output_dir may still hold a previous attempt's server.log,
+        # whose terminal init markers would be read as this attempt's.
+        server_log = output_dir / "server.log"
+        attempt_index = open_bringup_attempt(output_dir)
+        # And the ready stamp beside it: a previous attempt's would make this
+        # attempt's boot look like it never happened.
+        clear_server_ready_stamp(str(server_log))
+
+        def record_bringup(*, wrapper_stderr: str = "", wrapper_stdout: str = "") -> str:
+            """Observe this attempt's boot once and name it on every later result.
+
+            Args:
+                wrapper_stderr: The launcher's stderr, fallback evidence.
+                wrapper_stdout: The launcher's stdout, fallback evidence.
+
+            Returns:
+                str: The server log text that was classified.
+            """
+            from ...bringup import observe_bringup, write_boot_observation
+
+            read = read_bringup_log(server_log)
+            verdict = observe_bringup(
+                server_log=read.text,
+                server_elapsed_sec=server_child_elapsed_sec(read.text),
+                wrapper_stderr=wrapper_stderr,
+                wrapper_stdout=wrapper_stdout,
+                session_dir=self.session_dir,
             )
-        # And the ready stamp beside it, for the same reason: a prior attempt's
-        # would make this attempt's boot look like it never happened.
-        clear_server_ready_stamp(str(stale_server_log))
+            capture_meta["boot_observation_path"] = write_boot_observation(
+                verdict.observation,
+                session_dir=self.session_dir,
+                output_dir=output_dir,
+                attempt=attempt_index,
+            )
+            capture_meta["boot_observation_degraded"] = read.degraded
+            return read.text
+
+        refusal = self._preflight_server_argv(
+            config_path=config_path,
+            framework=framework,
+            launch_env=env,
+            output_dir=output_dir,
+            attempt=attempt_index,
+            capture_meta=capture_meta,
+        )
+        if refusal is not None:
+            return refusal
+
         try:
             if serving_lease is not None:
-                # Ray-managed GPU execution (§12 T1): run inside the lease's
-                # actor (holds num_gpus across this run's rounds). Ray owns
-                # *_VISIBLE_DEVICES, so strip the YAML device list first (T2).
+                # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
+                # rounds).
                 from ._ray_backend import strip_visible_devices_from_config
 
                 ray_config_path = strip_visible_devices_from_config(config_path)
@@ -4987,12 +3903,9 @@ class BaselineExecutor:
                     config_path=ray_config_path,
                     output_dir=output_dir,
                 )
-                # No liveness callback is possible here: the round runs inside a
-                # Ray actor in another process (potentially on another node) and
-                # only its final ``(rc, stdout, stderr)`` crosses back, so there
-                # is nothing local to call per line of child output. A Ray-backed
-                # round reports on entry and then goes quiet until it returns — a
-                # known gap, not an oversight.
+                # No liveness callback is possible here: the round runs inside a Ray actor in another process
+                # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
+                # nothing local to call per line of child output.
                 proc_returncode, proc_stdout, proc_stderr = await asyncio.to_thread(
                     serving_lease.run_session_kill,
                     ray_cmd,
@@ -5026,6 +3939,9 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
+            # A reaped timeout carries no wrapper streams; the server log is
+            # the whole of the evidence.
+            record_bringup()
             timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
@@ -5041,6 +3957,12 @@ class BaselineExecutor:
                 **capture_meta,
             }
 
+        server_log_text = record_bringup(
+            wrapper_stderr=proc_stderr or "",
+            wrapper_stdout=proc_stdout or "",
+        )
+        boot_observation_ref = capture_meta["boot_observation_path"]
+
         stopped = stopped_by_the_run(proc_returncode)
         if stopped is not None:
             return _stopped_round_result(
@@ -5052,10 +3974,8 @@ class BaselineExecutor:
                 capture_meta=capture_meta,
             )
 
-        # Detokenizer-stall watchdog reap: the server came up healthy but went
-        # silent for the stall grace window (hung engine / wedged detokenizer).
-        # A stall reap leaves no benchmark_* workspace; a distinct error_class
-        # lets the coordinator fast-fail instead of burning the full timeout.
+        # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window (hung
+        # engine / wedged detokenizer).
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
             stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             stall_harvested = harvest_leaked_artifacts(
@@ -5087,35 +4007,29 @@ class BaselineExecutor:
         # may have reaped the hung parent with ``SERVER_DEAD_RETURNCODE``. Detect
         # that once here and reuse it across the failure branches so the failure
         # is classified ``server_init_dead``. Backend-agnostic (vLLM + SGLang).
-        server_death_excerpt = server_log_death_excerpt(str(output_dir / "server.log"))
+        server_death_excerpt = server_log_death_excerpt(str(server_log))
         server_init_dead = server_death_excerpt is not None or proc_returncode == SERVER_DEAD_RETURNCODE
         server_init_dead_error = server_death_excerpt or (
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
 
-        # Detect cuda-graph capture failures (OOM-rooted ones excluded).
-        # Markers live in server.log; read a bounded tail for classification.
-        server_log_tail = ""
-        try:
-            slog = output_dir / "server.log"
-            if slog.exists():
-                with open(slog, "rb") as f:
-                    f.seek(0, 2)
-                    sz = f.tell()
-                    f.seek(max(0, sz - 65536))
-                    server_log_tail = f.read().decode("utf-8", "replace")
-        except OSError:
-            server_log_tail = ""
+        registry_mismatch = is_aiter_jit_registry_mismatch(
+            server_log_text,
+            proc_stderr or "",
+            proc_stdout or "",
+        )
+        # The same read that produced the observation answers whether the wall
+        # is the recoverable cuda-graph capture one (OOM-rooted ones excluded)
+        # that arms the one-shot eager retry below.
         cuda_graph_capture_failed = _is_cuda_graph_capture_failure(
-            server_log_tail,
+            server_log_text,
             proc_stderr or "",
             proc_stdout or "",
         )
 
         workspace = select_run_workspace(output_dir, known_before=workspaces_before)
-        # Always-on artifact harvest: copy wrapper-side leaks into the task
-        # workspace so failure-path diagnostics survive; mtime gating rejects
-        # stale prior-run leaks.
+        # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
+        # survive; mtime gating rejects stale prior-run leaks.
         harvest_destination = workspace if workspace is not None else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
@@ -5133,9 +4047,7 @@ class BaselineExecutor:
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
                 **capture_meta,
             }
-            # Magpie never created a benchmark_* workspace, so the wrapper never
-            # wrote server.log. Persist captured stderr/stdout so the failure
-            # survives the NFS clone and S3 archive.
+            # Magpie never created a benchmark_* workspace, so the wrapper never wrote server.log.
             captured = redact_secret_values((proc_stderr or "") + (proc_stdout or ""))
             stderr_log_path: str | None = None
             if captured.strip():
@@ -5150,8 +4062,20 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
-            # cuda-graph capture failures take priority over server_init_dead:
-            # only this class arms the one-shot disable-cuda-graph retry.
+            # Registry mismatch is wrapped in "Capture cuda graph failed" and must win so we do not arm the
+            # disable-cuda-graph retry.
+            if registry_mismatch:
+                return {
+                    "status": "failed",
+                    "error_class": "aiter_jit_registry_mismatch",
+                    "returncode": proc_returncode,
+                    "error": redact_secret_values(
+                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
+                    ),
+                    **failure_extras,
+                }
+            # cuda-graph capture failures take priority over server_init_dead: only this class arms the one-shot
+            # disable-cuda-graph retry.
             if cuda_graph_capture_failed:
                 return {
                     "status": "failed",
@@ -5175,6 +4099,7 @@ class BaselineExecutor:
                 err_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
+                    proc_returncode,
                 )
                 return {
                     "status": "failed",
@@ -5210,9 +4135,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            # cuda-graph capture failure wins over server_init_dead so the
-            # one-shot disable-cuda-graph retry is armed even when both co-occur.
-            if cuda_graph_capture_failed:
+            if registry_mismatch:
+                error_class = "aiter_jit_registry_mismatch"
+                error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
+            elif cuda_graph_capture_failed:
                 error_class = "cuda_graph_capture_failed"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
             elif server_init_dead:
@@ -5223,6 +4149,7 @@ class BaselineExecutor:
                 error_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
+                    proc_returncode,
                 )
                 error = tail
             elif not report_path.exists():
@@ -5270,29 +4197,22 @@ class BaselineExecutor:
             "result_dir": str(result_dir),
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
-            # Materialized YAML for THIS baseline. Coordinator promotes it into
-            # SharedState.baseline_config_path so downstream tasks reuse it as
-            # `config_path` (else variants render from smoke defaults).
+            # Materialized YAML for THIS baseline.
             "materialized_config": str(materialized_config_path),
-            # Magpie subprocess wall-clock (success path only). Coordinator
-            # promotes into ``SharedState.baseline_runtime_sec``, the explore
-            # overtime-kill anchor. Omitted on failure paths.
+            # Magpie subprocess wall-clock (success path only).
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-            # The benchmark's own share of that wall-clock, boot excluded. Kept
-            # separate rather than folded in because the two are spent by
-            # different things: every later variant boots again, so it is the
-            # sum that prices one, while only this part prices a pass that
-            # re-attaches. ``None`` when nothing recorded a ready boundary.
+            # The benchmark's own share of that wall-clock, boot excluded.
             "post_ready_runtime_sec": _round_post_ready_sec(
                 watchdog_server_log,
                 started_unix=subprocess_started_unix,
                 runtime_sec=subprocess_runtime_sec,
             ),
-            # Authoritative (materialized-config) view of whether the serving
-            # lm-eval ran this run. The accuracy-stop decision reads this rather
-            # than re-deriving from params, so a YAML/reference-env RUN_EVAL=false
-            # is honored as an intentional opt-out.
+            # Authoritative (materialized-config) view of whether the serving lm-eval ran this run.
             "run_eval_disabled": bool(run_eval_disabled),
+            # Where this round's boot observation landed, and whether the log
+            # it was classified from could be read.
+            "boot_observation_path": boot_observation_ref,
+            "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
         }
         _attach_baseline_launch_evidence(
             result,
@@ -5301,38 +4221,31 @@ class BaselineExecutor:
             framework=framework,
         )
 
-        # Parse accuracy eval results (GSM8K for serving, or the image-quality
-        # gate for scriptable frameworks). Pass the framework so scriptable runs
-        # fail closed on a missing quality gate instead of falling back to GSM8K.
+        # Parse accuracy eval results (GSM8K for serving, or the image-quality gate for scriptable frameworks).
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
         from hyperloom.inference_optimizer import framework_registry
 
-        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run. Scriptable (xDiT)
-        # workloads carry no lm-eval; their sole correctness signal is the image
-        # ``quality_gate`` embedded in ``benchmark_report.json``, which the bench
-        # script writes every run and ``parse_quality_gate`` resolves by newest
-        # mtime -- so there is no stale-artifact risk to guard against. The skip
-        # below therefore applies to serving only, never dropping a scriptable
-        # gate (which would leave baseline_accuracy=0 -> throughput-only KEEP).
+        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         eval_scriptable = framework_registry.is_scriptable(eval_framework)
         if run_eval_disabled and not eval_scriptable:
-            # Serving RUN_EVAL was off this run (eval-failure fallback or
-            # ``disable_run_eval``), so lm-eval did not execute and there is no
-            # fresh accuracy to read. Do NOT parse: the eval-failure retry reuses
-            # ``output_dir``, so the slot may still hold a prior attempt's
-            # ``results*.json`` and reading it would promote a stale score into
-            # baseline_accuracy. Reading eval output strictly follows running eval.
+            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
+            # execute and there is no fresh accuracy to read.
             log.info(
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
             )
         else:
             from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
 
-            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
-            # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
-            # still resolve from Magpie's benchmark reports.
+            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
+            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
             eval_search_root = result_dir
-            eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
+            eval_data = parse_eval_results(
+                eval_search_root,
+                framework=eval_framework,
+                benchmark_mode=str(
+                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
+                ),
+            )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
                 result["accuracy_task"] = eval_data.get("task", "gsm8k")

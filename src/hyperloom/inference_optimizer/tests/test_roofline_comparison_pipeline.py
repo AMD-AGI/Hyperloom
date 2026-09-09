@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
-
-``final.json``'s ``roofline_comparison`` block is built from the append-only
-``SharedState.roofline_snapshots`` history.
-"""
+"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`."""
 
 from __future__ import annotations
 
@@ -640,9 +636,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["gap_to_roofline_pct"] == pytest.approx(30.91, abs=0.01)
 
     def test_forced_baseline_arm_overrides_promoted_current_best(self, tmp_path, monkeypatch):
-        """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as
-        baseline even after warm-replay promoted a fp8 current_best — the ceiling
-        is computed for the baseline arm and achieved uses baseline_tput."""
+        """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as baseline even after warm-replay promoted a fp8 current_best — the ceiling is computed for the baseline arm and achieved uses baseline_tput."""
         from hyperloom.orchestrator.kernel import roofline_ceiling
         from hyperloom.orchestrator.kernel.roofline_ceiling import (
             RooflineBreakdown,
@@ -712,8 +706,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["within_roofline_pct"] == 52.75
 
     def test_baseline_arm_falls_back_to_last_baseline_tput(self, tmp_path, monkeypatch):
-        """When baseline_tput is lost, a baseline-arm snapshot still stamps
-        achieved from last_baseline so within/gap pct are not empty."""
+        """When baseline_tput is lost, a baseline-arm snapshot still stamps achieved from last_baseline so within/gap pct are not empty."""
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         self._mock_breakdown(
@@ -742,8 +735,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["within_roofline_pct"] == 48.0
 
     def test_unknown_roofline_arm_falls_back_to_inference(self, tmp_path, monkeypatch):
-        """An invalid roofline_arm is ignored and the recorder infers from
-        current_best.tput (here a promoted optimized arm)."""
+        """An invalid roofline_arm is ignored and the recorder infers from current_best.tput (here a promoted optimized arm)."""
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         self._mock_breakdown(
@@ -770,8 +762,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 900.0
 
     def test_current_best_arm_keeps_arm_when_tput_missing(self, tmp_path, monkeypatch):
-        """A current_best-tagged snapshot keeps its arm even when current_best
-        carries no live tput; the ceiling must not downgrade to baseline."""
+        """A current_best-tagged snapshot keeps its arm even when current_best carries no live tput; the ceiling must not downgrade to baseline."""
         from hyperloom.orchestrator.kernel import roofline_ceiling
         from hyperloom.orchestrator.kernel.roofline_ceiling import (
             RooflineBreakdown,

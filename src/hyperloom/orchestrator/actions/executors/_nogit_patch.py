@@ -1,60 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared non-git patch apply / revert primitives.
-
-Lets the specialist and upstream-PR patch
-executor share one backup-based apply/revert channel without git.
-
-Public surface
---------------
-* :func:`_is_git_tree`           — probe whether a directory is inside a git work-tree.
-* :func:`_apply_patch_no_git`    — apply a unified diff with POSIX ``patch``, backing up targets.
-* :func:`_revert_patches_no_git` — restore backed-up targets (reverse of apply).
-
-Supporting constants / helpers used by both callers:
-
-* :data:`_P_LEVELS`         — ``-p`` strip levels tried in priority order.
-* :data:`_PATCH_DEV_NULL`   — the sentinel ``/dev/null`` path in diff headers.
-* :func:`_strip_path_prefix` — drop leading path components like ``git apply -p<n>``.
-* :func:`_is_within`        — containment check (both paths pre-resolved).
-* :func:`_sanitize_git_index_lines` — drop ``index`` headers that contradict ``---``.
-
-Placeholder git index headers
------------------------------
-Unlike ``git apply``, GNU ``patch`` honours the ``index <old>..<new>`` line and
-reads an all-zero *old* blob hash as a file creation. Specialists write
-placeholder hashes, so a modification hunk can arrive as
-``index 0000000..1111111`` alongside ``--- a/path``, and ``patch`` then refuses
-it with ``... which already exists!``. :func:`_sanitize_git_index_lines` drops
-such contradicting lines before the CLI sees the patch; genuine creations
-(``--- /dev/null``) keep theirs.
-
-Backup naming
--------------
-Backup files are named ``<patch_stem>__<rel_flat>__<seq:04d>.bak`` where
-``rel_flat`` is the target's relative path with ``/`` replaced by ``__`` and
-``seq`` is a caller-supplied offset (``seq_offset``) plus the record index.
-Callers that accumulate backups across multiple ``_apply_patch_no_git`` calls
-pass ``seq_offset=len(existing_backups)`` so names are globally unique within a
-shared ``backup_root`` even when patches touch files with the same basename.
-
-Rename / move revert
---------------------
-For a rename hunk (``---`` old path != ``+++`` new path, neither ``/dev/null``),
-``_apply_patch_no_git`` backs up the old source file (to restore on revert) and
-tracks the new destination (to delete on revert). Each backup record carries a
-``revert_action`` key:
-
-* ``"restore"`` — copy ``backup_path`` back to ``target`` (modified/created files).
-* ``"delete"``  — remove ``target`` (the rename destination, which did not exist
-  before the patch).
-* ``"restore_old"`` — copy ``backup_path`` back to ``target`` (the rename source,
-  which existed before the patch and must be put back).
-
-``_revert_patches_no_git`` dispatches on ``revert_action`` (falling back to the
-``backup_path``-present → restore / absent → delete heuristic for older records).
-"""
+"""Shared non-git patch apply / revert primitives."""
 
 from __future__ import annotations
 
@@ -67,14 +14,14 @@ from hyperloom.common.git_safety import safe_directory_args
 from pathlib import Path
 from typing import Any
 
+from ...delivery.ledger import append_record, merge_records
+from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
 
 
 # Candidate ``-p`` strip levels, tried in priority order (``-p1`` first).
-# Specialists author patches with heterogeneous path prefixes, so we auto-detect
-# rather than assume a single level.
 _P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 _PATCH_DEV_NULL = "/dev/null"
@@ -87,20 +34,7 @@ _ZERO_OLD_INDEX_RE = re.compile(r"^index 0+\.\.")
 
 
 def _old_path_after_index(lines: list[str], start: int) -> str | None:
-    """Return the ``--- `` path token of the file block containing ``lines[start]``.
-
-    Scans forward from an ``index`` line to that block's ``--- `` header,
-    stopping at the next ``diff --git`` header or the first hunk marker so a
-    later block's header is never attributed to this one.
-
-    Args:
-        lines: The patch text split into lines.
-        start: Index of the ``index`` line to resolve.
-
-    Returns:
-        The raw pre-image path token, or ``None`` when the block has no
-        ``--- `` header.
-    """
+    """Return the ``--- `` path token of the file block containing ``lines[start]``."""
     for line in lines[start + 1 :]:
         if line.startswith("--- "):
             return line[4:].strip().split("\t")[0]
@@ -110,31 +44,7 @@ def _old_path_after_index(lines: list[str], start: int) -> str | None:
 
 
 def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
-    """Drop git ``index`` lines whose all-zero old blob contradicts the ``---`` header.
-
-    GNU ``patch`` reads an all-zero *old* blob hash as "this hunk creates the
-    file" and then refuses the hunk with ``The next patch would create the file
-    X, which already exists!`` -- even though the accompanying ``--- a/X``
-    header says X is being *modified*. ``git apply`` ignores the index line
-    entirely, so such a patch applies through the git channel and fails only
-    here, which makes the failure look like a bad patch rather than a header
-    disagreement.
-
-    Specialists emit placeholder index lines rather than real blob hashes, so
-    the contradiction is common enough to absorb rather than reject. The
-    ``---``/``+++`` headers are the authoritative unified-diff surface and GNU
-    ``patch`` does not need the index line, so a contradicting one is dropped.
-
-    A genuine creation hunk carries ``--- /dev/null`` and keeps its index line,
-    so real file creations are unaffected.
-
-    Args:
-        patch_text: The unified-diff text to sanitize.
-
-    Returns:
-        A ``(sanitized_text, dropped_count)`` pair. When nothing contradicts,
-        ``dropped_count`` is ``0`` and the text is returned unmodified.
-    """
+    """Drop git ``index`` lines whose all-zero old blob contradicts the ``---`` header."""
     lines = patch_text.splitlines(keepends=True)
     kept: list[str] = []
     dropped = 0
@@ -151,16 +61,7 @@ def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``).
-
-    Args:
-        path: The diff-header path to strip.
-        level: The number of leading components to drop (``<= 0`` is a no-op).
-
-    Returns:
-        The path with ``level`` leading components removed (or the basename
-        when there are not enough components).
-    """
+    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
     if level <= 0:
         return path
     parts = path.split("/")
@@ -194,28 +95,31 @@ def _is_git_tree(path: Path) -> bool:
 def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     """True when ``patch_path`` is already fully applied in ``framework_root``.
 
-    A reverse dry-run (``patch -R --dry-run``) succeeds only when every hunk's
-    *post*-state is already present in the tree — i.e. the tree is exactly what
-    a successful forward apply would have produced. That makes it the reliable
-    already-applied probe: POSIX ``patch`` exits non-zero for both "does not
-    apply" and "previously applied", so the forward exit code alone cannot tell
-    the two apart.
+    A reverse dry-run (``patch -R --dry-run``) is the only probe POSIX
+    ``patch`` offers: its forward exit code is non-zero for both "does not
+    apply" and "previously applied". On its own it is not proof of exactness:
+    ``patch`` matches with fuzz and at an offset, so it answers yes for a tree
+    that merely resembles the post-state. Fuzz is disabled, and a hunk that
+    only matched by shifting is rejected -- an offset means the surrounding
+    lines are not the ones the patch was written against, so the tree is not
+    the post-image even though every hunk found a home.
 
     Strictly a probe: ``--dry-run`` is passed at every level, so the tree is
-    never mutated. Partial overlap is correctly rejected — a patch whose hunks
-    are only *partly* present fails the reverse check and stays a real failure.
+    never mutated.
 
     Args:
         framework_root: The source-tree root the patch targets.
         patch_path: The unified-diff patch file to probe.
 
     Returns:
-        ``True`` when some strip level reverse-applies cleanly.
+        ``True`` when the tree exactly holds the patch's post-state.
     """
     for lvl in _P_LEVELS:
         try:
             cp = subprocess.run(
-                ["patch", f"-p{lvl}", "-R", "--dry-run", "-i", str(patch_path)],
+                # ``--fuzz=0``: an approximate context match would answer yes
+                # for a tree that only resembles the post-state.
+                ["patch", f"-p{lvl}", "-R", "--fuzz=0", "--dry-run", "-i", str(patch_path)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -226,24 +130,19 @@ def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         if cp.returncode == 0:
+            if "offset" in cp.stdout:
+                log.info(
+                    "nogit patch: %s reverses only at an offset in %s; not treating it as applied",
+                    patch_path.name,
+                    framework_root,
+                )
+                return False
             return True
     return False
 
 
 def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
-    """Return a backup filename unique within a shared ``backup_root``.
-
-    Encodes both the patch identity and the target path so two patches that
-    touch a file with the same basename never collide.
-
-    Args:
-        patch_stem: ``patch_path.stem`` of the originating patch file.
-        rel_target: Relative path of the target within ``framework_root``.
-        seq: Globally unique sequence number (caller-maintained).
-
-    Returns:
-        A safe filename string ending in ``.bak``.
-    """
+    """Return a backup filename unique within a shared ``backup_root``."""
     flat = _UNSAFE_NAME_RE.sub("_", str(rel_target))
     safe_stem = _UNSAFE_NAME_RE.sub("_", patch_stem)
     return f"{safe_stem}__{flat}__{seq:04d}.bak"
@@ -256,45 +155,7 @@ def _apply_patch_no_git(
     *,
     seq_offset: int = 0,
 ) -> "tuple[bool, str, list[dict[str, Any]], Any]":
-    """Apply ``patch_path`` into ``framework_root`` without git, backing up targets.
-
-    Uses the ``patch`` CLI (POSIX standard) with automatic ``-p`` strip-level
-    detection via a dry-run pass, then backs up each target file before
-    mutating, mirroring the artifact backup scheme.
-
-    Backup names are globally unique across multiple calls sharing the same
-    ``backup_root`` when callers pass ``seq_offset=len(accumulated_backups)``
-    (see module docstring for the naming scheme).
-
-    Rename/move hunks back up the old source file (to restore on revert) and
-    track the new destination (to delete on revert).
-
-    Args:
-        framework_root: The source-tree root to apply into (need not be a git repo).
-        patch_path: The unified-diff patch file to apply.
-        backup_root: Directory under which target backups are written.
-        seq_offset: Starting sequence number for backup filenames within this call.
-            Pass ``len(accumulated_backups)`` when reusing a ``backup_root`` across
-            multiple ``_apply_patch_no_git`` calls to avoid name collisions.
-
-    Returns:
-        A ``(ok, err, backups, feedback)`` four-tuple: ``ok`` is ``True`` on
-        success, ``err`` is a human-readable failure description, ``backups``
-        is a list of per-file backup records, and ``feedback`` is an
-        :class:`~._apply_feedback.ApplyFeedback` instance on failure or
-        ``None`` on success.  Backup record fields:
-
-        * ``"target"`` — absolute path of the affected file.
-        * ``"existed"`` — whether the file existed before the patch.
-        * ``"backup_path"`` — path of the saved copy (``None`` for new files).
-        * ``"revert_action"`` — one of ``"restore"``, ``"delete"``, or
-          ``"restore_old"`` (see module docstring).
-
-    .. note::
-        Existing callers that unpack only three items can use
-        ``ok, err, backups, *_ = _apply_patch_no_git(...)`` for zero-change
-        compatibility.
-    """
+    """Apply ``patch_path`` into ``framework_root`` without git, backing up targets."""
     from ._apply_feedback import ApplyFeedback, read_patch_source_context
 
     try:
@@ -308,8 +169,8 @@ def _apply_patch_no_git(
             ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=[], stderr=err_msg),
         )
 
-    # Feed the CLI a copy with contradicting index headers removed; keep the
-    # original path in feedback so advisories point at what the author wrote.
+    # Feed the CLI a copy with contradicting index headers removed; keep the original path in feedback so advisories
+    # point at what the author wrote.
     patch_input = patch_path
     sanitized_text, dropped_index_lines = _sanitize_git_index_lines(patch_text)
     if dropped_index_lines:
@@ -336,9 +197,8 @@ def _apply_patch_no_git(
                 timeout=60,
                 check=False,
                 cwd=str(framework_root),
-                # ``patch`` prompts ("Assume -R? [n]") on an already-applied
-                # hunk; without a closed stdin it can inherit the parent's and
-                # block until the 60s timeout.
+                # ``patch`` prompts ("Assume -R? [n]") on an already-applied hunk; without a closed stdin it can
+                # inherit the parent's and block until the 60s timeout.
                 stdin=subprocess.DEVNULL,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
@@ -412,10 +272,7 @@ def _apply_patch_no_git(
     patch_stem = patch_path.stem
 
     def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
-        """Resolve a raw diff-header path to (rel, abs, error).
-
-        Returns ``(None, None, err_msg)`` on failure.
-        """
+        """Resolve a raw diff-header path to (rel, abs, error)."""
         rel = Path(_strip_path_prefix(raw, detected_level))  # type: ignore[arg-type]
         if rel.is_absolute() or ".." in rel.parts:
             return None, None, f"patch target escapes framework root: {raw}"
@@ -423,6 +280,18 @@ def _apply_patch_no_git(
         if not _is_within(abs_path, framework_root_resolved):
             return None, None, f"patch target escapes framework root: {raw}"
         return rel, abs_path, ""
+
+    def _record(record: dict[str, Any]) -> str:
+        """Persist a backup record and add it to the in-memory list.
+
+        Returns:
+            An error string when the record could not be persisted; the caller
+            must then abort rather than mutate an unrecorded file.
+        """
+        if not append_record(backup_root, record):
+            return f"backup ledger write failed for {record.get('target')}"
+        backups.append(record)
+        return ""
 
     def _backup_existing(abs_path: Path, rel: Path, action: str) -> tuple[dict[str, Any] | None, str]:
         """Copy ``abs_path`` to a uniquely named backup and return the record."""
@@ -439,6 +308,7 @@ def _apply_patch_no_git(
             "backup_path": str(bak),
             "revert_action": action,
             "mode": mode,
+            "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
     for old_raw, new_raw in patch_file_targets(patch_text):
@@ -453,7 +323,7 @@ def _apply_patch_no_git(
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
-            backups.append(
+            err = _record(
                 {
                     "target": str(abs_new),
                     "existed": False,
@@ -461,6 +331,8 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 }
             )
+            if err:
+                return _fail(err, backups)
 
         elif is_delete:
             # Existing file deleted by patch: back it up to restore on revert.
@@ -473,9 +345,9 @@ def _apply_patch_no_git(
                 rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
             else:
-                backups.append(
+                err = _record(
                     {
                         "target": str(abs_old),
                         "existed": False,
@@ -483,24 +355,47 @@ def _apply_patch_no_git(
                         "revert_action": "delete",
                     }
                 )
+            if err:
+                return _fail(err, backups)
 
         elif is_rename:
-            # Rename/move: back up old source (to restore on revert) and
-            # track new destination (to delete on revert).
+            # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
                 return _fail(err, backups)
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
+            if rel_old == rel_new:
+                # Both header prefixes resolve to one file at this strip level,
+                # so this is a plain modification, not a rename.
+                if abs_old.exists():  # type: ignore[union-attr]
+                    rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
+                    if err:
+                        return _fail(err, backups)
+                    err = _record(rec)  # type: ignore[arg-type]
+                else:
+                    err = _record(
+                        {
+                            "target": str(abs_old),
+                            "existed": False,
+                            "backup_path": None,
+                            "revert_action": "delete",
+                        }
+                    )
+                if err:
+                    return _fail(err, backups)
+                continue
             # Back up old source so it can be restored on revert.
             if abs_old.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
+                if err:
+                    return _fail(err, backups)
             # Track new destination for deletion on revert.
-            backups.append(
+            err = _record(
                 {
                     "target": str(abs_new),
                     "existed": False,
@@ -508,6 +403,8 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 }
             )
+            if err:
+                return _fail(err, backups)
 
         else:
             # Modification: back up existing target to restore on revert.
@@ -521,9 +418,9 @@ def _apply_patch_no_git(
                 rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
             else:
-                backups.append(
+                err = _record(
                     {
                         "target": str(abs_t),
                         "existed": False,
@@ -531,9 +428,10 @@ def _apply_patch_no_git(
                         "revert_action": "delete",
                     }
                 )
+            if err:
+                return _fail(err, backups)
 
-    # Apply for real. ``--reject-file=-`` discards rejects, so the failure path's
-    # ``.rej`` sweep only picks up sidecars left by other tooling.
+    # Apply for real.
     rej_dir = backup_root / "rej"
     rej_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -577,21 +475,7 @@ def _apply_patch_no_git(
 
 
 def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
-    """Collect ``.rej`` reject files left by a failed ``patch`` apply.
-
-    The POSIX ``patch`` tool writes ``<target>.rej`` alongside each file that
-    had failing hunks.  This helper scans ``framework_root`` for any ``.rej``
-    file whose mtime is recent (within 60 s), reads them all, then removes
-    them so they do not interfere with future apply attempts.
-
-    Args:
-        framework_root: The source-tree root that was patched into.
-        patch_path: The patch file that was applied (used for logging only).
-
-    Returns:
-        A concatenated string of all ``.rej`` file contents, or ``""`` when
-        none were found.
-    """
+    """Collect ``.rej`` reject files left by a failed ``patch`` apply."""
     import time
 
     cutoff = time.time() - 60.0
@@ -614,6 +498,8 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
 
 def _revert_patches_no_git(
     backups: list[dict[str, Any]],
+    *,
+    backup_root: Path | None = None,
 ) -> tuple[bool, list[str]]:
     """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
 
@@ -624,14 +510,18 @@ def _revert_patches_no_git(
     a partial restore is reported rather than mistaken for success.
 
     Args:
-        backups: The per-file backup records produced by :func:`_apply_patch_no_git`.
+        backups: The per-file backup records the caller still holds.
+        backup_root: The apply's backup directory. When given, the persisted
+            ledger under it is merged in first, so a mutation whose record
+            never reached the caller is still reverted.
 
     Returns:
         A ``(ok, errors)`` tuple; ``ok`` is ``True`` only when every record
         restored and verified, and ``errors`` carries one entry per failure.
     """
+    records = merge_records(backups, backup_root) if backup_root is not None else list(backups)
     errors: list[str] = []
-    for record in reversed(backups):
+    for record in reversed(records):
         target = Path(record["target"])
         bak = record.get("backup_path")
         action = record.get("revert_action")

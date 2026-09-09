@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Local recipe-snapshot KB for the inference optimizer.
-
-Reads and writes through :class:`RecipeKB` use only
-:class:`LocalRecipeStore`. Remote Recipe mode is implemented separately by the
-KB Store CLOSE writer under :mod:`hyperloom.orchestrator.knowledge.remote_recipe`.
-
-The on-disk layout maps the canonical id
-``inference:{model}:{hardware}:{framework_name}:{model_type}:{architectures}:{framework_version}:{precision}``
-to a directory tree under :data:`LocalRecipeStore.root`. Each leaf directory
-holds ``recipe.json`` (live), ``history/v{N}.json`` (archived prior
-versions), ``attempts.ndjson`` (append-only attempts log), and ``.lock``
-(flock target).
-
-The ``Recipe`` / ``Attempt`` dataclasses define the local on-disk contract.
-"""
+"""Local recipe-snapshot KB for the inference optimizer."""
 
 from __future__ import annotations
 

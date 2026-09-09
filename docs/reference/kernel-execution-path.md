@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand how Hyperloom dispatches kernel optimization requests. Covers the request dispatch flow, registered request kinds, KERNEL phase entry, backend selection, and artifact layout."
-        "keywords": "Hyperloom, kernel optimization, GEAK, Forge, request dispatch, kernel execution, AMD GPU, ROCm, KERNEL phase, TraceLens, collective lane, multi-node"
+        "keywords": "Hyperloom, kernel optimization, GEAK, Forge, request dispatch, kernel execution, AMD GPU, ROCm, KERNEL phase, TraceLens, rewrite controller, multi-node"
 ---
 
 # Kernel optimization execution path
@@ -40,7 +40,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
 | `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or kernelforge gemm-tune |
-| `run_collective` | `run_collective_handler` | forge-collective (collective rewrite) |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
@@ -48,19 +47,14 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 Any kind outside this table, including the action-name `kernel_opt`, yields an
 immediate `unknown_kernel_kind` rejection.
 
-Registration is not permission. `run_fusion` and `run_collective` are
-Coordinator-owned lanes: they need a handler entry so the Coordinator can
-dispatch them itself at KERNEL entry, but PolicyGate rejects an
-orchestration-issued REQUEST for either
+Registration is not permission. `run_gemm_tuning` is a Coordinator-owned lane:
+PolicyGate rejects an orchestration-issued REQUEST for it
 (`COORDINATOR_OWNED_KERNEL_REQUEST_KINDS` in
 `inference_optimizer/protocol/action_surfaces.py`, raised as
-`rule="phase_incompatible"`) — a direct request would skip the lane's entry
-gate, its SharedState accounting and its integrate step. The kinds
-orchestration can request are therefore `trace_analyze`, `run_gemm_tuning`,
-`run_optimization`, `integrate` and `apply_patch`; the LLM sees the two lanes
-only as `run_fusion_done` / `run_collective_done` inbox responses. PolicyGate
-validates the REQUEST payload from orchestration (path-sandbox, phase-action
-gate) but never sees the RESPONSE.
+`rule="phase_incompatible"`) because it is dispatched once at phase entry from
+a lane budget, and a per-tick re-issue would spend time the allocation never
+granted. PolicyGate validates the REQUEST payload from orchestration
+(path-sandbox, phase-action gate) but never sees the RESPONSE.
 
 `run_fusion_handler` is absent from the table on purpose: `KernelPhase` awaits
 it directly, so no request ever carries that kind.
@@ -73,19 +67,13 @@ calls it makes depends on the backend: the entry hook branches before any lane
 runs.
 
 ```python
-# 1. HYPERLOOM_COLLECTIVE_ONLY wins over everything: reprofile, collective, done.
-if collective_only:
-    await self._maybe_reprofile_for_kernel()
-    await self._maybe_run_collective_before_kernel_opt()
-    return
-
-# 2. GEAK branch — the documented default. One whole-pipeline e2e run, then
+# 1. GEAK branch — the documented default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
 if geak_enabled:                      # geak_selected(): order is not exactly `forge`
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
-# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
+# 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
 #    one shared tail, chosen by whether GEMM tuning is due.
 if not self._gemm_tuning_required_before_kernel_opt():
     await self._finish_kernel_entry()
@@ -102,39 +90,30 @@ phase's own work happens:
 async def _finish_kernel_entry(self) -> None:
     await self._maybe_reprofile_for_kernel()
     await self._maybe_run_forge_fusion_before_kernel_opt()
-    await self._maybe_run_collective_before_kernel_opt()
-    if self._kernel_opt_work_remains():
-        await self._run_kernel_opt_entry_batch()
+    handoff_dir = write_forge_handoff(...)
+    await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir)
 ```
 
-**The source-level dispatch is not downstream of GEMM tuning.** Tuning GEMM
-shape tables and rewriting kernel source are unrelated jobs, so each stage in
-the shared tail consults only its own switch and each skip is a return inside
-its own helper rather than out of the entry hook.
-`INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the source-level
-dispatch alone.
+**The rewrite controller is not downstream of GEMM tuning.** Tuning GEMM shape
+tables and rewriting kernel source are unrelated jobs, so each stage in the
+shared tail consults only its own switch and each skip is a return inside its
+own helper rather than out of the entry hook.
+`INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the rewrite controller
+alone.
 
-`_run_kernel_opt_entry_batch()` names no `kernel_id`, leaving the set to
-`_batch_kernel_candidates`' own filter: every candidate that clears the dispatch
-floor and has retries left goes in one batch. Naming one here would put the
-phase back in the business of picking, which is the part that stalls when nobody
-picks. `_kernel_opt_work_remains()` gates it on `auto_kernel_opt_enabled`
-(`--no-auto-kernel-opt`) and a non-empty `untried_hot_reusable_kernels()`. The
-switch covers this dispatch only: `kernel_opt` stays in the phase's allowed
-actions, so orchestration can still request it, and the fusion and collective
-lanes keep their own gates.
+The controller runs last and unconditionally — no trace, candidate count or
+source-resolution verdict gates it, because choosing operators is its job rather
+than Hyperloom's. Hyperloom writes it a Markdown handoff (`workload.md`,
+`serving-context.md`, `trace-evidence.md`), runs
+`python -m kernelforge.cli kernel-rewrite-controller` as a bounded subprocess,
+and integrates whatever patches it publishes through
+`integrate_controller_patches`. Communication operators ride this path like any
+other operator; a task declares its rank count and the controller passes
+`--nproc-per-node` down to forge-loop.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the
 request had come through the bus.
-
-The collective lane (`_maybe_run_collective_before_kernel_opt` →
-`run_collective_handler`, integrated by `_integrate_collective`) gates on
-`TP > 1`, an exposed-communication share at or above the phase floor, a
-`last_trace_analyze` snapshot, and no already-settled campaign for the same
-analysis key. `HYPERLOOM_SKIP_COLLECTIVE` disables it;
-`HYPERLOOM_COLLECTIVE_ONLY` inverts the entry so the lane runs alone and the
-phase then hints `skip_to_sweep`.
 
 The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
 `run_fusion_handler`, integrated by `_integrate_fusion`) gates on
@@ -142,8 +121,7 @@ The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
 framework in `{sglang, vllm, vllm-aiter}`, a `last_profile_trace` to discover
 from, and no `last_fusion` whose status is already `ok` / `complete` / `kept`
 (idempotent re-entry). It is forge-only — under the default `geak` backend
-`_on_enter_kernel` returns before the lane is reached, and unlike collective
-there is no `..._ONLY` escape hatch that reaches it while GEAK owns the phase.
+`_on_enter_kernel` returns before the lane is reached.
 
 A fusion result is written to the `last_fusion` SharedState field and posted as
 a `run_fusion_done` response with `source="kernel_entry_auto"`. A result that is
@@ -191,37 +169,20 @@ the phase to `_run_geak_kernel_phase` and returns before reaching it.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
-### Two dispatch paths for kernels
+### Communication operators
 
-Collective kernels do *not* ride the per-kernel backend. A trace row whose
-`kernel_contract.kind == "collective"` is routed as follows:
+Collectives are ordinary rewrite targets. TraceLens resolves a mangled NCCL/RCCL
+kernel name back to the framework device source that issued it and publishes the
+row in `kernel_candidates.json` with `candidate_source: nccl_summary`; vendor
+RCCL/NCCL symbols never qualify, because they are opaque binaries with no
+rewritable source. The controller's opportunity analysis reads those rows like
+any other candidate and decides whether to publish a task for them.
 
-- **Per-kernel path** (`run_optimization` → GEAK / Forge): The row is dropped up
-  front by `_batch_kernel_candidates` using `is_collective_candidate`, and is also
-  withheld from `reusable_native_kernel_ids` so orchestration is never offered
-  an id whose dispatch would be an empty batch. The FlyDSL rewrite route refuses
-  such candidates independently (`collective_unsupported`).
-- **Collective lane** (`run_collective_handler`): The Coordinator selects the
-  hottest source-resolved collective candidate itself at KERNEL entry. Vendor
-  RCCL/NCCL symbols never qualify — they are opaque binaries with no rewritable
-  source. The supported `collective_op` values are `all_reduce`,
-  `reduce_scatter` and `all_gather` (`SUPPORTED_COLLECTIVE_OPS`); each needs its
-  own `torch.distributed` reference in the generated driver, so widening the set
-  means adding one there first.
-
-The lane is reached on the native/Forge KERNEL entry path; when GEAK owns the
-phase `_on_enter_kernel` returns before it. Under the default
-`KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only through
-`HYPERLOOM_COLLECTIVE_ONLY`, which turns the GEAK branch off. Its own gate keys
-on `TP > 1` and exposed-communication share, not on the backend order value.
-
-The lane writes three SharedState fields into `state.json`:
-
-| Field | Contents |
-|---|---|
-| `last_collective` | The most recent campaign result: `status`, `decision`, `kernel_name`, `kernel_speedup`, `kept` and the integrate verdict. |
-| `collective_attempts` | One row per logical campaign, deduplicated by `collective_attempt_id` so a resumed or salvaged run does not double-count. |
-| `collective_only_mode` | Mirrors `HYPERLOOM_COLLECTIVE_ONLY`, so a reader can tell a collective-only session from one where the lane merely happened to run. |
+What separates such a task is only its measurement harness: it declares
+`world_size`, the controller forwards `--nproc-per-node` to forge-loop, and the
+task preparer authors a driver that launches its own ranks, checks correctness
+against the matching `torch.distributed` collective, and reduces latency and SNR
+across ranks before reporting.
 
 ## Toolkit installation
 
@@ -276,15 +237,11 @@ Fusion lane:
 | `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds (default 7200 = 2h); a payload `timeout` / `timeout_sec` wins over it |
 | `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100); a payload `max_turns` wins over it |
 
-Collective lane:
+Collective candidate extraction:
 
 | Variable | Purpose |
 |---|---|
-| `HYPERLOOM_SKIP_COLLECTIVE` | Truthy disables the collective lane outright |
-| `HYPERLOOM_COLLECTIVE_ONLY` | Truthy runs ONLY the collective lane at KERNEL entry (GEAK / fusion / per-kernel are skipped), then hints `skip_to_sweep` |
-| `HYPERLOOM_COLLECTIVE_KEEP_PCT` | E2E KEEP threshold in percent for the collective integrate (default `1.0`); must be finite and non-negative |
-| `FORGE_COLLECTIVE_TIMEOUT` | Wrapper timeout in seconds (default 14400 = 4h); a payload `timeout` wins over it |
-| `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Per-agent timeout in seconds handed to forge-collective as `--agent-timeout-sec` |
+| `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Truthy lets a source-resolved collective borrow shapes from the trace's sole all-reduce workload family |
 
 ## Artifact layout
 

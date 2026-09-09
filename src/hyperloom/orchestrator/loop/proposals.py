@@ -36,19 +36,7 @@ def apply_critic_grid_filter(
     original_grid: list[Any],
     approved_variant_names: set[str] | None,
 ) -> bool:
-    """Restrict ``params['grid']`` to Critic-approved variant names.
-
-    ``None`` leaves the grid untouched. Non-dict slots cannot carry a name:
-    they pass through only when there is no filter.
-
-    Args:
-        params: Task params mutated in place; must already hold ``grid``.
-        original_grid: The proposer's grid, used for the filter audit count.
-        approved_variant_names: Names that may run; ``None`` keeps the full grid.
-
-    Returns:
-        ``False`` when a filter was set and no variant survived; ``True`` otherwise.
-    """
+    """Restrict ``params['grid']`` to Critic-approved variant names."""
     stamped_grid: list[Any] = []
     for variant in original_grid:
         if not isinstance(variant, dict):
@@ -89,11 +77,7 @@ class ProposalsCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _workload_canonical_id(self) -> str:
-        """Return the workload's canonical seven-dimension Recipe identity.
-
-        Returns:
-            The canonical Recipe id used by warm-start and writeback.
-        """
+        """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
         hw = self._kb_hardware_slug()
@@ -115,10 +99,7 @@ class ProposalsCollaborator:
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
-        """Load the selected store's exact authority row for writes.
-
-        Cached per tick to avoid repeated I/O during multi-variant KEEP batches.
-        """
+        """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
         tick = int(getattr(self.shared_state, "tick", 0) or 0)
@@ -211,25 +192,16 @@ class ProposalsCollaborator:
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup.
-
-        Args:
-            append_lesson: Optional lesson dict appended to the recipe.
-            append_pitfall: Optional pitfall dict appended to the recipe.
-            recipe_overrides: Optional recipe field overrides merged in (unset
-                fields preserved).
-            provenance_details: Optional provenance metadata recorded with the
-                amendment.
-        """
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
         config = getattr(getattr(self, "knowledge_plane", None), "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
-        # See agentx_kb_write_blocked for why; this is one of three sinks.
+        # See agentx_kb_blocked for why; this is one of three sinks.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(self.shared_state):
+        if agentx_kb_blocked(self.shared_state):
             log.info(
                 "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or "
                 "workload dimension, so an agentic-replay throughput would overwrite "
@@ -368,12 +340,7 @@ class ProposalsCollaborator:
             )
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides.
-
-        Args:
-            params: The explore-task params dict mutated in place; existing keys
-                are preserved (``setdefault``).
-        """
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -416,8 +383,8 @@ class ProposalsCollaborator:
                 "variant_timeout_safety_margin",
                 safety_margin_override,
             )
-        # Thread the persisted explore_search ledger so the executor seeds its
-        # tested history; it is evidence only, not an eligibility gate.
+        # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
+        # not an eligibility gate.
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
@@ -430,17 +397,9 @@ class ProposalsCollaborator:
         *,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full).
-
-        Args:
-            pending: The approved proposal to materialise into a task.
-            approved_variant_names: When set, restricts an explore grid to these
-                Critic-approved variant names; ``None`` keeps the full grid.
-        """
-        # An upstream-PR candidate pre-screen is an ``integrate_patch`` proposal
-        # carrying a candidate id at the top level (rather than params). It has
-        # its own materializer because approval means "spend a bench on this
-        # candidate", and the task params are built from the candidate row.
+        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
+        # An upstream-PR candidate pre-screen is an ``integrate_patch`` proposal carrying a candidate id at the top
+        # level (rather than params).
         if pending.action_name == "integrate_patch" and (pending.payload or {}).get("framework_agent_candidate_id"):
             await self._materialize_framework_agent_candidate(pending)
             return
@@ -516,16 +475,14 @@ class ProposalsCollaborator:
                 return
             params["source_phase"] = owner
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-            # Seed the patched-eval server with the same base args/config every
-            # other eval server uses, else it launches on bare framework defaults
-            # and crashes at startup regardless of the patch.
+            # Seed the patched-eval server with the same base args/config every other eval server uses, else it
+            # launches on bare framework defaults and crashes at startup regardless of the patch.
             inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
-        # Content-addressed so a batch of proposals that would launch identical
-        # work collapses to one task; a terminated twin still gets a fresh key so
-        # a legitimate retry after failure is never locked out.
+        # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
+        # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
         raw_key = approved_proposal_idempotency_key(pending.action_name, params)
         task = None
         was_existing = False
@@ -570,6 +527,8 @@ class ProposalsCollaborator:
                 },
             )
             return
+        # The round the authoring specialist opened runs on under this task id.
+        await self._handoff_enablement_round(task)
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(
@@ -589,11 +548,7 @@ class ProposalsCollaborator:
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
-        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map.
-
-        Lets the collector recover which decision a Critic review served. No-op
-        on empty ids; OSError swallowed so a trace write never breaks the loop.
-        """
+        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""
         if not proposal_msg_id or not task_id:
             return
         try:

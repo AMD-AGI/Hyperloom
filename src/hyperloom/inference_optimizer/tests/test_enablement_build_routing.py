@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Targeted-build <-> enablement integration in the framework phase.
-
-Tests escalation, outcome routing, failure_class injection into the mandate,
-and the gpu_arch derivation helper.  No GPU, no network, no coordinator ticks.
-"""
+"""Targeted-build <-> enablement integration in the framework phase."""
 
 from __future__ import annotations
 
@@ -25,16 +21,12 @@ from hyperloom.orchestrator.enablement.build import (
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
-# ---------------------------------------------------------------------------
 # Fixture: extend the shared build_coord with framework-phase routing methods
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def coord(build_coord):
-    """``build_coord`` augmented with the routing-method surface the framework
-    phase delegates to (launch-probe enqueue, rearm capture, build lifecycle).
-    """
+    """``build_coord`` augmented with the routing-method surface the framework phase delegates to (launch-probe enqueue, rearm capture, build lifecycle)."""
     build_coord._rearm_calls = []
     for name in (
         "_enqueue_build_launch_probe",
@@ -47,11 +39,11 @@ def coord(build_coord):
         "_time_budget_denial_for_action",
     ):
         setattr(build_coord, name, _types.MethodType(getattr(Coordinator, name), build_coord))
-    # The real wall-clock gate, on the real catalogue: with no budget set it
-    # admits everything, so a test that wants a denial sets one.
+    # The real wall-clock gate, on the real catalogue: with no budget set it admits everything, so a test that wants a
+    # denial sets one.
     build_coord.action_registry = ACTION_CATALOGUE
 
-    def _maybe_rearm_enablement(res):
+    async def _maybe_rearm_enablement(res):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
 
     async def _enqueue_targeted_build(action):
@@ -61,8 +53,8 @@ def coord(build_coord):
     build_coord.enqueue_targeted_build = _enqueue_targeted_build
     build_coord._framework_gpu_params = lambda: {}
     build_coord._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
-    # The launch probe is an ``integrate_patch`` task, so it resolves its lanes
-    # from that kind rather than from the specialist research lane.
+    # The launch probe is an ``integrate_patch`` task, so it resolves its lanes from that kind rather than from the
+    # specialist research lane.
     build_coord._registry_lanes_ttl = lambda kind: (
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
@@ -72,9 +64,7 @@ def coord(build_coord):
     return build_coord
 
 
-# ---------------------------------------------------------------------------
 # _derive_gpu_arch
-# ---------------------------------------------------------------------------
 
 
 def test_derive_gpu_arch_mi355x():
@@ -109,9 +99,7 @@ def test_targeted_build_repo_match_rejects_wrong_component():
     )
 
 
-# ---------------------------------------------------------------------------
 # _maybe_escalate_to_targeted_build
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -187,10 +175,8 @@ async def test_escalate_disabled_by_env(coord, monkeypatch):
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
-# ---------------------------------------------------------------------------
-# _maybe_escalate_to_targeted_build: vLLM arch/weight deep-failure -> vllm_source
-# (source patches keep hitting the arch wall)
-# ---------------------------------------------------------------------------
+# _maybe_escalate_to_targeted_build: vLLM arch/weight deep-failure -> vllm_source (source patches keep hitting the
+# arch wall)
 
 
 @pytest.mark.asyncio
@@ -230,10 +216,7 @@ async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
-# ---------------------------------------------------------------------------
-# _maybe_enqueue_specialist_requested_build
-# (specialist asks for a compiled / from-source build in specialist_done)
-# ---------------------------------------------------------------------------
+# _maybe_enqueue_specialist_requested_build (specialist asks for a compiled / from-source build in specialist_done)
 
 
 @pytest.mark.asyncio
@@ -369,7 +352,7 @@ async def test_specialist_requested_build_noop_without_request(coord, monkeypatc
     tid = "spec-plain"
     wd = coord.session_dir / "runs" / "specialist" / tid
     wd.mkdir(parents=True, exist_ok=True)
-    (wd / "specialist_done.json").write_text(json.dumps({"empty": False, "patches_written": ["p.patch"]}))
+    (wd / "specialist_done.json").write_text(json.dumps({"patches_written": ["p.patch"]}))
     coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
@@ -387,9 +370,7 @@ async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatc
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
-# ---------------------------------------------------------------------------
 # _maybe_route_build_outcomes -> _maybe_rearm_enablement routing
-# ---------------------------------------------------------------------------
 
 
 async def _enqueue_and_transition(coord, action, state):
@@ -528,13 +509,7 @@ async def test_route_succeeded_probe_idempotent(coord, tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_launch_probe_the_budget_cannot_fit_is_not_enqueued(coord, tmp_path):
-    """A probe opened into a spent budget is cancelled at dispatch and lost.
-
-    The probe is what declares KEEP for a build, and the queue scan drops a
-    queued row the wall-clock budget can no longer fit. Opening one anyway spends
-    the build's one routing pass on a row that will never run, so the build stays
-    verified and unlaunched with nothing left to notice it.
-    """
+    """A probe opened into a spent budget is cancelled at dispatch and lost."""
     build_tid = await _verified_build(coord, tmp_path / "attempt_broke", gap_id="g_budget")
     _spend_the_budget(coord)
 
@@ -548,14 +523,7 @@ async def test_a_launch_probe_the_budget_cannot_fit_is_not_enqueued(coord, tmp_p
 
 @pytest.mark.asyncio
 async def test_a_build_whose_probe_the_run_cancelled_is_still_unprobed(coord, tmp_path):
-    """A cancelled probe is no evidence about the build, so the build gets another.
-
-    The gate above narrows the window but cannot close it: a probe that fits when
-    it is opened can still be dropped before it is dispatched, and a probe row
-    cancelled that way owns this build's idempotency key for the rest of the
-    session. Both halves have to hold -- the build is routed again, and the key it
-    is routed on is a fresh generation rather than the cancelled row.
-    """
+    """A cancelled probe is no evidence about the build, so the build gets another."""
     build_tid = await _verified_build(coord, tmp_path / "attempt_again", gap_id="g_again")
     await Coordinator._maybe_route_build_outcomes(coord)
     first = (await _queued_probes(coord))[0]
@@ -683,11 +651,11 @@ async def test_route_failed_build_not_acked_when_rearm_raises(coord):
     attempts = {"n": 0}
     real_rearm = coord._maybe_rearm_enablement
 
-    def _flaky_rearm(res):
+    async def _flaky_rearm(res):
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise RuntimeError("rearm failed")
-        real_rearm(res)
+        await real_rearm(res)
 
     coord._maybe_rearm_enablement = _flaky_rearm
 
@@ -717,9 +685,7 @@ async def test_route_oldest_unrouted_build_when_newer_already_routed(coord, tmp_
     assert Coordinator._build_routing_record(coord, newer_tid) is not None
 
 
-# ---------------------------------------------------------------------------
 # _build_enablement_specialist_params injects failure_class into notes/params
-# ---------------------------------------------------------------------------
 
 
 def _make_params_fake(**kw):
@@ -739,7 +705,7 @@ def _make_params_fake(**kw):
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
     fake._build_enablement_specialist_params = types.MethodType(Coordinator._build_enablement_specialist_params, fake)
-    fake._discover_enablement_candidate_refs = lambda req, plan: []
+    fake._discover_enablement_candidate_refs = lambda req, plan, *, deadline=None: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     fake._framework_gpu_params = lambda: {}
@@ -787,9 +753,7 @@ def test_build_params_failure_class_distinguishes_timeout_vs_defect():
     assert "budget" in notes_timeout.lower() or "time" in notes_timeout.lower()
 
 
-# ---------------------------------------------------------------------------
 # _maybe_escalate_to_targeted_build: discovery-driven ref selection
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

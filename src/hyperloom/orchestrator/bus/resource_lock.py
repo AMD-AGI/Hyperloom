@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ResourceLockManager + SqliteLeaseBackend.
-
-``acquire_many`` is a single ``BEGIN IMMEDIATE`` all-or-nothing batch acquire;
-cross-lane mutual exclusion co-acquires conflicting lanes.
-Leases are keyed on ``(lane, holder_id)``, supporting multiple holders per
-lane; the manager raises :class:`LaneFull` at capacity vs :class:`LaneBusy`
-on a cross-lane conflict. ``benchmark_lane`` holds at most one holder via the
-default capacity=1 for serving-side lanes.
-
-Ray-managed GPU execution: under single-node Ray execution the **authoritative**
-physical GPU mutex is Ray's custom resources — serving-family work (serving /
-benchmark / profile / gpu_research) holds a whole-machine ``serving_slot`` and
-GPU specialists hold ``num_gpus``, so Ray physically prevents card sharing
-regardless of what these SQLite lanes do. These lanes are a **scheduling /
-observability / accounting view**: they gate dispatch cheaply and their acquire
-/ release / expiry events feed the lane timeline, resume reconciliation and
-prompt displays, but they are not the truth source for GPU mutual exclusion.
-The two layers are redundant — either alone keeps serving and specialists off
-the same card — so the SQLite gate is kept for its observability + resume value.
-"""
+"""ResourceLockManager + SqliteLeaseBackend."""
 
 from __future__ import annotations
 
@@ -49,22 +30,17 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
-    # research_lane carries LLM specialist sub-agents; no serving-lane conflict
-    # and capacity may exceed 1.
+    # research_lane carries LLM specialist sub-agents; no serving-lane conflict and capacity may exceed 1.
     "research_lane",
-    # gpu_research_lane carries GPU-holding specialists; mutually exclusive with
-    # the serving lanes and capacity-1 / strictly serial (one GPU specialist
-    # holds the machine at a time; the GPU pool partitions cards within it).
+    # gpu_research_lane carries GPU-holding specialists; mutually exclusive with the serving lanes and capacity-1 /
+    # strictly serial (one GPU specialist holds the machine at a time; the GPU pool partitions cards within it).
     "gpu_research_lane",
-    # build_lane serializes off-loop compile tasks; capacity-1 with no
-    # serving-lane conflict (the compile step needs no GPU/server).
+    # build_lane serializes off-loop compile tasks; capacity-1 with no serving-lane conflict (the compile step needs
+    # no GPU/server).
     "build_lane",
 )
 
 # Lane → lanes that must *also* be free or co-acquired.
-# Conflicts are symmetric: each lane lists every lane it mutexes against.
-# ``_expand_lanes`` only expands the *requested* lane's own conflict set, so
-# two lanes block each other only if each side lists the other.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "benchmark_lane": frozenset({"profile_lane", "server_lifecycle", "gpu_research_lane"}),
     "profile_lane": frozenset({"benchmark_lane", "server_lifecycle", "gpu_research_lane"}),
@@ -79,22 +55,106 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 }
 
 
+#: The lane an open bring-up round holds for as long as it is open.
+#:
+#: Deliberately absent from :data:`KNOWN_LANES`, because no task may request it.
+#: A round is held by a task that still has to be dispatchable while the round
+#: stands, and every serving lane mutexes against ``gpu_research_lane``, so a
+#: round holding a serving lane under a holder id of its own would deny its own
+#: holder the dispatch the round exists to cover. ``RoundStore`` writes and
+#: drops this row inside the transaction that opens, renews and settles the
+#: round; the rest of the lease machinery -- ``lane_holders``, ``reap_expired``,
+#: the breakdown lane timeline -- reads it like any other lease.
+BRINGUP_ROUND_LANE = "bringup_round"
+
+#: Recorded on a round's lane row in place of a pid. The round's holder is a
+#: task, not this process, and only the task registry can prove a task's process
+#: dead and date the kill an expiry outcome has to carry -- so
+#: :meth:`SqliteLeaseBackend.reap_dead_holders`, which skips non-positive pids,
+#: leaves these rows to the TTL sweep.
+ROUND_LEASE_PID = 0
+
+#: Recorded in the lane row's ``action`` column.
+_ROUND_LEASE_ACTION = "bringup_round"
+
+
 _now_iso = now_iso
 
 
-def _expand_lanes(lanes: list[str]) -> list[str]:
-    """Expand requested lanes by transitive conflicts; sorted deterministically.
+def _lease_iso(unix_ts: float) -> str:
+    """Render unix seconds the way the lease table's timestamps compare.
+
+    ``expires_at`` is swept by string comparison against :func:`now_iso`, so the
+    two have to agree on offset and precision.
 
     Args:
-        lanes: Requested lane names to expand.
+        unix_ts: The instant to render.
 
     Returns:
-        The requested lanes plus their conflicting lanes, sorted for
-        deterministic ordering.
-
-    Raises:
-        ValueError: If any requested lane is not a known lane.
+        str: A fixed-width UTC ISO-8601 timestamp.
     """
+    return datetime.fromtimestamp(float(unix_ts), tz=timezone.utc).isoformat(timespec="microseconds")
+
+
+def hold_round_lane(
+    cur: sqlite3.Cursor,
+    *,
+    round_id: str,
+    holder_task_id: str,
+    expires_unix: float,
+    now_unix: float,
+) -> None:
+    """Write the lane row an open round holds, inside the caller's transaction.
+
+    Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
+    serves the acquire, every renewal, and a handoff that moves the round to a
+    new holder. ``acquired_at`` survives a renewal; only the holder and the two
+    clock columns move.
+
+    Args:
+        cur: Cursor of the transaction writing the round row, so the round and
+            its lane land together or not at all.
+        round_id: The round holding the lane; also the lease's holder id.
+        holder_task_id: The task the round is held by right now.
+        expires_unix: When the round's lease runs out.
+        now_unix: Current wall time.
+    """
+    stamp = _lease_iso(now_unix)
+    cur.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
+        "  acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(lane, holder_id) DO UPDATE SET"
+        "  task_id = excluded.task_id,"
+        "  expires_at = excluded.expires_at,"
+        "  heartbeat_at = excluded.heartbeat_at",
+        (
+            BRINGUP_ROUND_LANE,
+            round_id,
+            holder_task_id,
+            _ROUND_LEASE_ACTION,
+            ROUND_LEASE_PID,
+            stamp,
+            _lease_iso(expires_unix),
+            stamp,
+        ),
+    )
+
+
+def drop_round_lane(cur: sqlite3.Cursor, *, round_id: str) -> None:
+    """Release the lane row a round held, inside the caller's transaction.
+
+    Args:
+        cur: Cursor of the transaction settling the round.
+        round_id: The round whose lane is released.
+    """
+    cur.execute(
+        "DELETE FROM leases WHERE lane = ? AND holder_id = ?",
+        (BRINGUP_ROUND_LANE, round_id),
+    )
+
+
+def _expand_lanes(lanes: list[str]) -> list[str]:
+    """Expand requested lanes by transitive conflicts; sorted deterministically."""
     out: set[str] = set()
     for lane in lanes:
         if lane not in KNOWN_LANES:
@@ -121,12 +181,7 @@ class LaneBusy(RuntimeError):
     """Raised by ``acquire_many`` on a cross-lane conflict (Inv-7.1); kept distinct from capacity."""
 
     def __init__(self, busy_lanes: list[str]):
-        """Initialise with the lanes that triggered the cross-lane conflict.
-
-        Args:
-            busy_lanes (list[str]): Lanes whose cross-lane mutex blocked
-                the acquire; stored on ``self.busy_lanes``.
-        """
+        """Initialise with the lanes that triggered the cross-lane conflict."""
         super().__init__(f"lanes busy: {busy_lanes!r}")
         self.busy_lanes = busy_lanes
 
@@ -135,12 +190,7 @@ class LaneFull(RuntimeError):
     """Raised by ``acquire_many`` when a lane hits its ``capacity`` cap (pure capacity decision, distinct from :class:`LaneBusy`)."""
 
     def __init__(self, full_lanes: list[str]):
-        """Initialise with the lanes that were at capacity.
-
-        Args:
-            full_lanes (list[str]): Lanes at their per-lane capacity cap;
-                stored on ``self.full_lanes``.
-        """
+        """Initialise with the lanes that were at capacity."""
         super().__init__(f"lanes full: {full_lanes!r}")
         self.full_lanes = full_lanes
 
@@ -153,12 +203,7 @@ class SqliteLeaseBackend:
     """Lease backend behind :class:`ResourceLockManager`; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
     def __init__(self, db: SqliteConnection):
-        """Bind the backend to a SQLite connection.
-
-        Args:
-            db (SqliteConnection): The unified WAL DB connection used for
-                all lease reads / writes.
-        """
+        """Bind the backend to a SQLite connection."""
         self.db = db
 
     async def acquire_many(
@@ -170,26 +215,7 @@ class SqliteLeaseBackend:
         action: str,
         ttl_sec: int,
     ) -> Lease:
-        """Acquire ``lanes`` + transitive conflicts as one atomic batch.
-
-        Same-holder retries are idempotent; raises :class:`LaneFull` (at cap)
-        or :class:`LaneBusy` (different-holder conflict). Inv-7.1: serving lanes default capacity 1.
-
-        Args:
-            lanes: Lanes to acquire; transitive conflicts are co-acquired.
-            holder_id: Identifier of the lease holder.
-            task_id: Identifier of the task acquiring the lanes.
-            action: Action label recorded with the lease.
-            ttl_sec: Lease time-to-live in seconds.
-
-        Returns:
-            The acquired ``Lease`` covering the expanded set of lanes.
-
-        Raises:
-            ValueError: If ``lanes`` is empty.
-            LaneFull: If a lane is at (or disabled by) its capacity cap.
-            LaneBusy: If a capacity-1 lane is held by a different holder.
-        """
+        """Acquire ``lanes`` + transitive conflicts as one atomic batch."""
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
@@ -310,16 +336,7 @@ class SqliteLeaseBackend:
         )
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK).
-
-        Args:
-            lease: The lease whose lanes should be refreshed.
-            ttl_sec: New lifetime in seconds from now.
-
-        Raises:
-            StaleLeaseError: If the number of rows updated does not match the
-                lease's lane count (the lease no longer belongs to us).
-        """
+        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
         new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
         now_iso = _now_iso()
         async with self.db.transaction() as cur:
@@ -332,15 +349,7 @@ class SqliteLeaseBackend:
                 raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
-        """Refresh every lane row a task holds, whoever the holder is.
-
-        Args:
-            task_id: The task whose lane rows should be refreshed.
-            ttl_sec: New lifetime in seconds from now.
-
-        Returns:
-            The lanes that were refreshed, sorted.
-        """
+        """Refresh every lane row a task holds, whoever the holder is."""
         new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
         now_iso = _now_iso()
         async with self.db.transaction() as cur:
@@ -354,17 +363,7 @@ class SqliteLeaseBackend:
         return lanes
 
     async def release(self, lease: Lease) -> int:
-        """Drop every (lane, holder_id) row this lease owns.
-
-        Other holders on the same lane are untouched (Inv-7.3 atomic
-        release for one holder).
-
-        Args:
-            lease (Lease): The lease to release.
-
-        Returns:
-            int: Number of lease rows deleted.
-        """
+        """Drop every (lane, holder_id) row this lease owns."""
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
@@ -374,13 +373,7 @@ class SqliteLeaseBackend:
             return cur.rowcount
 
     async def reap_expired(self) -> list[dict]:
-        """Sweep expired rows; emits one ``lease_expired`` event per stale
-        (lane, holder_id) row. Reaps only TTL-fired holders, leaving live
-        holders on a multi-holder lane untouched.
-
-        Returns:
-            The reaped lease rows as dicts, one per deleted (lane, holder_id).
-        """
+        """Sweep expired rows; emits one ``lease_expired`` event per stale (lane, holder_id) row."""
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
@@ -420,13 +413,7 @@ class SqliteLeaseBackend:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        """Best-effort liveness probe for a lease-holder PID.
-
-        Uses ``os.kill(pid, 0)`` which raises ``ProcessLookupError`` for a dead
-        PID and ``PermissionError`` for a live PID owned by another user (treated
-        as alive). Any other error is treated as alive so we never reap a holder
-        we cannot positively prove dead.
-        """
+        """Best-effort liveness probe for a lease-holder PID."""
         if pid <= 0:
             return True
         try:
@@ -440,12 +427,7 @@ class SqliteLeaseBackend:
         return True
 
     async def reap_dead_holders(self) -> list[dict]:
-        """Release leases whose holder process is no longer alive.
-
-        Checks each not-yet-expired lease's recorded ``pid`` and deletes rows
-        whose PID is provably gone. Rows with a null / non-positive pid are
-        left untouched. Returns the reaped rows as dicts.
-        """
+        """Release leases whose holder process is no longer alive."""
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
@@ -475,16 +457,27 @@ class SqliteLeaseBackend:
             )
         return reaped
 
-    async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: live_holder_count}`` for lanes with live rows.
+    async def bringup_round_holders(self, now_unix: float) -> set[str]:
+        """Return the ids of rounds whose lane row is still live at ``now_unix``.
 
-        Used by the dispatcher to gauge research_lane occupancy. (The
-        breakdown ``lane_timeline`` collector reads the ``leases`` table
-        directly and does not go through this method.)
+        The lease a round takes when it opens is the round's clock: a round
+        missing from this set has run out, whether or not a sweep has deleted
+        its row yet.
+
+        Args:
+            now_unix: The instant to test, so the caller's pass reads one clock.
 
         Returns:
-            dict[str, int]: Map of lane name to its live holder count.
+            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
         """
+        rows = await self.db.fetchall(
+            "SELECT holder_id FROM leases WHERE lane = ? AND expires_at > ?",
+            (BRINGUP_ROUND_LANE, _lease_iso(now_unix)),
+        )
+        return {str(r["holder_id"]) for r in rows}
+
+    async def lane_holders(self) -> dict[str, int]:
+        """Return ``{lane: live_holder_count}`` for lanes with live rows."""
         rows = await self.db.fetchall(
             "SELECT lane, COUNT(*) AS n FROM leases WHERE expires_at > ? GROUP BY lane",
             (_now_iso(),),
@@ -492,15 +485,7 @@ class SqliteLeaseBackend:
         return {r["lane"]: int(r["n"]) for r in rows}
 
     async def lane_capacities(self) -> dict[str, int]:
-        """Return ``{lane: capacity}`` for every row in ``lane_capacity``.
-
-        Falls back to :data:`storage.schema.DEFAULT_LANE_CAPACITIES`
-        when the table is missing (legacy DB never opened with v0.8).
-
-        Returns:
-            dict[str, int]: Map of lane name to capacity, defaults merged
-                with any rows present in the ``lane_capacity`` table.
-        """
+        """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
         try:
             rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
         except sqlite3.OperationalError as exc:
@@ -514,38 +499,16 @@ class SqliteLeaseBackend:
 
 
 class ResourceLockManager:
-    """Coordinator-facing wrapper.
-
-    Provides non-blocking acquire and multi-holder observability so the
-    concurrent dispatcher can fan tasks out without spinning on busy errors.
-    """
+    """Coordinator-facing wrapper."""
 
     def __init__(self, backend: SqliteLeaseBackend):
-        """Wrap a lease backend and initialise the per-process counters.
-
-        Args:
-            backend (SqliteLeaseBackend): The backend doing the actual
-                lease reads / writes.
-        """
+        """Wrap a lease backend and initialise the per-process counters."""
         self.backend = backend
         # Per-process cumulative acquire / lane-full / lane-busy counters.
         self._counters: dict[str, dict[str, int]] = {}
 
     async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:
-        """Acquire lanes via the backend, updating lifetime counters.
-
-        Args:
-            lanes (list[str]): Lanes to acquire.
-            **kwargs: Forwarded to :meth:`SqliteLeaseBackend.acquire_many`
-                (``holder_id`` / ``task_id`` / ``action`` / ``ttl_sec``).
-
-        Returns:
-            Lease: The acquired lease.
-
-        Raises:
-            LaneFull: Re-raised after bumping the lane's full counter.
-            LaneBusy: Re-raised after bumping the lane's busy counter.
-        """
+        """Acquire lanes via the backend, updating lifetime counters."""
         try:
             lease = await self.backend.acquire_many(lanes, **kwargs)
         except LaneFull as exc:
@@ -561,115 +524,74 @@ class ResourceLockManager:
         return lease
 
     async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
-        """Non-blocking variant of :meth:`acquire_many`.
-
-        Returns the :class:`Lease` on success, ``None`` when any lane is
-        busy or full (both LaneBusy and LaneFull map to None; retry next tick).
-
-        Args:
-            lanes: Lanes to acquire.
-            **kwargs: Forwarded to :meth:`acquire_many` (``holder_id`` /
-                ``task_id`` / ``action`` / ``ttl_sec``).
-
-        Returns:
-            The acquired ``Lease``, or ``None`` when any lane is busy or full.
-        """
+        """Non-blocking variant of :meth:`acquire_many`."""
         try:
             return await self.acquire_many(lanes, **kwargs)
         except (LaneBusy, LaneFull):
             return None
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh a lease's TTL via the backend.
-
-        Args:
-            lease (Lease): The lease to refresh.
-            ttl_sec (int): New lifetime in seconds.
-
-        Returns:
-            None: Delegates to :meth:`SqliteLeaseBackend.heartbeat`.
-        """
+        """Refresh a lease's TTL via the backend."""
         return await self.backend.heartbeat(lease, ttl_sec=ttl_sec)
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
-        """Refresh every lane row a task holds.
-
-        Args:
-            task_id (str): The task whose lane rows should be refreshed.
-            ttl_sec (int): New lifetime in seconds.
-
-        Returns:
-            list[str]: The lanes that were refreshed.
-        """
+        """Refresh every lane row a task holds."""
         return await self.backend.heartbeat_by_task(task_id, ttl_sec=ttl_sec)
 
     async def release(self, lease: Lease) -> int:
-        """Release a lease and bump each lane's release counter.
-
-        Args:
-            lease (Lease): The lease to release.
-
-        Returns:
-            int: Number of lease rows deleted by the backend.
-        """
+        """Release a lease and bump each lane's release counter."""
         n = await self.backend.release(lease)
         for lane in lease.lanes:
             self._bump_counter(lane, "release_count")
         return n
 
     async def reap_expired(self) -> list[dict]:
-        """Sweep expired leases via the backend.
-
-        Returns:
-            list[dict]: The reaped lease rows.
-        """
+        """Sweep expired leases via the backend."""
         return await self.backend.reap_expired()
 
     async def reap_dead_holders(self) -> list[dict]:
-        """Release leases whose holder process is dead via the backend.
-
-        Returns:
-            list[dict]: The reaped lease rows (dead-PID holders).
-        """
+        """Release leases whose holder process is dead via the backend."""
         fn = getattr(self.backend, "reap_dead_holders", None)
         if not callable(fn):
             return []
         return await fn()
 
-    async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: live_holder_count}`` via the backend.
+    async def bringup_round_holders(self, now_unix: float) -> set[str]:
+        """Return the ids of rounds still holding their lane, via the backend.
+
+        Args:
+            now_unix: The instant to test.
 
         Returns:
-            dict[str, int]: Live holder count per lane.
+            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
         """
+        return await self.backend.bringup_round_holders(now_unix)
+
+    async def lane_holders(self) -> dict[str, int]:
+        """Return ``{lane: live_holder_count}`` via the backend."""
         return await self.backend.lane_holders()
 
     async def lane_capacities(self) -> dict[str, int]:
-        """Return ``{lane: capacity}`` via the backend.
-
-        Returns:
-            dict[str, int]: Capacity per lane.
-        """
+        """Return ``{lane: capacity}`` via the backend."""
         return await self.backend.lane_capacities()
 
     def _bump_counter(self, lane: str, field: str) -> None:
-        """Increment one per-lane lifetime counter by 1.
-
-        Args:
-            lane (str): Lane whose counter dict is updated.
-            field (str): Counter key to increment (e.g. ``"acquire_count"``).
-        """
+        """Increment one per-lane lifetime counter by 1."""
         d = self._counters.setdefault(lane, {})
         d[field] = int(d.get(field, 0)) + 1
 
 
 __all__ = [
+    "BRINGUP_ROUND_LANE",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
+    "ROUND_LEASE_PID",
     "LaneBusy",
     "LaneFull",
     "Lease",
     "ResourceLockManager",
     "SqliteLeaseBackend",
     "StaleLeaseError",
+    "drop_round_lane",
+    "hold_round_lane",
 ]

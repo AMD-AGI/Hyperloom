@@ -158,9 +158,7 @@ def publish_warm_start_recovery(
     try:
         manifest = publisher.publish(**publish_kwargs)
     except Exception as error:
-        # A derived view can fail after best_result.json is already durable. In
-        # that case the external recovery contract is satisfied and the run may
-        # continue; otherwise the caller must rollback to the pristine base.
+        # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(
             workspace_dir,
             commit_hash=head,
@@ -171,11 +169,8 @@ def publish_warm_start_recovery(
         if manifest is None:
             raise
         publication_errors.append(f"derived-best-view: {error}")
-    # The manifest publish() just wrote withholds the improvement badge when the
-    # aggregate wall times contradict the score. The checkpoint and the caller's
-    # result are written from the same adoption and used to assert an
-    # improvement outright, so a reader's conclusion depended on which of the
-    # three artifacts it happened to open.
+    # The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
+    # score.
     improvement = warm_start_improvement_flags(
         pristine_ms=float(baseline_ms),
         best_ms=float(best_ms),

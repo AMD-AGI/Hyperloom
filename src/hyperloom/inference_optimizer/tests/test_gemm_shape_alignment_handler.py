@@ -32,8 +32,8 @@ class TestAlignForgeShapesForAiter:
         assert out.endswith("forge_shapes.aiter_aligned.json")
         assert report["applied"] is True
         aligned = set(load_shapes_json(out))
-        # The raw prefill M is gone; its fine-padded key plus a full power-of-two
-        # ladder up to the observed maximum take its place.
+        # The raw prefill M is gone; its fine-padded key plus a full power-of-two ladder up to the observed maximum
+        # take its place.
         assert (1076, 5120, 17408) not in aligned
         assert (1088, 5120, 17408) in aligned
         assert {m for m, _, _ in aligned} == {16, 32, 64, 128, 256, 512, 1024, 1088, 2048}

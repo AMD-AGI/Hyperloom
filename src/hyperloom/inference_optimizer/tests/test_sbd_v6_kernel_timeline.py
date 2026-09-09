@@ -91,13 +91,7 @@ def test_the_event_is_on_the_timeline_before_it_concludes(tmp_path):
 
 
 def test_the_stage_in_flight_is_recoverable_from_the_rows_alone(tmp_path):
-    """A session killed mid-phase is closed out of its fragments by finalize.
-
-    The timeline entry keeps the status and stage it opened with, because
-    rewriting it on every sub-step is the write amplification the fragments
-    exist to avoid. What the kill has to leave behind is enough to *assemble*
-    the stage, and that is a property of the rows rather than of the entry.
-    """
+    """A session killed mid-phase is closed out of its fragments by finalize."""
     recorder = _forge_recorder()
     recorder.enter_stage("gemm_tuning")
 
@@ -438,12 +432,7 @@ def _geak_with_one_acceptance():
     [(REBENCH_VALIDATED, REBENCH_NO_PROMOTE), (REBENCH_NO_PROMOTE, REBENCH_VALIDATED)],
 )
 def test_conflicting_geak_rebenches_leave_the_candidate_pending(tmp_path, decisions):
-    """Two settled verdicts that disagree must not collapse to the newest one.
-
-    GEAK rebenches the same candidate up to its per-cycle ceiling, so taking
-    the last verdict would let a validation after a rejection read as an
-    adoption -- and would make the outcome depend on dispatch order.
-    """
+    """Two settled verdicts that disagree must not collapse to the newest one."""
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", decisions[0])
     _geak_rebench(recorder, "geak-rb-2", decisions[1])
@@ -500,12 +489,7 @@ def test_the_verdict_stays_unstamped_when_nothing_was_adopted(tmp_path):
 
 
 def test_the_verdict_comes_from_the_rebench_and_not_from_the_caller(tmp_path):
-    """The phase seam names no verdict, so assembly must supply one.
-
-    The seam is the only production caller and it has nothing to judge with;
-    it used to default to "adopted", which stamped the word on any entry whose
-    rows happened to settle that way and on any that did not.
-    """
+    """The phase seam names no verdict, so assembly must supply one."""
     recorder = _forge_recorder()
     _forge_rewrite_with_rebench(recorder, decision=REBENCH_VALIDATED, measured_tput=1100.0, status="settled")
     recorder.finish(tput_after=1100.0)
@@ -570,14 +554,7 @@ def test_an_entry_whose_every_rebench_faulted_is_failed(tmp_path):
 
 
 def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
-    """The config under test did not engage, so nothing was measured about it.
-
-    The projection this replaces read ``fallback_failed`` as a rejection, which
-    credits the rebench with a conclusion it did not reach: a run whose overlay
-    dropped out measured plain flags, so it says nothing about the candidate
-    either way. ``no_material`` and ``no_promote`` do reject, because both were
-    measured with the configuration engaged.
-    """
+    """The config under test did not engage, so nothing was measured about it."""
     recorder = _geak_with_one_acceptance()
     _geak_rebench(
         recorder,
@@ -605,7 +582,7 @@ def test_a_lane_that_produced_nothing_stays_empty(tmp_path):
     assert len(lanes["fusion_runs"]) == 1
     assert lanes["kernel_rewrites"] == []
     assert lanes["gemm_tuning_runs"] == []
-    assert lanes["collective_runs"] == []
+    assert "collective_runs" not in lanes
 
 
 def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
@@ -634,12 +611,7 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
 
 
 def test_lane_rows_are_ordered_by_when_they_started(tmp_path):
-    """Row order comes from the rows, not from the order they were written in.
-
-    Writing the later run first is exactly the case a fragment envelope's
-    ``seq`` or ``ts`` would sort backwards, since both name the write rather
-    than the run.
-    """
+    """Row order comes from the rows, not from the order they were written in."""
     recorder = _forge_recorder()
     recorder.record_fusion_run(run_id="late", status="success", started_at="2026-09-02T00:05:00")
     recorder.record_fusion_run(run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
@@ -679,14 +651,7 @@ def test_an_inline_reprofile_survives_the_active_close(tmp_path):
 
 
 def test_a_recovered_kernel_event_keeps_its_inline_reprofile(tmp_path):
-    """Recovery must read the roofline sections the active close reads.
-
-    An inline re-profile records into the kernel event, so its rows live in the
-    ``roofline_*`` sections under this event's id. Recovering from only the
-    ``kernel_*`` sections gave the assembler nothing to fold into
-    ``forge.reprofile.run`` -- an interrupted entry is exactly the case that
-    cannot be reconstructed any other way.
-    """
+    """Recovery must read the roofline sections the active close reads."""
     from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 
     recorder = _forge_recorder()

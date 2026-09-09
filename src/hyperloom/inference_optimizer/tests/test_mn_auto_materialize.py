@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``Coordinator._maybe_materialize_mn_explore``.
-
-The multi-node bridge that turns a specialist ``proposal_set`` into a benchmarked
-``explore`` task. Single-node is a strict no-op; multi-node deterministically
-enqueues an explore grid built from the proposals.
-"""
+"""Unit tests for ``Coordinator._maybe_materialize_mn_explore``."""
 
 from __future__ import annotations
 

@@ -76,33 +76,22 @@ def test_blank_value_is_not_configured(clean_env, var, blank):
     ],
 )
 def test_base_url_is_used_exactly_as_configured(clean_env, configured):
-    """No route suffix is appended and no path is rewritten.
-
-    The operator knows their gateway's layout; guessing at it would also hide
-    their typos behind ours.
-    """
+    """No route suffix is appended and no path is rewritten."""
     clean_env.setenv("OPENAI_BASE_URL", configured)
     clean_env.setenv("OPENAI_API_KEY", "openai")
     assert resolve_openai_gateway().base_url == configured
 
 
 def test_the_anthropic_endpoint_and_credential_are_never_borrowed(clean_env):
-    """A fully configured Anthropic line does not make this one usable.
-
-    The two lines are different protocols on different routes and belong to
-    different consumers; substituting one produces a failure nobody can trace
-    back to a variable. Claude reads ANTHROPIC_* itself. Headers are the one
-    exception, and only within a single host -- see
-    :func:`_resolve_openai_gateway_headers`.
-    """
+    """A fully configured Anthropic line does not make this one usable."""
     clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
     clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "bearer")
     clean_env.setenv("ANTHROPIC_API_KEY", "console")
     clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub")
     assert not resolve_openai_gateway().is_complete()
 
-    # Its own pair is what turns the line on; Anthropic headers fill in when the
-    # OpenAI header slot was left empty (single-gateway / tag-injection setups).
+    # Its own pair is what turns the line on; Anthropic headers fill in when the OpenAI header slot was left empty
+    # (single-gateway / tag-injection setups).
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
     assert resolve_openai_gateway() == LlmGateway(
@@ -125,8 +114,8 @@ def test_expand_env_refs(monkeypatch):
     """Shared by both lines: one parses headers here, the other hands them off."""
     monkeypatch.setenv("SUBKEY", "xyz")
     assert expand_env_refs("Key: ${SUBKEY}") == "Key: xyz"
-    # An unset reference becomes empty rather than staying literal, so a blank
-    # header value points at the typo instead of shipping "${TYPO}" upstream.
+    # An unset reference becomes empty rather than staying literal, so a blank header value points at the typo instead
+    # of shipping "${TYPO}" upstream.
     monkeypatch.delenv("NOPE", raising=False)
     assert expand_env_refs("Key: ${NOPE}") == "Key: "
     assert expand_env_refs("no refs here") == "no refs here"
@@ -140,19 +129,13 @@ def test_parse_custom_headers_lines_json_and_envref(monkeypatch):
     # ${VAR} expansion from env
     monkeypatch.setenv("SUBKEY", "xyz")
     assert parse_custom_headers("Ocp-Apim-Subscription-Key: ${SUBKEY}") == {"Ocp-Apim-Subscription-Key": "xyz"}
-    # malformed JSON (starts with { but invalid) falls back to line parsing,
-    # matching Hyperloom's behavior.
+    # malformed JSON (starts with { but invalid) falls back to line parsing, matching Hyperloom's behavior.
     assert parse_custom_headers('{"broken: value') == {'{"broken': "value"}
     assert parse_custom_headers(None) == {} and parse_custom_headers("") == {}
 
 
 def test_comma_separated_pairs_are_not_split(caplog):
-    """A header value may contain commas, so one line stays one header.
-
-    The retired NTID regex stopped at the first comma, so a Secret written in
-    that style now yields a wrong value rather than two headers — warn loudly
-    instead of guessing which commas were separators.
-    """
+    """A header value may contain commas, so one line stays one header."""
     with caplog.at_level("WARNING", logger="kernelforge.llm"):
         parsed = parse_custom_headers("user: alice, x-foo: bar")
     assert parsed == {"user": "alice, x-foo: bar"}
@@ -185,8 +168,8 @@ def test_anthropic_line_reports_what_is_configured(clean_env):
         "https://gw.example/llm-proxy", "ANTHROPIC_API_KEY", {"user": "alice"}
     )
 
-    # Anthropic protocol, so the native x-api-key form stays ahead of the
-    # gateway bearer token, the order Hyperloom's Claude paths also use.
+    # Anthropic protocol, so the native x-api-key form stays ahead of the gateway bearer token, the order Hyperloom's
+    # Claude paths also use.
     clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "bearer")
     assert resolve_anthropic_gateway().key_env == "ANTHROPIC_API_KEY"
 
@@ -203,12 +186,7 @@ def test_anthropic_line_allows_a_missing_endpoint(clean_env):
 
 
 def test_incomplete_is_not_the_same_as_unusable(clean_env):
-    """Neither Anthropic half is mandatory, so completeness must be asked for.
-
-    A Claude CLI on a Max login needs no endpoint and no credential, and an
-    API-credit user needs only the key. A single truthiness rule shared with the
-    OpenAI line would label both of those as unconfigured.
-    """
+    """Neither Anthropic half is mandatory, so completeness must be asked for."""
     assert not resolve_anthropic_gateway().is_complete()
 
     clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant-...")
@@ -241,12 +219,7 @@ def test_openai_headers_win_and_the_same_gateway_fills_when_empty(clean_env):
 
 
 def test_a_different_host_never_receives_the_anthropic_headers(clean_env):
-    """The headers carry a gateway secret, so they stop at that gateway.
-
-    Reusing them across hosts would hand the operator's subscription key to a
-    machine they never pointed at, and an ``Authorization`` among them would
-    displace this line's own bearer on every call.
-    """
+    """The headers carry a gateway secret, so they stop at that gateway."""
     clean_env.setenv("OPENAI_BASE_URL", "https://other.example/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
     clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
@@ -281,13 +254,7 @@ def test_the_default_port_matches_its_explicit_form(clean_env):
 
 
 def test_this_line_keeps_its_own_credential(clean_env):
-    """Borrowed headers never carry the other line's authentication.
-
-    ``default_headers`` are applied over the SDK's own, so an inherited
-    ``Authorization`` would replace the bearer built from OPENAI_API_KEY and
-    401 every call -- while the subscription key and the spend tag still have
-    to get through.
-    """
+    """Borrowed headers never carry the other line's authentication."""
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
     clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
@@ -333,9 +300,5 @@ def test_openai_line_inherits_litellm_tags_from_anthropic(clean_env):
     ],
 )
 def test_anthropic_base_url_loses_only_a_duplicated_tail(configured, expected):
-    """Both the SDK and the CLI append /v1/messages, so a base carrying it 404s.
-
-    Measured: with the tail left on, the CLI reports the model as missing or
-    unauthorized rather than the doubled path it actually requested.
-    """
+    """Both the SDK and the CLI append /v1/messages, so a base carrying it 404s."""
     assert normalize_anthropic_base_url(configured) == expected

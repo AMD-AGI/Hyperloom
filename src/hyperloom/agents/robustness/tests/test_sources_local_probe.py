@@ -1321,7 +1321,6 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
     assert isinstance(data.local_external_deps.get("mounts"), list)
 
 
-# ---------------------------------------------------------------------------
 # In-flight task progress (``_read_task_progress``).
 
 
@@ -1379,18 +1378,7 @@ def test_task_progress_reports_the_freshest_heartbeat_per_agent(tmp_path):
 
 @pytest.mark.parametrize("freshest_first", [False, True])
 def test_task_progress_keeps_the_quietest_unit_a_fresher_sibling_would_hide(tmp_path, freshest_first):
-    """The dispatcher runs units concurrently; only the freshest used to survive.
-
-    Keeping the newest is what answers "is this agent's work progressing", but
-    dropping the others left a unit that has not reported in hours with no trace
-    in the snapshot at all.
-
-    Both visit orders are exercised, because only one of them reaches the branch
-    that records the quiet end: rows arrive ordered by ``task_id``, so which
-    unit's note is folded in first is what the parameter chooses. Seeing the
-    quiet one first makes the freshest note the one that has to overtake it, and
-    a snapshot built that way tells nothing about the other direction.
-    """
+    """The dispatcher runs units concurrently; only the freshest used to survive."""
     quiet = ("baseline", "2026-08-13T08:00:00+00:00")
     fresh = ("explore", "2026-08-13T10:42:00+00:00")
     first, second = (fresh, quiet) if freshest_first else (quiet, fresh)
@@ -1451,11 +1439,7 @@ def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
 
 
 def test_a_sampled_process_carries_the_directory_it_runs_in(monkeypatch):
-    """On a shared node the cwd is what says which session a process belongs to.
-
-    A pid that is gone by the time ``/proc`` is read — or one owned by another
-    user — reports no directory rather than a wrong one.
-    """
+    """On a shared node the cwd is what says which session a process belongs to."""
     ps_out = (
         f"  {os.getpid()} 1048576 python benchmark_serving.py --port 30000\n"
         "  999999999 2048 python benchmark_serving.py --port 30001\n"
@@ -1560,11 +1544,7 @@ def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
 
 
 def test_probe_queries_resolve_against_the_real_coordinator_schema(tmp_path):
-    """Both coordinator.db queries must resolve against the production DDL.
-
-    A column the real table lacks degrades to ``[]``, which is
-    indistinguishable from an idle session, so the rows must come back.
-    """
+    """Both coordinator.db queries must resolve against the production DDL."""
     db = tmp_path / "coordinator.db"
     conn = sqlite3.connect(str(db))
     try:

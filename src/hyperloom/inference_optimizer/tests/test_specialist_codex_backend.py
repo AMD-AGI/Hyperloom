@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist Codex CLI and Agent SDK integration.
-
-Pins the bug an OpenAI-only end-to-end run exposed: the specialist dispatcher
-hard-wired the Claude CLI, so an OpenAI-only deployment spawned a runtime with
-no credential. Every specialist task died with ``subprocess_exit_code:1`` after
-the CLI reported ``Not logged in · Please run /login``, and the run continued
-without its research-scout and static-recon specialists.
-
-The dispatcher must spawn the Codex CLI when only the OpenAI side is
-configured, and must keep spawning the Claude CLI for the Anthropic-only and
-both-configured shapes. The same suite covers secure sandbox selection,
-stdin/role transport, provider env wiring, MCP translation, structured errors,
-model precedence, and true in-process Codex Agent SDK dispatch.
-"""
+"""Specialist Codex CLI and Agent SDK integration."""
 
 from __future__ import annotations
 
@@ -27,6 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.roles.codex_agent as codex_agent
 import hyperloom.orchestrator.specialists.subprocess_ as sp
@@ -41,8 +30,8 @@ _build_specialist_env = sp._build_specialist_env
 resolve_codex_executable = sp.resolve_codex_executable
 resolve_specialist_agent_backend = sp.resolve_specialist_agent_backend
 
-# Every provider-shape signal ``llm_config`` consults, so a test can pin an
-# exact deployment shape instead of inheriting the developer's own gateway.
+# Every provider-shape signal ``llm_config`` consults, so a test can pin an exact deployment shape instead of
+# inheriting the developer's own gateway.
 _PROVIDER_ENV_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -74,13 +63,12 @@ _DONE_PAYLOAD: dict[str, object] = {
     "domain": "research_scout_specialist",
     "proposal_set": [{"name": "codex_variant", "extra_args": "", "extra_envs": {}, "reason": "fake"}],
     "patches_written": [],
-    "empty": False,
     "summary": "fake codex specialist run",
     "confidence": 0.5,
 }
 
-# The event stream ``codex exec --json`` emits, captured verbatim from a real
-# Codex CLI turn against the gateway (one JSON object per line).
+# The event stream ``codex exec --json`` emits, captured verbatim from a real Codex CLI turn against the gateway (one
+# JSON object per line).
 _CODEX_JSONL: tuple[str, ...] = (
     '{"type":"thread.started","thread_id":"019fe0ee-1a4e-7dc0-9f05-b5bfb0c7fb7f"}',
     '{"type":"turn.started"}',
@@ -129,13 +117,7 @@ def _write_executable(path: Path, body: str) -> Path:
 
 
 def _fake_agent_bin_dir(tmp_path: Path) -> Path:
-    """Create a bin dir holding a failing fake ``claude`` and a working fake ``codex``.
-
-    ``claude`` reproduces the unauthenticated run observed in production: it
-    prints the ``Not logged in`` stream-json rows and exits 1 without writing
-    ``specialist_done.json``. ``codex`` prints the real ``codex exec --json``
-    event stream and completes the specialist contract.
-    """
+    """Create a bin dir holding a failing fake ``claude`` and a working fake ``codex``."""
     bin_dir = tmp_path / "bin"
     claude_log = "\n".join(f"echo {json.dumps(line)}" for line in _CLAUDE_NOT_LOGGED_IN_JSONL)
     _write_executable(
@@ -158,13 +140,7 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reproduction: an OpenAI-only deployment must not be handed the Claude CLI.
-
-    The live run spawned ``claude --print --output-format stream-json`` with no
-    Anthropic credential in the environment at all, so the CLI answered
-    ``Not logged in · Please run /login`` and exited 1. Both affected domains
-    exhausted their retries and the session lost them silently.
-    """
+    """The reproduction: an OpenAI-only deployment must not be handed the Claude CLI."""
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
     bin_dir = _fake_agent_bin_dir(tmp_path)
@@ -187,7 +163,7 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
         user_prompt="find the gap",
         disallowed_tools=frozenset(),
         max_turns=2,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.exit_code == 0, (
@@ -213,21 +189,14 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``CODEX_HOME`` is redirected into the task workspace, not a temp dir.
-
-    Per-task so concurrent specialists and the operator's own Codex state stay
-    independent. Deliberately *not* a ``tempfile`` directory: the Codex CLI
-    refuses to create its PATH helper binaries under one and runs on without
-    them. The workspace lives under the session dir, so it is a real location on
-    every deployment.
-    """
+    """``CODEX_HOME`` is redirected into the task workspace, not a temp dir."""
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
     bin_dir = tmp_path / "bin"
     _write_executable(
         bin_dir / "codex",
         "#!/usr/bin/env bash\nset -e\n"
-        'printf \'{"codex_home":"%s","proposal_set":[],"empty":true}\\n\' "$CODEX_HOME"'
+        'printf \'{"codex_home":"%s","proposal_set":[]}\\n\' "$CODEX_HOME"'
         ' > "$PWD/specialist_done.json"\nexit 0\n',
     )
     workspace = tmp_path / "workspace"
@@ -246,7 +215,7 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.done_payload is not None
@@ -257,9 +226,7 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
     assert str(workspace) in codex_home
 
 
-# ---------------------------------------------------------------------------
 # Backend selection per credential shape
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -268,9 +235,8 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         ("openai_only", _OPENAI_ONLY_ENV, AGENT_BACKEND_CODEX),
         ("anthropic_only", _ANTHROPIC_ONLY_ENV, AGENT_BACKEND_CLAUDE),
         ("both_configured", _BOTH_CONFIGURED_ENV, AGENT_BACKEND_CLAUDE),
-        # Nothing configured keeps the historical default, so a deployment that
-        # authenticates the Claude CLI by other means (a logged-in CLI, Bedrock)
-        # is untouched by this selection.
+        # Nothing configured keeps the historical default, so a deployment that authenticates the Claude CLI by other
+        # means (a logged-in CLI, Bedrock) is untouched by this selection.
         ("unconfigured", {}, AGENT_BACKEND_CLAUDE),
     ],
 )
@@ -361,11 +327,7 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Gateway wiring comes from ``codex_session``, so CLI and SDK cannot drift.
-
-    The API key crosses as an env-var NAME, never a value, so the secret stays
-    out of the spawned process's argv.
-    """
+    """Gateway wiring comes from ``codex_session``, so CLI and SDK cannot drift."""
     from hyperloom.common.codex_session import CODEX_PROVIDER_NAME, resolve_codex_provider_config
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
@@ -377,8 +339,8 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     assert f'model_provider="{CODEX_PROVIDER_NAME}"' in overrides
     # A specialist must not carry memory between tasks (matches the SDK session).
     assert "features.memories=false" in overrides
-    # The credential crosses as an env-var NAME; its value stays out of argv,
-    # where any user on the host could read it out of ``ps``.
+    # The credential crosses as an env-var NAME; its value stays out of argv, where any user on the host could read it
+    # out of ``ps``.
     assert any(o.endswith('env_key="OPENAI_API_KEY"') for o in overrides)
     assert _OPENAI_ONLY_ENV["OPENAI_API_KEY"] not in " ".join(cmd)
 
@@ -481,11 +443,7 @@ def test_explicit_config_backend_overrides_the_credential_shape(
     pinned: str,
     shape: dict[str, str],
 ) -> None:
-    """An explicitly configured backend wins over the shape probe.
-
-    The CLI resolves the backend once at boot and pins it, so a dispatch cannot
-    disagree with the executable and model that were chosen alongside it.
-    """
+    """An explicitly configured backend wins over the shape probe."""
     _pin_provider_env(monkeypatch, {**shape, **_OPENAI_ONLY_ENV} if pinned == AGENT_BACKEND_CODEX else shape)
     cmd = _build_cmd(
         tmp_path,
@@ -506,9 +464,7 @@ def test_unknown_configured_backend_fails_loudly(
         _build_cmd(tmp_path, agent_backend="gemini")
 
 
-# ---------------------------------------------------------------------------
 # Codex runtime resolution
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_codex_executable_prefers_explicit_then_path(
@@ -530,8 +486,8 @@ def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
     """A pod that never ran the npm install still finds the pinned runtime."""
     monkeypatch.setenv("PATH", "/nonexistent")
     resolved = resolve_codex_executable()
-    # The SDK runtime is an install-time dependency of ``openai-codex``; when it
-    # is absent the resolver reports that rather than guessing a name.
+    # The SDK runtime is an install-time dependency of ``openai-codex``; when it is absent the resolver reports that
+    # rather than guessing a name.
     if resolved:
         assert Path(resolved).exists()
         assert Path(resolved).name == "codex"
@@ -542,11 +498,7 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No Codex runtime must be reported, never absorbed into a Claude spawn.
-
-    The whole point of this fix is that a missing specialist runtime silently
-    degraded the run; a deployment with no usable CLI has to say so.
-    """
+    """No Codex runtime must be reported, never absorbed into a Claude spawn."""
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
     monkeypatch.setattr(
@@ -570,7 +522,7 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.done_payload is None
@@ -583,11 +535,7 @@ async def test_unconfigured_codex_gateway_fails_the_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An OpenAI key with no base URL cannot be expressed as a Codex provider.
-
-    Codex provider setup needs an explicit gateway URL, so this shape is
-    reported as a task failure rather than spawning a CLI that cannot route.
-    """
+    """An OpenAI key with no base URL cannot be expressed as a Codex provider."""
     _pin_provider_env(monkeypatch, {"OPENAI_API_KEY": "openai-side-key"})
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
     dispatcher = SpecialistSubprocessDispatcher(
@@ -602,7 +550,7 @@ async def test_unconfigured_codex_gateway_fails_the_task(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
     assert result.done_payload is None
     assert "not configured" in result.error
@@ -612,11 +560,7 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The CLI has no usable fallback in this shape, so it must not start.
-
-    Degrading to the in-process backend would hand every specialist task the
-    Claude runtime that has no credential — the exact silent loss this fixes.
-    """
+    """The CLI has no usable fallback in this shape, so it must not start."""
     from hyperloom.inference_optimizer.cli import executors
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
@@ -637,13 +581,7 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
         executors._build_specialist_executor(args, session_dir=tmp_path, knowledge_plane=None)
 
 
-# ---------------------------------------------------------------------------
 # Codex JSONL parsers
-#
-# Twins of the Claude ``stream-json`` parsers, exercised against the event
-# stream a real ``codex exec --json`` turn emitted (``_CODEX_JSONL``). The
-# Claude twins are covered in ``test_parse_usage_unit.py``.
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -655,13 +593,7 @@ def codex_log(tmp_path: Path) -> Path:
 
 
 def test_parse_codex_usage_maps_onto_the_canonical_counters(codex_log: Path) -> None:
-    """Codex's counter names differ from Anthropic's and must be translated.
-
-    ``cached_input_tokens`` is a cache *read*; Codex has no cache-write counter,
-    so ``cache_creation_input_tokens`` stays ``None`` and the collector can still
-    tell "no cache concept" from "zero cache hits". Reasoning tokens ride along
-    rather than being folded into the visible output count.
-    """
+    """Codex's counter names differ from Anthropic's and must be translated."""
     assert pu.parse_codex_jsonl_usage(codex_log) == {
         "input_tokens": 24099,
         "output_tokens": 44,
@@ -720,11 +652,7 @@ def test_parse_codex_response_joins_multiple_agent_messages(tmp_path: Path) -> N
 
 
 def test_parse_codex_tool_calls_uses_the_claude_tool_names(codex_log: Path) -> None:
-    """Shell calls land in the intel ledger under the name Claude runs use.
-
-    ``item.started`` and ``item.completed`` describe one call, so the item id
-    de-duplicates them instead of double counting.
-    """
+    """Shell calls land in the intel ledger under the name Claude runs use."""
     calls = pu.parse_codex_jsonl_tool_calls(codex_log)
     assert calls == [{"tool": "Bash", "query": "/bin/bash -lc 'echo SANDBOX_OK > proof.txt'"}]
 
@@ -811,9 +739,7 @@ def test_codex_usage_returns_none_when_no_counters_are_reported(tmp_path: Path) 
     assert pu.parse_codex_jsonl_turn_usages(log) == []
 
 
-# ---------------------------------------------------------------------------
 # Secure Codex specialist integration regressions
-# ---------------------------------------------------------------------------
 
 
 def _enable_codex_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -829,7 +755,7 @@ def _successful_codex_script(path: Path) -> Path:
         "set -e\n"
         "cat >/dev/null\n"
         "cat > \"$PWD/specialist_done.json\" <<'EOF'\n"
-        '{"proposal_set":[],"empty":true,"summary":"ok"}\n'
+        '{"proposal_set":[],"summary":"ok"}\n'
         "EOF\n",
     )
 
@@ -913,7 +839,7 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -977,7 +903,7 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
         user_prompt="FULL_USER_PROMPT_SENTINEL",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 0
@@ -1032,7 +958,7 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert "bubblewrap" in result.error
@@ -1051,7 +977,7 @@ class _RecordingGpuLease:
         self.started = {"cmd": list(cmd), **kwargs}
         Path(kwargs["log_path"]).write_text("", encoding="utf-8")
         (self.workspace / "specialist_done.json").write_text(
-            '{"proposal_set":[],"empty":true,"summary":"ray"}',
+            '{"proposal_set":[],"summary":"ray"}',
             encoding="utf-8",
         )
 
@@ -1097,7 +1023,7 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
         disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0,),
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -1170,7 +1096,7 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         user_prompt="mcp user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 0
@@ -1266,7 +1192,7 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -1368,7 +1294,7 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 7
@@ -1521,7 +1447,6 @@ async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
         "gap_canonical_id": "gap.sdk",
         "domain": "serving_specialist",
         "proposal_set": [],
-        "empty": True,
         "summary": "sdk result",
     }
     captured: dict[str, Any] = {}

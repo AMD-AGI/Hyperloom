@@ -227,8 +227,8 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     table.parent.mkdir(parents=True, exist_ok=True)
     table.write_text("{}", encoding="utf-8")
     warm_dir.mkdir(parents=True, exist_ok=True)
-    # Every overlay names the checkout it was applied into; replay places it
-    # there and refuses the record outright when it cannot.
+    # Every overlay names the checkout it was applied into; replay places it there and refuses the record outright
+    # when it cannot.
     recorded_root = tmp_path / "framework"
     (warm_dir / "recipe.json").write_text(
         json.dumps(
@@ -327,8 +327,8 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     }
     assert [patch["patch_file"] for patch in task.params["patches"]] == refs
     assert task.params["required_patch_timeline"] is True
-    # How the overlays were captured travels with the outcome, so a reader can
-    # tell a clean replay from one with a known gap.
+    # How the overlays were captured travels with the outcome, so a reader can tell a clean replay from one with a
+    # known gap.
     assert coord.shared_state.warm_replay_outcome["overlay_provenance"] == {
         "overlays": 2,
         "realized": 1,
@@ -917,10 +917,7 @@ def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
 
 
 def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
-    """A faster warm config that FAILS the image-quality gate vs the baseline
-    reference must NOT be promoted (no stack push, no current_best), even though
-    its throughput beats baseline.
-    """
+    """A faster warm config that FAILS the image-quality gate vs the baseline reference must NOT be promoted (no stack push, no current_best), even though its throughput beats baseline."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -998,8 +995,7 @@ def test_all_revert_branches_retain_pending_on_rollback_failure(
 
 
 def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
-    """A warm config that beats baseline AND clears the quality gate (mse within
-    the ceiling) is promoted normally."""
+    """A warm config that beats baseline AND clears the quality gate (mse within the ceiling) is promoted normally."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -1026,10 +1022,7 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
 
 
 def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
-    """Double-run replay uses the hot measure round for gain/current_best.
-
-    The discarded warmup round is retained only under ``cold_tput`` for audit.
-    """
+    """Double-run replay uses the hot measure round for gain/current_best."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -1149,8 +1142,8 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
     assert coord.shared_state.optimization_stack == []
 
 
-# A FAILED replay_warm_recipe must route to _promote_warm_replay (which clears
-# in_flight); otherwise PRELUDE never exits.
+# A FAILED replay_warm_recipe must route to _promote_warm_replay (which clears in_flight); otherwise PRELUDE never
+# exits.
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     assert (
@@ -1482,11 +1475,7 @@ async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
 async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimization_phases(
     tmp_path,
 ):
-    """A roofline is worth an hour only if the session can still use what it finds.
-
-    The Qwen3.5-397B shape: 51 minutes of baseline, then an 81-minute TraceLens
-    arm that left FRAMEWORK_AGENT 46 minutes against its 108-minute threshold.
-    """
+    """A roofline is worth an hour only if the session can still use what it finds."""
     coord = _make_coord(tmp_path)
     state = coord.shared_state
     state.baseline_tput = 600.0
@@ -1541,8 +1530,7 @@ def test_prelude_bootstrap_skipped_when_roofline_pending(tmp_path):
 
 
 def test_prelude_bootstrap_skipped_when_stop_pending(tmp_path):
-    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not
-    enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
+    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
     coord = _make_coord(tmp_path)
     coord.shared_state.stop_reason = "baseline_accuracy_failed"
     assert coord._should_run_prelude_bootstrap(600.0) is False
@@ -1559,8 +1547,7 @@ def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):
 
 
 def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
-    """Every what_failed row carries a canonical fingerprint into the
-    rejected ledger, with ``source=warm_start_recipe``."""
+    """Every what_failed row carries a canonical fingerprint into the rejected ledger, with ``source=warm_start_recipe``."""
     recipe = _warm_recipe_t1(
         what_failed=[
             {
@@ -2498,16 +2485,7 @@ def _warm_replay_ledger(session_dir):
 
 
 def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
-    """A promoted warm replay must be an adopted step in the recorded ledger.
-
-    The replay executor settles on ``succeeded`` whether or not the recipe
-    reproduced, and the keep decision is reached only by ``_promote_warm_replay``.
-    Mirroring the action before that ruling published every replay as
-    discarded, so a reproduced one was pushed onto the stack and moved
-    ``cumulative_gain_validated`` while the canonical streams held no adoption
-    for it -- ``optimizations.entries`` came back empty on a session that had
-    measurably gained. The verdict-aware mirror closes that gap.
-    """
+    """A promoted warm replay must be an adopted step in the recorded ledger."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -2539,12 +2517,7 @@ def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
 
 
 def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
-    """A replay that missed the bar must not be credited any gain.
-
-    The fix for the discarded-reproduced replay must not reach the other way
-    and let a drift claim a keep it never earned. The rejected attempt must
-    still carry the evidence that explains the rejection.
-    """
+    """A replay that missed the bar must not be credited any gain."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -2568,8 +2541,8 @@ def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
     assert ledger["validation"]["ledger_total_gain_pct"] == 0.0
     attempt = ledger["attempts"][0]
     assert attempt["adopted"] is False
-    # The rejected replay carries why it was dropped: the measured gain, the bar
-    # it missed, and the reason -- not a blank row.
+    # The rejected replay carries why it was dropped: the measured gain, the bar it missed, and the reason -- not a
+    # blank row.
     assert attempt["local_gain_pct"] == pytest.approx(0.0, abs=0.01)
     assert attempt["keep_threshold_pct"] == pytest.approx(0.0, abs=0.01)
     assert "below keep threshold" in attempt["decision_reason"]
@@ -2578,14 +2551,7 @@ def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
 
 
 def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
-    """An eval that ran but returned no score is adopted, not accuracy-validated.
-
-    ``_warm_replay_accuracy_ok`` admits a replay whose eval ran but produced no
-    usable number (``eval_ran`` true, ``replay_accuracy`` None). ``eval_ran``
-    alone must not be read as a passed gate: the step is adopted on the keep
-    verdict alone and has to record ``keep_verdict_unscored`` rather than dress
-    up an absent score as ``accuracy_pass``.
-    """
+    """An eval that ran but returned no score is adopted, not accuracy-validated."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     # Reproduced, but the accuracy eval ran without yielding a score.
     coord.shared_state.warm_replay_outcome = {
@@ -2610,12 +2576,7 @@ def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
 
 
 def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
-    """A scored, passing replay records ``accuracy_pass`` -- the counterpart.
-
-    The unscored path must not swallow the case where a real score exists: a
-    numeric ``replay_accuracy`` that reached ``reproduced`` cleared the gate and
-    has to read as validated.
-    """
+    """A scored, passing replay records ``accuracy_pass`` -- the counterpart."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "reproduced",
@@ -2638,14 +2599,7 @@ def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
 
 
 def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_path):
-    """The accuracy provenance must ride on what the run actually stamped.
-
-    The unscored/scored pair above hand-build ``warm_replay_outcome``; on their
-    own they would stay green even if ``_promote_warm_replay`` stopped stamping
-    ``replay_accuracy`` and every replay silently degraded to unscored. This
-    drives the real promote path so the ``replay_accuracy`` (not ``eval_ran``)
-    keying is anchored to a genuine producer.
-    """
+    """The accuracy provenance must ride on what the run actually stamped."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -2675,13 +2629,7 @@ def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_pa
 
 # ---- each overlay is placed against the checkout it was taken from ---------
 def test_each_overlay_carries_the_checkout_it_was_applied_into(tmp_path, monkeypatch):
-    """Two KEEPs from two trees must each replay against their own tree.
-
-    A session can KEEP a framework patch and, separately, a snapshot whose gain
-    was in a data file under a different root. Resolving one root for the set
-    would place one of them against a tree it was never measured on, so the root
-    travels per overlay ref.
-    """
+    """Two KEEPs from two trees must each replay against their own tree."""
     refs = [
         "patch/overlays/000001/00-sglang.patch",
         "patch/overlays/000001/01-sglang.patch",

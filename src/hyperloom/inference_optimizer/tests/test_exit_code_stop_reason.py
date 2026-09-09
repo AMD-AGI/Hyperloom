@@ -1,10 +1,4 @@
-"""Exit-code mapping for terminal stop_reasons.
-
-Regression: a clean no-kernel run closes with stop_reason ``sweep_done``
-(and a shape-grid run with ``sweep_done``). Both mean the optimizer ran and
-closed normally, yet the CLI used to return exit code 1 for them, so CI (with
-backoffLimit: 0) flagged a successful run as failed.
-"""
+"""Exit-code mapping for terminal stop_reasons."""
 
 from __future__ import annotations
 
