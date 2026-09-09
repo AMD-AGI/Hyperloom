@@ -156,7 +156,7 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["args_mode"] == "replace"
 
 
-@pytest.mark.parametrize("metric_override", [None, "composite_v1", "output"])
+@pytest.mark.parametrize("metric_override", [None, "intvty_v1", "composite_v1", "output"])
 @pytest.mark.asyncio
 async def test_agentx_geak_output_is_only_a_proposal_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, metric_override: str | None
@@ -192,7 +192,7 @@ async def test_agentx_geak_output_is_only_a_proposal_proxy(
 
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
-    [(None, "output"), ("composite_v1", "total"), ("output", "output")],
+    [(None, "output"), ("intvty_v1", "output"), ("composite_v1", "output"), ("output", "output")],
 )
 @pytest.mark.asyncio
 async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(

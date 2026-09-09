@@ -823,18 +823,7 @@ class KernelPhase(PhaseHandler):
         # Full layered environment and its matching measurement identity.
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
-        from hyperloom.common.perf_metric import total_tput_serving_grading_enabled
-        from ..state.shared_state import framework_is_scriptable
-
-        handoff["e2e_metric"] = (
-            "total"
-            if not agentx
-            and total_tput_serving_grading_enabled(
-                scriptable=framework_is_scriptable(handoff["framework"]),
-                benchmark_mode=benchmark_mode,
-            )
-            else "output"
-        )
+        handoff["e2e_metric"] = "output"
         if agentx:
             # The saved recipe names aiperf_client.sh, not a server launcher.
             handoff["bench_launcher"] = "native"
