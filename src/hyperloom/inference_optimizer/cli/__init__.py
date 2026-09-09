@@ -852,7 +852,7 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-# Default robustness backend ("agent"); force heartbeat-only mock via --robustness-mock or env.
+# Default robustness backend ("agent"); force observation-only mock via --robustness-mock or env.
 DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
     "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
     "agent",

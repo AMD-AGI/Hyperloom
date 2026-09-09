@@ -196,8 +196,9 @@ class MachinePhase(PhaseHandler):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # ``exit_normal_optimize`` is the hint's only consumer, so a transition away from that phase leaves it
-            # unclaimable; keeping it would let an unrelated phase re-evaluate it.
+            # Both ``exit_normal_optimize`` and ``exit_normal_kernel`` consume ``skip_to_sweep``, so a transition to
+            # any phase other than FRAMEWORK_AGENT leaves the hint unclaimable. A transition *into* FRAMEWORK_AGENT is
+            # the opposite case: discarding there would drop the hint on the doorstep of the rules that read it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
@@ -257,10 +258,19 @@ class MachinePhase(PhaseHandler):
             ),
         )
         if cancelled:
-            log.info(
-                "Coordinator.phase: cancelled %d queued task(s) incompatible with %s",
-                len(cancelled),
-                target,
+            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "queued_tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "count": len(cancelled),
+                    "detail": f"kind not allowed in {target}; re-dispatch if still needed",
+                },
             )
         state.record_phase_transition(
             to_phase=target,
@@ -313,16 +323,6 @@ class MachinePhase(PhaseHandler):
 
     async def _on_phase_entered(self, *, from_phase: str, to_phase: str, reason: str = "") -> None:
         """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done)."""
-        # Orchestration checkpoint at the phase seam.
-        try:
-            await self._maybe_checkpoint_orchestration(
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase_changed=True,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("Coordinator: phase-boundary checkpoint failed")
-        # Cache-safe here only because the checkpoint above already re-seeded the conversation, so the cached prefix
-        # is rebuilt regardless.
         try:
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort

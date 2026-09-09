@@ -763,11 +763,17 @@ class ExploreExecutor:
             unique_in_round[fp] = gv
 
         runnable: list[GridVariant] = list(unique_in_round.values())
+
+        # Re-proposals are still benchmarked; the tested ledger already carries
+        # each prior outcome and is rendered in full, so this only counts them.
+        re_proposed = sum(1 for fp in unique_in_round if isinstance(tested_dict.get(fp), dict))
+
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
+            re_proposed,
         )
 
         # Multi-node grid shaping.

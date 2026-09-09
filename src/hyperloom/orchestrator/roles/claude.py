@@ -74,12 +74,9 @@ def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
 
 def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     """Render the output-format suffix for a role's allowed intent set."""
-    import json as _json
-
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    heartbeat = _json.dumps({"topic": "heartbeat", "body_md": "ok"})
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
@@ -94,8 +91,6 @@ Tool input shape:
   }}
 
 - Required keys per intent_type: {contract}.{constraints_line}
-- If you have nothing to say, call once with intent_type=send_message and
-  payload={heartbeat}.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only
@@ -104,12 +99,8 @@ what changed. Match length to substance.
 """.strip()
 
 
-# Conversational-mode floors: a persistent ReAct turn pulls context tools before emitting, so it needs more turns +
-# wall-clock budget.
-_CONVERSATIONAL_MIN_MAX_TURNS: int = 12
-_CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
-# Global floor, applied by ``run()`` to every mode: Claude Code counts the model's own text message as a turn, so a
-# low max_turns trips before any output.
+# Global floor, applied by ``run()`` to every mode: Claude Code counts the
+# model's own text message as a turn, so a low max_turns trips before any output.
 _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
@@ -154,6 +145,12 @@ _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
+_EFFORT_ROLES: dict[str, tuple[str, str]] = {
+    "orchestration": (_EFFORT_ENV_ORCH, "medium"),
+    "kernel": (_EFFORT_ENV_KERNEL, "low"),
+}
+
 
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise."""
@@ -172,12 +169,10 @@ class ClaudeBackend:
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS (8), so values below 8 have no
-    # effect; conversational mode raises it to 12.
-    max_turns_default: int = 4
-    # Persistent-conversation mode: resume the SAME SDK session across ticks, feeding only a per-tick delta. kernel /
-    # critic / robustness stay stateless.
-    conversational: bool = False
+    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
+    # (8), so values below 8 have no effect.
+    max_turns_default: int = 12
+    effort_role: str = "kernel"
     enable_mcp_emit_intent: bool = True
     capture_turn_diagnostics: bool = False
     # Raw single-shot completion mode: skips the emit_intent server + suffix, disallows all tools, and returns
@@ -212,9 +207,8 @@ class ClaudeBackend:
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
-    # SDK session token captured last turn; replayed via ``resume`` in conversational mode.
-    _session_id: str | None = field(default=None, init=False)
-    # Read-only context-pull MCP server config, set via ``set_context_provider`` and merged into the SDK options.
+    # Read-only context-pull MCP server config, set via
+    # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
     _mcp_setup_error: str | None = field(default=None, init=False)
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
@@ -238,23 +232,6 @@ class ClaudeBackend:
                     self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
-        if self.conversational:
-            # Persistent ReAct turns need more turns + a longer idle budget than the stateless default; operator env
-            # override still wins.
-            if self.max_turns_default < _CONVERSATIONAL_MIN_MAX_TURNS:
-                self.max_turns_default = _CONVERSATIONAL_MIN_MAX_TURNS
-            if (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
-                    "",
-                ).strip()
-                == ""
-            ):
-                # No operator override -> raise the idle-timeout floor.
-                self.call_timeout_s = max(
-                    self.call_timeout_s,
-                    _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
-                )
         if self.raw_completion:
             self.enable_mcp_emit_intent = False
         if self.enable_mcp_emit_intent:
@@ -295,14 +272,12 @@ class ClaudeBackend:
         # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
         # raise this as an error rather than returning a partial result.
         max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
-        resume_session = self._session_id if self.conversational else None
         try:
             options = self._build_options(
                 tools=tools or [],
                 disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
-                resume_session_id=resume_session,
             )
         except BaseException as exc:
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
@@ -310,7 +285,6 @@ class ClaudeBackend:
         self._update_turn_options(
             options,
             max_turns=max_turns_use,
-            resume_session=resume_session,
         )
 
         # Each attempt bounds the gap BETWEEN streamed SDK messages (silence budget), not the total turn; each retry
@@ -375,21 +349,6 @@ class ClaudeBackend:
             raise
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
-            self._active_turn_diagnostic["new_session"] = bool(session_id and not resume_session)
-        # Capture the SDK session token for the next conversational resume; only overwrite on a non-empty id.
-        if self.conversational:
-            log.info(
-                "claude[conv] turn: resumed=%s prev_session=%s "
-                "new_session=%s tool_blocks=%d intents=%d prompt_chars=%d",
-                bool(resume_session),
-                (resume_session or "")[-12:],
-                (session_id or "")[-12:],
-                tool_block_count,
-                len(intents),
-                len(full_prompt),
-            )
-            if session_id:
-                self._session_id = session_id
         cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
         cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = safe_int(usage.get("input_tokens") if usage else None)
@@ -469,15 +428,6 @@ class ClaudeBackend:
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
-    @property
-    def context_tools_mounted(self) -> bool:
-        """Whether the read-only context-pull tools are live this turn."""
-        return self._context_server_config is not None
-
-    def reset_conversation(self) -> None:
-        """Drop the captured session so the next ``run`` starts fresh."""
-        self._session_id = None
-
     def get_turn_diagnostic(self) -> dict[str, Any]:
         """Return the most recently completed turn diagnostic."""
         return dict(self._last_turn_diagnostic)
@@ -512,7 +462,6 @@ class ClaudeBackend:
     ) -> None:
         if not self.capture_turn_diagnostics:
             return
-        previous_session = self._session_id if self.conversational else None
         self._active_stderr = []
         self._active_turn_diagnostic = {
             "backend": type(self).__name__,
@@ -521,10 +470,7 @@ class ClaudeBackend:
             "sdk_version": getattr(self.sdk_module, "__version__", None),
             "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
             "gateway_endpoint": self._gateway_endpoint_identifier(),
-            "resume_requested": bool(previous_session),
-            "previous_session_id_hash": self._session_hash(previous_session),
             "session_id_hash": None,
-            "new_session": None,
             "max_turns": None,
             "timeout_sec": self.call_timeout_s,
             "reasoning_effort": None,
@@ -544,7 +490,7 @@ class ClaudeBackend:
             "stderr_tail": [],
         }
 
-    def _update_turn_options(self, options: Any, *, max_turns: int, resume_session: str | None) -> None:
+    def _update_turn_options(self, options: Any, *, max_turns: int) -> None:
         diag = self._active_turn_diagnostic
         if diag is None:
             return
@@ -569,17 +515,9 @@ class ClaudeBackend:
                 if self._context_server_config is not None:
                     servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         diag["max_turns"] = max_turns
-        diag["resume_requested"] = bool(resume_session)
         diag["allowed_tools"] = [str(tool) for tool in allowed or []]
         diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
-        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
-        default_effort = "medium" if self.conversational else "low"
-        diag["reasoning_effort"] = kwargs.get(
-            "effort",
-            getattr(
-                options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()
-            ),
-        )
+        diag["reasoning_effort"] = kwargs.get("effort", getattr(options, "effort", self._resolve_effort()))
         diag["thinking"] = kwargs.get(
             "thinking",
             getattr(options, "thinking", {"type": (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()}),
@@ -618,7 +556,6 @@ class ClaudeBackend:
         disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
-        resume_session_id: str | None = None,
     ) -> Any:
         """Build the SDK options object for one turn."""
         kwargs: dict[str, Any] = {"max_turns": max_turns}
@@ -629,8 +566,6 @@ class ClaudeBackend:
             kwargs["cli_path"] = cli_path
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
-        if resume_session_id:
-            kwargs["resume"] = resume_session_id
         self._apply_sdk_env_options(kwargs)
         self._apply_effort_options(kwargs)
         if self.raw_completion:
@@ -676,11 +611,19 @@ class ClaudeBackend:
             )
         )
 
+    def _resolve_effort(self) -> str:
+        """Reasoning-effort tier for this backend's role.
+
+        Returns:
+            The role's env override, else the shared override, else the role
+            default from :data:`_EFFORT_ROLES`.
+        """
+        role_env, default = _EFFORT_ROLES.get(self.effort_role, _EFFORT_ROLES["kernel"])
+        return (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options."""
-        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
-        default = "medium" if self.conversational else "low"
-        effort = (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        effort = self._resolve_effort()
         if effort in _VALID_EFFORT:
             kwargs["effort"] = effort
         thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()
