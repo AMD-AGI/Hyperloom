@@ -89,8 +89,22 @@ def attempt_generated_tuner(
         return outcome
 
     gap = decision.gap
-    outcome.attempted = True
     outcome.table = gap.table
+    if make_baseline is None or make_dispatch is None:
+        # Checked here rather than at the referee, where it used to be. The
+        # verdict does not depend on anything the intervening stages produce, so
+        # deferring it bought nothing and cost an authoring session plus a full
+        # sandbox run -- every one of which was then discarded unread. Any table
+        # without a dispatch adapter reaches this: opening the gate to fused-MoE
+        # demand made that a live path rather than a hypothetical one.
+        outcome.reason = (
+            f"no dispatch was supplied for {gap.table}, so nothing written for it could be "
+            "re-timed; an unverified generated tuner is not emitted, and generating one to "
+            "throw away costs a model call and a sandbox run"
+        )
+        return outcome
+
+    outcome.attempted = True
     work_dir = work_root / "tier3" / gap.table.replace(".", "_")
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,13 +153,6 @@ def attempt_generated_tuner(
         break
 
     outcome.stage = "referee"
-    if make_baseline is None or make_dispatch is None:
-        outcome.reason = (
-            "no dispatch was supplied, so the candidates cannot be re-timed; "
-            "an unverified generated tuner is not emitted"
-        )
-        return outcome
-
     candidates = load_candidates(mandate.candidates_json, mandate)
     if not candidates:
         outcome.reason = "the script proposed no candidates to re-time"
