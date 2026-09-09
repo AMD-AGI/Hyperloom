@@ -27,27 +27,30 @@ import pytest
 
 from hyperloom.orchestrator.bringup import argv_preflight as pf
 
-#: The argument surface of the "installed" sglang. Written as a real parser
-#: because the thing under test is what a real parser does with an argv --
-#: abbreviation matching, choice validation and all.
-_LAUNCH_SERVER = """
-import argparse
-
-parser = argparse.ArgumentParser(prog="sglang.launch_server")
-parser.add_argument("--model-path", required=True)
-parser.add_argument("--tp", "--tensor-parallel-size", type=int, default=1)
-parser.add_argument("--context-length", type=int)
-parser.add_argument("--moe-runner-backend", default="auto")
-parser.add_argument("--attention-backend", choices=("triton", "aiter"))
+#: The argument surface of the "installed" sglang, in the shape the adapter
+#: reaches for: a registrar that fills a parser the caller owns. Written as a
+#: real parser because the thing under test is what a real parser does with an
+#: argv -- abbreviation matching, choice validation and all.
+_SERVER_ARGS = """
+class ServerArgs:
+    @staticmethod
+    def add_cli_args(parser):
+        parser.add_argument("--model-path", required=True)
+        parser.add_argument("--tp", "--tensor-parallel-size", type=int, default=1)
+        parser.add_argument("--context-length", type=int)
+        parser.add_argument("--moe-runner-backend", default="auto")
+        parser.add_argument("--attention-backend", choices=("triton", "aiter"))
+        return parser
 """
 
 
 def _install_sglang(root: Path, version: str) -> Path:
     """Write an importable ``sglang`` with a metadata version under ``root``."""
-    package = root / "sglang"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "launch_server.py").write_text(_LAUNCH_SERVER, encoding="utf-8")
+    srt = root / "sglang" / "srt"
+    srt.mkdir(parents=True)
+    (root / "sglang" / "__init__.py").write_text("", encoding="utf-8")
+    (srt / "__init__.py").write_text("", encoding="utf-8")
+    (srt / "server_args.py").write_text(_SERVER_ARGS, encoding="utf-8")
     dist = root / f"sglang-{version}.dist-info"
     dist.mkdir()
     (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: sglang\nVersion: {version}\n", encoding="utf-8")

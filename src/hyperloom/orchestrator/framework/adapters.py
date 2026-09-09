@@ -407,8 +407,20 @@ class SglangAdapter(_VenvProvisionMixin):
         return "python" if (root / "python" / "sglang").is_dir() else ""
 
     def argv_parser_source(self) -> str:
-        """Return the source that builds sglang's ``launch_server`` parser."""
-        return "def _build_parser():\n    from sglang.launch_server import parser\n    return parser\n"
+        """Return the source that builds sglang's server-args parser.
+
+        ``sglang.launch_server`` exposes no parser at module scope, so the
+        parser is built here and handed to the framework's own registrar --
+        the shape ``atom`` already used.
+        """
+        return (
+            "def _build_parser():\n"
+            "    import argparse\n"
+            "    from sglang.srt.server_args import ServerArgs\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    ServerArgs.add_cli_args(parser)\n"
+            "    return parser\n"
+        )
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
