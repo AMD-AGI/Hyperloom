@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
 from kernelforge.agent_backends.model_context import with_context_window
 
 
@@ -36,27 +37,18 @@ def session_environment(overlay: Mapping[str, str]) -> Iterator[None]:
         _session_environment.reset(token)
 
 
-#: The generic effort vocabulary, ordered. Providers narrow it to their own
-#: names (Codex folds ``max`` onto ``xhigh``); this ranking exists only so a
-#: ceiling can be compared against whatever the deployment asked for. A name
-#: outside the ladder is not ranked and therefore never clamped -- an unknown
-#: effort is the provider's to reject, not this module's to silently rewrite.
-_EFFORT_RANK: dict[str, int] = {
-    "none": 0,
-    "low": 1,
-    "medium": 2,
-    "high": 3,
-    "xhigh": 4,
-    "max": 4,
-}
-
-
 def _clamped_effort(effort: str, ceiling: str) -> str:
-    """Return ``effort``, lowered to ``ceiling`` when it outranks it."""
+    """Return ``effort``, lowered to ``ceiling`` when it outranks it.
+
+    Ranked by :data:`REASONING_EFFORT_RANK`, the vocabulary both Hyperloom and
+    Forge speak. A name outside the ladder is not ranked and therefore never
+    clamped -- an unknown effort is the provider's to reject, not this
+    function's to silently rewrite into something the caller did not ask for.
+    """
     if not ceiling:
         return effort
-    asked = _EFFORT_RANK.get(effort.strip().lower())
-    limit = _EFFORT_RANK.get(ceiling.strip().lower())
+    asked = REASONING_EFFORT_RANK.get(effort.strip().lower())
+    limit = REASONING_EFFORT_RANK.get(ceiling.strip().lower())
     if asked is None or limit is None or asked <= limit:
         return effort
     return ceiling.strip().lower()
@@ -107,7 +99,7 @@ class AgentRuntimeConfig:
     model: str
     executable: str = ""
     timeout_sec: int = 1800
-    reasoning_effort: str = "high"
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
     #: Context window to name in the model id, empty when the gateway
     #: publishes none. Settled once in :func:`resolve_agent_runtime` so
     #: ``model`` already carries it; see :mod:`kernelforge.agent_backends.model_context`.
@@ -231,7 +223,7 @@ class AgentRunSpec:
     # workspace root.
     ignored_untracked_globs: list[str] = field(default_factory=list)
     # Ceiling on the effort this session may run at, in the generic vocabulary
-    # ranked by :data:`_EFFORT_RANK`. Empty for every ordinary session: the
+    # ranked by :data:`REASONING_EFFORT_RANK`. Empty for every ordinary session: the
     # deployment's effort is the one that runs, and a call site that thinks it
     # knows better is exactly what ``resolved`` stopped honouring.
     #

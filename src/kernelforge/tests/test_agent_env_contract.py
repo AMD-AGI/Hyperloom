@@ -116,3 +116,27 @@ def test_forge_effort_outranks_the_project_wide_one(clean_env) -> None:
     clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "medium")
     clean_env.setenv("FORGE_AGENT_REASONING_EFFORT", "low")
     assert resolve_agent_reasoning_effort() == "low"
+
+
+@pytest.mark.parametrize("value", ["minimal", "none", "hgih"])
+@pytest.mark.parametrize("name", _EFFORT_VARS)
+def test_an_off_ladder_effort_is_refused_by_name(clean_env, name: str, value: str) -> None:
+    """A campaign refuses to start rather than 400 hours in.
+
+    ``HYPERLOOM_REASONING_EFFORT=minimal`` used to pass Hyperloom's own filter
+    and then raise inside the Codex backend, mid-campaign. Both variables now
+    answer for themselves, at startup, and the message names which one carried
+    the bad value -- an operator sets both and would otherwise have to guess.
+    """
+    clean_env.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        resolve_agent_reasoning_effort()
+    with pytest.raises(ValueError, match=name):
+        Config.from_env(agent_backend="claude", workspace="/tmp")
+
+
+def test_the_lower_variable_is_not_consulted_when_the_higher_one_is_valid(clean_env) -> None:
+    """A stale project-wide value does not veto an explicit Forge one."""
+    clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "minimal")
+    clean_env.setenv("FORGE_AGENT_REASONING_EFFORT", "low")
+    assert resolve_agent_reasoning_effort() == "low"

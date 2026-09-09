@@ -14,6 +14,7 @@ from importlib import metadata, util
 from typing import Callable
 
 from kernelforge.agent_backends.model_context import with_context_window
+from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
     AgentCapabilities,
@@ -212,7 +213,7 @@ def resolve_agent_runtime(
     model: str = "",
     executable: str = "",
     timeout_sec: int = 1800,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     sandbox_mode: str = "bypass",
     precheck: bool = True,
     fallback_provider: str = "",
@@ -233,7 +234,7 @@ def resolve_agent_runtime(
         model=with_context_window(selected, window),
         executable=executable.strip(),
         timeout_sec=timeout_sec,
-        reasoning_effort=reasoning_effort.strip() or "high",
+        reasoning_effort=reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,
         context_window=window,
         sandbox_mode=sandbox_mode.strip() or "bypass",
         precheck=precheck,

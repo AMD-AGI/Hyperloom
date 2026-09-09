@@ -206,6 +206,32 @@ for the user-facing summary.
 
 ### Changed
 
+- **One reasoning-effort vocabulary, and it is the one both surfaces accept.**
+  Three tables disagreed: Hyperloom took `minimal | low | medium | high`, Forge
+  ranked `none | low | medium | high | xhigh | max`, and the Codex backend
+  accepted a third list while folding `max` onto `xhigh`. The disagreement was
+  not cosmetic -- `HYPERLOOM_REASONING_EFFORT=minimal` passed Hyperloom's own
+  filter and then raised inside the Codex backend, so a box configured once
+  crashed the component doing most of the spending.
+  `hyperloom.common.reasoning_effort` now holds the single ladder
+  `low | medium | high | xhigh | max`, measured against both surfaces:
+  `claude --effort` takes `low..xhigh` plus `max`, the OpenAI-compatible
+  gateway takes `none`/`minimal`/`low..xhigh` and returns 400 on `max`.
+  `low`–`xhigh` are levels as written. `max` is a real Claude level, so it is
+  one here too, and `gateway_reasoning_effort` projects it onto `xhigh` -- the
+  gateway's deepest -- for the Codex backend *and* for Hyperloom's own
+  chat.completions: the fold used to live inside the Codex backend only, so the
+  identical value reaching Hyperloom's own calls was a 400. `minimal` and
+  `none` go the other way -- the gateway takes them, the Claude CLI does not
+  know them, and there is no Claude level below `low` to project them onto --
+  so neither is a level.<br/>
+  **A bad value is refused at startup, by name.** `resolve_agent_reasoning_effort`
+  and `Config.__post_init__` raise on an unrecognized effort and say which
+  variable carried it, rather than passing it through for the provider to
+  reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
+  keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
+  non-reasoning models and gateways that reject the field.
+
 - **Forge reads Hyperloom's environment contract instead of its own.** Forge
   does not ship next to Hyperloom any more, it ships inside it, and an operator
   configuring one box was being asked to learn two vocabularies for the same

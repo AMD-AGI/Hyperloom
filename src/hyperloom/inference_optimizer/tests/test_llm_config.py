@@ -61,8 +61,26 @@ def test_apply_reasoning_effort_injects_recognized_value():
     assert out2["reasoning_effort"] == "high"
 
 
-def test_apply_reasoning_effort_ignores_unknown_value():
-    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "turbo"})
+def test_apply_reasoning_effort_accepts_the_top_of_the_ladder():
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": " XHigh "})
+    assert out["reasoning_effort"] == "xhigh"
+
+
+def test_apply_reasoning_effort_sends_max_as_the_gateway_level():
+    """``max`` is a Claude level this gateway 400s on, so it goes as ``xhigh``."""
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "max"})
+    assert out["reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("value", ["turbo", "minimal", "none"])
+def test_apply_reasoning_effort_ignores_off_ladder_value(value):
+    """Only the shared four levels are injected; the rest are no-ops.
+
+    This gateway accepts ``minimal`` and ``none``, but the Claude CLI does not
+    know either and there is no Claude level below ``low`` to project them
+    onto, so neither is a level of the shared vocabulary.
+    """
+    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": value})
     assert "reasoning_effort" not in out
 
 

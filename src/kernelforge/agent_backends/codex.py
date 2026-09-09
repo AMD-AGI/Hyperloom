@@ -20,6 +20,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+    gateway_reasoning_effort,
+)
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderError,
@@ -123,12 +128,23 @@ def resolve_codex_model(explicit: str = "") -> str:
 
 
 def resolve_codex_reasoning_effort(explicit: str = "") -> str:
-    """Map the generic maximum effort onto Codex's highest supported level."""
-    effort = (explicit or "high").strip().lower()
-    if effort == "max":
-        return "xhigh"
-    if effort not in {"none", "low", "medium", "high", "xhigh"}:
-        raise CodexExecutionError(f"unsupported Codex reasoning effort: {explicit!r}")
+    """Settle the effort a Codex session runs at, refusing anything off-ladder.
+
+    ``max`` is a level of the shared vocabulary that this protocol cannot be
+    told by name, so it arrives here as ``xhigh`` -- the deepest the gateway
+    has. The projection is shared rather than local to this backend: when it
+    lived here only, the same ``max`` reaching Hyperloom's own chat.completions
+    was a 400.
+
+    Anything off the ladder is refused loudly. An unrecognized effort used to
+    travel into the run and come back a 400 mid-campaign, hours after it
+    started with a typo nobody had a reason to look at.
+    """
+    effort = gateway_reasoning_effort(explicit or DEFAULT_REASONING_EFFORT)
+    if not effort:
+        raise CodexExecutionError(
+            f"unsupported Codex reasoning effort: {explicit!r}; expected one of {', '.join(REASONING_EFFORT_LEVELS)}"
+        )
     return effort
 
 

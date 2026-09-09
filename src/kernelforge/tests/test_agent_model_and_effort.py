@@ -67,15 +67,15 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
 def test_runtime_effort_outranks_the_spec() -> None:
     """A spec's own effort loses to the runtime's."""
     runtime = AgentRuntimeConfig(provider="claude", model="claude-opus-5", reasoning_effort="medium")
-    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp", reasoning_effort="max")
+    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp", reasoning_effort="xhigh")
     assert spec.resolved(runtime).reasoning_effort == "medium"
 
 
 def test_spec_effort_survives_a_runtime_that_names_none() -> None:
     """The spec is the fallback, not the loser, when the runtime is silent."""
     runtime = AgentRuntimeConfig(provider="claude", model="claude-opus-5", reasoning_effort="")
-    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp", reasoning_effort="max")
-    assert spec.resolved(runtime).reasoning_effort == "max"
+    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp", reasoning_effort="xhigh")
+    assert spec.resolved(runtime).reasoning_effort == "xhigh"
 
 
 def test_no_context_window_by_default() -> None:
@@ -130,10 +130,10 @@ def test_an_effort_ceiling_only_ever_lowers() -> None:
     for asked in ("medium", "high", "xhigh", "max"):
         runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort=asked)
         assert spec.resolved(runtime).reasoning_effort == "low"
-    # An operator already below the cap keeps their own value: the cap is a
+    # An operator already at the cap keeps their own value: the cap is a
     # ceiling on this call's cost, not a floor under it.
-    runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort="none")
-    assert spec.resolved(runtime).reasoning_effort == "none"
+    runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort="low")
+    assert spec.resolved(runtime).reasoning_effort == "low"
 
 
 def test_an_unranked_effort_is_left_alone() -> None:

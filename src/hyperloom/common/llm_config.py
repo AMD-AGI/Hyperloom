@@ -18,6 +18,7 @@ from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
+from hyperloom.common.reasoning_effort import gateway_reasoning_effort
 
 log = logging.getLogger(__name__)
 
@@ -568,10 +569,14 @@ def apply_reasoning_effort(
     *,
     env: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    """Inject ``reasoning_effort`` into chat.completions params, env-gated."""
+    """Inject ``reasoning_effort`` into chat.completions params, env-gated.
+
+    ``max`` is a Claude-only level and comes back a 400 here, so it is sent as ``xhigh``.
+    """
     source = env if env is not None else os.environ
-    val = (source.get("HYPERLOOM_REASONING_EFFORT") or source.get("OPENAI_REASONING_EFFORT") or "").strip().lower()
-    if val in {"minimal", "low", "medium", "high"}:
+    raw = source.get("HYPERLOOM_REASONING_EFFORT") or source.get("OPENAI_REASONING_EFFORT") or ""
+    val = gateway_reasoning_effort(raw)
+    if val:
         params["reasoning_effort"] = val
     return params
 

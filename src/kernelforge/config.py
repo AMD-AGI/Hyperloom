@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from hyperloom.common.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+    normalize_reasoning_effort,
+)
 from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.resources import default_project_root, resource_path
 
@@ -77,13 +82,22 @@ def resolve_agent_reasoning_effort() -> str:
     campaign that ignored it would be the one component quietly running at a
     different depth than the operator asked for.
     ``FORGE_AGENT_REASONING_EFFORT`` stays above it for the run that wants Forge
-    specifically turned up or down.
+    specifically turned up or down. Both name a level in
+    :data:`REASONING_EFFORT_LEVELS`; a value outside it is refused here, by
+    name, rather than carried into the campaign to fail at the provider once
+    the run is already hours deep.
     """
-    return (
-        os.getenv("FORGE_AGENT_REASONING_EFFORT", "").strip()
-        or os.getenv("HYPERLOOM_REASONING_EFFORT", "").strip()
-        or "high"
-    )
+    for name in ("FORGE_AGENT_REASONING_EFFORT", "HYPERLOOM_REASONING_EFFORT"):
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            continue
+        effort = normalize_reasoning_effort(raw)
+        if not effort:
+            raise ValueError(
+                f"{name}={raw!r} is not a reasoning effort; expected one of {', '.join(REASONING_EFFORT_LEVELS)}"
+            )
+        return effort
+    return DEFAULT_REASONING_EFFORT
 
 
 def _env_json_object(name: str) -> dict:
@@ -118,7 +132,7 @@ class Config:
     agent_model: str = ""
     agent_cli: str = ""
     agent_timeout_sec: int = 1800
-    agent_reasoning_effort: str = "high"
+    agent_reasoning_effort: str = DEFAULT_REASONING_EFFORT
     # Context window to name in the Claude model id, e.g. "1m" -> the session
     # runs as ``claude-opus-5[1m]``. Empty by default and it has to stay that
     # way: a gateway that does not publish a windowed id rejects the whole
@@ -183,7 +197,11 @@ class Config:
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
         if self.agent_backend != "auto":
             get_agent_provider(self.agent_backend)
-        self.agent_reasoning_effort = (self.agent_reasoning_effort or "high").strip()
+        self.agent_reasoning_effort = normalize_reasoning_effort(
+            self.agent_reasoning_effort or DEFAULT_REASONING_EFFORT
+        )
+        if not self.agent_reasoning_effort:
+            raise ValueError(f"agent_reasoning_effort must be one of {', '.join(REASONING_EFFORT_LEVELS)}")
         self.agent_context_window = (self.agent_context_window or "").strip()
         self.agent_sandbox_mode = (self.agent_sandbox_mode or "bypass").strip().lower()
         self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()

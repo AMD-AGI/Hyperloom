@@ -726,10 +726,17 @@ def test_shared_model_option_is_provider_neutral() -> None:
     assert resolve_codex_model("provider-model") == "provider-model"
     assert resolve_codex_model("") == "gpt-5.6-sol"
     assert resolve_codex_reasoning_effort("") == "high"
-    assert resolve_codex_reasoning_effort("max") == "xhigh"
     assert resolve_codex_reasoning_effort("xhigh") == "xhigh"
-    with pytest.raises(CodexExecutionError, match="reasoning effort"):
-        resolve_codex_reasoning_effort("ultra")
+    assert resolve_codex_reasoning_effort(" MEDIUM ") == "medium"
+    # ``max`` is a level of the shared vocabulary that this protocol 400s on by
+    # name, so it arrives as the deepest level the gateway does have.
+    assert resolve_codex_reasoning_effort("max") == "xhigh"
+    assert resolve_codex_reasoning_effort(" MAX ") == "xhigh"
+    # Off the shared ladder, so refused here rather than 400'd by the gateway
+    # hours into a campaign.
+    for off_ladder in ("ultra", "none", "minimal"):
+        with pytest.raises(CodexExecutionError, match="reasoning effort"):
+            resolve_codex_reasoning_effort(off_ladder)
 
 
 def test_backend_factory_falls_back_only_when_enabled(
