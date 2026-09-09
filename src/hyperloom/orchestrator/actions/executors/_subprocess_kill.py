@@ -1090,7 +1090,12 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
                 "server_log_path": str(server_log_path),
                 "workspace": workspace.name,
                 "run_path": _run_relative_path(workspace),
-                "session_id": os.environ.get("INFERENCE_OPTIMIZER_SESSION_ID", ""),
+                # From the session directory, which the CLI does export. There
+                # is no INFERENCE_OPTIMIZER_SESSION_ID: nothing in the tree sets
+                # one, so reading it produced a field that was always empty.
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
             },
         )
     except Exception:  # noqa: BLE001 - collection is never worth a failed round

@@ -133,20 +133,43 @@ def test_capacity_is_latched_from_the_first_reading_that_has_it():
     assert summary["capacity_gb"] == 180.0
 
 
+def _grouped(**shards) -> dict[str, dict[str, float]]:
+    """One independent unit carrying the given shard readings."""
+    return {"": dict(shards)}
+
+
 def test_counter_delta_credits_only_the_post_restart_count():
     """An engine restart zeroes its series; a flat subtraction would go negative."""
-    assert counter_delta({"a": 10.0}, {"a": 48.0}) == 38.0
-    assert counter_delta({"a": 100.0}, {"a": 3.0}) == 3.0
+    assert counter_delta(_grouped(a=10.0), _grouped(a=48.0)) == 38.0
+    assert counter_delta(_grouped(a=100.0), _grouped(a=3.0)) == 3.0
     assert counter_delta({}, {}) is None
-    assert counter_delta({}, {"a": 5.0}) == 5.0
+    assert counter_delta({}, _grouped(a=5.0)) == 5.0
 
 
 def test_counter_delta_does_not_multiply_lockstep_ranks():
     """Eight ranks reporting 48 describe 48 retracts, not 384."""
-    first = {f'tp_rank="{i}"': 0.0 for i in range(8)}
-    last = {f'tp_rank="{i}"': 48.0 for i in range(8)}
+    first = {"": {f'tp_rank="{i}"': 0.0 for i in range(8)}}
+    last = {"": {f'tp_rank="{i}"': 48.0 for i in range(8)}}
 
     assert counter_delta(first, last) == 48.0
+
+
+def test_counter_delta_adds_independent_engines():
+    first = {'engine="0"': {'engine="0"': 0.0}, 'engine="1"': {'engine="1"': 0.0}}
+    last = {'engine="0"': {'engine="0"': 48.0}, 'engine="1"': {'engine="1"': 48.0}}
+
+    assert counter_delta(first, last) == 96.0
+
+
+def test_rows_and_summary_use_the_same_counter_rule():
+    """Two rules inside one artifact is worse than either being wrong: nothing
+    on the page says which number was computed which way."""
+    shards = {"": {f'tp_rank="{i}"': 48.0 for i in range(8)}}
+    poller = _StubPoller([_sample(retract_total=shards)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+
+    assert rec.rows()[0]["retract_total"] == 48.0
 
 
 def test_downsampling_respects_the_cap():
@@ -158,16 +181,36 @@ def test_downsampling_respects_the_cap():
     assert len(rec.rows()) <= 5000
 
 
-def test_prefix_cache_counters_reach_the_artifact():
-    """They were parsed and then dropped: read at cost, stored nowhere."""
-    poller = _StubPoller([_sample(prefix_cache_queries=1000.0, prefix_cache_hits=529.0)])
+def test_prefix_cache_counters_are_bracketed_not_snapshotted():
+    """Cumulative counters, and the engine outlives the round under warm reuse.
+
+    The latest absolute value therefore carries whatever the previous round
+    warmed the cache with, which is not attributable to this one.
+    """
+    poller = _StubPoller(
+        [
+            _sample(prefix_cache_queries=1000.0, prefix_cache_hits=800.0),
+            _sample(prefix_cache_queries=1400.0, prefix_cache_hits=1100.0),
+        ]
+    )
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
+    rec.tick(1.0)
 
-    assert rec.summary()["prefix_cache"] == {
-        "prefix_cache_queries": 1000.0,
-        "prefix_cache_hits": 529.0,
-    }
+    window = rec.summary()["prefix_cache"]
+    assert window["prefix_cache_queries_delta"] == 400.0
+    assert window["prefix_cache_hits_delta"] == 300.0
+    assert window["first"]["prefix_cache_queries"] == 1000.0
+    assert window["last"]["prefix_cache_queries"] == 1400.0
+
+
+def test_prefix_cache_restart_credits_only_the_post_restart_count():
+    poller = _StubPoller([_sample(cached_tokens_total=900.0), _sample(cached_tokens_total=12.0)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+    rec.tick(1.0)
+
+    assert rec.summary()["prefix_cache"]["cached_tokens_total_delta"] == 12.0
 
 
 def test_capacity_provenance_and_series_count_reach_the_artifact():
@@ -191,7 +234,7 @@ def test_summary_availability_is_tristate():
 
 def test_close_writes_the_artifact_and_is_idempotent(tmp_path):
     out = tmp_path / KV_ARTIFACT_NAME
-    poller = _StubPoller([_sample(retract_total={"": 48.0})])
+    poller = _StubPoller([_sample(retract_total={"": {"": 48.0}})])
     rec = KvMetricsRecorder(poller=poller, output_path=str(out), min_interval_sec=0.0)
     rec.tick(0.0)
 

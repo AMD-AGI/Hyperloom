@@ -14,6 +14,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._kv_metrics import (
     DEFAULT_METRICS_PORT,
     KvMetricsPoller,
+    aggregate_series,
     canonical_label_key,
     parse_prometheus_text,
     resolve_metrics_port,
@@ -73,7 +74,7 @@ def test_active_and_physical_usage_diverge():
     """
     s = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
 
-    assert s.active_pool_usage == pytest.approx(0.8506)
+    assert s.active_pool_usage == pytest.approx(0.85)
     assert s.physical_pool_usage == pytest.approx(29880 / 32768)
     assert s.physical_pool_usage > s.active_pool_usage
 
@@ -82,8 +83,7 @@ def test_reads_cumulative_retracts_not_the_instantaneous_gauge():
     """``num_retracted_requests_total`` is 48; ``num_retracted_reqs`` is 1."""
     s = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
 
-    assert list(s.retract_total.values()) == [48.0]
-    assert 1.0 not in s.retract_total.values()
+    assert aggregate_series(s.retract_total) == 48.0
 
 
 def test_counters_are_kept_per_label_series():
@@ -91,7 +91,41 @@ def test_counters_are_kept_per_label_series():
     fam = parse_prometheus_text(VLLM_METRICS)
     s = sample_from_families(fam)
 
-    assert s.preempt_total == {'engine="0",model_name="qwen"': 458.0}
+    assert s.preempt_total == {'engine="0",model_name="qwen"': {'engine="0",model_name="qwen"': 458.0}}
+
+
+def test_shards_collapse_but_independent_engines_add_up():
+    """The two label kinds need opposite treatment; one rule is wrong either way."""
+    shards = "".join(f'sglang:num_retracted_requests_total{{tp_rank="{i}"}} 48.0\n' for i in range(8))
+    assert aggregate_series(sample_from_families(parse_prometheus_text(shards)).retract_total) == 48.0
+
+    engines = 'vllm:num_preemptions_total{engine="0"} 48.0\nvllm:num_preemptions_total{engine="1"} 48.0\n'
+    assert aggregate_series(sample_from_families(parse_prometheus_text(engines)).preempt_total) == 96.0
+
+
+def test_a_ranks_fields_are_never_welded_to_another_ranks():
+    """Per-field maxima across ranks combine numbers from different sides of the
+    engine. These two readings are individually valid and produced an occupancy
+    of 1.7 when mixed."""
+    text = (
+        'sglang:max_total_num_tokens{dp_rank="0"} 100.0\n'
+        'sglang:kv_used_tokens{dp_rank="0"} 10.0\n'
+        'sglang:kv_evictable_tokens{dp_rank="0"} 5.0\n'
+        'sglang:token_usage{dp_rank="0"} 0.10\n'
+        'sglang:max_total_num_tokens{dp_rank="1"} 80.0\n'
+        'sglang:kv_used_tokens{dp_rank="1"} 72.0\n'
+        'sglang:kv_evictable_tokens{dp_rank="1"} 4.0\n'
+        'sglang:token_usage{dp_rank="1"} 0.90\n'
+    )
+    s = sample_from_families(parse_prometheus_text(text))
+
+    assert s.physical_pool_usage is not None and s.physical_pool_usage <= 1.0
+    # The most pressured rank is reported whole: rank 1's capacity with rank 1's
+    # tokens, not rank 0's capacity with rank 1's tokens.
+    assert s.active_pool_usage == pytest.approx(0.90)
+    assert s.capacity_tokens == 80.0
+    assert s.used_tokens == 72.0
+    assert s.physical_pool_usage == pytest.approx(76 / 80)
 
 
 def test_vllm_shape_and_legacy_usage_alias():
@@ -132,12 +166,19 @@ def test_idle_zero_is_a_reading_not_an_absence():
     assert s.has_readings()
 
 
-def test_hybrid_pool_takes_the_max_subpool_not_the_full_one():
-    """On a hybrid model the full-attention subpool understates real pressure."""
-    hybrid = "sglang:token_usage 0.10\nsglang:full_token_usage 0.10\nsglang:swa_token_usage 0.93\n"
-    s = sample_from_families(parse_prometheus_text(hybrid))
+def test_token_usage_is_authoritative_when_present():
+    """Current SGLang already sets it to max(full, swa, mamba); recomputing that
+    here would duplicate upstream logic and drift from it."""
+    text = "sglang:token_usage 0.93\nsglang:full_token_usage 0.10\nsglang:swa_token_usage 0.93\n"
 
-    assert s.active_pool_usage == pytest.approx(0.93)
+    assert sample_from_families(parse_prometheus_text(text)).active_pool_usage == pytest.approx(0.93)
+
+
+def test_subpool_gauges_are_the_fallback_for_builds_without_token_usage():
+    """Reading only the full pool would understate a hybrid model's pressure."""
+    hybrid = "sglang:full_token_usage 0.10\nsglang:swa_token_usage 0.93\n"
+
+    assert sample_from_families(parse_prometheus_text(hybrid)).active_pool_usage == pytest.approx(0.93)
 
 
 def test_labels_comments_and_timestamps_are_handled():

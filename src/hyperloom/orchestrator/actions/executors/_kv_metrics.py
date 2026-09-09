@@ -88,7 +88,12 @@ _MAX_CONSECUTIVE_FAILURES = 3
 # that has no such subpool, so taking the max over all of them is both the
 # hybrid-correct answer (SGLang's own scheduler judges pressure that way) and a
 # no-op on an ordinary KV pool.
-_SGL_USAGE = ("sglang:token_usage", "sglang:full_token_usage", "sglang:swa_token_usage")
+# ``token_usage`` is already max(full, swa, mamba) on current SGLang, so it is
+# authoritative on its own. The per-subpool gauges are a fallback for a build
+# that predates it, where reading only the full pool would understate a hybrid
+# model's real pressure.
+_SGL_USAGE_PRIMARY = "sglang:token_usage"
+_SGL_USAGE_FALLBACK = ("sglang:full_token_usage", "sglang:swa_token_usage", "sglang:mamba_usage")
 _SGL_USED = "sglang:kv_used_tokens"
 _SGL_AVAILABLE = "sglang:kv_available_tokens"
 # Only the main KV pool's evictable count. The SWA and Mamba pools have their
@@ -294,17 +299,94 @@ def _series_count(families: ParsedFamilies, names: tuple[str, ...]) -> int:
     return max((len(families.get(name) or ()) for name in names), default=0)
 
 
-def _series(families: ParsedFamilies, name: str) -> dict[str, float]:
-    """Read a counter as a per-label-set mapping.
+#: Labels that identify a shard of one engine rather than an independent one.
+#: Shards schedule in lockstep, so each reports the same event; anything else
+#: (``dp_rank``, ``engine``, ``model_name``, ``pid``) marks a unit that
+#: retracts on its own account.
+_REPLICA_LABELS = frozenset({"tp_rank", "pp_rank"})
+
+
+def _series(families: ParsedFamilies, name: str) -> dict[str, dict[str, float]]:
+    """Read a counter grouped by independent unit, then by shard.
+
+    Two levels because the two label kinds need opposite treatment and a flat
+    map cannot express that: shards of one engine duplicate each other's
+    counts, while separate engines contribute their own.
 
     Args:
         families (ParsedFamilies): Parsed exposition.
         name (str): Metric name.
 
     Returns:
-        dict[str, float]: Canonical label key to value; empty when absent.
+        dict[str, dict[str, float]]: Independent-unit key to shard key to
+        value; empty when the metric is absent.
     """
-    return {canonical_label_key(labels): value for labels, value in families.get(name, [])}
+    out: dict[str, dict[str, float]] = {}
+    for labels, value in families.get(name, []):
+        group = canonical_label_key({k: v for k, v in labels.items() if k not in _REPLICA_LABELS})
+        out.setdefault(group, {})[canonical_label_key(labels)] = value
+    return out
+
+
+def aggregate_series(grouped: dict[str, dict[str, float]]) -> float | None:
+    """Collapse a grouped counter into one number.
+
+    Max within a group, sum across groups. Eight tensor-parallel ranks carrying
+    48 retracts describe 48 events, not 384; two data-parallel engines carrying
+    48 each describe 96. Applying one rule to both label kinds is wrong in one
+    direction or the other, which is why the grouping exists.
+
+    Args:
+        grouped (dict[str, dict[str, float]]): Output of :func:`_series`.
+
+    Returns:
+        float | None: The total, or ``None`` when the counter was never seen.
+    """
+    if not grouped:
+        return None
+    return sum(max(shards.values()) for shards in grouped.values() if shards)
+
+
+def _rank_keys(families: ParsedFamilies, names: tuple[str, ...]) -> list[str]:
+    """Label keys the given gauges were reported under.
+
+    Args:
+        families (ParsedFamilies): Parsed exposition.
+        names (tuple[str, ...]): Metric names to inspect.
+
+    Returns:
+        list[str]: Canonical label keys, or ``[""]`` when nothing is labelled.
+    """
+    keys: list[str] = []
+    for name in names:
+        for labels, _ in families.get(name, []):
+            key = canonical_label_key(labels)
+            if key not in keys:
+                keys.append(key)
+    return keys or [""]
+
+
+def _read(families: ParsedFamilies, name: str, key: str) -> float | None:
+    """One gauge's value for one rank.
+
+    Falls back to an unlabelled series so a metric the engine reports once
+    globally still resolves for every rank.
+
+    Args:
+        families (ParsedFamilies): Parsed exposition.
+        name (str): Metric name.
+        key (str): Canonical label key of the rank being assembled.
+
+    Returns:
+        float | None: The value, or ``None`` when this rank has no reading.
+    """
+    series = families.get(name) or []
+    for labels, value in series:
+        if canonical_label_key(labels) == key:
+            return value
+    if len(series) == 1 and not series[0][0]:
+        return series[0][1]
+    return None
 
 
 @dataclass(frozen=True)
@@ -427,26 +509,79 @@ def sample_from_families(
         ``None``.
     """
     engine = _detect_engine(families)
-    used = _scalar(families, _SGL_USED)
-    available = _scalar(families, _SGL_AVAILABLE)
-    evictable = _scalar(families, _SGL_EVICTABLE)
+    occupancy_names = (_SGL_USAGE_PRIMARY,) + _SGL_USAGE_FALLBACK + _VLLM_USAGE + (_SGL_USED,)
+    keys = _rank_keys(families, occupancy_names)
 
-    # Engine-reported capacity wins; the sum is a fallback for builds that do
-    # not expose it, and is marked as derived so a consumer knows it may run
-    # short of the true pool size.
-    capacity = _scalar(families, _SGL_CAPACITY_TOKENS)
-    capacity_derived = False
-    if capacity is None and used is not None and available is not None:
-        capacity = used + available + (evictable or 0.0)
-        capacity_derived = True
+    # Assemble each rank in full before choosing one. Taking a per-field max
+    # across ranks silently welds numbers from different sides of the engine
+    # together: rank A's capacity against rank B's used tokens produced a
+    # physical occupancy of 1.7 on two individually valid readings.
+    best: dict[str, Any] | None = None
+    for key in keys:
+        used = _read(families, _SGL_USED, key)
+        available = _read(families, _SGL_AVAILABLE, key)
+        evictable = _read(families, _SGL_EVICTABLE, key)
 
-    physical: float | None = None
-    if capacity and capacity > 0 and used is not None:
-        physical = (used + (evictable or 0.0)) / capacity
+        # Engine-reported capacity wins; the sum is a fallback for builds that
+        # do not expose it, flagged so a consumer knows it may run short of the
+        # true pool size.
+        capacity = _read(families, _SGL_CAPACITY_TOKENS, key)
+        capacity_derived = False
+        if capacity is None and used is not None and available is not None:
+            capacity = used + available + (evictable or 0.0)
+            capacity_derived = True
 
-    active = _max_scalar(families, _SGL_USAGE)
-    if active is None:
-        active = _max_scalar(families, _VLLM_USAGE)
+        physical: float | None = None
+        if capacity and capacity > 0 and used is not None:
+            physical = (used + (evictable or 0.0)) / capacity
+
+        # ``token_usage`` is already the maximum across the full, SWA and Mamba
+        # subpools on current SGLang, so it is read directly. The per-subpool
+        # gauges are only consulted when it is missing, which is what an older
+        # build looks like.
+        active = _read(families, _SGL_USAGE_PRIMARY, key)
+        if active is None:
+            active = max(
+                (v for n in _SGL_USAGE_FALLBACK if (v := _read(families, n, key)) is not None),
+                default=None,
+            )
+        if active is None:
+            active = max(
+                (v for n in _VLLM_USAGE if (v := _read(families, n, key)) is not None),
+                default=None,
+            )
+
+        candidate = {
+            "active": active,
+            "physical": physical,
+            "used": used,
+            "available": available,
+            "evictable": evictable,
+            "capacity": capacity,
+            "capacity_derived": capacity_derived,
+            "capacity_gb": _read(families, _SGL_CAPACITY_GB, key),
+        }
+        # The most pressured rank is the one that will retract, so it is the one
+        # worth reporting. Fall back to physical, then to having read anything.
+        if best is None:
+            best = candidate
+            continue
+        for metric in ("active", "physical", "used"):
+            mine, theirs = candidate.get(metric), best.get(metric)
+            if mine is None and theirs is None:
+                continue
+            if theirs is None or (mine is not None and mine > theirs):
+                best = candidate
+            break
+
+    assembled = best or {}
+    used = assembled.get("used")
+    available = assembled.get("available")
+    evictable = assembled.get("evictable")
+    capacity = assembled.get("capacity")
+    capacity_derived = bool(assembled.get("capacity_derived"))
+    physical = assembled.get("physical")
+    active = assembled.get("active")
 
     return KvSample(
         ts=time.time() if ts is None else ts,
@@ -459,7 +594,7 @@ def sample_from_families(
         available_tokens=available,
         capacity_tokens=capacity,
         capacity_derived=capacity_derived,
-        series_count=_series_count(families, _SGL_USAGE + _VLLM_USAGE),
+        series_count=len(keys) if keys != [""] else 0,
         capacity_gb=_scalar(families, _SGL_CAPACITY_GB),
         retract_total=_series(families, _SGL_RETRACT_TOTAL),
         preempt_total=_series(families, _VLLM_PREEMPT_TOTAL),
@@ -634,18 +769,12 @@ def counter_delta(first: dict[str, float], last: dict[str, float]) -> float | No
         first (dict[str, float]): Series readings at window open.
         last (dict[str, float]): Series readings at window close.
 
-    Series are combined by **max, not sum**, for the same reason gauges are: a
-    sharded engine reports one series per rank and the ranks retract in
-    lockstep, so eight series carrying 48 describe 48 events, not 384. This
-    under-counts a deployment whose series really are independent engines;
-    that trade is deliberate, because an inflated pressure count would send the
-    optimizer chasing a bottleneck that is not there, while an under-count only
-    understates one that is. ``series_count`` on the sample says which case a
-    reading came from.
+    Per-shard deltas are then combined by :func:`aggregate_series`, so shards of
+    one engine collapse to one count while separate engines add up.
 
     Args:
-        first (dict[str, float]): Series readings at window open.
-        last (dict[str, float]): Series readings at window close.
+        first (dict[str, dict[str, float]]): Grouped readings at window open.
+        last (dict[str, dict[str, float]]): Grouped readings at window close.
 
     Returns:
         float | None: The increment, or ``None`` when the counter was never
@@ -653,11 +782,13 @@ def counter_delta(first: dict[str, float], last: dict[str, float]) -> float | No
     """
     if not first and not last:
         return None
-    deltas: list[float] = []
-    for key, end in last.items():
-        start = first.get(key)
-        deltas.append(end if start is None or end < start else end - start)
-    return max(deltas) if deltas else 0.0
+    deltas: dict[str, dict[str, float]] = {}
+    for group, shards in last.items():
+        opened = first.get(group) or {}
+        for key, end in shards.items():
+            start = opened.get(key)
+            deltas.setdefault(group, {})[key] = end if start is None or end < start else end - start
+    return aggregate_series(deltas) or 0.0
 
 
 class KvMetricsRecorder:
@@ -707,7 +838,8 @@ class KvMetricsRecorder:
         self._capacity_derived = False
         self._capacity_gb: float | None = None
         self._series_count = 0
-        self._prefix_cache: dict[str, float] = {}
+        self._prefix_first: dict[str, float] = {}
+        self._prefix_last: dict[str, float] = {}
         self._closed = False
 
     @property
@@ -763,13 +895,16 @@ class KvMetricsRecorder:
         if self._capacity_gb is None and sample.capacity_gb is not None:
             self._capacity_gb = sample.capacity_gb
         self._series_count = max(self._series_count, sample.series_count)
-        # Prefix-cache counters are cumulative, so the newest reading is the
-        # whole story; keeping the latest non-null avoids a column of repeats
-        # in every row.
+        # Prefix-cache counters are cumulative and the engine outlives the
+        # round under warm reuse, so the latest absolute value carries the
+        # previous round's hits too. Bracket the window instead: first reading
+        # in, last reading out, difference attributable to this round.
         for attr in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total"):
             value = getattr(sample, attr)
-            if value is not None:
-                self._prefix_cache[attr] = value
+            if value is None:
+                continue
+            self._prefix_first.setdefault(attr, value)
+            self._prefix_last[attr] = value
         for name, series in (("retract", sample.retract_total), ("preempt", sample.preempt_total)):
             if not series:
                 continue
@@ -784,10 +919,35 @@ class KvMetricsRecorder:
                 "physical_pool_usage": sample.physical_pool_usage,
                 "used_tokens": sample.used_tokens,
                 "evictable_tokens": sample.evictable_tokens,
-                "retract_total": sum(sample.retract_total.values()) if sample.retract_total else None,
-                "preempt_total": sum(sample.preempt_total.values()) if sample.preempt_total else None,
+                # Same aggregation rule the summary uses. Rows and summary
+                # disagreeing inside one artifact is worse than either rule
+                # being wrong, because nothing on the page says which is which.
+                "retract_total": aggregate_series(sample.retract_total),
+                "preempt_total": aggregate_series(sample.preempt_total),
             }
         )
+
+    def _prefix_cache_window(self) -> dict[str, Any]:
+        """Prefix-cache counters attributable to this round.
+
+        Reports the increment across the round, plus the raw endpoints so a
+        consumer can audit it. Absolute values alone are unusable under warm
+        reuse: the engine survives the round boundary, so they carry whatever
+        the previous round warmed the cache with.
+
+        Returns:
+            dict[str, Any]: ``<name>_delta`` per counter plus ``first`` /
+            ``last`` maps. Empty when no counter was ever read.
+        """
+        if not self._prefix_last:
+            return {}
+        window: dict[str, Any] = {"first": dict(self._prefix_first), "last": dict(self._prefix_last)}
+        for name, end in self._prefix_last.items():
+            start = self._prefix_first.get(name)
+            # A counter that went backwards means the engine restarted; credit
+            # only what has accumulated since, as the retract counters do.
+            window[f"{name}_delta"] = end if start is None or end < start else end - start
+        return window
 
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap.
@@ -826,7 +986,7 @@ class KvMetricsRecorder:
             "capacity_derived": self._capacity_derived,
             "capacity_gb": self._capacity_gb,
             "series_count": self._series_count,
-            "prefix_cache": dict(self._prefix_cache),
+            "prefix_cache": self._prefix_cache_window(),
             "phase_marks": self._phase_marks,
             "retract_delta": counter_delta(
                 self._first_counters.get("retract", {}),
