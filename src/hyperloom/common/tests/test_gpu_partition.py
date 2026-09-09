@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for reading a card's compute-partition shape.
-
-Every entry point in the module under test is a read, so the tests supply
-``amd-smi`` payloads rather than asserting on commands issued. The payload
-shapes are the real ones: a partitioned device reports its *partition's* CU
-count and VRAM, which is the fact the module is built around.
-"""
+"""Tests for reading a card's compute-partition shape."""
 
 from __future__ import annotations
 
@@ -182,11 +176,7 @@ class TestLayoutFor:
             gp.layout_for("CPX", gpu_type="some-new-board")
 
     def test_an_uneven_division_raises_rather_than_flooring(self, monkeypatch):
-        """A floored CU count matches no device, and reports the wrong cause.
-
-        Every board in the table divides evenly today, so the guard is exercised
-        against an injected entry -- it exists for the one that does not.
-        """
+        """A floored CU count matches no device, and reports the wrong cause."""
         monkeypatch.setitem(gp.AMD_GPU_DISPATCH_IDENTITIES, "oddball", ("gfx950", 300))
         with pytest.raises(gp.PartitionError, match="does not divide"):
             gp.layout_for("CPX", gpu_type="oddball")
@@ -268,12 +258,7 @@ class TestFitsInPartition:
 
 
 class TestCapacityKnown:
-    """One predicate for "is this capacity worth checking against".
-
-    Two call sites asked the question with different tests -- ``is None`` in the
-    validator and falsiness in the arithmetic -- so a zero took opposite paths
-    through them.
-    """
+    """One predicate for \"is this capacity worth checking against\"."""
 
     @pytest.mark.parametrize(
         ("gib", "known"),
@@ -307,12 +292,7 @@ class TestPublicSurface:
         ["read_partition_mode", "read_partition_modes", "read_device_cu", "read_device_gib"],
     )
     def test_the_probe_helpers_behind_observe_partition_are_not_advertised(self, name):
-        """``observe_partition`` calls itself the single entry point a caller needs.
-
-        Listing the four steps it takes contradicted that: they are its call
-        graph, not the module's interface. They stay importable for the tests
-        that exercise each amd-smi payload shape.
-        """
+        """``observe_partition`` calls itself the single entry point a caller needs."""
         assert name not in gp.__all__
         assert callable(getattr(gp, name))
 

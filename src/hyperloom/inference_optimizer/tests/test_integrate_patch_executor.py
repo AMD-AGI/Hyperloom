@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_allowlist
+from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -73,7 +73,7 @@ index 0000000..1111111 100644
 
 @pytest.fixture(autouse=True)
 def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
 def _write_specialist_workspace(
@@ -95,7 +95,6 @@ def _write_specialist_workspace(
         "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": patch_paths,
-        "empty": False,
         "summary": "PR-A4 test",
         "confidence": 0.5,
     }
@@ -274,7 +273,7 @@ def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypa
     repo = tmp_path / "repo"
     init_git_repo(repo)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
         lambda: [str(repo)],
     )
     root = _resolve_framework_root(str(repo))
@@ -296,8 +295,8 @@ def _patch_for(rel_path: str) -> str:
 
 
 def _root_resolution_repos(tmp_path: Path, monkeypatch):
-    """The live layout: an unrelated repo heading the allowlist, and the
-    session's own framework tree further down it."""
+    """The live layout: an unrelated repo heading the search roots, and the
+    session's own framework tree further down them."""
     unrelated = tmp_path / "aiter"
     (unrelated / "csrc").mkdir(parents=True)
     (unrelated / "csrc" / "kernel.cpp").write_text("old\n")
@@ -309,7 +308,7 @@ def _root_resolution_repos(tmp_path: Path, monkeypatch):
     init_git_repo(session)
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
         lambda: [str(unrelated), str(session)],
     )
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(session))
@@ -324,7 +323,7 @@ def test_unresolvable_patch_target_does_not_divert_to_an_unrelated_repo(
 
     Target-aware matching is all-or-nothing across the patch set, so a single
     path that resolves nowhere rejects the tree that holds all the others. The
-    next choice used to be the head of the allowlist — ``/sgl-workspace/aiter/``,
+    next choice used to be the head of the search roots — ``/sgl-workspace/aiter/``,
     which leads the static defaults whatever the session is optimising. Patches
     naming the real tree's files then could not apply, and two of the first six
     candidates in a live session were written off as ``rejected_apply_fail`` at
@@ -628,7 +627,6 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": True,
                 "summary": "no proposals or patches",
             }
         )
@@ -777,7 +775,6 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": False,
                 "summary": "config-only specialist",
             }
         )

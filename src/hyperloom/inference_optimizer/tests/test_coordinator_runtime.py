@@ -139,9 +139,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
-    """A raised executor exception must not collapse into the generic
-    unknown_error gap bucket -- error_class carries the exception's own class name.
-    """
+    """A raised executor exception must not collapse into the generic unknown_error gap bucket -- error_class carries the exception's own class name."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -232,8 +230,8 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 3 agents × 2 ticks × 1 heartbeat = 6 send_message events
-        msgs = await c.bus.tail(n=20, topic="heartbeat")
+        # 3 agents × 2 ticks × 1 idle message = 6 send_message events
+        msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 6
     finally:
         await c.stop()
@@ -294,12 +292,7 @@ def _llm_error_rows(session_dir: Path) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_plain_backend_error_records_no_llm_error_row(session_dir):
-    """A deterministic local fault must not be counted as a provider failure.
-
-    ``BackendError`` covers unreadable ``emit.json``, a missing ``--review``
-    path, an absent SDK — none of which touched the model. Recording those
-    would make the Langfuse LLM error rate meaningless.
-    """
+    """A deterministic local fault must not be counted as a provider failure."""
     backends = _build_backends({})
     backends["robustness"] = _AlwaysFailingBackend("robustness")
     c = Coordinator(session_dir, backends=backends)
@@ -329,11 +322,7 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
 
 
 class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
-    """A self-tracing backend (critic-shaped): writes its own row, then raises.
-
-    Having ``set_trace_context`` is the contract that marks a backend as owning
-    its trace rows, so the Coordinator must not add one of its own.
-    """
+    """A self-tracing backend (critic-shaped): writes its own row, then raises."""
 
     def __init__(self, name: str, session_dir: Path) -> None:
         super().__init__(name)
@@ -379,12 +368,7 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
 
 @pytest.mark.asyncio
 async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
-    """One provider failure must produce one row, not one per writer.
-
-    The critic writes its own error row (carrying the review model) and then
-    raises; if the Coordinator also wrote one, Langfuse would count a single
-    critic failure twice, with disagreeing model/latency on the two rows.
-    """
+    """One provider failure must produce one row, not one per writer."""
     backends = _build_backends({})
     backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
     c = Coordinator(session_dir, backends=backends)
@@ -425,8 +409,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir,
     monkeypatch,
 ):
-    """A consecutive BackendError streak promotes per-call ``backend_error``
-    events into a single ``backend_unhealthy`` observation, fired once."""
+    """A consecutive BackendError streak promotes per-call ``backend_error`` events into a single ``backend_unhealthy`` observation, fired once."""
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
         "3",
@@ -629,8 +612,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 @pytest.mark.asyncio
 async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """When idempotency_key is under params, Coordinator treats it as the
-    delegate key and removes it from executor params."""
+    """When idempotency_key is under params, Coordinator treats it as the delegate key and removes it from executor params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
         payload={
@@ -763,8 +745,7 @@ async def test_explore_not_denied_before_profile(session_dir):
 async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
-    """Actions must NOT be denied when ``last_trace_analyze`` is stale (the
-    action-layer ``trace_analyze`` hard-gate was removed)."""
+    """Actions must NOT be denied when ``last_trace_analyze`` is stale (the action-layer ``trace_analyze`` hard-gate was removed)."""
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
@@ -813,8 +794,8 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        # ``baseline`` flows through the normal Critic/pending-proposal path; the
-        # prune-advisory mechanism under test is family-agnostic.
+        # ``baseline`` flows through the normal Critic/pending-proposal path; the prune-advisory mechanism under test
+        # is family-agnostic.
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
@@ -1251,12 +1232,7 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
 async def test_baseline_rounds_the_run_stopped_do_not_charge_the_failure_streak(session_dir, error_class):
-    """Three rounds the run stopped are not three baselines that failed.
-
-    The executor refuses to grade a reaped round because it would put a verdict
-    on a model the round never reached; the streak has to agree, or the session
-    stops as ``baseline_failed`` on the evidence of its own clock.
-    """
+    """Three rounds the run stopped are not three baselines that failed."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1368,8 +1344,8 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        # An enablement round is on record, but the lane was never admitted, so
-        # it must not hold the baseline_failed budget open.
+        # An enablement round is on record, but the lane was never admitted, so it must not hold the baseline_failed
+        # budget open.
         c.shared_state.enablement_mode = "off"
         c.shared_state.enablement.attempts = 2
         c.shared_state.enablement.inflight_task_id = "spec-off"
@@ -1488,13 +1464,7 @@ def _eval_unavailable_result() -> dict:
 
 @pytest.mark.asyncio
 async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_dir, monkeypatch):
-    """An eval-less re-baseline must not overwrite a measured enablement trigger.
-
-    ``disable_run_eval`` re-baselines report ``accuracy_unavailable`` with no
-    task/metric/source. They still count as a failed round, but the stored
-    ``accuracy_below_floor`` evidence (the measurement enablement must
-    reproduce) has to survive.
-    """
+    """An eval-less re-baseline must not overwrite a measured enablement trigger."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1582,14 +1552,7 @@ async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
     monkeypatch,
     error_class,
 ):
-    """The same round cannot be exempt from one ledger and charged to the other.
-
-    A reaped revalidation baseline is exempted from the baseline failure streak
-    because nothing about the baseline was measured. Charging it to the
-    enablement stall streak reaches the cap on the evidence of a clock, and the
-    session's terminal reason becomes ``enablement_stalled`` for rounds nobody
-    ever ran.
-    """
+    """The same round cannot be exempt from one ledger and charged to the other."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1611,14 +1574,7 @@ async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
 
 @pytest.mark.asyncio
 async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session_dir, monkeypatch):
-    """Nothing else reopens the window, so the stop must not close it.
-
-    ``validation_pending`` is set only by an eval-origin KEEP, and the
-    revalidation enqueue is gated on it, so clearing it strands a KEEP'd patch
-    that was never revalidated. The generation is bumped for the same reason
-    opening the window bumps it: the idempotency key must not resolve to the row
-    the run just stopped.
-    """
+    """Nothing else reopens the window, so the stop must not close it."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1652,14 +1608,7 @@ async def _cancelled_revalidation_row(c: Coordinator, *, gen: int) -> Task:
 
 @pytest.mark.asyncio
 async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir, monkeypatch):
-    """Opening a row the dispatcher would cancel on sight is what wedges the window.
-
-    A revalidation is a full baseline, and the queue scan drops a queued one the
-    wall-clock budget can no longer fit. That leaves a cancelled row owning this
-    window's idempotency key -- and a row cancelled at dispatch never produces a
-    result to route, so nothing advances the generation past it and every later
-    tick resolves the window to a row that measured nothing.
-    """
+    """Opening a row the dispatcher would cancel on sight is what wedges the window."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -1671,8 +1620,8 @@ async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir,
 
         assert await c._maybe_enqueue_enablement_baseline_revalidation() == ""
 
-        # The window survives the stop: same generation, still pending, and no
-        # row for the key a resume with budget left will need.
+        # The window survives the stop: same generation, still pending, and no row for the key a resume with budget
+        # left will need.
         assert st.enablement.validation_pending is True
         assert st.enablement.revalidation_generation == 3
         assert st.enablement.revalidation_task_id == ""
@@ -1683,12 +1632,7 @@ async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir,
 
 @pytest.mark.asyncio
 async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(session_dir, monkeypatch):
-    """A terminal row is a spent generation, not an enqueue.
-
-    ``create_or_return_existing`` hands back the cancelled row for as long as the
-    key names it, so without recognising that the window stays open resolving to
-    it for the rest of the session.
-    """
+    """A terminal row is a spent generation, not an enqueue."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -1711,14 +1655,7 @@ async def test_resume_does_not_charge_a_revalidation_the_run_cancelled(
     session_dir,
     monkeypatch,
 ):
-    """The exemption the reap grants must not be charged back by the resume.
-
-    The reap path leaves the window open without charging the stall streak,
-    because a round the run stopped measured nothing. The resume-time recovery saw
-    only "tracked row is terminal" and closed the window with the increment the
-    reap went out of its way to avoid -- reaching the ``enablement_stalled`` cap on
-    the evidence of a clock, one resume later.
-    """
+    """The exemption the reap grants must not be charged back by the resume."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -1818,8 +1755,7 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
 async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
     session_dir,
 ):
-    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot
-    eager fallback flag through the real coordinator failure handler."""
+    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot eager fallback flag through the real coordinator failure handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1851,9 +1787,7 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
 async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     session_dir,
 ):
-    """Executor consumption must clear Coordinator's live state too, or a later
-    coordinator save re-persists stale True and makes the one-shot eager
-    fallback sticky for all later baseline retries."""
+    """Executor consumption must clear Coordinator's live state too, or a later coordinator save re-persists stale True and makes the one-shot eager fallback sticky for all later baseline retries."""
     from hyperloom.orchestrator.actions.executors.baseline import (
         BaselineExecutor,
     )
@@ -1890,8 +1824,7 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
 async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
     session_dir,
 ):
-    """Resume case: with an existing baseline (tput > 0) the coordinator must
-    NOT arm the eager fallback on a later cuda-graph capture failure."""
+    """Resume case: with an existing baseline (tput > 0) the coordinator must NOT arm the eager fallback on a later cuda-graph capture failure."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1914,9 +1847,9 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
     session_dir,
     caplog,
 ):
-    """A watermark-roofline failure must increment roofline_failure_streak,
-    eagerly clear auto_roofline_pending_task_id, and emit an Auto-roofline
-    warning."""
+    """A watermark-roofline failure must increment roofline_failure_streak, eagerly clear
+    auto_roofline_pending_task_id, and emit an Auto-roofline warning.
+    """
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -2186,12 +2119,7 @@ def test_critic_md_carves_out_archival_actions():
 async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     tmp_path,
 ):
-    """A row cancelled between dispatch and the claim must not keep its lanes.
-
-    The rejection itself is the double-spawn guard and still reaches the
-    caller; what must not survive it is the lease, which would otherwise hold
-    every conflicting lane until the TTL sweep noticed.
-    """
+    """A row cancelled between dispatch and the claim must not keep its lanes."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2225,13 +2153,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
 async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
     tmp_path,
 ):
-    """Losing the race for a lane is a retry, not a task that started.
-
-    Claiming the row first would stamp it ``running`` for work that never
-    began, and every ``tasks.running()`` reader -- the KERNEL idle guard, the
-    CLOSE sequencer -- would hold a phase open for it until the lease TTL
-    expired.
-    """
+    """Losing the race for a lane is a retry, not a task that started."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2269,12 +2191,7 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
 
 @pytest.mark.asyncio
 async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path):
-    """The handle is the whole point: without it a cancel cannot find the action.
-
-    Going straight to ``sub.run_task`` is what left the kernel-entry reprofile
-    and the closing steps off ``_inflight_actions``, where a shutdown or a spent
-    budget could not stop them.
-    """
+    """The handle is the whole point: without it a cancel cannot find the action."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2299,11 +2216,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
 
 @pytest.mark.asyncio
 async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
-    """This is the only place ``type`` is published for gateway attribution.
-
-    A caller that reached ``sub.run_task`` directly would spend its tokens with
-    no action label, which is exactly the hole this method exists to close.
-    """
+    """This is the only place ``type`` is published for gateway attribution."""
     from hyperloom.common.llm_attribution import current_action
 
     db = SqliteConnection(tmp_path / "x.db")
@@ -2435,8 +2348,8 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         reason = await c.run(max_ticks=5)
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
-        # Two advance_phase calls per run (pre-reactor hint consume + main) each
-        # record a coordinator exception when the tick body raises.
+        # Two advance_phase calls per run (pre-reactor hint consume + main) each record a coordinator exception when
+        # the tick body raises.
         assert c.shared_state.crash_count == 2
         assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
@@ -2449,9 +2362,8 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 
 @pytest.mark.asyncio
 async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
-    # Defensive audit (log-only): a queued task whose kind has no registered
-    # executor is flagged in the process log; dispatch itself is unchanged
-    # (the task still fails on the missing runner).
+    # Defensive audit (log-only): a queued task whose kind has no registered executor is flagged in the process log;
+    # dispatch itself is unchanged (the task still fails on the missing runner).
     import logging
 
     delegate = Intent(
@@ -2468,8 +2380,8 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     async def _noop_executor(ctx):
         return {}
 
-    # A fresh SubAgentRunner has an empty registry; the audit only fires once the
-    # registry is populated, so register one unrelated executor first.
+    # A fresh SubAgentRunner has an empty registry; the audit only fires once the registry is populated, so register
+    # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
@@ -2482,13 +2394,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 @pytest.mark.asyncio
 async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
-    """A met target does not relabel a sweep that failed.
-
-    ``sweep_failed`` returns above the rename in ``compute_next_phase``, so it
-    reaches CLOSE under its own name and the run still exits non-zero. Reporting
-    it as ``target_reached`` would call a run successful on the strength of a
-    concurrency curve that never measured anything.
-    """
+    """A met target does not relabel a sweep that failed."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -2515,11 +2421,7 @@ async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
 
 @pytest.mark.asyncio
 async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
-    """The run must not stop on the hop into SWEEP.
-
-    conc_sweep reaches a terminal state many ticks later, so
-    ``exit_normal_sweep`` returns None meanwhile and the advance is a no-op.
-    """
+    """The run must not stop on the hop into SWEEP."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -2542,12 +2444,7 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
 
 @pytest.mark.asyncio
 async def test_target_reached_routes_through_sweep_then_close(session_dir):
-    """A met objective goes to SWEEP first, then closes on the target.
-
-    The concurrency curve has to measure the configuration the target was met
-    on, and the run must still reach the close sequencer rather than leaving
-    only the cli safety-net report.
-    """
+    """A met objective goes to SWEEP first, then closes on the target."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -2574,12 +2471,7 @@ async def test_target_reached_routes_through_sweep_then_close(session_dir):
 
 @pytest.mark.asyncio
 async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir):
-    """A met target must not be treated as a wall-clock rescue.
-
-    ``_maybe_run_close_post_opt_roofline`` returns early on ``closing_phase``,
-    which would drop the post-opt snapshot the optimization-progress chart
-    reads.
-    """
+    """A met target must not be treated as a wall-clock rescue."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)

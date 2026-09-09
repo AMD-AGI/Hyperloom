@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node grid restarts must carry the same reference server envs as baseline.
-
-Single-node reads the reference envs out of the materialized YAML, because Magpie
-launches the server from that YAML. Multi-node launches through
-``restart_server_for_round``, which never reads it, and the baseline forwards them
-explicitly -- so a grid that forwarded only ``variant.extra_envs`` measured every
-candidate on a server missing the envs the baseline ran with, and attributed the
-difference to the candidate's flags.
-"""
+"""Multi-node grid restarts must carry the same reference server envs as baseline."""
 
 from __future__ import annotations
 

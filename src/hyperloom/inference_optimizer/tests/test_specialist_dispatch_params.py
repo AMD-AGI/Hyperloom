@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Dispatch-dial matrix + freeform sanity-gate tests for the unified specialist.
-
-Covers the four orthogonal dials (``scope`` / ``mode`` / ``bench`` / ``lane``)
-resolved by ``resolve_specialist_profile`` and the mechanical PolicyGate that
-guards ``scope='freeform'`` dispatches.
-"""
+"""Dispatch-dial matrix + freeform sanity-gate tests for the unified specialist."""
 
 from __future__ import annotations
 
@@ -39,12 +34,10 @@ from hyperloom.orchestrator.specialists.profile import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# resolve_specialist_profile — the dial matrix
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # resolve_specialist_profile — the dial
+# matrix --------------------------------------------------------------------------- #
 def test_bare_dispatch_defaults_to_freeform_research_cpu():
-    """A truly bare dispatch (no scope, no domain/tag anchor) resolves to the
-    cheap, read-only freeform/research/CPU lane — safe & cheap first."""
+    """A truly bare dispatch (no scope, no domain/tag anchor) resolves to the cheap, read-only freeform/research/CPU lane — safe & cheap first."""
     prof = resolve_specialist_profile(None)
     assert prof.scope == SCOPE_FREEFORM
     assert prof.mode == MODE_RESEARCH
@@ -54,8 +47,7 @@ def test_bare_dispatch_defaults_to_freeform_research_cpu():
 
 
 def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
-    """A dispatch that carries a domain anchor but no explicit dials keeps the
-    historical single-domain, patch-authoring, GPU-leased behaviour."""
+    """A dispatch that carries a domain anchor but no explicit dials keeps the historical single-domain, patch-authoring, GPU-leased behaviour."""
     prof = resolve_specialist_profile({"domain": "serving_specialist"})
     assert prof == SpecialistProfile(
         scope=DEFAULT_SCOPE,
@@ -112,13 +104,11 @@ def test_bench_falsy_values(falsy):
 
 
 def test_holds_serving_slot_only_for_bench_capable():
-    """phase-3 §4 / invariant §6.3: only bench-capable patch specialists hold
-    the whole-machine serving_slot; authoring-only (incl. framework authoring)
-    holds num_gpus only so it can share the GPU queue."""
+    """phase-3 §4 / invariant §6.3: only bench-capable patch specialists hold the whole-machine serving_slot; authoring-only (incl. framework authoring) holds num_gpus only so it can share the GPU queue."""
     # Bench-capable patch specialist -> holds the slot.
     assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    # Framework authoring is NOT bench-capable by default -> no slot, but it
-    # still draws from the whole-machine pool (uses_whole_machine_gpu_lane).
+    # Framework authoring is NOT bench-capable by default -> no slot, but it still draws from the whole-machine pool
+    # (uses_whole_machine_gpu_lane).
     fw = {"framework_agent_authoring": True, "domain": "serving_specialist"}
     assert holds_serving_slot(fw) is False
     assert uses_whole_machine_gpu_lane(fw) is True
@@ -145,8 +135,7 @@ def test_research_mode_defaults_to_cpu_lane():
     assert resolve_specialist_profile({"scope": "domain", "mode": "research"}).lane == LANE_CPU
 
 
-# --------------------------------------------------------------------------- #
-# Freeform sanity gate (PolicyGate)
+# --------------------------------------------------------------------------- # Freeform sanity gate (PolicyGate)
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def orchestration_role():
@@ -185,8 +174,7 @@ def test_freeform_wave_ok(gate, orchestration_role):
 
 
 def test_freeform_skips_tag_and_gap_requirements(gate, orchestration_role):
-    """Freeform carries no domain/tag/gap anchor — the tag/gap checks that a
-    single-domain dispatch would trip must NOT fire here."""
+    """Freeform carries no domain/tag/gap anchor — the tag/gap checks that a single-domain dispatch would trip must NOT fire here."""
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch({"scope": "freeform", "task_description": "A short mandate."}),
@@ -282,9 +270,8 @@ def test_freeform_wave_all_invalid_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_wave_invalid_task"
 
 
-# --------------------------------------------------------------------------- #
-# Non-freeform scope gating still applies
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Non-freeform scope gating still
+# applies --------------------------------------------------------------------------- #
 _REAL_TAGS = sorted(KNOWLEDGE_DOMAIN_TAG_SET)
 
 
@@ -302,9 +289,8 @@ def test_domains_scope_with_one_tag_allowed(gate, orchestration_role):
     )
 
 
-# --------------------------------------------------------------------------- #
-# Gap auto-fill from the gaps[] ledger (friction symmetry, point 4)
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Gap auto-fill from the gaps[] ledger
+# (friction symmetry, point 4) --------------------------------------------------------------------------- #
 def _gate_with_gaps(gaps: list[dict]) -> PolicyGate:
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -377,9 +363,8 @@ def test_single_domain_scope_with_multiple_tags_allowed(gate, orchestration_role
     )
 
 
-# --------------------------------------------------------------------------- #
-# GPU request is governed by the same ceiling for *every* scope — freeform is
-# not a hole around the GPU-pool accounting.
+# --------------------------------------------------------------------------- # GPU request is governed by the same
+# ceiling for *every* scope — freeform is not a hole around the GPU-pool accounting.
 # --------------------------------------------------------------------------- #
 def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -458,8 +443,7 @@ def test_freeform_gpu_request_nonpositive_count_rejected(orchestration_role):
 
 
 def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
-    """Regression: the GPU check extracted into _validate_specialist_gpu_request
-    must still fire on the domain-anchored path."""
+    """Regression: the GPU check extracted into _validate_specialist_gpu_request must still fire on the domain-anchored path."""
     gate = _gate_with_gpu_capacity(0)
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
@@ -476,16 +460,7 @@ def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
 
 
 def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role, monkeypatch):
-    """A bench-enabled (mode=patch & bench=true) specialist auto-defaults
-    needs_gpu=True at dispatch; the gate must mirror that so it is rejected
-    when the pool is disabled.
-
-    Both pools have to be empty for the denial to apply: a bench specialist
-    leases from the whole-machine pool, which the gate exempts from a zero
-    specialist ceiling whenever that pool has cards. The visible-device env is
-    therefore pinned empty -- otherwise the pool is resolved from the host's real
-    GPUs and the test only passes on a GPU-less machine.
-    """
+    """A bench-enabled (mode=patch & bench=true) specialist auto-defaults needs_gpu=True at dispatch; the gate must mirror that so it is rejected when the pool is disabled."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
@@ -507,9 +482,7 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
 
 
 def test_bench_specialist_whole_machine_lane_allows_full_node(orchestration_role, monkeypatch):
-    """A bench specialist takes the whole-machine, time-shared GPU lane, so
-    serving occupying the whole node (TP == #GPUs) does not deny it — the
-    serving-disjoint carve does not apply to the whole-machine pool."""
+    """A bench specialist takes the whole-machine, time-shared GPU lane, so serving occupying the whole node (TP == #GPUs) does not deny it — the serving-disjoint carve does not apply to the whole-machine pool."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
@@ -530,8 +503,7 @@ def test_bench_specialist_whole_machine_lane_allows_full_node(orchestration_role
 
 
 def test_bench_specialist_denied_when_whole_machine_too_small(orchestration_role, monkeypatch):
-    """A bench specialist is still denied when the whole node physically has
-    fewer cards than the serving TP it must shard a server across."""
+    """A bench specialist is still denied when the whole node physically has fewer cards than the serving TP it must shard a server across."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
@@ -554,8 +526,7 @@ def test_bench_specialist_denied_when_whole_machine_too_small(orchestration_role
 
 
 def test_bench_specialist_omitted_gpu_count_allows_whole_machine(orchestration_role, monkeypatch):
-    """Omitting gpu_count defaults a bench specialist to serving TP and is valid
-    when the whole-machine pool has at least that many cards."""
+    """Omitting gpu_count defaults a bench specialist to serving TP and is valid when the whole-machine pool has at least that many cards."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
@@ -574,8 +545,7 @@ def test_bench_specialist_omitted_gpu_count_allows_whole_machine(orchestration_r
 
 
 def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
-    """A non-bench (research) specialist needs no GPU, so the pool-disabled
-    gate must NOT fire for it even when capacity is 0."""
+    """A non-bench (research) specialist needs no GPU, so the pool-disabled gate must NOT fire for it even when capacity is 0."""
     gate = _gate_with_gpu_capacity(0)
     gate._validate_specialist_dispatch(
         orchestration_role,
@@ -668,9 +638,8 @@ def test_resolve_specialist_max_turns_zero_uses_default():
     assert resolve_specialist_max_turns(5, default=1000) == 5
 
 
-# --------------------------------------------------------------------------- #
-# Tool surface: TaskKill and SlashCommand are denied.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Tool surface: TaskKill and
+# SlashCommand are denied. --------------------------------------------------------------------------- #
 def test_denylist_blocks_process_kill_tools():
     from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
@@ -680,8 +649,7 @@ def test_denylist_blocks_process_kill_tools():
     assert "TodoWrite" not in SPECIALIST_TOOL_DENYLIST
 
 
-# --------------------------------------------------------------------------- #
-# domain KEY -> kb_anchor translation
+# --------------------------------------------------------------------------- # domain KEY -> kb_anchor translation
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
@@ -703,8 +671,8 @@ def test_normalize_dispatch_tags_keeps_valid_anchor_and_dedups():
 def test_normalize_dispatch_tags_passes_garbage_through():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
 
-    # Genuinely unknown tags are NOT invented into an anchor — they pass
-    # through verbatim so the runner can synthesize an empty result.
+    # Genuinely unknown tags are NOT invented into an anchor — they pass through verbatim so the runner can synthesize
+    # an empty result.
     assert normalize_dispatch_tags({"tags": ["totally_bogus"]}) == ["totally_bogus"]
 
 
@@ -744,12 +712,7 @@ def test_dispatch_with_garbage_tag_allowed(gate, orchestration_role):
 
 
 def test_specialist_emit_hint_lists_every_llm_selectable_domain():
-    """The hint must name every domain Orchestration is allowed to pick.
-
-    Derived from the registry: a domain added without appearing in the hint is
-    one the LLM can never choose, and one listed but not selectable is an
-    invitation PolicyGate will refuse.
-    """
+    """The hint must name every domain Orchestration is allowed to pick."""
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -766,20 +729,16 @@ def test_specialist_emit_hint_lists_every_llm_selectable_domain():
         assert key not in hint, key
 
 
-# --------------------------------------------------------------------------- #
-# gate gpu_count default aligned with dispatcher at serving_tp=0
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # gate gpu_count default aligned with
+# dispatcher at serving_tp=0 --------------------------------------------------------------------------- #
 def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_role, monkeypatch):
-    """When serving_tp=0, a bench specialist with no explicit gpu_count must
-    default to the whole-machine pool size in the gate, matching the
-    dispatcher's fallback to ``gpu_pool.capacity``."""
+    """When serving_tp=0, a bench specialist with no explicit gpu_count must default to the whole-machine pool size in the gate, matching the dispatcher's fallback to ``gpu_pool.capacity``."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     # tp=0: no serving, gpu_specialist_capacity=4 (4-card node).
     gate = _gate_with_gpu_capacity(4, tp=0)
-    # gate's default gpu_count must be 4 (whole-machine), agreeing with the
-    # dispatcher that leases all 4 cards.
+    # gate's default gpu_count must be 4 (whole-machine), agreeing with the dispatcher that leases all 4 cards.
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch(
@@ -795,9 +754,8 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
     )
 
 
-# --------------------------------------------------------------------------- #
-# domain.default_mode → mode=research, lane=cpu
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # domain.default_mode → mode=research,
+# lane=cpu --------------------------------------------------------------------------- #
 def test_research_mode_param_forces_research_mode():
     """params['mode']='research' must override the global default."""
     profile = resolve_specialist_profile({"mode": "research", "domain": "serving_specialist"})

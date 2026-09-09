@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ingest — resolve a cross-language rewrite task into a :class:`RewriteSpec`.
-
-Also provides host-entry auto-discovery: when the task does not name the source
-host callable (``source_entry``), find the function that launches the target
-kernel (e.g. the ``softmax(x)`` wrapper that calls
-``softmax_kernel_online[grid](...)``, or the ``__host__`` launcher that calls
-``attention_kernel<<<...>>>``). This is a best-effort convenience; tasks should
-prefer to state ``source_entry`` explicitly.
-"""
+"""Ingest — resolve a cross-language rewrite task into a :class:`RewriteSpec`."""
 
 from __future__ import annotations
 
@@ -37,25 +29,11 @@ _SUFFIX_LANGUAGE = {
 }
 
 # A top-level C function signature, e.g. ``void attention(const float* q) {``.
-# Anchored at column 0, which is what separates a definition from the ``if`` and
-# ``for`` lines inside its body.
 _C_SIGNATURE_RE = re.compile(r"^[A-Za-z_][\w\s\*&:<>]*?\b(\w+)\s*\(")
 
 
 def resolve_source_language(source_path: str, declared: str = "") -> str:
-    """Resolve the language a source kernel is written in.
-
-    A caller's declaration wins, since it comes from a profiler that saw the
-    kernel run. Reports ``""`` rather than defaulting to Triton when neither the
-    declaration nor the file settles it.
-
-    Args:
-        source_path: Path to the source kernel.
-        declared: Language or curated kind the caller named, if any.
-
-    Returns:
-        One of :data:`protocol.SUPPORTED_SOURCE_LANGUAGES`, or ``""``.
-    """
+    """Resolve the language a source kernel is written in."""
     stated = str(declared or "").strip().lower().replace("-", "_")
     if stated in protocol.SUPPORTED_SOURCE_LANGUAGES:
         return stated
@@ -96,16 +74,7 @@ def discover_source_entry(
     *,
     source_language: str = "triton",
 ) -> str:
-    """Find the function that launches one of ``target_functions``.
-
-    For a Python source the heuristic parses with ``ast`` and returns the first
-    top-level ``def`` whose body references ``<target_fn>`` as a subscript/call
-    (a Triton ``kernel[grid](...)`` launch shows up as a ``Subscript`` on the
-    kernel name, or a plain ``Call``), preferring a wrapper that takes a single
-    positional arg (the classic ``op(x) -> y`` shape). A C-like source is scanned
-    textually instead, since ``ast`` can only raise ``SyntaxError`` on it.
-    Returns "" if none is found.
-    """
+    """Find the function that launches one of ``target_functions``."""
     if not target_functions:
         return ""
     if source_language and source_language != "triton":
@@ -177,9 +146,9 @@ def build_spec(
         )
         if entry:
             log.info("rewrite: auto-discovered source entry '%s' in %s", entry, Path(source_kernel).name)
-    # The source host entry is only a HINT shown to the port agent — the supplied
-    # or rewrite-prepared measurement driver owns how the reference/baseline is
-    # invoked, so an unresolved entry does not block the pipeline (no fail-fast).
+    # The source host entry is only a HINT shown to the port agent — the supplied or rewrite-prepared measurement
+    # driver owns how the reference/baseline is invoked, so an unresolved entry does not block the pipeline (no
+    # fail-fast).
     if not entry:
         log.warning(
             "rewrite: no source host entry for op '%s' (not provided, not "

@@ -1,42 +1,4 @@
-"""Producer-aware kernel recipe SDK records under a canonical ``kernel:`` id.
-
-This is KernelForge's rewrite knowledge and nothing else's. A rewrite resolves
-its own identity, writes its own candidate and owns its own champion pointer; it never
-reaches into the inference document that a parent assembles. A run under
-Hyperloom and a run from the command line therefore record the same way.
-
-The agent hands over the complete picture of one port plus the files that
-belong to it, and the SDK owns the envelope around it -- the identity, the
-candidate id and the champion policy -- so a caller never re-derives any of
-them. Normal reads restore JSON and every file for the selected Top-N into
-separate session directories::
-
-    identity = KernelRecipeIdentity(
-        producer="flydsl",
-        kernel_name="softmax",
-        framework="vllm",
-        framework_version="0.10.0",
-        backend="flydsl",
-        gpu="mi355x",
-    )
-    kb = KernelRecipeKB.open_identity(identity, config)
-    prior = kb.read_best(workspace / "prior-recipes")
-    outcome = kb.write_candidate({"metric": {...}}, [kernel_path], 1.4)
-
-The canonical id includes ``producer``. KB Store support for that canonical
-dimension is still a live deployment blocker; this client does not emulate it
-with a producer-neutral fallback.
-
-``speedup`` is a parameter rather than part of the payload because it decides
-the champion pointer. A port that does not beat its source baseline is still
-recorded: it is what saves the next run from repeating PORT. Only the pointer
-is gated.
-
-Wiring is unconditional. A run with no configured store leaves the SDK
-inactive and turns every call into a no-op, so a caller never has to branch on
-whether the KB is on. Nothing here raises into the agent: knowledge is
-advisory, and a failure to record must not fail a rewrite.
-"""
+"""Producer-aware kernel recipe SDK records under a canonical ``kernel:`` id."""
 
 from __future__ import annotations
 
@@ -67,11 +29,7 @@ _DIGEST_LEN = 32
 
 @dataclass(frozen=True)
 class CandidateMetadata:
-    """Ranking metadata for one previously recorded port.
-
-    ``speedup`` is the recorded claim; ``measured_speedup`` is set only once a
-    consumer applied this port and measured it, and it is what ranking trusts.
-    """
+    """Ranking metadata for one previously recorded port."""
 
     session_id: str
     value: dict[str, Any]
@@ -90,12 +48,7 @@ class CandidateBundle(CandidateMetadata):
 
 
 def kb_store_secrets(config: Config) -> tuple[str, ...]:
-    """The credentials a store failure's text must never be allowed to keep.
-
-    Public because the callers that wrap this facade report their own store
-    errors, and a reason is only as redacted as the secret list it was given, so
-    every one of them redacts against the same configured credential.
-    """
+    """The credentials a store failure's text must never be allowed to keep."""
     knowledge = knowledge_config_from_runtime(config)
     return tuple(value for value in (knowledge.kb_store_token,) if value)
 
@@ -125,12 +78,7 @@ def _port_digest(knowledge: Mapping[str, Any], files: Mapping[str, Path]) -> str
 
 
 class KernelRecipeKB:
-    """Read and write one producer's candidates for one kernel recipe identity.
-
-    The producer owns candidate ranking and its champion pointer. ``backend`` is
-    separate: it describes the final implementation type produced by that
-    system, not the system that authored the recipe.
-    """
+    """Read and write one producer's candidates for one kernel recipe identity."""
 
     def __init__(
         self,
@@ -172,12 +120,7 @@ class KernelRecipeKB:
         canonical_id: str,
         config: Config,
     ) -> "KernelRecipeKB":
-        """Open the SDK on an address a prior read already resolved.
-
-        Amending a record needs the address the candidate came from and nothing
-        else, so the identity dimensions are not re-derived here; that keeps a
-        write-back from being filed anywhere but the record it measured.
-        """
+        """Open the SDK on an address a prior read already resolved."""
         if not str(canonical_id or "").strip():
             return cls(None, reason="missing_canonical_id")
         store = create_rewrite_record_store(config)
@@ -225,15 +168,7 @@ class KernelRecipeKB:
         destination: str | Path,
         limit: int = 3,
     ) -> list[CandidateBundle]:
-        """Materialize this producer's recorded recipes, best evidence first.
-
-        Candidates a consumer already measured come first, ranked by that
-        measurement; the rest follow ranked by the speedup they claim.
-        A candidate that lost to its source baseline is included: the caller
-        decides whether to replay it or read it as reference material. Each
-        selected candidate gets ``<destination>/<session-id>/recipe.json`` and
-        its own ``files/`` tree; candidates outside Top-N are never downloaded.
-        """
+        """Materialize this producer's recorded recipes, best evidence first."""
         if not self.active or limit <= 0:
             return []
         try:
@@ -264,12 +199,7 @@ class KernelRecipeKB:
             return []
 
     def prior_file(self, session_id: str, rel_path: str) -> bytes:
-        """Fetch one artifact's byte-exact contents on demand.
-
-        The result is artifact bytes without decoding or newline conversion.
-        Normal Top-N consumers should use the materialized :class:`Path`
-        objects returned by :meth:`read_top_n`.
-        """
+        """Fetch one artifact's byte-exact contents on demand."""
         if not self.active:
             return b""
         try:
@@ -285,18 +215,7 @@ class KernelRecipeKB:
         files: Any = (),
         speedup: float | None = None,
     ) -> dict[str, Any]:
-        """Record the complete picture of one port, plus the files it needs.
-
-        ``files`` is either a list of paths, whose basenames become the
-        artifact names, or a ``{rel_path: source}`` mapping when the names
-        matter. The champion pointer moves only when this port both improves on
-        its source baseline and beats the identity's incumbent.
-
-        Never raises: a refusal is returned, and the caller persists that reason
-        in the run's result JSON, so a store exception is redacted and bounded
-        before it is handed back. The exception type leads the message, so the
-        cap can only cut the tail of a long error body.
-        """
+        """Record the complete picture of one port, plus the files it needs."""
         if not self.active:
             return {"written": False, "reason": self.reason or "not_configured"}
         if not isinstance(knowledge, Mapping):
@@ -338,14 +257,7 @@ class KernelRecipeKB:
         session_id: str,
         measured_speedup: float,
     ) -> dict[str, Any]:
-        """Amend one recorded candidate with the speedup this run measured.
-
-        A recorded measurement is what lets the next run rank this candidate on
-        evidence instead of on the number it claims. Never raises: the caller
-        reports the returned reason rather than losing the run over it, and that
-        reason is persisted into the run's result JSON, so a store exception is
-        redacted and bounded before it is handed back.
-        """
+        """Amend one recorded candidate with the speedup this run measured."""
         if not self.active:
             return {"recorded": False, "reason": self.reason or "not_configured"}
         try:

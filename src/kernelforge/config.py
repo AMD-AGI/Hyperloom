@@ -85,8 +85,7 @@ class Config:
     experiments_dir: Path = field(default=None)
     # There is no `knowledge_dir` here any more. It used to resolve the packaged
     # `data/knowledge_base` tree, which no caller ever read; the tree is gone and
-    # the field went with it. Knowledge the loop *produces* goes to
-    # `resources.writable_knowledge_root()`, which is a different directory.
+    # the field went with it.
     # Curated per-backend knowledge tree injected into the forge-loop system
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)

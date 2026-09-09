@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Closing the events a killed session left open.
-
-Every event closes itself when the phase or action that opened it ends. A
-session that was killed mid-phase never reaches that call, so its fragments
-survive with no closing write behind them. Export runs this first, so those
-fragments become events instead of being dropped for having no entry.
-
-What a recovered event says about itself is deliberately thin. Its rows are
-assembled in full -- everything that was recorded before the kill is on the
-timeline -- but its status is :data:`EVENT_STATUS_INTERRUPTED` and never the
-status assembly would derive. Nothing judged the run: the verdict is the
-phase's to give, and it was killed before giving it. Calling such an event
-``succeeded`` because its rows look complete is the inference this design
-exists to remove.
-"""
+"""Closing the events a killed session left open."""
 
 from __future__ import annotations
 
@@ -34,18 +20,7 @@ log = logging.getLogger(__name__)
 
 
 class _EventType(NamedTuple):
-    """One timeline event type, described well enough to recover it.
-
-    Attributes:
-        event_type (str): The timeline event type, e.g. ``kernel``.
-        kind (str): The sub-kind its envelope carries.
-        event_section (str): The event-level section holding one fragment per
-            event, which is what says an event exists at all.
-        sections (tuple[str, ...]): Every section assembly reads.
-        assemble (Callable[..., tuple[dict[str, Any], str]]): The assembler,
-            called as ``assemble(parts, event=...)``. Its derived status is
-            discarded on this path; see the module docstring.
-    """
+    """One timeline event type, described well enough to recover it."""
 
     event_type: str
     kind: str
@@ -59,11 +34,8 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
         event_type=kernel_event.EVENT_TYPE,
         kind=kernel_event.EVENT_KIND,
         event_section=kernel_event.SECTION_EVENT,
-        # Both families, matching what the phase's own close reads: a roofline
-        # dispatched inline records into the kernel event, and the re-profile
-        # block is assembled from those rows. Reading only the ``kernel_*``
-        # sections here recovered the event with an empty ``forge.reprofile``,
-        # which is the case recovery exists for.
+        # Both families, matching what the phase's own close reads: a roofline dispatched inline records into the
+        # kernel event, and the re-profile block is assembled from those rows.
         sections=EVENT_SECTIONS,
         assemble=kernel_event.assemble_kernel_ext,
     ),
@@ -85,19 +57,7 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
 
 
 def finalize_events(session_dir: Path) -> list[str]:
-    """Close every event whose fragments outlived the phase that recorded them.
-
-    Binds the session itself rather than taking a bound one, because export
-    runs from processes that never bound anything -- a re-export of a finished
-    session, a CLI reading a directory handed to it.
-
-    Args:
-        session_dir (Path): The session whose spool to recover.
-
-    Returns:
-        list[str]: The event ids closed, in the order they were closed. Empty
-            when nothing was left open, which is the normal case.
-    """
+    """Close every event whose fragments outlived the phase that recorded them."""
     from ...session.session_binding import session_scope
 
     closed: list[str] = []
@@ -108,14 +68,7 @@ def finalize_events(session_dir: Path) -> list[str]:
 
 
 def _finalize_type(spec: _EventType) -> list[str]:
-    """Close the open events of one type.
-
-    Args:
-        spec (_EventType): The type to recover.
-
-    Returns:
-        list[str]: The event ids closed.
-    """
+    """Close the open events of one type."""
     try:
         parts = event_parts(spec.sections)
     except Exception:  # noqa: BLE001 — a spool we cannot read costs the export nothing else
@@ -150,15 +103,7 @@ def _finalize_type(spec: _EventType) -> list[str]:
 
 
 def _start_time(event_rows: list[dict[str, Any]], event: str) -> str:
-    """Return the start time recorded when the event was opened.
-
-    Args:
-        event_rows (list[dict[str, Any]]): The event-level fragments.
-        event (str): The event id wanted.
-
-    Returns:
-        str: The ISO timestamp, or ``""`` when the event has none.
-    """
+    """Return the start time recorded when the event was opened."""
     for row in event_rows:
         if isinstance(row, Mapping) and str(row.get("event_id") or "") == str(event):
             return str(row.get("start_time") or "")

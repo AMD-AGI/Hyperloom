@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,25 +32,7 @@ from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "controller-test",
-    "GIT_AUTHOR_EMAIL": "controller-test@local",
-    "GIT_COMMITTER_NAME": "controller-test",
-    "GIT_COMMITTER_EMAIL": "controller-test@local",
-}
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env={**os.environ, **_GIT_IDENTITY},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:

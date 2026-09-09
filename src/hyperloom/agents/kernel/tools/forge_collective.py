@@ -118,14 +118,7 @@ class CollectiveInvocationSpecUnavailable(RuntimeError):
 
 
 def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> str:
-    """Record how the traced collective is called, for forge-loop task prep.
-
-    The spec carries the argument order, dtypes and case ids that the generated
-    driver leaves as ``NotImplementedError`` for the author to fill in. Starting
-    a multi-hour campaign without it only defers the failure to task
-    preparation, so this raises rather than degrading -- the same call the
-    rewrite lane makes when its own spec is absent.
-    """
+    """Record how the traced collective is called, for forge-loop task prep."""
     try:
         path = output_dir / invocation_spec_filename(candidate)
         write_invocation_spec(
@@ -143,11 +136,7 @@ def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> s
 
 
 def _campaign_is_resumable(workspace: str) -> bool:
-    """Return whether the workspace holds a forge-loop campaign to continue.
-
-    ``run_state.json`` is the only safe trigger: forge-loop requires it for
-    ``--resume`` and refuses a fresh campaign over leftover artifacts.
-    """
+    """Return whether the workspace holds a forge-loop campaign to continue."""
     return (Path(workspace) / "forge_experiments" / "run_state.json").is_file()
 
 
@@ -171,9 +160,8 @@ def _build_cmd(
     cmd = [str(cli), "forge-loop"] if cli else [sys.executable, "-m", "kernelforge.cli", "forge-loop"]
     _add_opt(cmd, workspace, "--workspace")
     if resuming:
-        # forge-loop owns the campaign's immutable configuration once it has
-        # been saved, and rejects any of --kernel / --driver / --program-md-file
-        # / --source-files / --operator-name alongside --resume.
+        # forge-loop owns the campaign's immutable configuration once it has been saved, and rejects any of --kernel /
+        # --driver / --program-md-file / --source-files / --operator-name alongside --resume.
         cmd.append("--resume")
     else:
         _add_opt(cmd, source_file, "--kernel")
@@ -199,9 +187,8 @@ def _build_cmd(
         raise ValueError("deadline_unix must be a positive integer")
     _add_opt(cmd, deadline_unix, "--deadline-unix")
     _add_opt(cmd, args.get("agent_timeout_sec"), "--agent-timeout-sec")
-    # Match forge_submit / forge-fusion: pin the provider when the coordinator
-    # resolved one, and disable the silent Claude fallback for Codex so a
-    # missing SDK fails here instead of degrading into an unauthenticated run.
+    # Match forge_submit / forge-fusion: pin the provider when the coordinator resolved one, and disable the silent
+    # Claude fallback for Codex so a missing SDK fails here instead of degrading into an unauthenticated run.
     agent_backend = str(args.get("agent_backend") or "").strip().lower()
     if agent_backend == "codex":
         cmd.extend(["--agent-backend", "codex", "--agent-fallback-provider", "none"])
@@ -238,8 +225,8 @@ def _build_cmd(
     spec_file = str(args.get("invocation_spec_file") or "").strip()
     if spec_file and Path(spec_file).is_file():
         _add_opt(cmd, str(Path(spec_file).resolve()), "--invocation-spec-file")
-    # Gate integrity depends on task preparation pinning the driver digest;
-    # disabling preparation would remove it without any local symptom.
+    # Gate integrity depends on task preparation pinning the driver digest; disabling preparation would remove it
+    # without any local symptom.
     if "--no-prepare-task" in cmd:
         raise ValueError("collective driver integrity requires forge-loop task preparation")
     return cmd
@@ -374,13 +361,7 @@ def _restore_config(repo: str, snapshot: dict[str, str | None]) -> None:
 
 
 def _restore_journal_path(repo: str) -> Path:
-    """Return the crash-recovery journal path for an in-place campaign.
-
-    This does not duplicate forge-loop's ``run_state.json``: that recovers
-    iteration progress inside a campaign, while forge-loop explicitly leaves
-    worktree prep, export and restore to its caller. Only this journal can put
-    an in-place checkout back the way the operator left it.
-    """
+    """Return the crash-recovery journal path for an in-place campaign."""
     return Path(repo) / ".git" / "hyperloom_collective_restore.json"
 
 
@@ -428,9 +409,8 @@ def _write_restore_journal(repo: str, restore: dict[str, Any]) -> None:
     payload["baseline_tracked_sha256"] = hashlib.sha256(tracked_patch).hexdigest()
     path = _restore_journal_path(repo)
     tmp = path.with_suffix(".tmp")
-    # The journal is the only record that can undo an in-place campaign, so it
-    # has to survive a power loss, not just a process crash: fsync the contents
-    # before the rename and the directory after it.
+    # The journal is the only record that can undo an in-place campaign, so it has to survive a power loss, not just a
+    # process crash: fsync the contents before the rename and the directory after it.
     with tmp.open("w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, indent=2, sort_keys=True))
         handle.flush()
@@ -481,14 +461,7 @@ def _verify_restored_repo(repo: str, payload: dict[str, Any]) -> None:
 
 
 def _recover_stale_inplace(repo: str) -> bool:
-    """Recover a journaled in-place campaign under the repository lock.
-
-    The journal decides, not the branch name: an interrupted restore leaves HEAD
-    back on the original branch, so a surviving journal whose tree diverged means
-    the previous restore never finished and must be replayed. Replaying puts back
-    the operator's pre-campaign content, including uncommitted work, and discards
-    only the agent's edits.
-    """
+    """Recover a journaled in-place campaign under the repository lock."""
     journal = _restore_journal_path(repo)
     lock = _acquire_repo_lock(repo)
     if lock is None:
@@ -539,9 +512,8 @@ def _recover_stale_inplace(repo: str) -> bool:
         if not parked_on_forge_branch:
             head = _git(repo, "rev-parse", "HEAD").stdout.strip()
             if branch != str(payload.get("orig_branch") or "") or head != str(payload.get("orig_head") or ""):
-                # The repository advanced past the recorded baseline, so the
-                # user has replaced the state this journal describes. Restoring
-                # would roll their commits back.
+                # The repository advanced past the recorded baseline, so the user has replaced the state this journal
+                # describes.
                 log.warning(
                     "Discarding a superseded collective restore journal: %s",
                     journal,
@@ -549,16 +521,13 @@ def _recover_stale_inplace(repo: str) -> bool:
                 journal.unlink()
                 return True
             if _recorded_tree_matches(repo, payload):
-                # Still at the baseline, so the previous restore completed and
-                # only the journal outlived it.
+                # Still at the baseline, so the previous restore completed and only the journal outlived it.
                 _restore_config(repo, dict(payload.get("config_snapshot") or {}))
                 _verify_restored_repo(repo, payload)
                 journal.unlink()
                 return True
-            # HEAD never moved but the tree diverges: the previous restore was
-            # interrupted after it reset HEAD and before it replayed the
-            # baseline. This is indistinguishable from an ordinary branch by
-            # name alone, which is why the journal decides.
+            # HEAD never moved but the tree diverges: the previous restore was interrupted after it reset HEAD and
+            # before it replayed the baseline.
         log.warning(
             "Replaying an unfinished collective restore for %s (branch=%s)",
             repo,
@@ -1156,8 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 forge_payload = {}
             if published_best:
-                # A published best supersedes a wrapper failure but does not
-                # erase it: the KEEP still came out of an unclean exit.
+                # A published best supersedes a wrapper failure but does not erase it: the KEEP still came out of an
+                # unclean exit.
                 superseded = {
                     key: forge_payload[key] for key in ("error", "detail") if forge_payload.get(key) not in (None, "")
                 }

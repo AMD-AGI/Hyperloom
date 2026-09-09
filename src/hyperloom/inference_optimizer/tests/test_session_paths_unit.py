@@ -143,8 +143,8 @@ def test_fs_safe_id_folds_a_fusion_operator_name():
 
 
 def test_fs_safe_id_preserves_ordinary_ids():
-    # uuid hex / k001 / dotted names round-trip untouched, so existing run dirs
-    # keep their names and no in-flight session sees its workspace move.
+    # uuid hex / k001 / dotted names round-trip untouched, so existing run dirs keep their names and no in-flight
+    # session sees its workspace move.
     for value in ("k001", "abc123", "kernel.name-v2", "9f3c1a2b4d5e"):
         assert sp.fs_safe_id(value) == value
 

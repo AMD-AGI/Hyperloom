@@ -1,18 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Collective-kernel name detection.
-
-Name-pattern fallback for multi-GPU collectives TraceLens missed; false
-positives are cheap so we bias toward them.
-"""
+"""Collective-kernel name detection."""
 
 from __future__ import annotations
 
 import re
 
-# Canonical collective op tokens (full-verb match, rejecting bare "reduce"),
-# applied to the normalised lowercase kernel name.
+# Canonical collective op tokens (full-verb match, rejecting bare "reduce"), applied to the normalised lowercase
+# kernel name.
 _COLLECTIVE_TOKEN_PATTERNS = [
     re.compile(r"(?:^|_)all_?reduce(?:_|$)"),
     re.compile(r"(?:^|_)all_?gather(?:_|$)"),
@@ -25,21 +21,13 @@ _COLLECTIVE_TOKEN_PATTERNS = [
 
 _NORMALISE_DELIMS = re.compile(r"[\W]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-# Itanium mangling prefixes each identifier with its length ("5aiter",
-# "33reduce_scatter_..."), which glues the digit onto the token and defeats the
-# word-start anchor in the patterns below. Split digit->letter as well.
+# Itanium mangling prefixes each identifier with its length ("5aiter", "33reduce_scatter_..."), which glues the digit
+# onto the token and defeats the word-start anchor in the patterns below.
 _DIGIT_LETTER_BOUNDARY = re.compile(r"(?<=\d)(?=[a-z])")
 
 
 def _normalise_kernel_name(name: str) -> str:
-    """Lowercase and underscore-delimit a name so substring tests are stable.
-
-    Args:
-        name: The raw kernel name.
-
-    Returns:
-        The normalized name, or an empty string if ``name`` is falsy.
-    """
+    """Lowercase and underscore-delimit a name so substring tests are stable."""
     if not name:
         return ""
     s = _CAMEL_BOUNDARY.sub("_", str(name))
@@ -49,18 +37,7 @@ def _normalise_kernel_name(name: str) -> str:
 
 
 def kernel_name_implies_multigpu(name: str) -> bool:
-    """Report whether a kernel name implies a multi-GPU collective op.
-
-    Patterns are applied to the entire normalized name (camel-split, non-word
-    chars collapsed to underscores, lowercased), so a namespace or prefix token
-    such as ``nccl::`` also matches; over-matching is intentional.
-
-    Args:
-        name: The kernel name to test.
-
-    Returns:
-        ``True`` if the name matches a known collective-op pattern.
-    """
+    """Report whether a kernel name implies a multi-GPU collective op."""
     norm = _normalise_kernel_name(name)
     if not norm:
         return False

@@ -214,16 +214,7 @@ def write_forge_handoff(
     handoff_dir: Path | None = None,
     baselines: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Atomically write one Forge handoff and return its directory.
-
-    ``handoff_dir`` lets the caller keep the handoff beside the controller output
-    that consumed it, so a second attempt within one macro cycle does not
-    overwrite the evidence the first one was given.
-
-    ``baselines`` is what the seal returned. Naming the same commits the seal
-    produced is what lets a task that reaches for a path Git does not carry be
-    answered from this document alone.
-    """
+    """Atomically write one Forge handoff and return its directory."""
     if handoff_dir is None:
         handoff_dir = forge_handoff_dir(
             Path(session_dir),

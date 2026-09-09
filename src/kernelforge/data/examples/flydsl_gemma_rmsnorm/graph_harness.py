@@ -1,64 +1,4 @@
-"""Reusable CUDA/HIP graph timing harness for kernel micro-benchmarks.
-
-Why this exists
----------------
-A tiny kernel's wall time is dominated by HOST-side launch/dispatch overhead
-(Python -> framework -> kernel launch), not by the GPU work itself. If the loop
-benchmarks in eager mode, the agent ends up "optimizing" launch overhead, which
-is meaningless — and real AMD serving runs these ops under a HIP graph anyway.
-
-This harness captures ONE invocation of an operator into a CUDA/HIP graph and
-then times graph *replays*. CUDA events bracket only the GPU stream timeline, so
-the reported time is GPU execution, with the host replay-launch cost excluded —
-the quantity that actually matters for a latency-bound kernel.
-
-How to use it (operator-agnostic)
----------------------------------
-Any operator plugs in by passing a zero-argument ``step`` closure that runs ONE
-invocation on tensors the caller has ALREADY allocated. A graph replays the same
-memory every time, so:
-
-  * allocate all inputs (and, if you can, outputs) ONCE before calling;
-  * ``step`` must be replay-safe: no host-side control flow that depends on the
-    result, no per-call allocation that must differ between replays (internal
-    allocations are fine — they are captured into the graph's private pool and
-    reused on replay);
-  * anything that must compile/autotune (e.g. JIT) happens during warmup, before
-    capture — the harness warms up on a side stream first;
-  * ``step`` must launch its kernel on the CURRENT stream. torch.cuda.graph
-    captures a private capture stream; a kernel launched on the default/NULL
-    stream (common for DSLs that manage their own stream) is NOT recorded, which
-    yields a silently EMPTY graph that "replays" in a few microseconds
-    regardless of problem size. See ``verify`` below to guard against this.
-
-Capture-validity guard (``dirty`` / ``verify``)
------------------------------------------------
-Because an uncaptured launch produces a fast-but-empty graph, trusting the raw
-replay time is dangerous. If the caller passes ``dirty`` and ``verify``, the
-harness — after capture — corrupts the output via ``dirty()``, replays once, and
-checks ``verify()``. If the replay did NOT recompute a correct result the graph
-captured no real work, so the harness rejects it and falls back to eager timing
-with a mode string that says so. This turns a silent mis-measurement into a loud,
-honest one.
-
-Example::
-
-    x = torch.randn(4096, 1024, device="cuda", dtype=torch.float32)
-    out = torch.empty_like(x)
-    ref = torch.softmax(x, dim=-1)
-    result = cuda_graph_bench(
-        lambda: my_op(x, out),
-        warmup=10, iters=30,
-        dirty=lambda: out.zero_(),
-        verify=lambda: torch.allclose(out, ref, atol=1e-2, rtol=1e-2),
-    )
-    for t in result["times_ms"]:
-        print(f"wall_ms: {t:.6f}")
-
-On a platform/op that cannot be captured (or fails the guard), it transparently
-falls back to eager event timing so the driver still produces measurements (the
-returned ``mode`` says which path ran and why).
-"""
+"""Reusable CUDA/HIP graph timing harness for kernel micro-benchmarks."""
 
 from __future__ import annotations
 
@@ -92,18 +32,12 @@ def _time_graph(
     dirty: Callable[[], None] | None,
     verify: Callable[[], bool] | None,
 ) -> list[float]:
-    """Capture ``step`` into a CUDA/HIP graph and time per-replay GPU execution.
-
-    Raises on capture failure OR on a failed capture-validity guard so the caller
-    can fall back to eager timing.
-    """
+    """Capture ``step`` into a CUDA/HIP graph and time per-replay GPU execution."""
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
 
-    # Capture-validity guard: an uncaptured launch yields an empty graph whose
-    # replay is a fast no-op. Corrupt the output, replay, and confirm the graph
-    # actually recomputed a correct result before we trust any timing.
+    # Capture-validity guard: an uncaptured launch yields an empty graph whose replay is a fast no-op.
     if dirty is not None and verify is not None:
         dirty()
         torch.cuda.synchronize()
@@ -141,32 +75,12 @@ def cuda_graph_bench(
     dirty: Callable[[], None] | None = None,
     verify: Callable[[], bool] | None = None,
 ) -> dict:
-    """Benchmark ``step`` under CUDA/HIP graph replay (eager fallback).
-
-    Args:
-        step: zero-arg closure running ONE operator invocation on pre-allocated
-            tensors (see module docstring for the replay-safety contract). It
-            must launch on the current stream.
-        warmup: warmup invocations (on a side stream) before capture — this is
-            where JIT compile / autotune / workspace allocation must happen.
-        iters: number of timed graph replays.
-        capture: set False to force the eager path (e.g. for A/B comparison).
-        dirty: optional zero-arg closure that corrupts the output tensor(s)
-            (e.g. ``lambda: out.zero_()``). Used with ``verify`` to prove the
-            captured graph actually did work.
-        verify: optional zero-arg predicate returning True iff the output is
-            correct after a replay. When both ``dirty`` and ``verify`` are given,
-            a graph that fails the check is rejected (falls back to eager).
-
-    Returns:
-        dict with ``mode`` ("cudagraph" or an "eager..." reason), ``times_ms``
-        (per-iteration GPU time), and ``median_ms`` / ``mean_ms`` aggregates.
-    """
+    """Benchmark ``step`` under CUDA/HIP graph replay (eager fallback)."""
     if not torch.cuda.is_available():
         raise RuntimeError("no GPU available (torch.cuda.is_available() is False)")
 
-    # Warm up on a side stream so JIT compile / autotune / workspace allocation
-    # complete BEFORE capture (those steps are not capturable).
+    # Warm up on a side stream so JIT compile / autotune / workspace allocation complete BEFORE capture (those steps
+    # are not capturable).
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):

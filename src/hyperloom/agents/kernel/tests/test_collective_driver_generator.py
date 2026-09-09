@@ -279,13 +279,7 @@ def test_bench_times_a_captured_graph(tmp_path):
 
 
 def test_bench_does_not_resynchronise_between_samples(tmp_path):
-    """One barrier per sample would hide arrival skew and reward its removal.
-
-    A barrier immediately before each replay resets the ranks to a fully
-    synchronised state, which is the condition under which deleting an internal
-    barrier looks free. The timed region must hold at most the single entry
-    barrier.
-    """
+    """One barrier per sample would hide arrival skew and reward its removal."""
     driver, program = _gen(tmp_path)
     bench = driver.split("def bench_case(")[1].split("def profile_case(")[0]
     assert bench.count("dist.barrier(group=ctx.group)") == 1
@@ -335,13 +329,11 @@ def test_driver_self_launches_under_torchrun(tmp_path):
 
 
 def test_driver_refuses_to_oversubscribe_gpus(tmp_path):
-    """Two ranks on one device would measure intra-device copies, and the
-    resulting 'speedup' would not transfer to the real multi-GPU path."""
+    """Two ranks on one device would measure intra-device copies, and the resulting 'speedup' would not transfer to the real multi-GPU path."""
     driver, _ = _gen(tmp_path)
     assert "visible < WORLD_SIZE" in driver
     assert "world_size > visible" in driver
-    # Each rank must own a device, so binding follows LOCAL_RANK rather than a
-    # modulo of the visible count.
+    # Each rank must own a device, so binding follows LOCAL_RANK rather than a modulo of the visible count.
     assert "rank % torch.cuda.device_count()" not in driver
     assert 'os.environ["LOCAL_RANK"]' in driver
 

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The orchestrator's import path into the framework agent's shared tables.
-
-Re-exports :func:`repo_url_for_framework` so the orchestrator has one place to
-reach it, and owns the discovery retry budget the source arm declines on.
-"""
+"""The orchestrator's import path into the framework agent's shared tables."""
 
 from __future__ import annotations
 

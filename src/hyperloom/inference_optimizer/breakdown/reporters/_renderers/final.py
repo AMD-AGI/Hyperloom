@@ -16,31 +16,18 @@ from ..base import (
 )
 from ._invocation import render_invocation_block
 
-# ``geak_pending.status`` values meaning the candidate was measured but its
-# revalidation never landed, so the win was abandoned rather than judged.
+# ``geak_pending.status`` values meaning the candidate was measured but its revalidation never landed, so the win was
+# abandoned rather than judged.
 _GEAK_DROPPED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
-# ``geak_result.revalidation_status`` values with the same meaning, but settled:
-# the rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
-# are deliberately absent — those ARE verdicts, so the candidate was judged.
+# ``geak_result.revalidation_status`` values with the same meaning, but settled: the rebench ran and could not produce
+# a verdict.
 _GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
 
 
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the final / validated-result section.
-
-    Surfaces final throughput, the delta and validated cumulative gain vs.
-    baseline, the action path and final server args, plus data-quality
-    warnings (stale validation, missing validated gain). Skipped when
-    neither final throughput nor a validated gain is present.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered final-result section.
-    """
+    """Render the final / validated-result section."""
     f = breakdown.get("final") or {}
     b = breakdown.get("baseline") or {}
     session = breakdown.get("session") or {}
@@ -131,16 +118,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "self-reported number is audit-only and must not be presented as the "
             "headline result."
         )
-    # Last: a settled ``failed`` on ``geak_result`` outlives the pending slot it
-    # was recorded from, so a LIVE candidate in a later macro-cycle must win over
-    # a terminal status left behind by an earlier one. ``render.py`` orders the
-    # same three cases the same way.
-    #
-    # ``not geak_in_final_stack`` is the same guard one step further: a 2b
-    # rebench that failed stamps ``failed``, and nothing clears it when the 2a
-    # GEAK-harness fallback then promotes the candidate for real. The claim
-    # here is that the candidate is ABSENT from the final stack, so read that
-    # off the stack rather than trusting a status no writer retracts.
+    # Last: a settled ``failed`` on ``geak_result`` outlives the pending slot it was recorded from, so a LIVE
+    # candidate in a later macro-cycle must win over a terminal status left behind by an earlier one.
     elif geak_revalidation_status in _GEAK_DROPPED_RESULT_STATUSES and not geak_in_final_stack:
         self_gain = geak.get("gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"

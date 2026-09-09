@@ -320,23 +320,7 @@ def _phase_windows(
     state: dict[str, Any],
     phases: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Cut ``state.phase_history`` into one window per stay inside ``phases``.
-
-    A stage that the macro loop re-enters (Framework Agent, Kernel Agent) needs
-    each visit kept apart, because V6 disambiguates repeats by
-    ``ext.macro_cycle``. Entering the phase set opens a window, leaving it
-    closes one, and a transition that stays inside the set (``EXPLORE`` ->
-    ``FRAMEWORK_AGENT``) extends the open window rather than starting a new one.
-
-    Args:
-        state (dict[str, Any]): The V5 ``state.json`` mapping.
-        phases (frozenset[str]): Upper-case phase names forming the stage.
-
-    Returns:
-        list[dict[str, Any]]: Windows sorted by ``(cycle, start_time)``, each
-        ``{cycle, start_time, end_time, rows, exit_row}``. ``end_time`` is
-        empty for a window the session never left.
-    """
+    """Cut ``state.phase_history`` into one window per stay inside ``phases``."""
     windows: list[dict[str, Any]] = []
     active: dict[str, Any] | None = None
     history = _dict_rows(state.get("phase_history"))
@@ -622,7 +606,7 @@ def _specialist_status(row: dict[str, Any]) -> str:
     if raw in {"failed", "error", "timed_out", "timeout"} or row.get("error"):
         return "failed"
     proposals = row.get("proposal_set")
-    if bool(row.get("empty")) or isinstance(proposals, list) and not proposals:
+    if not row.get("proposals_total") or (isinstance(proposals, list) and not proposals):
         return "empty"
     if raw in {"empty", "skipped"}:
         return "empty"
@@ -1936,25 +1920,7 @@ def _projected(
     project: Callable[[], Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Run one stage projector so its failure costs only its own events.
-
-    The exporter already wraps this whole collector, but that granularity is
-    too coarse to honor what V6 promises. A single ``_safe_collect`` around the
-    lot means one projector raising on a malformed field discards the durable
-    ``install`` / ``model_gate`` events read moments earlier and every other
-    stage that projected cleanly — so a session that failed at the model gate,
-    whose gate event is the only thing worth reporting, can lose it to a
-    kernel-stage bug it never reached.
-
-    Args:
-        stage (str): Stage name, used to name the projector in the warning.
-        project (Callable[[], Any]): Returns one event, a list of events, or
-            ``None``.
-        warnings (list[str]): V6 warning sink (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: The projected events, or ``[]`` on failure.
-    """
+    """Run one stage projector so its failure costs only its own events."""
     try:
         result = project()
     except Exception as exc:  # noqa: BLE001 — one stage must not cost the timeline
@@ -1977,20 +1943,7 @@ def collect_v6_timeline(
     conc_sweep_summary: Any = None,
     phase_timeline: Any = None,
 ) -> list[dict[str, Any]]:
-    """Load durable events and project stage work without mutating V5 state.
-
-    ``install``, ``model_gate``, ``kernel``, ``roofline`` and ``baseline`` are
-    read back from the durable event directory: the first two run before the
-    Coordinator exists, and the rest are recorded by the phase or the action
-    that produces them, which knows things no projection over ``state.json``
-    can recover -- when the work started, most plainly. The remaining
-    measurement stages are projected here from V5 sections the exporter has
-    already built, so the keyword arguments are all optional: a caller that
-    passes none still gets the durable events plus the framework projection.
-
-    Every projection is isolated (see :func:`_projected`). The durable events
-    are read first and are never discarded by a later stage's failure.
-    """
+    """Load durable events and project stage work without mutating V5 state."""
     timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
@@ -2146,8 +2099,8 @@ def collect_v6_outcome(
         "available": attribution_available,
         "by_source": {
             "warm_replay": _gain_bucket(summary.get("warm_replay")),
-            # V6 folds the old Explore phase into Framework Agent, so its two
-            # V5 ledger buckets are combined at this projection boundary.
+            # V6 folds the old Explore phase into Framework Agent, so its two V5 ledger buckets are combined at this
+            # projection boundary.
             "framework_agent": _gain_bucket(summary.get("framework_agent"), summary.get("explore")),
             "kernel": {
                 **_gain_bucket(kernel_summary),

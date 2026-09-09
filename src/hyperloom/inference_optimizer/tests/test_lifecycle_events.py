@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lifecycle-event infrastructure.
-
-Covers the operator-facing phase/step boundary log:
-
-* ``phase_state.lifecycle_label`` resolves the human-friendly names used
- for TraceLens / GEAK / Integrate / Report, falls back to the
-  phase-label table, then to the verbatim name.
-* ``phase_state.make_lifecycle_event`` produces a canonical row (seq / ts /
-  phase upper-cased / step / label default / status upper-cased / artifact
-  filtering / duration rounding).
-* ``SharedState.record_lifecycle_event`` appends, defaults the phase to the
-  current coordinator phase, keeps ``seq`` monotonic across the cap, and
-  enforces ``_LIFECYCLE_CAP``.
-* ``lifecycle`` round-trips through ``save`` / ``load_or_init``.
-* ``lifecycle`` is a Coordinator-only (``CORE_STATE_FIELDS``) field so an
-  LLM ``update_state`` cannot forge events.
-"""
+"""Lifecycle-event infrastructure."""
 
 from __future__ import annotations
 

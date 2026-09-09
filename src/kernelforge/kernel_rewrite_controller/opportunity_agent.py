@@ -48,12 +48,7 @@ ANALYSIS_STATUS_TIMED_OUT = "timed_out"
 _ABSOLUTE_PATH_RE = re.compile(r"`(/[^`\n]+)`")
 _PUBLISH_POLL_SEC = 0.5
 
-# Caps on what one investigation tool call may return. When TraceLens artifacts
-# are absent the Agent's only route is reading raw serving logs, and those run
-# to tens of megabytes: an unbounded grep over them returns far more text than
-# the analysis can use and can exceed what a single provider stream message may
-# carry. The bound is injected into the call rather than refused, so a capped
-# read costs the Agent no turn.
+# Caps on what one investigation tool call may return.
 _MAX_GREP_MATCHES = 200
 _MAX_READ_LINES = 2000
 
@@ -465,10 +460,8 @@ class OpportunityAnalysisAgent:
             progress_log=progress,
         )
 
-        # Resumed rather than run bare: a provider stream that drops mid-turn
-        # leaves a live session handle, and abandoning it throws away every turn
-        # already spent investigating. The chain is bounded by this analysis
-        # budget instead of its own default, which may outlive our window.
+        # Resumed rather than run bare: a provider stream that drops mid-turn leaves a live session handle, and
+        # abandoning it throws away every turn already spent investigating.
         backend_task = asyncio.create_task(
             run_session_with_api_resume(
                 self.backend,
@@ -478,8 +471,8 @@ class OpportunityAnalysisAgent:
             )
         )
         publications: dict[str, TaskPublicationResult] = {}
-        # Carried across polls so a draft this host already refused is not
-        # re-validated on every half-second tick for the rest of the session.
+        # Carried across polls so a draft this host already refused is not re-validated on every half-second tick for
+        # the rest of the session.
         refused: dict[str, float] = {}
         status = ANALYSIS_STATUS_COMPLETED
         reason = ""
@@ -503,10 +496,9 @@ class OpportunityAnalysisAgent:
                         status = ANALYSIS_STATUS_TIMED_OUT
                         reason = agent_result.stderr_tail or "opportunity analysis timed out"
                     elif end_reason not in TERMINAL_END_REASONS:
-                        # A provider failure measured nothing, so it must not
-                        # reach the controller as an answer: the controller
-                        # turns a completed analysis with no tasks into
-                        # `no_opportunity`, which is a verdict on the workload.
+                        # A provider failure measured nothing, so it must not reach the controller as an answer: the
+                        # controller turns a completed analysis with no tasks into `no_opportunity`, which is a
+                        # verdict on the workload.
                         status = ANALYSIS_STATUS_FAILED
                         reason = (
                             agent_result.stderr_tail or f"opportunity analysis ended with {end_reason or 'no reason'}"
@@ -522,9 +514,8 @@ class OpportunityAnalysisAgent:
                 backend_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await backend_task
-            # No quiescence window here: the session has stopped, so nothing is
-            # still writing, and waiting would strand a task finished moments
-            # before the deadline -- the case incremental publication exists for.
+            # No quiescence window here: the session has stopped, so nothing is still writing, and waiting would
+            # strand a task finished moments before the deadline -- the case incremental publication exists for.
             for result in publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused):
                 publications[result.source_dir.name] = result
             if progress:

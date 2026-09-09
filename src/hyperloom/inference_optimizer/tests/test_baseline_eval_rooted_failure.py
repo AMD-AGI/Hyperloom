@@ -1,11 +1,4 @@
-"""Classifying an eval-rooted baseline failure, and who may redefine the gate.
-
-When InferenceX's ``run_eval`` aborts the benchmark, the executor has to tell
-that apart from an ordinary benchmark failure: the retry-with-``RUN_EVAL=false``
-path is only correct for tasks that are *not* establishing the accuracy
-reference. Getting this wrong either burns a second full benchmark for nothing
-or silently redefines the quality reference from a throughput-only run.
-"""
+"""Classifying an eval-rooted baseline failure, and who may redefine the gate."""
 
 from __future__ import annotations
 
@@ -13,13 +6,7 @@ import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
 
 
 def _bare_executor() -> baseline_mod.BaselineExecutor:
-    """A ctx-less BaselineExecutor for exercising its pure helpers.
-
-    These tests only touch classification/config helpers that never read
-    instance state, so we build the instance with ``object.__new__`` and skip
-    the real (ctx-hungry) ``__init__`` -- rather than subclassing with a no-op
-    constructor, which trips CodeQL's missing-super-init check.
-    """
+    """A ctx-less BaselineExecutor for exercising its pure helpers."""
     return object.__new__(baseline_mod.BaselineExecutor)
 
 
@@ -51,20 +38,15 @@ def test_empty_result_is_not_eval_rooted_and_does_not_raise():
 
 def test_only_a_genuine_baseline_may_establish_the_quality_reference():
     assert baseline_mod._should_establish_quality_ref("baseline") is True
-    # replay_warm_recipe reuses this executor but is a candidate: letting it
-    # redefine the reference would mask its own deviation from the baseline.
+    # replay_warm_recipe reuses this executor but is a candidate: letting it redefine the reference would mask its own
+    # deviation from the baseline.
     assert baseline_mod._should_establish_quality_ref("replay_warm_recipe") is False
     assert baseline_mod._should_establish_quality_ref("") is False
     assert baseline_mod._should_establish_quality_ref(None) is False
 
 
 def test_measure_round_config_disables_eval(tmp_path):
-    """Round 2 must not re-measure accuracy.
-
-    Accuracy does not depend on cold-vs-hot timing, so a second eval only costs
-    minutes and doubles the window in which a server death can take it down --
-    which is how a real run was lost.
-    """
+    """Round 2 must not re-measure accuracy."""
     import yaml
 
     base = tmp_path / "base.yaml"

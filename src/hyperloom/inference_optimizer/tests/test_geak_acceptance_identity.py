@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for GEAK acceptance identity in the breakdown collectors.
-
-Each test here is anchored to a case measured on the recorded campaign at
-``/shared_nfs/hyperloom-claw``. The behaviours under test are the ones a
-reviewer flagged on Hyperloom PR #1209:
-
-* **Two lanes.** An acceptance lands in ``accepted_kernels`` *or*
-  ``accepted_heads``. Measured: 8 of 11 sessions with an acceptance carry it in
-  ``accepted_heads`` alone, 3 in ``accepted_kernels`` alone, 0 in both. Reading
-  one lane loses most of them.
-* **Alias twins.** GEAK records one acceptance as two journey rows: the
-  candidate-slot row carries the measurement, the resolved-symbol row does not.
-  The symbol is on the *unmeasured* twin, and ``name`` holds it while
-  ``kernel_id`` holds an underscore-stripped slug.
-* **Shared admission.** A journey row declares no ``kind``, so a library
-  selection (``kind="env"``) would be credited as an authored kernel. The kind
-  is recovered by joining the symbol back to the run's ``result.json`` lane, and
-  what the join cannot resolve is recorded as unresolved rather than guessed.
-"""
+"""Unit coverage for GEAK acceptance identity in the breakdown collectors."""
 
 from __future__ import annotations
 
@@ -46,9 +28,7 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
     return {"short_name": name, "e2e_delta_pct": delta, **extra}
 
 
-# --------------------------------------------------------------------------
 # B1 — attribution must read both acceptance lanes
-# --------------------------------------------------------------------------
 
 
 def test_geak_kernel_names_reads_the_heads_lane() -> None:
@@ -93,15 +73,11 @@ def test_geak_kernel_names_empty_when_no_lane_has_content() -> None:
     assert _geak_kernel_names({"accepted_kernels": [], "accepted_heads": []}) == []
 
 
-# --------------------------------------------------------------------------
 # B2 — the alias twin collapses onto the resolved symbol
-# --------------------------------------------------------------------------
 
 
 def test_collapse_keeps_the_symbol_from_the_unmeasured_twin() -> None:
-    # GLM-5.2-MXFP4/20260814T163244Z. The measured row is the slot tag; the
-    # symbol rides the twin that carries no gpu_pct.
-    # Both rows repeat the same e2e_gain_pct: that is what pairs the twin.
+    # GLM-5.2-MXFP4/20260814T163244Z.
     rows = [
         {
             "kernel_id": "c0_triton",
@@ -127,8 +103,7 @@ def test_collapse_keeps_the_symbol_from_the_unmeasured_twin() -> None:
 
 
 def test_collapse_prefers_name_over_the_slugged_kernel_id() -> None:
-    # MiniMax-M3-MXFP8/20260731T182731Z. GEAK strips the leading underscore
-    # when it builds kernel_id, so only `name` holds the true symbol.
+    # MiniMax-M3-MXFP8/20260731T182731Z.
     rows = [
         {
             "kernel_id": "c0_flydsl",
@@ -163,9 +138,7 @@ def test_collapse_leaves_a_lone_measured_row_alone() -> None:
 
 
 def test_collapse_keeps_two_real_kernels_that_share_a_gain() -> None:
-    # Rows are grouped by gain, so two distinct kernels that happen to land on
-    # the same number must not fold into one. Both are measured, so neither is
-    # a twin: the twin is defined by the missing measurement, not by the gain.
+    # Rows are grouped by gain, so two distinct kernels that happen to land on the same number must not fold into one.
     rows = [
         {"kernel_id": "kernel_a", "name": "kernel_a", "gpu_pct": 10.0, "e2e_gain_pct": 2.0},
         {"kernel_id": "kernel_b", "name": "kernel_b", "gpu_pct": 20.0, "e2e_gain_pct": 2.0},
@@ -262,12 +235,7 @@ def test_acceptance_specs_collapse_the_alias_twin_onto_the_kernel_symbol() -> No
 
 
 def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
-    """No measured delta is no evidence of twinning.
-
-    Reading the delta as ``float(x or 0.0)`` mapped absent and zero onto the
-    same number, so two unrelated env selections on one op_kind collapsed into
-    one acceptance for carrying no measurement at all.
-    """
+    """No measured delta is no evidence of twinning."""
     result = {
         "accepted_heads": [
             {"short_name": "ck_gemm_a8w8", "kind": "env", "op_kind": "gemm"},
@@ -304,9 +272,7 @@ def test_cand_tag_recognises_slot_tags_only() -> None:
     assert not geak_is_cand_tag("")
 
 
-# --------------------------------------------------------------------------
 # B3 — one admission test, shared with the ledger
-# --------------------------------------------------------------------------
 
 
 def test_stamp_recovers_kind_by_joining_the_ledger() -> None:
@@ -349,8 +315,8 @@ def test_stamp_drops_only_known_env_rows() -> None:
 
 
 def test_stamp_marks_an_unjoinable_row_absent_and_keeps_it() -> None:
-    # Guessing either way is wrong: "authored" inflates the kernel bucket with
-    # library picks, "env" deletes real kernels recovered from dead runs.
+    # Guessing either way is wrong: "authored" inflates the kernel bucket with library picks, "env" deletes real
+    # kernels recovered from dead runs.
     rows = [{"name": "orphan_kernel"}]
     out = _stamp_journey_kind(rows, {"accepted_kernels": [], "accepted_heads": []})
     assert len(out) == 1
@@ -367,10 +333,8 @@ def test_stamp_distinguishes_undeclared_from_absent() -> None:
 
 
 def test_kind_source_counts_cover_every_admitted_row() -> None:
-    # The counter must sum to the row count on every path, including the
-    # ``result`` path, whose rows carry no kind_source. Measured on the
-    # campaign: 3 of 4 rows on that path declare no kind at all, so treating
-    # the path as "always declared" empties the counter where it is needed.
+    # The counter must sum to the row count on every path, including the ``result`` path, whose rows carry no
+    # kind_source.
     rows: list[Any] = [
         {"name": "a", "kind_source": "result_json"},
         {"name": "b", "kind_source": "absent"},
@@ -388,9 +352,7 @@ def test_kind_source_counts_empty_for_no_rows() -> None:
     assert _kind_source_counts([]) == {}
 
 
-# --------------------------------------------------------------------------
 # The shared helpers the two collectors now agree on
-# --------------------------------------------------------------------------
 
 
 def test_spec_kind_returns_none_for_absent_and_for_empty() -> None:

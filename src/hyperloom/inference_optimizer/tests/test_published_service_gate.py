@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Post-restart gate on the published ClusterIP the benchmark actually dials.
-
-reachable_service_url can rewrite the ClusterIP service_url to a pod-pinned
-head address whose /health flips up seconds after a restart, while the published
-ClusterIP Service still has no ready endpoint and refuses connections. The gate
-here waits on that published endpoint so the benchmark is never fired into
-ECONNREFUSED (which surfaced as completed=0 -> invalid measurement).
-"""
+"""Post-restart gate on the published ClusterIP the benchmark actually dials."""
 
 from __future__ import annotations
 
@@ -91,11 +84,7 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: 
 
 
 def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op.
-
-    The skip is now gated on CONSECUTIVE resolution failures, so a name that
-    never resolves must still skip (after the retry budget), not hang or fail.
-    """
+    """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
@@ -104,13 +93,7 @@ def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.M
 
 
 def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A CoreDNS blip must not disable the gate when it is most needed.
-
-    One name-resolution failure (below the consecutive-skip threshold) followed
-    by the endpoint coming up must let the gate pass, not skip -- otherwise a
-    single DNS flap during the readiness window would green-light the benchmark
-    into the ECONNREFUSED this gate exists to prevent.
-    """
+    """A CoreDNS blip must not disable the gate when it is most needed."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     # DNS blips once, then the published endpoint answers: gate must hold + pass.
@@ -122,8 +105,7 @@ def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytes
 def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Skipping the gate is a WARNING, not a silent INFO: a later completed=0
-    must be traceable back to this skip (the #1060 'surface it' discipline)."""
+    """Skipping the gate is a WARNING, not a silent INFO: a later completed=0 must be traceable back to this skip (the #1060 'surface it' discipline)."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
@@ -135,17 +117,13 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
 
 
 def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance.
-
-    With it set to 1, a single resolution failure skips immediately (proving the
-    knob is wired); the default (6) would keep polling instead.
-    """
+    """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance."""
     monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", "1")
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
-    # One gaierror then 200s: skip_after=1 skips on the first failure (returns
-    # before the 200s); if the knob were ignored (default 6) it would pass on 200s
-    # -- either way it returns, but this asserts the env path does not raise/hang.
+    # One gaierror then 200s: skip_after=1 skips on the first failure (returns before the 200s); if the knob were
+    # ignored (default 6) it would pass on 200s -- either way it returns, but this asserts the env path does not
+    # raise/hang.
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
@@ -201,12 +179,7 @@ def test_gate_is_a_noop_without_a_rewrite(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """timeout_s<=0 is an escape hatch: skip the gate, never fail on it.
-
-    A zero budget used to fail every restart on the second poll (10 > 0). No
-    httpx is installed here on purpose -- the function must return before it is
-    reached.
-    """
+    """timeout_s<=0 is an escape hatch: skip the gate, never fail on it."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=0, poll_every_s=5))

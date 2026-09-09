@@ -177,7 +177,10 @@ jobs:
     if: needs.resolve.outputs.run == 'true'
     # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
     # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
-    runs-on: Hyperloom-e2e-ci
+    #
+    # Overridable so that a replacement runner can be proven on a real run before the
+    # pool moves to it. Unset, this is the pool it has always been.
+    runs-on: ${{ vars.CI_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
     # Covers a full MAX_HOURS run + setup/baseline overhead.
     timeout-minutes: 240
     steps:

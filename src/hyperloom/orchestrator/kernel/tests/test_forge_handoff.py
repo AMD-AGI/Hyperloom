@@ -168,12 +168,7 @@ def test_handoff_exposes_configured_git_source_roots_without_trace(
 
 
 def test_each_kernel_entry_gets_its_own_attempt_directory(tmp_path: Path) -> None:
-    """A second KERNEL entry needs an output root the controller has not used.
-
-    ``macro_cycle`` cannot supply one: it only advances in EXPLORE, which never
-    runs under ``--no-framework-agent``, so keying on the cycle alone leaves every
-    re-entry refused before it starts.
-    """
+    """A second KERNEL entry needs an output root the controller has not used."""
     session = tmp_path / "session"
 
     first = next_forge_attempt_dir(session, 3)

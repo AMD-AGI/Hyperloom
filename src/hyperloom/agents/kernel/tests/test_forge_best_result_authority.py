@@ -1,12 +1,4 @@
-"""Forge keep/revert reads the published best manifest as the authority.
-
-Forge rewrites ``forge_experiments/best_result.json`` atomically on every KEEP,
-gated on correctness and pointing at a commit already in the workspace history.
-It is therefore current after a clean finish, a soft budget exhaustion, or a
-hard kill -- unlike the final-result sidecar, which only exists on a graceful
-return. These tests pin that precedence and the lineage checks that keep a stale
-manifest from being trusted.
-"""
+"""Forge keep/revert reads the published best manifest as the authority."""
 
 from __future__ import annotations
 
@@ -309,14 +301,7 @@ def test_canonical_applyback_is_accepted_with_both_documents_agreeing(repo):
 
 
 def test_a_renaming_patch_is_not_discarded_for_naming_its_source(repo):
-    """The producer declares destinations; a rename header names both ends.
-
-    ``git diff --name-only`` reports a rename as its destination alone, while the
-    header reads ``diff --git a/<source> b/<destination>``. Counting the source
-    too made the declared and parsed sets differ, so an artifact that had already
-    run a whole campaign was thrown away. Add, modify and delete were unaffected,
-    because there both ends name the same file.
-    """
+    """The producer declares destinations; a rename header names both ends."""
     workspace, base_commit = repo
     renaming_patch = (
         "diff --git a/kernel.py b/flydsl_kernel.py\n"
@@ -344,11 +329,7 @@ def test_a_renaming_patch_is_not_discarded_for_naming_its_source(repo):
 
 
 def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
-    """Forty refusals used to reach an operator as one sentence.
-
-    A campaign that spent an hour reported only that it produced nothing, which
-    made every other failure in this route harder to place than it needed to be.
-    """
+    """Forty refusals used to reach an operator as one sentence."""
     workspace, base_commit = repo
     outer = _publish_applyback(
         workspace,
@@ -371,13 +352,7 @@ def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
 
 
 def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
-    """Materialize the real producer documents and pass them through this consumer.
-
-    This used to skip unless ``$FORGE_PATH`` named a checkout, which meant the
-    one test pinning both halves of the contract against each other never ran
-    anywhere. KernelForge ships in this distribution, so the producer is always
-    present and the test always runs.
-    """
+    """Materialize the real producer documents and pass them through this consumer."""
     proc = subprocess.run(
         [
             sys.executable,
@@ -549,12 +524,7 @@ def test_manifest_that_breaks_the_contract_is_rejected(repo, overrides):
     ],
 )
 def test_an_apply_back_that_is_not_faster_stays_contract_valid(repo, overrides):
-    """Being faster is consumer policy, not part of the producer contract.
-
-    The producer may publish a correct-but-not-faster port, so this validator
-    must still describe it. ``_run_rewrite_attempt`` is what declines it, with a
-    reason that says "not faster" rather than "malformed artifact".
-    """
+    """Being faster is consumer policy, not part of the producer contract."""
     workspace, base_commit = repo
     outer = _publish_applyback(workspace, base_commit, manifest_overrides=overrides)
 
@@ -645,9 +615,7 @@ def test_nested_schema_one_best_result_is_never_consulted_for_an_applyback(repo)
 
 @pytest.mark.parametrize("version", [1, 2, 3, None])
 def test_a_schema_bump_alone_does_not_discard_a_proven_best(repo, version):
-    """What actually broke: the producer went to 2, this stayed on 1, and every
-    published best was dropped for six days. The evidence is judged on its own
-    fields, so the version it is stamped with cannot decide the question."""
+    """What actually broke: the producer went to 2, this stayed on 1, and every published best was dropped for six days."""
     workspace, base_commit = repo
     best_commit = _commit_improvement(workspace)
     _publish(workspace, _manifest(best_commit, schema_version=version))

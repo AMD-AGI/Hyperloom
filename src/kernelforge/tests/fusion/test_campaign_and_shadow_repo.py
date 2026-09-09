@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two pieces that let the forge-loop drive a fusion.
-
-The loop keeps and reverts with git and scores from stdout, and a serving
-framework offers neither: it is usually a pip install with no repository, and
-the harness reports JSON. These tests cover the adapters for both.
-"""
+"""The two pieces that let the forge-loop drive a fusion."""
 
 from __future__ import annotations
 
@@ -110,7 +105,6 @@ class TestShadowRepo:
 
         assert shadow is not None
         # The tree now has a .git POINTER FILE (one line pointing to shadow.git).
-        # It is not a directory, so no git data is stored inside the tree itself.
         git_entry = root / ".git"
         assert git_entry.is_file(), "expected a .git pointer file, not a directory"
         assert not git_entry.is_dir()
@@ -162,8 +156,8 @@ class TestShadowRepo:
         tracked = _git_out(shadow, "ls-files").split()
         assert "sglang/layers/lfm2.py" in tracked
         assert not any(path.startswith("torch") for path in tracked)
-        # The exclude also keeps git from WALKING the neighbour, which is what
-        # makes every later status cheap rather than merely correct.
+        # The exclude also keeps git from WALKING the neighbour, which is what makes every later status cheap rather
+        # than merely correct.
         assert not any(
             path.startswith("torch") for path in _git_out(shadow, "ls-files", "--others", "--exclude-standard").split()
         )
@@ -183,7 +177,6 @@ class TestShadowRepo:
         root, source = _framework_tree(tmp_path)
         user_head = _make_checkout(root)
         # With an existing .git dir, ensure_git_workspace uses the env fallback.
-        # The developer's history must be unaffected by commits in the shadow.
 
         shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         assert shadow is not None
@@ -244,11 +237,7 @@ class TestShadowRepo:
         assert "def fused(x):" in patch
 
     def test_the_baseline_is_not_left_on_a_trunk_branch(self, tmp_path):
-        """``create_campaign_config`` refuses an unnamed, main or master branch.
-
-        A freshly initialized repository is on exactly one of those, so without
-        this every campaign would be rejected before its first iteration.
-        """
+        """``create_campaign_config`` refuses an unnamed, main or master branch."""
         root, source = _framework_tree(tmp_path)
 
         shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
@@ -259,11 +248,7 @@ class TestShadowRepo:
         assert _git_out(shadow, "rev-parse", "HEAD").strip() == shadow.base_commit
 
     def test_the_loop_accepts_the_workspace_the_shadow_hands_it(self, tmp_path, monkeypatch):
-        """Run the loop's own campaign resolution against a real shadow tree.
-
-        Every other test here mocks the subprocess away, so nothing else would
-        notice that the loop rejects the workspace before its first iteration.
-        """
+        """Run the loop's own campaign resolution against a real shadow tree."""
         from kernelforge.loop.campaign_config import create_campaign_config
 
         root, source = _framework_tree(tmp_path)
@@ -297,8 +282,8 @@ class TestShadowRepo:
         )
 
         assert campaign.producer == "fusion"
-        # Package-relative, which is what makes a diff taken here replayable
-        # against an install rather than against one directory inside it.
+        # Package-relative, which is what makes a diff taken here replayable against an install rather than against
+        # one directory inside it.
         assert campaign.kernel_path == "sglang/layers/lfm2.py"
         assert campaign.source_files == [
             "sglang/layers/lfm2.py",
@@ -323,11 +308,7 @@ class TestShadowRepo:
         assert _git_out(shadow, "show", f"{shadow.base_commit}:{rel}") == ""
 
     def test_a_flat_framework_still_tracks_its_placeholder(self, tmp_path):
-        """A source directly under the export root has no package to admit.
-
-        Each placeholder is named in the exclude too, or the whitelist would
-        leave the one file the campaign has to keep untracked.
-        """
+        """A source directly under the export root has no package to admit."""
         root = tmp_path / "framework"
         root.mkdir()
         source = root / "lfm2.py"
@@ -503,13 +484,7 @@ class TestDriverShim:
         assert "COMPILE FAILED: cuda_bf16.h not found" in proc.stdout
 
     def test_an_unfused_baseline_anchors_instead_of_failing(self, tmp_path):
-        """The pristine bench runs before any kernel exists, so nothing compiled.
-
-        Observed in production: the harness reported ``compiled: false`` with
-        eager-vs-eager parity, the driver called it a crash, and the loop died
-        with "mean case scoring requires pristine per-case timings" before its
-        first iteration -- every fusion campaign failed the same way.
-        """
+        """The pristine bench runs before any kernel exists, so nothing compiled."""
         fused = tmp_path / "model_fused.py"
         fused.write_text("", encoding="utf-8")  # committed empty by the campaign
         proc = self._run(
@@ -567,8 +542,8 @@ class TestDriverShim:
         )
         assert proc.returncode == 0
         assert "SKIPPED: Mamba backend cannot init on ROCm" in proc.stdout
-        # Reporting the eager time for both arms shows no speedup rather than an
-        # error, which is what a missing microbench actually means.
+        # Reporting the eager time for both arms shows no speedup rather than an error, which is what a missing
+        # microbench actually means.
         assert "case_ms: decode 0.130000" in proc.stdout
 
 
@@ -599,26 +574,20 @@ class TestCampaignCommand:
         assert "forge-loop" in cmd
         assert cmd[cmd.index("--kernel-backend") + 1] == "fusion"
         assert cmd[cmd.index("--task-type") + 1] == "repository"
-        # The loop refuses an unnamed / main / master branch, and a shadow
-        # repository is freshly initialized onto exactly one of those.
+        # The loop refuses an unnamed / main / master branch, and a shadow repository is freshly initialized onto
+        # exactly one of those.
         assert cmd[cmd.index("--git-branch") + 1] == SHADOW_BRANCH
         assert SHADOW_BRANCH not in {"", "main", "master"}
         # Discovery and the harness are the pipeline's.
         assert "--no-prepare-task" in cmd
-        # The fused module is an entry point too, or the loop orients on a model
-        # file and never sees where the kernel actually lives.
+        # The fused module is an entry point too, or the loop orients on a model file and never sees where the kernel
+        # actually lives.
         assert cmd[cmd.index("--source-files") + 1] == (
             "/sgl/models/lfm2.py,/sgl/models/lfm2_fused_residual_add_rmsnorm.py"
         )
 
     def test_the_campaign_pins_one_lane(self, tmp_path):
-        """A lane measures a copy; fusion is measured through the real install.
-
-        The loop's own default is above one, so this has to be stated. A lane
-        edits a workspace copy while the benchmark and the serving gate import
-        the framework from where it is installed, and the driver sits outside
-        the workspace entirely, which a round refuses outright.
-        """
+        """A lane measures a copy; fusion is measured through the real install."""
         cmd = build_forge_loop_command(
             _recipe(),
             workspace="/fw",
@@ -640,17 +609,13 @@ class TestCampaignCommand:
         )
         assert "--experience-kb" in cmd and "--no-experience-kb" not in cmd
         assert cmd[cmd.index("--producer") + 1] == "fusion"
-        # Keyed on the chain: several chains share one model file, and the file
-        # is all the loop could infer on its own.
+        # Keyed on the chain: several chains share one model file, and the file is all the loop could infer on its
+        # own.
         assert cmd[cmd.index("--operator-name") + 1] == "residual_add_rmsnorm"
         assert "--no-kb-warmstart" in cmd
 
     def test_the_callers_agent_runtime_reaches_the_process_that_edits(self, tmp_path):
-        """The loop resolves its own runtime from Config defaults otherwise.
-
-        A caller asking for a restricted sandbox would silently get the default
-        ``bypass`` in the one process that writes to the framework.
-        """
+        """The loop resolves its own runtime from Config defaults otherwise."""
         cmd = build_forge_loop_command(
             _recipe(),
             workspace="/fw",
@@ -674,11 +639,7 @@ class TestCampaignCommand:
         assert "Do NOT create any other new module." in program
 
     def test_the_task_document_hands_over_the_harness_read_only(self, tmp_path):
-        """The implementer is measured by this file, so it may not author it.
-
-        The document used to order it to write the harness, which the campaign
-        had already written -- and which the in-session gate would have denied.
-        """
+        """The implementer is measured by this file, so it may not author it."""
         program = build_campaign_program_md(
             _recipe(),
             harness_path="/out/kernel_harness.py",
@@ -718,13 +679,7 @@ class TestCampaignCommand:
         assert "CAMPAIGN FAILED" in outcome.result.note
 
     def _campaign_with_result(self, tmp_path, monkeypatch, payload, reports=()):
-        """Run a campaign whose forge-loop writes ``payload`` to --result-json.
-
-        The payload keys are the forge-loop's own (see cli.py _build_result), not
-        a shape invented here: an adapter tested against a fixture it also made up
-        proves only that it is self-consistent. ``reports`` stands in for what the
-        driver recorded while the loop ran.
-        """
+        """Run a campaign whose forge-loop writes ``payload`` to --result-json."""
         result_json = tmp_path / "forge_loop_residual_add_rmsnorm.json"
         report_log = tmp_path / "harness_reports_residual_add_rmsnorm.jsonl"
 
@@ -864,8 +819,8 @@ class TestCampaignCommand:
         assert outcome.result.fused_us == 96.0
         # The WORST shape decided correctness, so it is the one recorded.
         assert outcome.result.max_abs_err == 4e-04
-        # Provenance differs on purpose: the speedup is the loop's mean over
-        # repeated benchmarks, not fused_us/eager_us from this one report.
+        # Provenance differs on purpose: the speedup is the loop's mean over repeated benchmarks, not
+        # fused_us/eager_us from this one report.
         assert outcome.result.kernel_speedup == 1.25
         assert outcome.result.rtol is None
 

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Explore-grid provenance + GPU-specialist resource policy.
-
-Grids of any provenance mix pass PolicyGate, and the GPU specialist pool
-resource invariant still holds.
-"""
+"""Explore-grid provenance + GPU-specialist resource policy."""
 
 from __future__ import annotations
 

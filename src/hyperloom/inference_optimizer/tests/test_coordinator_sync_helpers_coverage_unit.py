@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for Coordinator pure/sync helper methods.
-
-Builds one Coordinator with mock backends and exercises the formatting / gap /
-fact / tag helpers directly, avoiding the async event loop."""
+"""Coverage for Coordinator pure/sync helper methods."""
 
 from __future__ import annotations
 
@@ -381,6 +378,63 @@ def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
     assert coord._target_gap_advisory_block() == ""
     assert coord._current_primary_gap() is None
     assert coord._priors_match_advisory_block() == ""
+
+
+# -- specialist findings block --------------------------------------------
+def _round(domain: str, finding: str, confidence, questions=()) -> dict:
+    return {
+        "domain": domain,
+        "confidence": confidence,
+        "new_findings": [finding],
+        "residual_questions": list(questions),
+    }
+
+
+def _findings(coord: Coordinator) -> str:
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+
+    return ConversationCollaborator(coord)._specialist_findings_block()
+
+
+def test_specialist_findings_survive_a_non_numeric_confidence(coord: Coordinator) -> None:
+    """``confidence`` is an audit field, so no value of it can drop the section.
+
+    It reaches the row straight from the specialist's own JSON, and the schema
+    invites a free-form self-assessment, so a string or a dict there must not
+    cost every domain its findings.
+    """
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", "kv cache is the bottleneck", "high"),
+        _round("comm_specialist", "all_reduce dominates", {"level": "high"}),
+        _round("kernel_specialist", "gemm is fine", 0.7, questions=["what about fp8?"]),
+    ]
+
+    block = _findings(coord)
+
+    assert "kv cache is the bottleneck" in block
+    assert "all_reduce dominates" in block
+    assert "gemm is fine" in block
+    assert "[kernel_specialist] what about fp8?" in block
+
+
+def test_specialist_findings_are_ordered_newest_first(coord: Coordinator) -> None:
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", "older finding", 0.9),
+        _round("comm_specialist", "newer finding", 0.1),
+    ]
+
+    block = _findings(coord)
+
+    assert block.index("newer finding") < block.index("older finding")
+
+
+def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(coord: Coordinator) -> None:
+    coord.shared_state.specialist_rounds = [
+        {"domain": "serving_specialist", "new_findings": [], "residual_questions": []},
+        "not a dict",
+    ]
+
+    assert _findings(coord) == ""
     assert coord._recent_proposed_variants() == []
 
 
@@ -565,11 +619,7 @@ def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
 
 
 def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coordinator) -> None:
-    """Selection is linear: the discovery specialist already ranked the batch.
-
-    Re-ranking here would overrule a judgement made with the gap and the
-    tried-ledger in view, using less context than the specialist had.
-    """
+    """Selection is linear: the discovery specialist already ranked the batch."""
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []

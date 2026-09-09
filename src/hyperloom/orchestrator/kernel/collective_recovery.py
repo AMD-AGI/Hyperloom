@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resume a collective integration that was interrupted mid-patch.
-
-The collective lane edits an editable-install repository in place, so a crash
-between ``apply`` and ``finalize`` leaves the repository holding a patch that no
-session owns. This module reads the apply checkpoint and its backup manifest and
-decides whether the interrupted integration can be resumed, must be reverted, or
-needs an operator. Everything here is a pure function of the checkpoint on disk
-plus the recorded campaign, so the phase only sequences the outcome.
-"""
+"""Resume a collective integration that was interrupted mid-patch."""
 
 from __future__ import annotations
 
@@ -44,13 +36,7 @@ class IntegrationInputs(NamedTuple):
 
 
 class RecoveredApply(NamedTuple):
-    """Outcome of inspecting an interrupted apply.
-
-    ``preapplied`` is a still-usable apply result the integrate handler can
-    adopt instead of re-applying. ``integ`` short-circuits the integration with
-    a terminal result. ``uncertain`` marks states an operator must confirm, and
-    suppresses the ``complete`` integration status.
-    """
+    """Outcome of inspecting an interrupted apply."""
 
     preapplied: dict[str, Any] | None
     integ: dict[str, Any] | None
@@ -61,11 +47,7 @@ def load_apply_checkpoint(
     checkpoint: Path,
     backup_root: Path,
 ) -> tuple[dict[str, Any], str]:
-    """Load a trusted collective apply checkpoint and manifest state.
-
-    The manifest path is required to resolve under ``backup_root`` so a
-    tampered or stale checkpoint cannot point the revert at an unrelated tree.
-    """
+    """Load a trusted collective apply checkpoint and manifest state."""
     recovered = json.loads(checkpoint.read_text(encoding="utf-8"))
     if not isinstance(recovered, dict):
         raise ValueError("Collective apply checkpoint must be a mapping")
@@ -83,12 +65,7 @@ def load_apply_checkpoint(
 
 
 def validate_integration_inputs(result: dict, state: Any) -> IntegrationInputs:
-    """Validate the campaign and the session state an integration will mutate.
-
-    Raises rather than degrading: every field here is required to revert
-    cleanly, so continuing past a malformed one risks leaving the repository
-    patched with no way back.
-    """
+    """Validate the campaign and the session state an integration will mutate."""
     if not isinstance(result, dict):
         raise TypeError("Collective integration input must be a mapping")
     raw = {
@@ -145,11 +122,7 @@ def _read_recovery_source(
     patch: str,
     target_file: str,
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
-    """Return ``(recovered_apply, manifest_status, terminal_result)``.
-
-    Prefers the checkpoint the applier writes; falls back to a lone manifest
-    left in the backup tree when the process died before the checkpoint landed.
-    """
+    """Return ``(recovered_apply, manifest_status, terminal_result)``."""
     if checkpoint.is_file():
         try:
             recovered, status = load_apply_checkpoint(checkpoint, backup_root)
@@ -196,8 +169,8 @@ def _read_recovery_source(
                 target_file,
             ),
         )
-    # The manifest's own status is the only evidence here; stamping an
-    # apply_result "ok" over it would report an outcome nothing measured.
+    # The manifest's own status is the only evidence here; stamping an apply_result "ok" over it would report an
+    # outcome nothing measured.
     return (
         {**manifest, "manifest_path": str(manifests[0])},
         str(manifest.get("status") or ""),
@@ -213,12 +186,7 @@ async def recover_apply_state(
     patch: str,
     target_file: str,
 ) -> RecoveredApply:
-    """Decide how an interrupted collective apply should continue.
-
-    ``result['patch_cleanup_action']`` (or legacy ``integration_recovery_action``)
-    records what the previous session still owed, so a resumed run replays that
-    step rather than re-deriving it from the manifest.
-    """
+    """Decide how an interrupted collective apply should continue."""
     from .request_handlers import (
         _maybe_finalize_kernel_patch,
         _maybe_revert_kernel_patch,
@@ -270,8 +238,8 @@ async def recover_apply_state(
     )
     if resumable_finalize:
         if manifest_status in _FINALIZED_MANIFEST_STATES:
-            # Terminal manifest: finalize already ran and cannot run again, so
-            # the cleanup it owed is closed even on a partial sweep.
+            # Terminal manifest: finalize already ran and cannot run again, so the cleanup it owed is closed even on a
+            # partial sweep.
             finalize_result = {
                 "status": "ok" if manifest_status == "finalized" else "partial",
                 "reason": "manifest already finalized",
@@ -303,8 +271,8 @@ async def recover_apply_state(
             False,
         )
 
-    # Two state machines meet here: a checkpoint carries the applier's own
-    # apply_result ("ok"), a lone manifest carries only the manifest state.
+    # Two state machines meet here: a checkpoint carries the applier's own apply_result ("ok"), a lone manifest
+    # carries only the manifest state.
     if manifest_status in _RESUMABLE_MANIFEST_STATES and str(recovered.get("status") or "") in {"ok", manifest_status}:
         return RecoveredApply(recovered, None, False)
 

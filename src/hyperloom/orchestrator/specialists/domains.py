@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist sub-agent domain catalogue.
-
-LLM sub-agent form factor parameterized by a ``domain`` — a stable
-id used across dispatch and prompt assembly. A runtime constant, not
-per-domain yaml.
-
-Field reference:
-
-* ``key`` — canonical id used in ``delegate{params.domain}``.
-* ``layer`` — short human label (analysis layer covered).
-* ``kb_anchor`` — knowledge-domain label for prompt grouping.
-* ``llm_selectable`` — False for a domain only the Coordinator dispatches.
-
-All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
-the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
-"""
+"""Specialist sub-agent domain catalogue."""
 
 from __future__ import annotations
 
@@ -25,25 +10,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpecialistDomain:
-    """A single specialist domain entry in the canonical catalogue.
-
-    Describes one specialist (serving, kernel, comm, compiler, system, etc.)
-    that the Orchestrator can dispatch, including which source layer it reads
-    and which KB anchor it maps to.
-
-    Attributes:
-        key (str): Stable identifier for the domain (e.g. ``serving_specialist``).
-        layer (str): Human-readable description of the source/runtime layer it
-            focuses on.
-        kb_anchor (str): Knowledge-base anchor the domain is associated with.
-        description (str): Free-form description of the domain's responsibilities.
-            Defaults to an empty string.
-        default_mode (str): Default dispatch mode for this domain, either
-            ``"patch"`` (authors patches) or ``"research"`` (investigation only).
-            A ``"mode"`` key in the dispatch params still overrides this at call
-            time; the field only changes the fall-back when no explicit mode is
-            given.
-    """
+    """A single specialist domain entry in the canonical catalogue."""
 
     key: str
     layer: str
@@ -57,8 +24,6 @@ class SpecialistDomain:
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
-# Entries are matched verbatim against the PR Monitor's indexed repo keys
-# (`pr_repos_list`), so the owner/name casing here must track the server's.
 PR_QUERY_REPOS: tuple[str, ...] = (
     "sgl-project/sglang",
     "ROCm/vllm",
@@ -218,14 +183,7 @@ EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
 
 
 def _derive_knowledge_domain_tags() -> tuple[str, ...]:
-    """Collect the distinct knowledge-domain tags from the catalogue.
-
-    Combines the ``kb_anchor`` of each specialist domain with any extra
-    standalone tags, preserving first-seen order and dropping blanks.
-
-    Returns:
-        Ordered tuple of unique knowledge-domain tags.
-    """
+    """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()
@@ -244,13 +202,7 @@ KNOWLEDGE_DOMAIN_TAG_SET: frozenset[str] = frozenset(KNOWLEDGE_DOMAIN_TAGS)
 
 # Map each knowledge-domain tag back to a representative catalogue entry.
 def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
-    """Build a map from KB anchor to its representative domain entry.
-
-    The first catalogue entry that owns a given anchor wins.
-
-    Returns:
-        Mapping of ``kb_anchor`` to the owning :class:`SpecialistDomain`.
-    """
+    """Build a map from KB anchor to its representative domain entry."""
     out: dict[str, SpecialistDomain] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()
@@ -263,16 +215,7 @@ _ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
 
 
 def domain_for_tag(tag: str) -> "SpecialistDomain | None":
-    """Return a representative catalogue entry for a knowledge-domain
-    tag (matched first by ``kb_anchor``, then by ``key``).
-
-    Args:
-        tag: The knowledge-domain tag to look up.
-
-    Returns:
-        The matching catalogue entry, or ``None`` when the tag is empty or
-        unknown.
-    """
+    """Return a representative catalogue entry for a knowledge-domain tag (matched first by ``kb_anchor``, then by ``key``)."""
     t = (tag or "").strip()
     if not t:
         return None
@@ -283,22 +226,7 @@ def domain_for_tag(tag: str) -> "SpecialistDomain | None":
 
 
 def _tag_to_kb_anchor(tag: str) -> str:
-    """Translate one dispatch tag to its knowledge-domain anchor.
-
-    The catalogue has two vocabularies: the domain ``key``
-    (``serving_specialist`` …) and the ``kb_anchor`` the PolicyGate whitelist
-    validates against (``framework`` …). A tag naming a domain **key** is
-    translated to that domain's anchor; a tag that is already a valid anchor is
-    kept as-is; anything else is returned verbatim rather than invented into
-    an anchor, so an unresolvable tag stays visible downstream.
-
-    Args:
-        tag: A single (already-stripped, non-empty) dispatch tag.
-
-    Returns:
-        The tag's ``kb_anchor`` when it names a catalogue key, the tag itself
-        when it is already a valid anchor, else the tag verbatim.
-    """
+    """Translate one dispatch tag to its knowledge-domain anchor."""
     dom = get_domain(tag)
     if dom is not None:
         return dom.kb_anchor or tag
@@ -306,19 +234,7 @@ def _tag_to_kb_anchor(tag: str) -> str:
 
 
 def normalize_dispatch_tags(params: dict) -> list[str]:
-    """Resolve a dispatch payload's tag list, translating domain keys to anchors.
-
-    Reads ``params.tags`` (each element is translated key→``kb_anchor`` via
-    :func:`_tag_to_kb_anchor`); falls back to the ``params.domain`` alias
-    (same translation) when absent. Order-preserving dedup; empty entries
-    dropped. Genuinely unknown tags pass through untranslated.
-
-    Args:
-        params: The dispatch payload (reads ``tags`` then ``domain``).
-
-    Returns:
-        The resolved, order-preserving deduped anchor list.
-    """
+    """Resolve a dispatch payload's tag list, translating domain keys to anchors."""
     raw = params.get("tags")
     tags: list[str] = []
     if isinstance(raw, (list, tuple)):
@@ -334,15 +250,7 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
 
 
 def get_domain(key: str) -> SpecialistDomain | None:
-    """Return the catalogue entry for ``key`` or None when unknown.
-
-    Args:
-        key (str): The domain key to look up (e.g. ``serving_specialist``).
-
-    Returns:
-        SpecialistDomain | None: The matching catalogue entry, or None if no
-        domain with that key exists.
-    """
+    """Return the catalogue entry for ``key`` or None when unknown."""
     for d in SPECIALIST_DOMAINS:
         if d.key == key:
             return d
@@ -350,23 +258,7 @@ def get_domain(key: str) -> SpecialistDomain | None:
 
 
 def authoring_domain_for_framework(framework: str | None) -> str:
-    """Return the authoring domain that matches a framework's kind.
-
-    A request-serving framework and an iterative model pipeline have almost no
-    optimization surface in common: one is scheduling, batching and KV-cache
-    admission, the other is redundant work created by running the same stack
-    once per block per denoising step. Steering a scriptable pipeline at
-    ``serving_specialist`` points it at a hot path that does not exist there, so
-    every place that names an authoring domain resolves it through here rather
-    than hard-coding one.
-
-    Args:
-        framework (str | None): The session's framework name.
-
-    Returns:
-        str: ``"framework_rewrite_specialist"`` for a scriptable (server-less)
-        framework, else ``"serving_specialist"``.
-    """
+    """Return the authoring domain that matches a framework's kind."""
     name = str(framework or "").strip().lower()
     if not name:
         return "serving_specialist"
@@ -375,10 +267,7 @@ def authoring_domain_for_framework(framework: str | None) -> str:
     return "framework_rewrite_specialist" if framework_registry.is_scriptable(name) else "serving_specialist"
 
 
-# Synthetic domain for ``scope='freeform'`` dispatches. NOT part of
-# SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
-# satisfy the runner's Domain contract. The real mandate is carried by
-# ``params.task_description`` and rendered by the free-form prompt block.
+# Synthetic domain for ``scope='freeform'`` dispatches.
 FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
     key="freeform_specialist",
     layer="(free-form — not bound to the domain catalogue)",
@@ -390,13 +279,10 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 )
 
 
-# Default number of LLM turns a specialist may run. Practically unbounded so the
-# ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns; the
-# real stop is the wall-clock budget.
+# Default number of LLM turns a specialist may run.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
-# Hard cap; PolicyGate denies a dispatch above it because the in-process
-# backend's turn loop has no wall-clock bound.
+# Hard cap; PolicyGate denies a dispatch above it because the in-process backend's turn loop has no wall-clock bound.
 SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 

@@ -204,9 +204,7 @@ def test_overflow_is_truncated_and_counted():
 @pytest.mark.parametrize("phase", PHASE_NAMES)
 @pytest.mark.asyncio
 async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase):
-    """Untested proposals feed explore grids, so only the phase that runs them
-    is shown the queue. Parameterised over the live chain: a phase added
-    without a decision here fails rather than silently inheriting ``False``."""
+    """Untested proposals feed explore grids, so only the phase that runs them is shown the queue."""
     expected = phase == PHASE_FRAMEWORK_AGENT
     coord.shared_state.phase = phase
     coord.shared_state.macro_cycle = 0
@@ -216,17 +214,15 @@ async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase
 
 
 @pytest.mark.asyncio
-async def test_the_block_survives_a_delta_turn(coord, monkeypatch):
+async def test_the_block_is_repeated_on_every_turn(coord):
+    """Every turn is a full projection, so the queue must not decay after turn one."""
     coord.shared_state.phase = PHASE_FRAMEWORK_AGENT
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
-    seed = await coord._compose_prompt("orchestration")
 
-    monkeypatch.setattr(type(coord.conversation), "_orchestration_conversational", lambda self: True)
-    coord._orchestration_seeded = True
-    delta = await coord._compose_prompt("orchestration")
+    first = await coord._compose_prompt("orchestration")
+    second = await coord._compose_prompt("orchestration")
 
-    assert "=== Shared session state ===" in seed
-    assert "=== Shared session state ===" not in delta
-    assert "queued" in seed
-    assert "queued" in delta
+    for out in (first, second):
+        assert "=== Shared session state ===" in out
+        assert "queued" in out

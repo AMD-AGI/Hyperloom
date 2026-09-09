@@ -1,14 +1,4 @@
-"""Hermetic tests for the forge-rewrite pipeline stages (no GPU / LLM / FlyDSL).
-
-Complements test_rewrite_by_flydsl.py (spec / ingest / seed / report / gate).
-Here we cover the orchestration stages by mocking their external processes:
-  * prompts.build_port_program_md — pure string assembly.
-  * optimize — forge-loop subprocess (subprocess.Popen) launch + result trust.
-  * runner — setup-failure paths, the git commit helper, and the happy/fail
-    end-to-end wiring with every GPU/LLM stage stubbed.
-  * port_loop.run_port_loop — accept / gate-reject / validation-fail / crash,
-    with make_agent_fn + the validation pipeline stubbed.
-"""
+"""Hermetic tests for the forge-rewrite pipeline stages (no GPU / LLM / FlyDSL)."""
 
 from __future__ import annotations
 
@@ -85,8 +75,7 @@ def test_port_program_md_describes_the_source_in_its_own_language(
     fence,
     banned,
 ):
-    """A HIP kernel fenced as ``python``, and a rule naming only Triton, both
-    misled the agent in the block it reads most closely."""
+    """A HIP kernel fenced as ``python``, and a rule naming only Triton, both misled the agent in the block it reads most closely."""
     s = _spec(tmp_path)
     s.source_language = language
     driver = tmp_path / "driver.py"
@@ -206,8 +195,8 @@ def test_optimize_argv_falls_back_to_console_script(monkeypatch):
 
 
 def test_optimize_no_trusted_result_returns_empty(tmp_path, monkeypatch):
-    # Default result_json path (result_json=None) is never written and stdout has
-    # neither a trusted experiment_id match nor a sentinel -> {}.
+    # Default result_json path (result_json=None) is never written and stdout has neither a trusted experiment_id
+    # match nor a sentinel -> {}.
     s = _spec(tmp_path)
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP9\n", "no result here\n"]))
     cfg = Config.from_env(workspace=str(tmp_path))
@@ -404,8 +393,7 @@ def test_ensure_git_committed_tracks_only_named_paths(tmp_path):
 
 
 def test_ensure_git_committed_skips_empty_and_unaddable_paths(tmp_path):
-    # Empty path is skipped; an unaddable path leaves nothing staged -> early return
-    # (no commit), and must not raise.
+    # Empty path is skipped; an unaddable path leaves nothing staged -> early return (no commit), and must not raise.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     runner._ensure_git_committed(str(tmp_path), "noop", ["", "does/not/exist.py"])
     log = subprocess.run(["git", "-C", str(tmp_path), "log", "--oneline"], capture_output=True, text=True)
@@ -413,9 +401,8 @@ def test_ensure_git_committed_skips_empty_and_unaddable_paths(tmp_path):
 
 
 def test_ensure_git_committed_warns_when_path_untracked_after_commit(tmp_path, capsys):
-    # An empty dir is "added" (git returns 0) but stages nothing, so it is not
-    # tracked after commit -> the helper warns loudly rather than silently letting
-    # forge-loop's keep/revert no-op on it.
+    # An empty dir is "added" (git returns 0) but stages nothing, so it is not tracked after commit -> the helper
+    # warns loudly rather than silently letting forge-loop's keep/revert no-op on it.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "emptydir").mkdir()
     runner._ensure_git_committed(str(tmp_path), "port", [str(tmp_path / "emptydir")])
@@ -586,8 +573,7 @@ def test_run_rewrite_survives_an_unmeasurable_candidate(tmp_path, monkeypatch):
     driver = tmp_path / "driver.py"
     driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
-    # A candidate that cannot be timed only costs the interim best; the correct
-    # port stands and OPTIMIZE still runs.
+    # A candidate that cannot be timed only costs the interim best; the correct port stands and OPTIMIZE still runs.
     monkeypatch.setattr(
         runner.driver_contract,
         "preflight_candidate",
@@ -929,8 +915,8 @@ def test_run_rewrite_interim_result_claims_no_framework_best(tmp_path, monkeypat
     result_json = tmp_path / "result.json"
     interim: dict = {}
 
-    # Whatever OPTIMIZE finds, the result on disk while it runs is what an outer
-    # hard kill leaves behind for the consumer.
+    # Whatever OPTIMIZE finds, the result on disk while it runs is what an outer hard kill leaves behind for the
+    # consumer.
     def capture_interim(*args, **kwargs):
         interim.update(json.loads(result_json.read_text()))
         return {"best_ms": 0.4, "best_commit": "flydsl-best"}
@@ -1183,8 +1169,8 @@ def test_port_loop_accepts_a_correct_flydsl_port(tmp_path, monkeypatch):
 def test_port_loop_rejects_a_cheating_port_before_validation(tmp_path, monkeypatch):
     s = _spec(tmp_path)
     (tmp_path / "driver.py").write_text("print('drive')\n")
-    # Agent writes a Triton reimplementation -> the FlyDSL gate rejects it, and the
-    # (would-pass) validation is never consulted.
+    # Agent writes a Triton reimplementation -> the FlyDSL gate rejects it, and the (would-pass) validation is never
+    # consulted.
     _install_agent(monkeypatch, "import triton\ndef build_softmax_module(*a): ...\n")
     called = {"validated": False}
 

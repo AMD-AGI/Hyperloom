@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A discovered fusion's identity must not depend on how the model worded it.
-
-Everything the KB key rests on -- the op categories, and whether the chain is
-claimed as a framework compile pass -- used to be recovered by keyword-matching
-the model's own prose. Measured on a real gateway, that made five runs against
-one unchanged trace look up three different keys: a proposal that merely
-mentioned writing to the KV cache picked up a ``copy`` category, and a reworded
-one stopped matching the compile-pass keyword groups, which changed which
-candidate ranked first.
-
-These tests pin the fix: when the model declares its ops from a fixed
-vocabulary, identity comes from that declaration and rewording cannot move it.
-"""
+"""A discovered fusion's identity must not depend on how the model worded it."""
 
 from __future__ import annotations
 
@@ -27,12 +15,7 @@ SOURCE = "/sp/vllm/model_executor/models/qwen3.py"
 
 
 def _claimable(flag: str) -> PassState:
-    """A compile pass that exists, is off, and is actually flippable.
-
-    ``source="default"`` matters: a flag an optimization level pins is not
-    claimable, because editing the PassConfig default would not change runtime
-    behaviour.
-    """
+    """A compile pass that exists, is off, and is actually flippable."""
     return PassState(
         flag=flag,
         present=True,
@@ -55,8 +38,6 @@ def _parse(payload: list[dict], *, framework: str = "vllm", probe=None):
 
 
 # The same fusion, described the way two different runs actually described it.
-# ``qk_norm`` is a trait, not an op: declaring it under "ops" would be dropped
-# silently, which would make the compile-pass assertion below vacuous.
 TERSE = {
     "name": "attn_qk_norm_rope",
     "op_chain": "q_norm, k_norm, then rope",
@@ -87,26 +68,17 @@ def test_rewording_one_proposal_does_not_change_its_categories():
 
 
 def test_rewording_one_proposal_does_not_change_the_compile_pass_verdict():
-    """Claiming a pass rewrites the pattern id, so a flip here moves the key.
-
-    The proposal's own name is not asserted: it never reaches the key, because
-    an ``llm:`` pattern hashes the category set instead.
-    """
+    """Claiming a pass rewrites the pattern id, so a flip here moves the key."""
     terse = _parse([TERSE])
     verbose = _parse([VERBOSE])
     assert [r.candidate_kind for r in terse] == [r.candidate_kind for r in verbose]
-    # Asserted absolutely, not just for agreement: two proposals that both fail
-    # to reach the gate would agree too, and the test would prove nothing.
+    # Asserted absolutely, not just for agreement: two proposals that both fail to reach the gate would agree too, and
+    # the test would prove nothing.
     assert terse[0].candidate_kind == "compile_pass"
 
 
 def test_the_gate_still_sees_the_prose_when_traits_are_omitted():
-    """``traits`` is optional, so a model will leave it out -- often.
-
-    The compile-pass table keys on precision and variant words that live only in
-    the prose. Dropping the prose the moment ``ops`` appears blinds the gate, and
-    the run then hand-writes a kernel vLLM already ships.
-    """
+    """``traits`` is optional, so a model will leave it out -- often."""
 
     def claimable(flag):
         return PassState(flag=flag, present=True, enabled=False, config_file="/sp/c.py", source="default")
@@ -193,13 +165,7 @@ def test_a_wholly_invalid_declaration_falls_back_rather_than_emptying_identity()
 
 
 def test_traits_describe_the_kernel_without_moving_the_key():
-    """Precision, variant and placement must not decide where a fusion is stored.
-
-    A run that reads the same chain as fp8 rather than quantized, or is unsure
-    whether it counts as attention, still has to find what the previous run
-    stored. Over 20 measured runs ``attention`` was the term that flipped, and it
-    separates nothing -- nearly every decode fusion sits beside attention.
-    """
+    """Precision, variant and placement must not decide where a fusion is stored."""
     plain = _parse([{**TERSE, "traits": []}], framework="sglang")
     adorned = _parse(
         [

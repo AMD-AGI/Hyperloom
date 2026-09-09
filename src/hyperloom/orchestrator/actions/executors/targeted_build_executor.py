@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Executor for ``targeted_build`` task rows.
-
-Runs compiled-component builds through the standard sub_agent_runner path so
-the in-flight asyncio.Task is registered in ``_inflight_actions`` (reachable
-by ``cancel_inflight_actions`` at shutdown). This coroutine owns the build for
-its whole life: ``asyncio.wait_for`` is the only wall-clock budget, and one
-teardown covers every way out of the wait.
-
-attempt_root is always ``session_dir / "enablement" / "builds" / task_id``.
-This derivation must stay identical to the fallback in
-``framework.py:_maybe_route_build_outcomes`` or succeeded builds are judged
-``artifact_unreadable`` and reverted.
-"""
+"""Executor for ``targeted_build`` task rows."""
 
 from __future__ import annotations
 
@@ -43,11 +31,7 @@ class TargetedBuildExecutor:
         return str(session_dir / "enablement" / "builds" / task_id)
 
     async def __call__(self, ctx: "RunnerContext") -> dict[str, Any]:
-        """Spawn and await a targeted build.
-
-        Raises RuntimeError on a failed or timed-out build so
-        sub_agent_runner writes the ``failed`` terminal state.
-        """
+        """Spawn and await a targeted build."""
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
@@ -61,9 +45,8 @@ class TargetedBuildExecutor:
             command=_driver_command(action, attempt_root),
         )
 
-        # The build outlives this coroutine unless killed, and the lane is
-        # released as it unwinds, so every exit from here must reach the
-        # teardown -- cancel and a failed sentinel write included.
+        # The build outlives this coroutine unless killed, and the lane is released as it unwinds, so every exit from
+        # here must reach the teardown -- cancel and a failed sentinel write included.
         try:
             if shared_state is not None:
                 shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)

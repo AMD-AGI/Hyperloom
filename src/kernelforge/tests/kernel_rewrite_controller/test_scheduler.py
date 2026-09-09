@@ -112,11 +112,7 @@ def test_progress_is_reported_after_every_task(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """A campaign killed mid-schedule must have already reported what it did.
-
-    The caller persists this, and the write it used to rely on is the terminal
-    one -- the one a hard timeout never reaches.
-    """
+    """A campaign killed mid-schedule must have already reported what it did."""
     layout = ControllerLayout(tmp_path / "output")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -146,12 +142,7 @@ def test_a_failing_progress_report_does_not_end_the_campaign(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Recording the accounting must not be able to abort what it records.
-
-    The callback scans the patch directory and rewrites two files on a shared
-    filesystem, and it now runs at every task boundary, so its own failure is a
-    real event -- and letting it out would abandon patches already published.
-    """
+    """Recording the accounting must not be able to abort what it records."""
     layout = ControllerLayout(tmp_path / "output")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -183,19 +174,15 @@ def test_a_superseded_duplicate_is_recorded_rather_than_dropped(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The loser of a dedup needs a skip record whichever side it is on.
-
-    Without one it stays ``ready`` and never appears in results, while
-    ``task_count`` still counts its directory.
-    """
+    """The loser of a dedup needs a skip record whichever side it is on."""
     layout = ControllerLayout(tmp_path / "output")
     repo = tmp_path / "repo"
     repo.mkdir()
-    # Same identity, two directories: reachable only by writing the second one
-    # under a name of its own, which is what a future non-identity layout would do.
+    # Same identity, two directories: reachable only by writing the second one under a name of its own, which is what
+    # a future non-identity layout would do.
     loser = _publish_task(layout, repo_root=repo, kernel_name="only", priority=5)
-    # Sorted after the encoded identity directory, so the better priority is the
-    # one that arrives second and displaces an incumbent.
+    # Sorted after the encoded identity directory, so the better priority is the one that arrives second and displaces
+    # an incumbent.
     winner_dir = layout.tasks_root / "zz-better-priority"
     winner_dir.mkdir()
     for name in ("task.json", "driver.py"):
@@ -223,12 +210,7 @@ def test_a_superseded_duplicate_is_recorded_rather_than_dropped(
 
 
 def _load_without_directory_identity(task_dir, **kwargs):
-    """Let a second directory hold the same identity, which the layout forbids.
-
-    The production layout derives a task's directory name from its identity, so
-    two directories cannot collide today. The dedup branch still has to record
-    its loser, because that invariant lives in a different module.
-    """
+    """Let a second directory hold the same identity, which the layout forbids."""
     from kernelforge.kernel_rewrite_controller import task as task_module
 
     payload = json.loads((Path(task_dir) / "task.json").read_text(encoding="utf-8"))
@@ -315,8 +297,8 @@ def test_tasks_from_separate_repositories_each_get_their_own_base(
     def _dispatch(task_dir, **kwargs):
         task = scheduler.load_task(task_dir, record_state=False).task
         assert task is not None
-        # Each task must be validated against its own repository's pin, not the
-        # top-priority task's, or the second repository could never run.
+        # Each task must be validated against its own repository's pin, not the top-priority task's, or the second
+        # repository could never run.
         assert kwargs["expected_base_commit"] == task.base_commit
         calls.append(task.identity.kernel_name)
         return _result(task, "succeeded")

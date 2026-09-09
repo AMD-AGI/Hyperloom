@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Force JIT-compiled kernels to rebuild from the CURRENT source.
-
-forge-loop optimizes real kernels in place, but aiter ships a prebuilt in-tree
-``.so`` and loads it WITHOUT re-checking the source. An agent edit to a HIP
-``.cu``/``.cuh`` would then be silently ignored — validation would pass the
-ORIGINAL kernel and the reported speedup would never move.
-
-Some upper-layer frameworks apply this same forcing centrally, but forge-loop is
-a general engine that other frameworks drive directly over the CLI. This module
-is forge's OWN safety net so an agent's edits take effect regardless of the driver.
-
-Scope: aiter HIP (C/C++) kernels only. Triton / Python kernels re-key their JIT
-on the source and recompile on edit, so they are left untouched — and forcing an
-aiter rebuild for a Triton task would trigger a slow, pointless C++ recompile.
-sglang (tvm-ffi) tasks are intentionally NOT handled yet (deferred). Best-effort
-and idempotent; unknown frameworks are no-ops.
-"""
+"""Force JIT-compiled kernels to rebuild from the CURRENT source."""
 
 from __future__ import annotations
 
@@ -34,27 +18,20 @@ _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")
 
 
 def force_jit_rebuild(paths: Iterable[str]) -> None:
-    """Make the framework recompile the kernel from the current source.
-
-    ``paths`` are the kernel/source files (relative or absolute); the framework
-    and language are inferred from them.
-    """
+    """Make the framework recompile the kernel from the current source."""
     try:
         source_paths = [str(path) for path in paths if path]
         strs = [path.lower() for path in source_paths]
         if not strs:
             return
-        # Only C/C++ HIP kernels have the prebuilt-.so shadowing problem; forcing
-        # a rebuild for a Triton (.py) task would recompile aiter's C++ for nothing.
+        # Only C/C++ HIP kernels have the prebuilt-.so shadowing problem; forcing a rebuild for a Triton (.py) task
+        # would recompile aiter's C++ for nothing.
         if not any(s.endswith(_CPP_EXTS) for s in strs):
             return
         joined = " ".join(strs)
 
         if "aiter" in joined:
-            # A fresh source digest selects an empty private shard and therefore
-            # rebuilds exactly once. Repeated correctness/bench/profile
-            # subprocesses for unchanged source reuse that shard instead of
-            # deleting the entire build tree via AITER_REBUILD.
+            # A fresh source digest selects an empty private shard and therefore rebuilds exactly once.
             activate_aiter_cache_for_sources(source_paths)
     except Exception as exc:  # noqa: BLE001 - best-effort safety net
         log.debug("force_jit_rebuild skipped: %r", exc)

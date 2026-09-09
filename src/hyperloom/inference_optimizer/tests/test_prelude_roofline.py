@@ -86,8 +86,6 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c._phase_budget_pct = {}
 
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
-    # Entry tests are about what leads up to that, so the handoff is the last
-    # step they exercise; the test that covers the handoff stubs this itself.
     async def _skip_controller(
         _handoff_dir: Path,
         _output_dir: Path,
@@ -174,14 +172,7 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_failed_roofline_does_not_dedup_away_the_retry(coord: Coordinator):
-    """The whole blackout, stated directly.
-
-    ``_needs_roofline_for_watermark`` re-arms once a roofline has failed, so the
-    system asks for a retry on purpose. It used to re-ask under a per-cycle
-    singleton key, so the registry handed back the attempt that had already
-    failed and nothing ran. Four sessions went by with no GPU evidence at all
-    while the log reported "enqueued" each time.
-    """
+    """The whole blackout, stated directly."""
     first = await coord._enqueue_internal_analysis_task(
         reason="integrate_keep_watermark",
     )
@@ -211,8 +202,7 @@ async def test_each_further_failure_earns_its_own_attempt(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_a_roofline_that_worked_is_never_re_run(coord: Coordinator):
-    """The streak resets to zero on a successful snapshot, so success collapses
-    back onto the original key and stays idempotent across resumes."""
+    """The streak resets to zero on a successful snapshot, so success collapses back onto the original key and stays idempotent across resumes."""
     coord.shared_state.roofline_failure_streak = 0
     first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
@@ -237,8 +227,8 @@ async def test_profile_kind_keeps_the_plain_key(coord: Coordinator):
     [
         ("succeeded", True),
         ("cancelled", True),
-        # A watchdog-reclaimed roofline reports no result, so the gate release
-        # is the only thing that can ever clear the marker it left.
+        # A watchdog-reclaimed roofline reports no result, so the gate release is the only thing that can ever clear
+        # the marker it left.
         ("failed", True),
         ("running", False),
         ("queued", False),
@@ -250,9 +240,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     named_state: str,
     reopens: bool,
 ):
-    """The gate exists so two rooflines never run at once, so it must hold for
-    every live state and release for every finished one. It is persisted state:
-    a marker left on a finished task is a wedge the next resume inherits."""
+    """The gate exists so two rooflines never run at once, so it must hold for every live state and release for every finished one."""
     state = coord.shared_state
     state.baseline_tput = 100.0
     state.cumulative_gain_validated = 50.0
@@ -275,8 +263,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
 
 
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
-    """A roofline leg costs the better part of an hour, so a collector that is
-    broken rather than flaky must not be allowed to spend the session on it."""
+    """A roofline leg costs the better part of an hour, so a collector that is broken rather than flaky must not be allowed to spend the session on it."""
     from hyperloom.orchestrator.loop.coordinator_helpers import (
         _MAX_ROOFLINE_FAILURE_RETRIES,
     )
@@ -353,8 +340,8 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert len(coord.sub.tasks_run) == 1
-    # The reason carries a profile fingerprint suffix so repeated kernel entries
-    # at the same gain stack are distinguishable in the task log.
+    # The reason carries a profile fingerprint suffix so repeated kernel entries at the same gain stack are
+    # distinguishable in the task log.
     assert coord.sub.tasks_run[0].params["reason"].startswith("kernel_entry_g0_")
     assert coord.shared_state.last_roofline_tput == 120.0
 
@@ -422,8 +409,8 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     await coord.phase_kernel._finish_kernel_entry()
 
     attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
-    # Each entry gets its own attempt directory: the controller refuses an output
-    # root it has already initialized, so re-entry cannot reuse the first one.
+    # Each entry gets its own attempt directory: the controller refuses an output root it has already initialized, so
+    # re-entry cannot reuse the first one.
     assert handed_off == [
         (attempt_root / "attempt-0" / "handoff", attempt_root / "attempt-0"),
         (attempt_root / "attempt-1" / "handoff", attempt_root / "attempt-1"),
@@ -438,16 +425,7 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
 
 
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
-    """The two writers of ``last_profile_workload`` disagree by construction.
-
-    The roofline path records through ``record_profile_workload(task_params)``
-    and fills ``server_args`` / ``extra_envs``; the kernel-entry path records
-    through ``profile_workload_context()`` and leaves them empty. Comparing the
-    whole dict therefore reported a change on every first KERNEL entry -- a full
-    re-profile plus a second TraceLens pass, with the serving configuration
-    provably unchanged -- and then stopped, because the re-profile it forced had
-    rewritten the record in the other writer's shape.
-    """
+    """The two writers of ``last_profile_workload`` disagree by construction."""
     state = coord.shared_state
     state.current_best = {
         "extra_server_args": "--block-size 128 --enable-expert-parallel",
@@ -521,14 +499,7 @@ _BASE_ENVS = {"VLLM_ROCM_USE_AITER": "1"}
     ],
 )
 def test_serving_config_changes_still_force_a_reprofile(coord: Coordinator, label, mutate, expected):
-    """Forgiving the parameterization must not forgive a real config change.
-
-    A configuration EXPLORE found and integrated changes which kernels run, so a
-    trace taken before it is genuinely stale. Those changes reach
-    ``_profile_config_changed``, which reads them from ``current_best`` on both
-    sides; only the recording-shape mismatch was taken out of
-    ``_profile_workload_changed``. This pins the boundary between the two.
-    """
+    """Forgiving the parameterization must not forgive a real config change."""
     state = coord.shared_state
     _recorded_under(state, server_args=_BASE_ARGS, envs=_BASE_ENVS)
     assert _reprofiles(coord) is False, "the recorded trace starts fresh"
@@ -647,9 +618,9 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     coord: Coordinator,
 ):
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
-    # The latest trace was profiled under a different backend (triton), recorded
-    # in last_profile_workload['serving_config'] exactly as the roofline executor
-    # writes it. last_profile_args stays the plain-args field it is elsewhere.
+    # The latest trace was profiled under a different backend (triton), recorded in
+    # last_profile_workload['serving_config'] exactly as the roofline executor writes it. last_profile_args stays the
+    # plain-args field it is elsewhere.
     coord.shared_state.last_profile_status = "succeeded"
     coord.shared_state.last_profile_workload = {
         "framework": "sglang",
@@ -675,8 +646,8 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     await coord._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
-    # After the reprofile the recorded workload reflects the current config
-    # (aiter + the new env), so the next entry sees no config change.
+    # After the reprofile the recorded workload reflects the current config (aiter + the new env), so the next entry
+    # sees no config change.
     assert (
         coord.shared_state.last_profile_workload["serving_config"]["extra_envs"]["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"]
         == "256"

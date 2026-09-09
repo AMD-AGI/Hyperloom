@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Forge submission backend running Kernel-Forge in an isolated worktree.
-
-Emits optimized source plus an optimization_report.md artifact for integration.
-"""
+"""Forge submission backend running Kernel-Forge in an isolated worktree."""
 
 from __future__ import annotations
 
@@ -117,24 +114,14 @@ def _knowledge_config_for_forge():
 
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
-# Mirrors kernelforge.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
-# runtime budget rather than running a non-productive campaign.
+# Mirrors kernelforge.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter runtime budget rather than running a
+# non-productive campaign.
 _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
 def _forge_failure_tail(output: str, *, max_chars: int = 500) -> str:
-    """Summarize why the forge child failed, for the error the caller reads.
-
-    The whole transcript already goes to the forge log, which nobody opens while
-    the only thing reaching the orchestrator is a return code -- so a producer
-    that rejected its own argv looked identical to one that crashed measuring.
-
-    A usage error outranks the tail: the CLI names it on one line and exits
-    before emitting any of the progress output the tail would otherwise capture.
-    Result sentinels are skipped because one such line is a whole JSON document
-    and would crowd out everything else.
-    """
+    """Summarize why the forge child failed, for the error the caller reads."""
     lines = [line.strip() for line in (output or "").splitlines() if line.strip() and "__FORGE_RESULT__" not in line]
     if not lines:
         return "no output"
@@ -203,11 +190,7 @@ def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subproce
 
 
 def _git_argv(args: list[str], cwd: str | None = None) -> list[str]:
-    """Build a ``git`` argv carrying a ``safe.directory`` exception for the target repo.
-
-    ``args`` excludes the executable. The kernel repo is routinely bind-mounted
-    and owned by another uid, which git refuses to read or write without this.
-    """
+    """Build a ``git`` argv carrying a ``safe.directory`` exception for the target repo."""
     try:
         from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
     except ImportError:
@@ -222,10 +205,7 @@ def _run_git(args: list[str], cwd: str | None = None, timeout: int = 120) -> sub
 
 
 def _resolve_gpu_target(candidate: dict) -> str:
-    """Resolve the gfx target: env GPU_TARGET -> candidate platform -> probe.
-
-    Never hard-codes; falls back to rocminfo when nothing else is available.
-    """
+    """Resolve the gfx target: env GPU_TARGET -> candidate platform -> probe."""
     env_target = (os.environ.get("GPU_TARGET") or os.environ.get("GPU_TYPE") or "").strip()
     if env_target:
         normalized = _normalize_gpu_target(env_target)
@@ -243,8 +223,8 @@ def _resolve_gpu_target(candidate: dict) -> str:
             return m.group(0)
     except Exception:
         pass
-    # Honor the "never hard-codes" contract: a wrong default (e.g. gfx942 on a
-    # gfx950 host) silently mis-targets kernel compilation. Fail loudly instead.
+    # Honor the "never hard-codes" contract: a wrong default (e.g. gfx942 on a gfx950 host) silently mis-targets
+    # kernel compilation.
     raise RuntimeError(
         "Cannot resolve gfx target: set GPU_TARGET/GPU_TYPE or a candidate "
         "'platform', and ensure rocminfo is available."
@@ -252,26 +232,13 @@ def _resolve_gpu_target(candidate: dict) -> str:
 
 
 def _known_gpu_model(value: str) -> str:
-    """Return the canonical card name, or "" when this is not one.
-
-    The command line and the environment must agree on the model, so both
-    render it through here rather than each trusting what it was handed.
-    """
+    """Return the canonical card name, or \"\" when this is not one."""
     model = str(value or "").strip().lower()
     return model if model in _PLATFORM_TO_GFX else ""
 
 
 def _resolve_gpu_type(candidate: dict) -> str:
-    """Resolve the hardware model: env GPU_TYPE -> candidate platform.
-
-    KernelForge files a kernel's experience under the card it was measured on,
-    not under the architecture it was compiled for. The two are not
-    interchangeable: mi300x, mi308x and mi325x all build for gfx942 while
-    differing in bandwidth and cache, so a recipe tuned on one is not a
-    recommendation for the others, and the target cannot be reversed into a
-    model. Returns "" when the model is unknown; KernelForge then declines to
-    read or write rather than filing under an address nothing resolves to.
-    """
+    """Resolve the hardware model: env GPU_TYPE -> candidate platform."""
     offered = (
         os.environ.get("GPU_TYPE"),
         candidate.get("platform"),
@@ -281,8 +248,8 @@ def _resolve_gpu_type(candidate: dict) -> str:
         model = _known_gpu_model(raw)
         if model:
             return model
-    # Nothing downstream fails on this: the loop optimizes, the result looks
-    # ordinary, and only the experience is missing. So it is said here.
+    # Nothing downstream fails on this: the loop optimizes, the result looks ordinary, and only the experience is
+    # missing.
     rejected = ", ".join(repr(str(v)) for v in offered if str(v or "").strip())
     log.warning(
         "forge: no known hardware model for this run%s; kernel experience is "
@@ -295,16 +262,7 @@ def _resolve_gpu_type(candidate: dict) -> str:
 
 
 def _apply_gpu_type_env(env: dict, gpu_type: str) -> None:
-    """Hand the child a hardware model, or none at all.
-
-    The child inherits this process's environment, where ``GPU_TYPE`` is also
-    accepted as a way to name a gfx target. Passing that through would file the
-    run's experience under ``gfx950`` as though it were a card, so an
-    unresolved model is removed rather than forwarded: KernelForge then declines
-    to read or write instead of addressing a record by a value that means
-    something else. The reason it could not be resolved is reported by
-    :func:`_resolve_gpu_type`, which is where it is known.
-    """
+    """Hand the child a hardware model, or none at all."""
     model = _known_gpu_model(gpu_type)
     if model:
         env["GPU_TYPE"] = model
@@ -324,9 +282,7 @@ def _normalize_gpu_target(value: str) -> str:
     return match.group(0) if match else ""
 
 
-# Framework aliases -> canonical KB framework identity. MUST stay in sync with
-# the arena launcher's _FRAMEWORK_ALIASES so producer/consumer agree. aiter_meta
-# is aiter's C++/CK companion package and shares aiter's identity.
+# Framework aliases -> canonical KB framework identity.
 _FRAMEWORK_ALIASES = {
     "vllm": "vllm",
     "sglang": "sglang",
@@ -345,27 +301,7 @@ def _framework_from_path(path: str) -> str:
 
 
 def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
-    """Best-effort framework identity for the KB slug. Empty == let forge-loop infer.
-
-    framework is a SOFT slug component, so this never raises and never guesses a
-    wrong value: it returns a framework only when confident, else "" so the
-    caller omits ``--framework`` and forge-loop falls back to its own path scan
-    (then ``unknown``). Passing it explicitly matters because a producer (arena)
-    and consumer (hyperloom) can have different workspace layouts — pinning the
-    framework keeps both on the SAME kernel page. Resolution order:
-
-      1. an explicit, recognized ``source_framework`` on the candidate;
-      2. the owning package of a KERNEL SOURCE definition file
-         (``kernel_sources``) — this is where the real compute kernel lives,
-         which can be aiter even when the traced entry/anchor is a vLLM/SGLang
-         dispatch that merely CALLS it; matching the definition keeps the slug
-         aligned with the arena producer;
-      3. the owning framework package in the kernel path — scanned shallowest
-         first so a kernel that lives DIRECTLY in vllm/sglang (e.g.
-         ``.../vllm/model_executor/layers/fused_moe/...``) resolves to that
-         package, not a deep subdir name;
-      4. "" (defer to forge-loop).
-    """
+    """Best-effort framework identity for the KB slug. Empty == let forge-loop infer."""
     raw = str((candidate or {}).get("source_framework") or "").strip().lower()
     canon = _FRAMEWORK_ALIASES.get(raw)
     if canon:
@@ -466,13 +402,7 @@ def _resolve_kernel_kind(source_type: str, kernel_kind: str) -> str:
     return ""
 
 
-# ``FORGE_DISABLE_COMPILED_FELLOWS`` was this knob's name before the
-# fellow -> kernel_backend rename. It cannot simply be dropped: ``FORGE_`` is on
-# env_safety's dotenv prefix allowlist, so an operator's old value is still
-# forwarded into the run and then ignored, which silently re-enables the
-# compiled kernel backends they had switched off. Honouring the old spelling
-# would keep the retired vocabulary alive, so it is refused instead -- once, and
-# loudly enough to be actionable.
+# ``FORGE_DISABLE_COMPILED_FELLOWS`` was this knob's name before the fellow -> kernel_backend rename.
 _RETIRED_COMPILED_OPT_OUT = "FORGE_DISABLE_COMPILED_FELLOWS"
 _retired_opt_out_warned = False
 
@@ -492,12 +422,7 @@ def _warn_on_retired_compiled_opt_out() -> None:
 
 
 def _kernel_backend_for_source_type(source_type: str) -> str | None:
-    """Map source_type to a Forge kernel_backend. None if unsupported.
-
-    Triton/python map to triton. Compiled source types
-    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native kernel backend by default;
-    opt out with FORGE_DISABLE_COMPILED_KERNEL_BACKENDS=1 for triton-only.
-    """
+    """Map source_type to a Forge kernel_backend. None if unsupported."""
     st = (source_type or "").strip().lower()
     kernel_backend = _SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
     if kernel_backend is not None:
@@ -541,11 +466,7 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 
 def _default_branch(repo: str) -> str:
-    """Best-effort default branch name for `repo` (e.g. 'main'/'master').
-
-    Prefers the remote's advertised default, then falls back to common local
-    branch names.
-    """
+    """Best-effort default branch name for `repo` (e.g. 'main'/'master')."""
     p = _run_git(["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=30)
     ref = (p.stdout or "").strip()
     if ref.startswith("origin/"):
@@ -569,13 +490,7 @@ def _new_forge_branch(output_dir: Path, source_file: str) -> str:
 
 
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
-    """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
-
-    Returns (worktree_dir, worktree_kernel_file, base_commit) or None when the
-    repo is not a clean git checkout / source_file is not tracked (forge then
-    skips, never mutating the live repo). base_commit is the commit the worktree
-    was created at (HEAD); export diffs the best state against it.
-    """
+    """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1)."""
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
         return None
@@ -585,19 +500,13 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     except ValueError:
         return None  # source_file not inside the repo
 
-    # Being inside the repo is not the same as being tracked by it. A framework
-    # tree can host a git repo that indexes only part of itself (a scratch repo
-    # over site-packages that only added ``vllm/``, say). ``git worktree add``
-    # then succeeds and produces a worktree WITHOUT the kernel, and the failure
-    # surfaces far downstream as "prepared kernel does not exist". Fall back to
-    # the no-git scratch path instead, which copies the file in.
+    # Being inside the repo is not the same as being tracked by it.
     tracked = _run_git(["-C", repo, "ls-files", "--error-unmatch", "--", rel.as_posix()], timeout=30)
     if tracked.returncode != 0:
         return None
 
     wt = output_dir / "worktree"
-    # A prior attempt at this path is retained for inspection. Never remove or
-    # reuse it, and never let the caller reinterpret it as a no-git scratch.
+    # A prior attempt at this path is retained for inspection.
     if wt.exists() or wt.is_symlink():
         raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {wt}")
     _run_git(["-C", repo, "worktree", "prune"], timeout=60)
@@ -695,17 +604,7 @@ def _remap_implementation_sources(
 
 
 def _pkg_toplevel(source_file: str) -> str:
-    """Return the topmost importable package directory containing ``source_file``.
-
-    Ascends while an ``__init__.py`` is present and returns the *last* directory
-    that still has one — i.e. the root package directory itself (e.g. ``vllm/``
-    for ``.../dist-packages/vllm/model_executor/models/deepseek_v2.py``), NOT its
-    parent. Its parent is the directory you would add to ``sys.path``; use
-    :func:`_pkg_sys_path_root` for that.
-
-    Falls back to the parent directory of ``source_file`` when the file is not
-    part of a package (no ``__init__.py`` beside it).
-    """
+    """Return the topmost importable package directory containing ``source_file``."""
     parent = Path(source_file).resolve().parent
     if not (parent / "__init__.py").exists():
         # Not inside a package — the file's own directory is the top level.
@@ -717,12 +616,7 @@ def _pkg_toplevel(source_file: str) -> str:
 
 
 def _pkg_sys_path_root(source_file: str) -> str:
-    """Return the directory to place on ``sys.path`` / ``PYTHONPATH``.
-
-    This is the parent of the topmost importable package (so ``import <pkg>``
-    resolves), or ``source_file``'s own directory when it is not part of a
-    package.
-    """
+    """Return the directory to place on ``sys.path`` / ``PYTHONPATH``."""
     top = Path(_pkg_toplevel(source_file))
     parent = Path(source_file).resolve().parent
     if str(top) == str(parent) and not (parent / "__init__.py").exists():
@@ -732,12 +626,7 @@ def _pkg_sys_path_root(source_file: str) -> str:
 
 
 def _is_on_network_fs(path: Path) -> bool:
-    """True when ``path`` or its nearest existing ancestor is on a network FS.
-
-    Imported inside the call: this file also runs as a standalone script on
-    nodes with no ``hyperloom`` on the path, the invariant
-    ``test_forge_submit_stays_import_light`` pins.
-    """
+    """True when ``path`` or its nearest existing ancestor is on a network FS."""
     from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
 
     probe = path
@@ -747,19 +636,7 @@ def _is_on_network_fs(path: Path) -> bool:
 
 
 def _local_scratch_dir(output_dir: Path) -> Path:
-    """Return where the scratch worktree belongs for ``output_dir``.
-
-    A worktree is throwaway but gets copied and git-hashed in full, so on a
-    network mount it is placed on local disk instead. Only the worktree moves;
-    the durable archive under ``output_dir`` stays where the operator put it.
-    Override the local root with ``$FORGE_LOCAL_SCRATCH_ROOT``.
-
-    The local tree mirrors ``<session_id>/<attempt>`` from the durable side.
-    The attempt name alone is the kernel's, so two sessions optimizing one
-    kernel would claim one path and the second would be refused for a collision
-    with the first. Carrying the session id also scopes the owner marker that
-    lets the sweep identify live trees regardless of durable-root differences.
-    """
+    """Return where the scratch worktree belongs for ``output_dir``."""
     if not _is_on_network_fs(output_dir):
         return output_dir / "worktree"
     root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
@@ -826,65 +703,23 @@ def _prepare_worktree_nogit(
     output_dir: Path,
     branch: str,
 ) -> tuple[str, str, str] | None:
-    """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A).
-
-    When ``source_file`` lives outside any git repository (e.g. a pip-installed
-    package under ``/usr/local/lib/python3.12/dist-packages/``), this function:
-
-    1. Determines the scratch layout root (== the PYTHONPATH root): the explicit
-       ``kernel_repo`` when provided, otherwise the *parent* of the single
-       top-level package containing ``source_file`` (so ``import <pkg>`` still
-       resolves from the scratch copy).
-    2. Copies only what is needed to ``output_dir/worktree`` — the whole tree
-       for an explicit ``kernel_repo``, but for a pip-installed package only that
-       one top-level package subtree (e.g. ``vllm/``), NEVER the entire
-       ``dist-packages``/``site-packages`` directory (which would copy every
-       installed package — torch, vllm, ... — 5-15 GB per submit, risking
-       ENOSPC). Ignores ``.git`` and the producer's runtime-artefact names.
-    3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
-       bytecode caches + ``git add -A`` + initial commit so Forge's
-       ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
-       its iterative keep/revert loop.
-    4. Returns ``(scratch_dir, scratch_kernel_file, base_commit)`` with the same
-       signature as :func:`_prepare_worktree`.
-
-    The measurement driver is staged inside this root and executed from it, so
-    the scratch copy shadows the dist-packages install at import time
-    (pure-Python only; editable-finder installs are excluded — those are handled
-    by :func:`_prepare_inplace`).
-
-    Returns ``None`` on any error (e.g. ``shutil.copytree`` failure).
-
-    .. note::
-        This path is intentionally **not** used for editable-finder packages.
-        Those are detected by :func:`_needs_inplace` before this function is
-        ever called.
-    """
+    """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A)."""
     src_abs = Path(source_file).resolve()
 
-    # Scratch layout root == the directory placed on PYTHONPATH. Honour an
-    # explicit kernel_repo; otherwise derive the single top-level package's
-    # parent (not the whole dist-packages dir — ENOSPC risk).
+    # Scratch layout root == the directory placed on PYTHONPATH.
     if kernel_repo:
         layout_root = Path(kernel_repo).resolve()
         copy_subtrees: list[Path] | None = None  # copy the whole repo
     else:
         layout_root = Path(_pkg_sys_path_root(source_file))
         pkg_top = Path(_pkg_toplevel(source_file))
-        # Copy only the top-level package subtree, unless the file is not part
-        # of a package.
+        # Copy only the top-level package subtree, unless the file is not part of a package.
         copy_subtrees = None if str(pkg_top) == str(layout_root) else [pkg_top]
 
     try:
         rel = src_abs.relative_to(layout_root)
     except ValueError:
-        # source_file not inside layout_root — fall back to a flat copy of just
-        # its parent dir. This DROPS the framework directory structure from the
-        # kernel path, which impairs cross-repo KB reuse: the slug's framework
-        # component now relies entirely on the explicit --framework we forward
-        # (see _resolve_framework), and a KB diff produced with the full repo
-        # path applies here only via forge-loop's strip-depth normalization.
-        # Surface it rather than degrade silently.
+        # source_file not inside layout_root — fall back to a flat copy of just its parent dir.
         log.warning(
             "forge: kernel %s is outside its package root %s; using a FLAT "
             "scratch layout. KB framework detection falls back to the explicit "
@@ -903,8 +738,7 @@ def _prepare_worktree_nogit(
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
-    # In-call for the reason ``_is_on_network_fs`` states. The copy takes the
-    # narrow set; only the index may drop what a package is imported through.
+    # In-call for the reason ``_is_on_network_fs`` states.
     from kernelforge.loop.path_ownership import (  # noqa: PLC0415
         COPY_FILTER_DIRECTORY_NAMES,
         RUNTIME_DIRECTORY_GLOBS,
@@ -929,8 +763,8 @@ def _prepare_worktree_nogit(
             # Whole layout_root.
             shutil.copytree(str(layout_root), str(scratch_dir), ignore=_ignore)
         else:
-            # Only the named top-level package(s), preserving their path relative
-            # to layout_root so ``import <pkg>`` still resolves.
+            # Only the named top-level package(s), preserving their path relative to layout_root so ``import <pkg>``
+            # still resolves.
             scratch_dir.mkdir(parents=True, exist_ok=True)
             for sub in copy_subtrees:
                 dest = scratch_dir / sub.relative_to(layout_root)
@@ -942,8 +776,8 @@ def _prepare_worktree_nogit(
 
     def _scaffold(cmds: list[list[str]]) -> bool:
         for cmd in cmds:
-            # 120s, not less: the baseline ``git add -A`` hashes every copied
-            # extension module, and a framework package carries GBs of them.
+            # 120s, not less: the baseline ``git add -A`` hashes every copied extension module, and a framework
+            # package carries GBs of them.
             try:
                 proc = _run_git(cmd, timeout=120)
             except subprocess.TimeoutExpired:
@@ -970,8 +804,8 @@ def _prepare_worktree_nogit(
     ):
         return None
 
-    # Must precede the baseline `git add -A`, so the pattern is in force for
-    # every commit the loop later makes against this repository.
+    # Must precede the baseline `git add -A`, so the pattern is in force for every commit the loop later makes against
+    # this repository.
     _exclude_runtime_artifacts(scratch_dir)
 
     if not _scaffold(
@@ -999,24 +833,7 @@ def _prepare_inplace(
     *,
     lock_fd: _RepoLock | None = None,
 ) -> tuple[str, str, dict] | None:
-    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import
-    sees the changes. Snapshots the original branch/HEAD + source bytes for a
-    per-file restore in finally. Returns (workspace=repo, kernel_file=source_file,
-    restore_info) or None when the repo is not a usable git checkout.
-
-    Safety:
-      - if HEAD is already on a forge/ temp branch (a prior crashed/SIGKILL'd
-        run that never restored), AUTO-RECOVER: force-checkout the repo's
-        default branch and delete the stale temp branch, then proceed from a
-        pristine baseline (falls back to skip only if the default branch can't
-        be resolved),
-      - hold a per-repo lock so concurrent forge runs never interleave,
-      - dirty working trees are allowed and preserved: the caller may record a
-        tracked-baseline patch and the untracked inventory, which
-        ``_restore_inplace`` replays so uncommitted work survives the campaign.
-        Files the campaign itself created are removed on restore; there is
-        still no ``reset --hard``.
-    """
+    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import sees the changes."""
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
         _release_repo_lock(lock_fd)
@@ -1045,8 +862,8 @@ def _prepare_inplace(
         orig_head = _run_git(["-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
         if not orig_head:
             return _skip()
-        # Auto-recover from a leftover forge temp branch: force the repo back
-        # onto its default branch and delete the stale temp branch.
+        # Auto-recover from a leftover forge temp branch: force the repo back onto its default branch and delete the
+        # stale temp branch.
         if orig_branch.startswith("forge/"):
             default_branch = _default_branch(repo)
             if not default_branch:
@@ -1067,14 +884,12 @@ def _prepare_inplace(
             backup = Path(source_file).read_bytes()
         except OSError:
             return _skip()
-        # Create a temp branch for the forge loop to commit/revert on (deleted
-        # in _restore_inplace).
+        # Create a temp branch for the forge loop to commit/revert on (deleted in _restore_inplace).
         cb = _run_git(["-C", repo, "checkout", "-b", branch], timeout=60)
         if cb.returncode != 0:
             return _skip()
-        # Snapshot any pre-existing dirty tracked files as a baseline commit so
-        # a later revert can't destroy them. base_commit is the pre-forge tree
-        # that agent edits stack on top of; when the tree is clean it equals
+        # Snapshot any pre-existing dirty tracked files as a baseline commit so a later revert can't destroy them.
+        # base_commit is the pre-forge tree that agent edits stack on top of; when the tree is clean it equals
         # orig_head.
         _run_git(["-C", repo, "add", "-u"], timeout=60)
         dirty = _run_git(["-C", repo, "diff", "--cached", "--quiet"], timeout=30)
@@ -1172,23 +987,7 @@ def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
 
 
 def _restore_inplace(restore: dict) -> None:
-    """Restore the live repo after in-place editing: revert EVERY file the agent
-    changed back to its pre-forge content, return to the original branch/HEAD,
-    and drop the temp branch.
-
-    Restores the full changed-file set (not just ``source_file``): the agent may
-    have edited a sibling tracked file (e.g. a config defaults module), and the
-    loop's ``git add -u`` commits mean those edits live on the temp branch.
-    ``base_commit`` holds the exact pre-forge tree (including any pre-existing
-    dirty content snapshotted at prepare time), so checking files out of it
-    restores precisely what was there before forge ran.
-
-    Untracked files are handled by inventory, not by ``reset --hard``: when the
-    caller recorded ``baseline_untracked`` at prepare time, untracked paths that
-    did NOT exist then are deleted, because a campaign's leftover artifacts
-    (notably ``forge_experiments/``) otherwise make the next run refuse to
-    start. Untracked files present in the baseline are preserved.
-    """
+    """Restore the live repo after in-place editing: revert EVERY file the agent changed back to its pre-forge content, return to the original branch/HEAD, and drop the temp branch."""
     if not restore:
         return
     repo = restore["repo"]
@@ -1197,9 +996,8 @@ def _restore_inplace(restore: dict) -> None:
     orig_branch = restore.get("orig_branch") or ""
     orig_head = restore.get("orig_head") or ""
     base_commit = restore.get("base_commit") or orig_head
-    # Restore every file that differs from the pre-forge baseline back to its
-    # base_commit content (working tree + index), undoing all tracked edits.
-    # Done while still on the temp branch so base_commit is reachable.
+    # Restore every file that differs from the pre-forge baseline back to its base_commit content (working tree +
+    # index), undoing all tracked edits.
     if base_commit:
         diff = _run_git(["-C", repo, "diff", "--name-only", base_commit], timeout=60)
         for rel in (diff.stdout or "").splitlines():
@@ -1211,14 +1009,13 @@ def _restore_inplace(restore: dict) -> None:
         # Was on a named branch: point HEAD back at it via symbolic-ref.
         _run_git(["-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
     elif orig_head:
-        # Was on detached HEAD: re-detach via update-ref --no-deref so the
-        # working tree is not touched.
+        # Was on detached HEAD: re-detach via update-ref --no-deref so the working tree is not touched.
         _run_git(["-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
     # Reset the index to match orig_head (without touching working tree).
     if orig_head:
         _run_git(["-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    # Any baseline failure below must still drop the temp branch and release the
-    # per-repo lock, otherwise the next in-place session cannot run.
+    # Any baseline failure below must still drop the temp branch and release the per-repo lock, otherwise the next
+    # in-place session cannot run.
     try:
         baseline_patch = restore.get("baseline_tracked_patch")
         if baseline_patch is not None:
@@ -1232,14 +1029,12 @@ def _restore_inplace(restore: dict) -> None:
                 raise RuntimeError("invalid tracked baseline commit marker")
             if baseline_patch and not baseline_in_base_commit:
                 _apply_tracked_baseline(repo, baseline_patch)
-        # Ensure the primary source_file is exactly the pre-forge bytes even if
-        # the git restore above raced or partially applied.
+        # Ensure the primary source_file is exactly the pre-forge bytes even if the git restore above raced or
+        # partially applied.
         try:
             Path(restore["source_file"]).write_bytes(restore["backup"])
         except OSError as exc:
             # Best-effort rewrite; the git restore above already reverted it.
-            # Surfaced rather than swallowed: if it fires alongside a failed
-            # git restore, the file is the one the caller must inspect.
             log.warning(
                 "in-place restore could not rewrite %s: %s",
                 restore.get("source_file"),
@@ -1272,9 +1067,8 @@ def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -
     _run_git(["-C", repo, "worktree", "prune"], timeout=60)
 
 
-# forge-loop requires --driver to exist before preflight_task repairs it in
-# place, so the delegated driver is a file that fails loudly rather than one
-# that could be mistaken for a conforming measurement driver.
+# forge-loop requires --driver to exist before preflight_task repairs it in place, so the delegated driver is a file
+# that fails loudly rather than one that could be mistaken for a conforming measurement driver.
 _TASK_PREPARER_PLACEHOLDER = '''#!/usr/bin/env python3
 """Placeholder driver — forge-loop's task preparer authors the real one."""
 import sys
@@ -1287,17 +1081,7 @@ _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
-    """Keep generated drivers out of whatever the producer stages.
-
-    Drivers are Hyperloom scratch files living inside the producer's workspace,
-    so a broad ``git add`` would otherwise sweep one into the framework patch.
-    Registering the pattern in the repository's own exclude file is idempotent
-    and leaves the working tree untouched.
-
-    ``--git-common-dir`` lands this in the live repository even from a linked
-    worktree, so :func:`_restore_generated_driver_exclude` takes it back out when
-    the run ends.
-    """
+    """Keep generated drivers out of whatever the producer stages."""
     exclude = _git_exclude_file(workspace)
     if exclude is None:
         return
@@ -1329,11 +1113,7 @@ def _git_exclude_file(workspace: Path) -> Path | None:
 
 
 def _exclude_runtime_artifacts(workspace: Path) -> None:
-    """Keep machine-generated artefacts out of the scratch repository's index.
-
-    Only the throwaway scratch repository needs this. Real repositories carry
-    their own ignore rules, and entries written there would outlive the run.
-    """
+    """Keep machine-generated artefacts out of the scratch repository's index."""
     from kernelforge.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
 
     exclude = _git_exclude_file(workspace)
@@ -1356,11 +1136,7 @@ def _exclude_runtime_artifacts(workspace: Path) -> None:
 
 
 def _restore_generated_driver_exclude(workspace: Path) -> None:
-    """Drop the driver pattern again so the live repository is left as found.
-
-    Run beside the deletion of the drivers themselves, so the entry never outlives
-    the files it hid. Only the exact pattern line is removed.
-    """
+    """Drop the driver pattern again so the live repository is left as found."""
     exclude = _git_exclude_file(workspace)
     if exclude is None or not exclude.is_file():
         return
@@ -1375,14 +1151,7 @@ def _restore_generated_driver_exclude(workspace: Path) -> None:
 
 
 def _write_generated_driver(workspace: str | Path, content: str) -> str:
-    """Atomically allocate a unique hidden driver inside ``workspace``.
-
-    The long-horizon forge-loop CLI resolves ``--driver`` relative to
-    ``--workspace`` and rejects anything outside it, so generated drivers must
-    live in the workspace rather than in the attempt output dir. The
-    ``.forge_driver_`` prefix is the contract ``_finalize_forge_workspace``
-    uses to clean these up after an in-place run.
-    """
+    """Atomically allocate a unique hidden driver inside ``workspace``."""
     workspace_path = Path(workspace)
     _exclude_generated_drivers(workspace_path)
     fd, raw_path = tempfile.mkstemp(
@@ -1462,15 +1231,7 @@ def _write_report(
     improved_during_search: bool = False,
     integration_validation: str = "",
 ) -> Path:
-    """Write optimization_report.md with the locked anchors (doc Section 6.4).
-
-    Only claims a KEEP-worthy result when Forge reports a validated
-    ``mean_case_speedup > 1``. Raw aggregate timings are diagnostic and may
-    regress because they are not the optimization objective.
-
-    ``integration_validation`` adds a second marker, so ``[correctness]`` keeps
-    meaning the micro gate while the report still states integration is unproven.
-    """
+    """Write optimization_report.md with the locked anchors (doc Section 6.4)."""
     lines = ["# Forge optimization report", ""]
     if improved and mean_case_speedup and mean_case_speedup > 1.0:
         lines.append(f"[micro_speedup] {mean_case_speedup:.4f}x")
@@ -1487,10 +1248,7 @@ def _write_report(
     else:
         lines.append("micro_speedup: N/A (no validated improvement kept)")
         lines.append("[correctness] fail")
-        # When both baseline and best were measured but not kept, record the
-        # observed timing informationally. Deliberately avoids the word
-        # "speedup" and the "Nx" form so the report scanners never treat it as a
-        # KEEP-worthy figure.
+        # When both baseline and best were measured but not kept, record the observed timing informationally.
         if baseline_ms and best_ms and best_ms > 0:
             lines.append(f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}")
     if integration_validation:
@@ -1508,25 +1266,7 @@ def _export_best_artifacts(
     output_dir: Path,
     best_commit: str = "",
 ) -> tuple[str, list[str]]:
-    """Export the best-kept state — ALL files the agent changed, not just the kernel.
-
-    The loop now commits every tracked edit (``runner._git_commit`` uses
-    ``git add -u``), so the agent's winning change may live in a sibling tracked
-    file (e.g. a ``*_config.py`` defaults module) rather than ``source_file``.
-    Exporting only ``source_file`` would yield a byte-identical artifact that
-    carries none of the optimization (the in-place bench measured it, but it
-    would not transfer on integration), and the sibling file would be left dirty.
-
-    This:
-      - copies the primary kernel to ``optimized_versions/v1_forge.<ext>`` (the
-        Hyperloom report scan's drop-in-replacement contract), and
-      - copies EVERY file changed since ``base_commit`` under
-        ``optimized_versions/files/<repo-relative-path>``, and
-      - writes a single ``optimized_versions/forge.patch`` (``git diff
-        base_commit``) so a multi-file change can be applied at integration time.
-
-    Returns (primary_artifact_path, changed_relpaths).
-    """
+    """Export the best-kept state — ALL files the agent changed, not just the kernel."""
     dst_dir = output_dir / "optimized_versions"
     dst_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1563,8 +1303,7 @@ def _export_best_artifacts(
                 exc,
             )
 
-    # A recovered run exports only the validated commit. A normally completed
-    # run without checkpoint evidence retains the legacy working-tree export.
+    # A recovered run exports only the validated commit.
     changed: list[str] = []
     diff_cmd = ["-C", workspace, "diff", "--name-only", base_commit]
     if best_commit:
@@ -1597,8 +1336,8 @@ def _export_best_artifacts(
                     exc,
                 )
 
-    # Full multi-file patch (excludes pre-existing dirty). --binary keeps the
-    # patch appliable when a change touches a non-text artifact.
+    # Full multi-file patch (excludes pre-existing dirty). --binary keeps the patch appliable when a change touches a
+    # non-text artifact.
     patch_cmd = ["-C", workspace, "diff", "--binary", base_commit]
     if best_commit:
         patch_cmd.append(best_commit)
@@ -1617,17 +1356,7 @@ def _export_best_artifacts(
 
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float, skipped: bool = False) -> dict:
-    """Shape the kernel-backend result dict (``returncode`` / ``skipped`` /
-    ``stdout_tail`` / ``stderr_tail`` / ``stdout`` / ``gpu_ids`` / ``elapsed_s``
-    / ``cmd``).
-
-    ``skipped=True`` marks a forge self-skip: forge bailed before any real
-    optimization attempt (unsupported source type, repo not a clean git
-    checkout, etc.). It is the structured signal downstream uses to classify the
-    kernel outcome as ``skip`` rather than a kernel failure; forge returns
-    ``returncode=2`` for every such path, but consumers should read this flag
-    rather than the return code.
-    """
+    """Shape the kernel-backend result dict (``returncode`` / ``skipped`` / ``stdout_tail`` / ``stderr_tail`` / ``stdout`` / ``gpu_ids`` / ``elapsed_s`` / ``cmd``)."""
     return {
         "returncode": returncode,
         "skipped": bool(skipped),
@@ -1641,19 +1370,7 @@ def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float, ski
 
 
 def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
-    """Self-heal aiter's flydsl dependency so HIP/CK ops aren't disabled.
-
-    flydsl >=0.2 renamed ``fly_values`` to ``extract_to_ir_values``, but aiter's
-    flydsl kernels still ``from flydsl.compiler.protocol import fly_values``. The
-    failed import makes aiter disable ALL CK/HIP ops -> any aiter forge loop is
-    dead on arrival. The sglang sandbox image ships the incompatible flydsl, and
-    the container FS is ephemeral, so idempotently append a back-compat alias
-    before running an aiter loop. Returns True when the alias is present.
-
-    Args:
-        protocol_path: Override for flydsl.compiler.protocol's file (tests);
-            resolved via importlib when empty.
-    """
+    """Self-heal aiter's flydsl dependency so HIP/CK ops aren't disabled."""
     try:
         path = protocol_path
         if not path:
@@ -1685,37 +1402,21 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
 
 
 def _openai_only_provider() -> bool:
-    """Return true when the OpenAI side is the only configured provider.
-
-    The forge kernel backend reaches an OpenAI-protocol gateway only through
-    KernelForge's codex provider, so this predicate is what selects it over the
-    claude provider that ``Config.agent_backend='auto'`` would otherwise resolve
-    to. The shape test lives in :mod:`hyperloom.common.llm_config` so that the
-    kernel backend, backend selection and the TraceLens runner cannot disagree.
-    """
+    """Return true when the OpenAI side is the only configured provider."""
     from hyperloom.common import llm_config  # local import: keep module import-light
 
     return llm_config.is_openai_only()
 
 
 def _apply_kernel_backend_env(env: dict) -> None:
-    """Apply kernel backend (claude CLI / codex SDK) stability defaults to ``env``.
-
-    Mutates the given child-process env dict ONLY -- never the parent
-    ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
-    proxy) cannot leak outside this forge attempt. The forge-loop subprocess
-    inherits this env; inside it the kernel backend drives either the claude CLI
-    streaming transport or the codex SDK, per the configured provider side.
-    ``setdefault`` keeps operator overrides authoritative.
-    """
+    """Apply kernel backend (claude CLI / codex SDK) stability defaults to ``env``."""
     claude_kernel_backend = not _openai_only_provider()
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
     if claude_kernel_backend:
-        # claude CLI discovery: the child may inherit a stripped PATH, so resolve
-        # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
-        # to the child PATH.
+        # claude CLI discovery: the child may inherit a stripped PATH, so resolve claude's absolute path here, export
+        # FORGE_CLAUDE_BIN, and prepend its dir to the child PATH.
         claude_bin = env.get("FORGE_CLAUDE_BIN", "").strip() or shutil.which("claude")
         if not claude_bin:
             for cand in ("/usr/local/bin/claude", "/usr/bin/claude", str(Path.home() / ".local/bin/claude")):
@@ -1728,38 +1429,28 @@ def _apply_kernel_backend_env(env: dict) -> None:
             cur_path = env.get("PATH", "")
             if bindir and bindir not in cur_path.split(os.pathsep):
                 env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
-        # Public defaults keep TLS verification enabled. Internal deployments with
-        # self-signed proxies can opt out by exporting their own TLS override envs.
+        # Public defaults keep TLS verification enabled.
         base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
         if base_url.endswith("/llm-gateway"):
             env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
-    # KernelBackend-hung mitigation: bound the claude CLI's own request timeout and cut
-    # non-essential traffic / autoupdate that can block in headless containers.
-    # Imported at module scope: the sibling directory is only on ``sys.path``
-    # during module load, so a deferred import here resolves nothing.
+    # KernelBackend-hung mitigation: bound the claude CLI's own request timeout and cut non-essential traffic /
+    # autoupdate that can block in headless containers.
     apply_llm_stability_env(env)
-    # The forge loop spends against the gateway for the whole of its run, and
-    # every agent it drives inherits this env, so without a tag here that spend
-    # arrives naming no component at all. Injecting from this side is what makes
-    # the phase and the action travel: both live in this process only, and the
-    # loop can refine the component it is given without having to restate them.
+    # The forge loop spends against the gateway for the whole of its run, and every agent it drives inherits this env,
+    # so without a tag here that spend arrives naming no component at all.
     from hyperloom.common.llm_attribution import inject_env
 
     inject_env(env, component="forge", operation="forge_loop")
-    # Shared KnowledgePlane contract. KernelForge remains responsible for its
-    # own local knowledge implementation and remote kernel-experience behavior.
+    # Shared KnowledgePlane contract.
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
         KernelExperienceBridge,
     )
 
-    # The process-level configuration was validated at startup/first use and is
-    # cached. A malformed child mapping therefore cannot fail every submission.
+    # The process-level configuration was validated at startup/first use and is cached.
     KernelExperienceBridge(_knowledge_config_for_forge()).configure_child_env(env)
 
-    # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
-    # primaryApiKey when it is not already exported. Skipped on the OpenAI-only
-    # side, where the codex provider authenticates from OPENAI_API_KEY, and under
-    # a subscription token, which any API key would silently override.
+    # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json primaryApiKey when it is not already
+    # exported.
     if (
         claude_kernel_backend
         and not env.get("ANTHROPIC_API_KEY", "").strip()
@@ -1971,12 +1662,7 @@ def _terminate_forge_process(
 
 
 def _read_forge_best_result(workspace: str) -> dict | None:
-    """Read the published best manifest forge atomically rewrites on every KEEP.
-
-    Anchored to the campaign root under the workspace (not --experiments-dir):
-    resume artifacts always live there, so this file is present and current after
-    a clean finish, a soft budget exhaustion, or a hard kill mid-run.
-    """
+    """Read the published best manifest forge atomically rewrites on every KEEP."""
     path = Path(workspace) / "forge_experiments" / "best_result.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2005,13 +1691,7 @@ def _canonical_forge_artifacts(
     workspace: str,
     published: dict | None,
 ) -> dict[str, object]:
-    """Normalize KernelForge's immutable best bundle for downstream deploy.
-
-    KernelForge schema-v1 paths are relative to the campaign root
-    (``<workspace>/forge_experiments``), not to ``best/manifest.json``.
-    Preserve changed paths as repo-relative POSIX paths and expose absolute
-    artifact locations only after containment validation.
-    """
+    """Normalize KernelForge's immutable best bundle for downstream deploy."""
     if not isinstance(published, dict):
         log.warning(
             "canonical Forge bundle unavailable: published manifest payload "
@@ -2168,21 +1848,7 @@ def _validated_commit_lineage_and_timing(
     workspace: str,
     base_commit: str,
 ) -> tuple[str, float, float] | None:
-    """Confirm a manifest names a real descendant of this run's base.
-
-    A manifest is written by another process and may be stale from an earlier
-    run against a different base, so the commit it names is re-checked against
-    the workspace history and its wall timings must be usable numbers.
-
-    Args:
-        payload: A manifest carrying ``commit_hash`` and both wall timings.
-        workspace: The git workspace the commit must live in.
-        base_commit: The commit this attempt started from.
-
-    Returns:
-        tuple[str, float, float] | None: ``(commit, baseline_ms, best_ms)``, or
-            ``None`` when the lineage or the timings do not hold up.
-    """
+    """Confirm a manifest names a real descendant of this run's base."""
     best_commit = str(payload.get("commit_hash") or "").strip()
     if not best_commit or best_commit == base_commit:
         return None
@@ -2221,20 +1887,7 @@ def _validated_forge_best_result(
     workspace: str,
     base_commit: str,
 ) -> dict | None:
-    """Return normalized evidence only for a published, correctness-passed best.
-
-    Forge publishes this file only after a KEEP whose validation passed and whose
-    commit is already in the workspace history, so it is the authoritative record
-    of what to keep. Re-verify the commit lineage and the speedup here anyway --
-    the file is written by another process and may be stale from an earlier run
-    against a different base.
-
-    ``schema_version`` is deliberately not gated on. Every field read below is
-    checked on its own -- the commit against the workspace history, the timings
-    for being positive numbers, the score for actually improving -- so pinning a
-    version bought nothing those checks do not, while a producer bump that
-    changed none of them silently rejected every published best for six days.
-    """
+    """Return normalized evidence only for a published, correctness-passed best."""
     if not isinstance(payload, dict):
         return None
     if payload.get("correctness_passed") is not True:
@@ -2328,12 +1981,7 @@ def _rewrite_contained_path(
 
 
 def _patch_touched_paths(patch_path: Path) -> set[str] | None:
-    """Return the repo-relative paths a git patch claims to touch.
-
-    Only the post-image side of each header, matching the producer's
-    ``git diff --name-only`` declaration. The two differ only on a rename or copy,
-    where the header names both ends but the declaration names the destination.
-    """
+    """Return the repo-relative paths a git patch claims to touch."""
     try:
         text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -2353,25 +2001,7 @@ def _validated_rewrite_applyback_result(
     base_commit: str,
     problems: list[str] | None = None,
 ) -> dict | None:
-    """Return normalized evidence only for a published framework apply-back.
-
-    The producer reports two documents with disjoint key sets: an outer result
-    naming the canonical artifacts, and the schema-2 manifest those artifacts
-    are described by. Both are checked with their own keys, and the manifest is
-    opened only through the path the outer result declares -- never by scanning
-    the workspace for whichever manifest looks newest.
-
-    Args:
-        payload: The outer result read from the caller-chosen result file.
-        workspace: The git workspace every reported path must stay inside.
-        base_commit: The commit this attempt started from.
-        problems: Collector for the clause that refused the artifact. Without it
-            every refusal here reaches an operator as the same sentence.
-
-    Returns:
-        dict | None: Normalized apply-back evidence, or ``None`` when any part
-            of the two-document contract does not hold.
-    """
+    """Return normalized evidence only for a published framework apply-back."""
 
     def _reject(reason: str) -> dict | None:
         if problems is not None:
@@ -2418,8 +2048,8 @@ def _validated_rewrite_applyback_result(
             f"canonical_files_root is not a directory inside the workspace: {payload.get('canonical_files_root')!r}"
         )
 
-    # Reclaiming these paths is destructive and keys off this declaration alone,
-    # so an absent or non-relative one fails the result rather than defaulting.
+    # Reclaiming these paths is destructive and keys off this declaration alone, so an absent or non-relative one
+    # fails the result rather than defaulting.
     declared_temporary = payload.get("temporary_paths")
     if not isinstance(declared_temporary, list):
         return _reject(f"temporary_paths is not a list: {declared_temporary!r}")
@@ -2505,9 +2135,8 @@ def _validated_rewrite_applyback_result(
         return _reject(
             f"the manifest's best commit ({best_commit[:12]}) is not the one the result names ({outer_commit[:12]})"
         )
-    # Whether the rewrite is *faster* is not part of the producer contract: it
-    # may publish a correct-but-not-faster port. That is a consumer policy call,
-    # graded by the caller so a rejected win is not reported as a bad artifact.
+    # Whether the rewrite is *faster* is not part of the producer contract: it may publish a correct-but-not-faster
+    # port.
 
     changed_files: list[str] = []
     for raw in manifest.get("changed_files") or []:
@@ -2624,15 +2253,12 @@ def _validated_forge_checkpoint(
         for shape in (shapes.get("minimal"), shapes.get("primary")):
             if isinstance(shape, dict) and shape and shape not in expected_coverage:
                 expected_coverage.append(shape)
-    # forge-loop stopped reporting case coverage once drivers took over suite
-    # evaluation, so silence here says nothing about what was measured -- an
-    # older loop reports an empty list for the same reason. Only a coverage that
-    # is reported and disagrees is evidence the checkpoint measured something
-    # else; vetoing on absence discards every salvageable best from a timeout.
+    # forge-loop stopped reporting case coverage once drivers took over suite evaluation, so silence here says nothing
+    # about what was measured -- an older loop reports an empty list for the same reason.
     actual_coverage = checkpoint.get("case_coverage")
     if actual_coverage and expected_coverage and actual_coverage != expected_coverage:
-        # Discarding a best the producer already validated and committed is too
-        # expensive an outcome to leave to a return value nobody can attribute.
+        # Discarding a best the producer already validated and committed is too expensive an outcome to leave to a
+        # return value nobody can attribute.
         log.warning(
             "forge recovery: dropping checkpoint for %s -- case coverage mismatch: expected %r, checkpoint reported %r",
             best_commit[:12],
@@ -2755,17 +2381,7 @@ def _run_loop_via_cli(
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
 ) -> ForgeLoopOutcome:
-    """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
-
-    Shells out to ``kernelforge forge-loop`` (like the GEAK backend shells
-    out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung kernel backend can no longer freeze the orchestrator: the timeout
-    terminates the whole process group, then returns any persisted best
-    checkpoint for recovery.
-
-    The child runs ``python -m kernelforge.cli forge-loop`` against the
-    installed package, which ships inside this distribution.
-    """
+    """Run the Forge IterationLoop as an isolated subprocess (CLI mode)."""
     import json as _json
 
     if deadline_unix <= 0:
@@ -2789,13 +2405,11 @@ def _run_loop_via_cli(
     env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
     env.setdefault("GIT_COMMITTER_NAME", "forge-bot")
     env.setdefault("GIT_COMMITTER_EMAIL", "forge-bot@local")
-    # KernelForge owns content-addressed AITER cache invalidation. Do not set
-    # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
-    # tree on every driver-process import, causing repeated attention rebuilds.
+    # KernelForge owns content-addressed AITER cache invalidation.
     if "/aiter/" in (worktree_kernel or ""):
         env.pop("AITER_REBUILD", None)
-        # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
-        # disabled before the loop imports aiter.
+        # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't disabled before the loop imports
+        # aiter.
         _ensure_flydsl_aiter_compat()
     cmd = [
         sys.executable,
@@ -2829,23 +2443,11 @@ def _run_loop_via_cli(
         "--result-json",
         str(result_json),
     ]
-    # Named on the command line as well as in the environment: KernelForge
-    # skips its KB and reports ``missing_gpu_type`` rather than stopping, so an
-    # identity that arrived only by inheritance could be lost without the run
-    # ever failing. Passed even when it resolves to nothing, because an omitted
-    # option is how KernelForge is told to use its own default -- saying nothing
-    # would file the run under a card it may never have run on.
+    # Named on the command line as well as in the environment: KernelForge skips its KB and reports
+    # ``missing_gpu_type`` rather than stopping, so an identity that arrived only by inheritance could be lost without
+    # the run ever failing.
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
-    # Provider selection. KernelForge defaults agent_backend to "auto", which
-    # resolves to its claude provider; an OpenAI-only deployment has no Anthropic
-    # credential and no Claude CLI login, so every attempt would REVERT on "Not
-    # logged in". Pin codex instead, and disable the provider fallback (it
-    # defaults to claude) so a missing Codex SDK fails loudly here rather than
-    # degrading into an unauthenticated claude run.
-    #
-    # Model id uses the shared Forge ladder (FORGE_* → CLAUDE/CODEX_MODEL) so
-    # rewrite honors the same overrides as fusion and collective. Omit --model
-    # when unset so KernelForge keeps its own provider default.
+    # Provider selection.
     from hyperloom.common.llm_config import resolve_forge_llm_model
 
     if _openai_only_provider():
@@ -2865,9 +2467,8 @@ def _run_loop_via_cli(
         cmd += ["--target-functions", ",".join(target_functions)]
     if source_files:
         cmd += ["--source-files", ",".join(source_files)]
-    # Pin the KB framework identity so producer/consumer resolve the same kernel
-    # page across differing workspace layouts. Omitted when unknown, in which
-    # case forge-loop infers it from the kernel path (soft, never fatal).
+    # Pin the KB framework identity so producer/consumer resolve the same kernel page across differing workspace
+    # layouts.
     if framework:
         cmd += ["--framework", framework]
 
@@ -3008,32 +2609,11 @@ def _run_rewrite_via_cli(
     timeout_s: int,
     deadline_unix: float = 0.0,
 ) -> RewriteRunOutcome:
-    """Run the source-to-FlyDSL rewrite as an isolated subprocess (CLI mode).
-
-    Shares the forge-loop launcher's containment guarantees -- child env,
-    isolated process group, absolute deadline and escalating termination -- but
-    builds the producer's own argv rather than stripping options off the
-    generic one, and reads only the caller-chosen result file.
-
-    ``shapes`` is a list of per-case dimension mappings, not the selector dict
-    Hyperloom carries internally: the rewrite producer coerces this argument
-    with ``list()``, so a mapping would degrade into a list of its keys.
-
-    ``invocation_spec_file`` is the evidence the producer's driver-preparation
-    stage reads when the handed-over driver does not conform. A synthesized
-    driver can also be found non-conforming and repaired from the same evidence,
-    so it is offered on both routes -- but only to a producer that advertised
-    ``driver_preparation``, since an older one rejects the options outright.
-
-    ``source_language`` is stated rather than left for the producer to infer: this
-    consumer resolved it from a trace, and a traced Triton kernel lives in a ``.py``
-    that names no language.
-    """
+    """Run the source-to-FlyDSL rewrite as an isolated subprocess (CLI mode)."""
     if deadline_unix <= 0:
         deadline_unix = time.time() + timeout_s
-    # Aim the producer one reserve short of the hard kill so it publishes the
-    # apply-back inside its own budget instead of racing the kill. The floor keeps
-    # a rounding error from passing a ``--max-hours`` the producer would reject.
+    # Aim the producer one reserve short of the hard kill so it publishes the apply-back inside its own budget instead
+    # of racing the kill.
     producer_deadline_unix = max(
         time.time() + 1.0,
         deadline_unix - _flydsl_rewrite.APPLYBACK_RESERVE_SEC,
@@ -3053,15 +2633,8 @@ def _run_rewrite_via_cli(
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
     _apply_kernel_backend_env(env)
-    # Same provider pin the generic loop applies through argv, which this command
-    # has no options for: it takes no --agent-backend, so its Config reads these.
-    # Without them an OpenAI-only deployment resolves "auto" to the claude
-    # provider and every session fails "Not logged in", after the whole budget.
-    #
-    # forge-rewrite-by-flydsl accepts --model (overrides KERNEL_AGENTS_MODEL /
-    # FORGE_AGENT_MODEL). KernelForge Config does not read FORGE_CLAUDE_MODEL /
-    # FORGE_CODEX_MODEL, so Hyperloom must resolve and pass the id explicitly —
-    # the same ladder forge-loop / fusion / collective already use.
+    # Same provider pin the generic loop applies through argv, which this command has no options for: it takes no
+    # --agent-backend, so its Config reads these.
     from hyperloom.common.llm_config import resolve_forge_llm_model
 
     if _openai_only_provider():
@@ -3104,9 +2677,8 @@ def _run_rewrite_via_cli(
         "--result-json",
         str(result_json),
     ]
-    # Named on the command line for the same reason the loop names it: the
-    # rewrite producer files its port under an identity the model is part of,
-    # and an unresolved model has to be said rather than left out.
+    # Named on the command line for the same reason the loop names it: the rewrite producer files its port under an
+    # identity the model is part of, and an unresolved model has to be said rather than left out.
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if forge_model:
         cmd += ["--model", forge_model]
@@ -3189,13 +2761,7 @@ _FORGE_USAGE_TOKEN_KEYS = (
 
 
 def _usage_has_token_counter(usage: object) -> bool:
-    """True when ``usage`` carries at least one int-coercible canonical counter.
-
-    Mirrors the FORGE_LLM_USAGE consumer's contract
-    (``parse_usage.normalize_usage``): a usage block is meaningful as soon as
-    any of the four canonical token counters is present and int-coercible. The
-    per-iteration ``calls`` field is optional metadata, not a precondition.
-    """
+    """True when ``usage`` carries at least one int-coercible canonical counter."""
     if not isinstance(usage, dict):
         return False
     for key in _FORGE_USAGE_TOKEN_KEYS:
@@ -3211,17 +2777,7 @@ def _usage_has_token_counter(usage: object) -> bool:
 
 
 def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | None]:
-    """Recover the forge run's LLM usage + key-step timeline from the CLI sidecar.
-
-    The forge loop runs in an isolated subprocess, so its in-process usage /
-    IterationResults are not reachable here. When the forge-loop CLI serializes
-    them into ``forge_cli_result.json`` (keys ``llm_usage`` / ``steps``),
-    surface them so ``submit`` can re-emit the canonical FORGE_LLM_USAGE /
-    FORGE_STEPS markers.
-
-    Returns ``(llm_usage, steps)``; either is ``None`` when the sidecar is
-    missing or lacks that field, leaving the markers a no-op.
-    """
+    """Recover the forge run's LLM usage + key-step timeline from the CLI sidecar."""
     sidecar = Path(output_dir) / "forge_cli_result.json"
     try:
         if not sidecar.exists():
@@ -3259,13 +2815,7 @@ def _run_rewrite_attempt(
     timeout_s: int,
     started: float,
 ) -> tuple[dict, list[str]]:
-    """Run one FlyDSL rewrite attempt and accept only a canonical apply-back.
-
-    Returns:
-        tuple[dict, list[str]]: The backend result dict, and the producer's
-            declared temporary paths -- empty unless an apply-back validated,
-            because reclaiming them is destructive and needs a trusted source.
-    """
+    """Run one FlyDSL rewrite attempt and accept only a canonical apply-back."""
     spec = route.spec
     outcome = _run_rewrite_via_cli(
         source_kernel=spec.source_kernel,
@@ -3290,8 +2840,8 @@ def _run_rewrite_attempt(
         timeout_s=timeout_s,
         deadline_unix=deadline_unix,
     )
-    # The producer is never given an experiment id, so it writes no forge-loop
-    # checkpoint: a published apply-back is the only evidence this route takes.
+    # The producer is never given an experiment id, so it writes no forge-loop checkpoint: a published apply-back is
+    # the only evidence this route takes.
     applyback_problems: list[str] = []
     applyback = _validated_rewrite_applyback_result(
         outcome.result,
@@ -3322,9 +2872,7 @@ def _run_rewrite_attempt(
             detail = f"{detail}: {outcome.error}"
         return _rejected(detail)
 
-    # A contract-valid apply-back that is not faster is a policy rejection, not
-    # a malformed artifact. Naming it separately keeps the two apart in the log,
-    # and keeps the producer's scratch unreclaimed on any rejection.
+    # A contract-valid apply-back that is not faster is a policy rejection, not a malformed artifact.
     if applyback["best_ms"] >= applyback["baseline_ms"]:
         log.info(
             "forge rewrite: rejecting a valid apply-back that is not faster (best=%sms baseline=%sms commit=%s)",
@@ -3350,8 +2898,8 @@ def _run_rewrite_attempt(
     _write_changed_files_index(output_dir, changed_files)
     baseline_ms = applyback["baseline_ms"]
     best_ms = applyback["best_ms"]
-    # The rewrite oracle reports one aggregate timing per implementation, so
-    # their ratio is this route's validated micro gain.
+    # The rewrite oracle reports one aggregate timing per implementation, so their ratio is this route's validated
+    # micro gain.
     micro_speedup = baseline_ms / best_ms
     _write_report(
         output_dir,
@@ -3463,18 +3011,9 @@ def _finalize_forge_workspace(
     temporary_paths: list[str] | None = None,
     result: dict[str, Any] | None = None,
 ) -> None:
-    """Restore live repos, but retain isolated Forge workspaces for inspection.
-
-    ``temporary_paths`` are scratch files a producer declared in a validated
-    result. They are reclaimed only in place, and only after re-confirming
-    containment, so an unvalidated run never deletes anything it merely guessed.
-
-    ``result`` is the dict about to be returned. Relocating an in-place campaign
-    directory moves the producer's published bundle with it, so its artifact paths
-    are repointed rather than left naming a directory this just emptied.
-    """
-    # --git-common-dir resolves to the live repo even from a linked worktree, so
-    # the exclude entry outlives a worktree run unless it is removed here too.
+    """Restore live repos, but retain isolated Forge workspaces for inspection."""
+    # --git-common-dir resolves to the live repo even from a linked worktree, so the exclude entry outlives a worktree
+    # run unless it is removed here too.
     if not nogit_scratch:
         _restore_generated_driver_exclude(Path(workspace))
 
@@ -3484,10 +3023,8 @@ def _finalize_forge_workspace(
         if campaign_root.is_dir():
             destination = Path(output_dir) / "forge_experiments"
             try:
-                # ``--experiments-dir`` already points at (and mkdir's) this
-                # path, so an empty destination is the normal case and must not
-                # abort cleanup. Only a destination holding real artifacts is
-                # preserved, by moving the workspace campaign beside it.
+                # ``--experiments-dir`` already points at (and mkdir's) this path, so an empty destination is the
+                # normal case and must not abort cleanup.
                 if destination.is_dir() and not any(destination.iterdir()):
                     destination.rmdir()
                 elif destination.exists():
@@ -3559,60 +3096,29 @@ def _finalize_forge_workspace(
 
 
 # --- Vendor-operator-playbook route -----------------------------------------
-#
-# A vendor-playbook candidate (mori's EP dispatch/combine is the first case,
-# see _vendor_operator_playbooks.py and KernelForge PR #88) has no rewritable
-# device source: it's a pip-installed compiled library. Instead of the
-# git-worktree / source-rewrite pipeline `submit()` otherwise runs, this copies
-# a validated KernelForge `examples/<task>/` bundle into a scratch workspace
-# and runs forge-loop against that bundle's own driver/config/program.md.
-#
-# mori's dispatch and combine are two separate hot-kernel candidates that
-# share one playbook id and are deliberately invoked as **one** Forge
-# task/session (not two) -- the lock/result files below de-duplicate so a
-# session that dispatches both candidates only launches forge-loop once.
 
 _VENDOR_PLAYBOOK_CLAIM_POLL_S = 5.0
 
-# A cached FAILURE only de-dupes submissions within this window -- long
-# enough to catch a genuinely concurrent dispatch+combine pair, short enough
-# that Hyperloom's normal "fail -> add budget -> retry" model gets a fresh
-# attempt instead of the whole group being permanently retired for the rest
-# of the session by one transient failure (see PR #1191 review finding #2).
-# A cached SUCCESS has no such expiry: sharing one session's result for the
-# rest of the session is the intended dedup behavior this module implements.
+# A cached FAILURE only de-dupes submissions within this window -- long enough to catch a genuinely concurrent
+# dispatch+combine pair, short enough that Hyperloom's normal "fail -> add budget -> retry" model gets a fresh attempt
+# instead of the whole group being permanently retired for the rest of the session by one transient failure (see PR
+# #1191 review finding #2).
 _VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S = 600.0
 
-# Extra time past an attempt's own timeout_s before its claim is presumed
-# abandoned (SIGKILL budget enforcement, OOM, node restart -- anything that
-# kills the holder without a chance to write result.json) rather than merely
-# still finishing up (writing the report, staging the artifact copy, etc).
+# Extra time past an attempt's own timeout_s before its claim is presumed abandoned (SIGKILL budget enforcement, OOM,
+# node restart -- anything that kills the holder without a chance to write result.json) rather than merely still
+# finishing up (writing the report, staging the artifact copy, etc).
 _VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S = 120.0
 
 
 def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
-    """Return the session-scoped directory used to de-duplicate a playbook group.
-
-    ``output_dir`` is per-attempt (``.../forge/<session_id>/<prompt_stem>``);
-    the lock lives one level up so every kernel_id in the same analysis
-    session and playbook group shares it.
-    """
+    """Return the session-scoped directory used to de-duplicate a playbook group."""
     safe_group = re.sub(r"[^A-Za-z0-9_-]+", "-", group_id).strip("-") or "vendor-playbook"
     return output_dir.parent / "vendor_playbook_locks" / safe_group
 
 
 def _read_vendor_playbook_cached_result(lock_dir: Path, *, max_failure_age_s: float | None = None) -> dict | None:
-    """Read a previously-cached vendor-playbook result, if any.
-
-    A cached SUCCESS (``returncode == 0``) is returned unconditionally --
-    sharing one session's validated result for the rest of the session is
-    the intended dedup behavior. A cached FAILURE is only returned while it
-    is younger than ``max_failure_age_s``; once it ages out it is treated as
-    absent so a fresh submission actually retries instead of one transient
-    failure (a flaky bundle copy, a transient git failure, etc.)
-    permanently wedging the whole playbook group for the rest of the session
-    (PR #1191 review finding #2).
-    """
+    """Read a previously-cached vendor-playbook result, if any."""
     result_path = lock_dir / "result.json"
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -3636,12 +3142,7 @@ def _write_vendor_playbook_result(lock_dir: Path, result: dict) -> None:
 
 
 def _write_claim_marker(claim_path: Path, *, nonce: str | None = None) -> str:
-    """Write ``{pid, claimed_at, nonce}`` into an already-created claim file.
-
-    The timestamp lets any waiter compute how long the claim has been held
-    without a result appearing; the nonce lets ``_steal_stale_claim`` verify
-    which of several racing stealers actually won the replace.
-    """
+    """Write ``{pid, claimed_at, nonce}`` into an already-created claim file."""
     nonce = nonce or uuid.uuid4().hex
     payload = {"pid": os.getpid(), "claimed_at": time.time(), "nonce": nonce}
     claim_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -3661,9 +3162,8 @@ def _claim_marker_age_s(claim_path: Path) -> float | None:
         except (ValueError, TypeError):
             claimed_at = None
     if claimed_at is None:
-        # Marker predates this format (or failed to write its JSON body) --
-        # fall back to the file's own mtime rather than treating age as
-        # unknown, since os.O_CREAT|O_EXCL always sets one.
+        # Marker predates this format (or failed to write its JSON body) -- fall back to the file's own mtime rather
+        # than treating age as unknown, since os.O_CREAT|O_EXCL always sets one.
         try:
             claimed_at = claim_path.stat().st_mtime
         except OSError:
@@ -3672,23 +3172,7 @@ def _claim_marker_age_s(claim_path: Path) -> float | None:
 
 
 def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
-    """A claim is stale (its holder is presumed done or dead) when either:
-
-    1. A result already exists but has aged out of the failure-cache TTL
-       (``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``) -- the completed attempt's
-       ``claimed.lock`` is never deleted, so without this check a lingering
-       claim from a long-finished, now-expired failure would block every
-       later retry from ever running (PR #1191 review finding #2 combined
-       with #3: the claim and the result cache must age out together).
-    2. The claim is older than its own attempt budget plus grace, with no
-       result at all -- covers SIGKILL budget enforcement, OOM, and node
-       restarts, none of which give the holder a chance to write
-       ``result.json``. Without this check every subsequent submission for
-       the group would poll ``_wait_for_vendor_playbook_result`` all the way
-       to its deadline and still find nothing -- for a 60-minute-budget
-       attempt, that is an hour burned per submission (PR #1191 review
-       finding #3).
-    """
+    """Return whether a claim has an expired result or exceeded its attempt budget plus grace."""
     lock_dir = claim_path.parent
     cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
     if cached is None and (lock_dir / "result.json").is_file():
@@ -3700,13 +3184,7 @@ def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
 
 
 def _steal_stale_claim(claim_path: Path) -> bool:
-    """Atomically replace a stale claim, verifying this caller actually won it.
-
-    ``os.replace`` never raises when the target already exists, so two
-    waiters racing to steal the same stale claim could both believe they
-    succeeded. Tag the write with a nonce and read it back afterwards: only
-    the caller whose nonce is what's on disk is the new owner.
-    """
+    """Atomically replace a stale claim, verifying this caller actually won it."""
     nonce = uuid.uuid4().hex
     tmp_path = claim_path.with_name(f".{claim_path.name}.{nonce}.tmp")
     try:
@@ -3719,26 +3197,17 @@ def _steal_stale_claim(claim_path: Path) -> bool:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
-            # Best-effort scratch-file cleanup only: by now tmp_path has
-            # already been atomically replaced onto claim_path (success) or
-            # never fully written (failure), so nothing downstream depends
-            # on this unlink -- it must never raise out of a claim-stealing
-            # attempt over something as inconsequential as a leftover temp
-            # file (missing_ok=True already covers the common "already
-            # gone" case; this only guards rarer failures like EPERM).
+            # Best-effort scratch-file cleanup only: by now tmp_path has already been atomically replaced onto
+            # claim_path (success) or never fully written (failure), so nothing downstream depends on this unlink --
+            # it must never raise out of a claim-stealing attempt over something as inconsequential as a leftover temp
+            # file (missing_ok=True already covers the common "already gone" case; this only guards rarer failures
+            # like EPERM).
             pass
     return current.get("nonce") == nonce
 
 
 def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
-    """Atomically claim the right to run this group's one forge-loop session.
-
-    Returns ``True`` for whichever caller wins the race (dispatch or
-    combine, whichever the orchestrator happened to submit first); the loser
-    waits for the winner's result instead of launching a second session.
-    Also returns ``True`` when the existing claim is stale (its holder is
-    presumed dead) and this caller wins the steal.
-    """
+    """Atomically claim the right to run this group's one forge-loop session."""
     lock_dir.mkdir(parents=True, exist_ok=True)
     claim_path = lock_dir / "claimed.lock"
     try:
@@ -3760,16 +3229,7 @@ def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
 
 
 def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float, timeout_s: int) -> dict | None:
-    """Poll for the winner's result until it appears, the claim looks
-    abandoned, or ``deadline_unix`` passes.
-
-    Returns early (well before ``deadline_unix``) the moment the claim looks
-    stale, so a waiter never burns its entire poll window on a holder that
-    was SIGKILLed/OOM-killed and will never write a result (PR #1191 review
-    finding #3). The caller is responsible for then trying to claim (steal)
-    the group itself rather than treating an early ``None`` as a hard
-    failure.
-    """
+    """Poll for the winner's result until it appears, the claim looks abandoned, or ``deadline_unix`` passes."""
     claim_path = lock_dir / "claimed.lock"
     while True:
         cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
@@ -3783,21 +3243,7 @@ def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float, timeo
 
 
 def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) -> None:
-    """Duplicate a reused vendor-playbook result's artifact under ``output_dir``.
-
-    ``kernel_optimization.py``'s ``invoke_backend()`` unconditionally resets
-    ``result["output_dir"]`` to *this* attempt's own directory right after
-    ``submit()`` returns (``result["output_dir"] = str(out_dir)``), and
-    ``_candidate_artifact_paths()`` looks under both ``cli_workspace`` and
-    ``output_dir`` for an ``optimized_versions/`` directory. A cache-hit
-    result's ``cli_workspace``/``output_dir`` fields describe the *winner's*
-    directory (correct at the time they were written to ``result.json``,
-    before that later overwrite mutates the in-memory dict this call
-    returns), so the winner's directory alone would silently stop being
-    reachable for a reused sibling once the caller clobbers ``output_dir``.
-    Physically copying the file(s) here makes the reused result
-    self-contained regardless of that overwrite.
-    """
+    """Duplicate a reused vendor-playbook result's artifact under ``output_dir``."""
     src_opt = None
     for key in ("cli_workspace", "output_dir"):
         candidate_dir = cached.get(key)
@@ -3823,15 +3269,7 @@ def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) ->
 
 
 def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
-    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and
-    git-init it there.
-
-    forge-loop's IterationLoop runs ``git status``/``git checkout`` against
-    the workspace to snapshot and restore each attempt (see the bundle's own
-    ``run_example.sh``, which does the identical ``git init`` + commit before
-    invoking forge-loop directly); a bare directory of copied files with no
-    ``.git`` fails the very first git call with "not a git repository".
-    """
+    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and git-init it there."""
     workspace.mkdir(parents=True, exist_ok=True)
     for item in sorted(task_bundle_root.iterdir()):
         if item.name in (".git", "__pycache__"):
@@ -3884,14 +3322,7 @@ def _run_vendor_playbook_loop_via_cli(
     experience_id: str,
     extra_env: dict[str, str] | None = None,
 ) -> ForgeLoopOutcome:
-    """Run forge-loop against a copied vendor-playbook task bundle.
-
-    Mirrors ``_run_loop_via_cli``'s subprocess/result-parsing conventions, but
-    always passes ``--no-profiling --no-prepare-task`` (the bundle already
-    ships a hand-written, validated ``driver.py`` -- forge-loop's own
-    task-preparer/profiler must not try to author or reprofile it) and forwards
-    the playbook's own env requirements (e.g. ``KERNELFORGE_INCLUDE_MORI_KB``).
-    """
+    """Run forge-loop against a copied vendor-playbook task bundle."""
     result_json = experiments_dir.parent / "forge_cli_result.json"
     checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
     for stale_path in (result_json, checkpoint_json):
@@ -4042,18 +3473,7 @@ def _run_vendor_playbook_loop_via_cli(
 
 
 def _resolve_vendor_task_bundle(relative: str) -> Path | None:
-    """Locate a vendor playbook's task bundle under KernelForge's ``examples/``.
-
-    The bundle ships inside the installed ``kernelforge`` package, so this needs
-    no environment at all -- it used to hard-fail with "FORGE_PATH is not set",
-    which is no longer a precondition. An operator who must substitute a bundle
-    without reinstalling points ``$KERNELFORGE_PROJECT_ROOT`` at a tree holding
-    it, which :func:`resource_path` honours ahead of the packaged copy.
-
-    Returns ``None`` for an empty ``relative``. ``missing_ok`` keeps a bundle
-    the package does not carry reportable as a concrete path, which the caller
-    turns into ``skipped`` rather than a failure.
-    """
+    """Locate a vendor playbook's task bundle under KernelForge's ``examples/``."""
     if not relative:
         return None
 
@@ -4074,15 +3494,7 @@ def _run_claimed_vendor_playbook(
     lock_dir: Path,
     started: float,
 ) -> dict:
-    """Copy the task bundle and run forge-loop, having already won the claim.
-
-    May raise (e.g. ``subprocess.CalledProcessError`` from the git-init
-    calls in ``_copy_vendor_task_bundle``, or anything else unexpected from
-    forge-loop setup) -- the caller (``_submit_vendor_playbook``) must catch
-    broadly and always write a result to ``lock_dir``, or a raised exception
-    here leaves ``claimed.lock`` in place forever with no result for any
-    waiting sibling or later retry to find.
-    """
+    """Copy the task bundle and run forge-loop, having already won the claim."""
     task_bundle_root = _resolve_vendor_task_bundle(str(playbook.get("task_bundle") or ""))
     if task_bundle_root is None or not task_bundle_root.is_dir():
         result = _normalized(
@@ -4110,8 +3522,8 @@ def _run_claimed_vendor_playbook(
     try:
         _copy_vendor_task_bundle(task_bundle_root, workspace)
     except (OSError, subprocess.CalledProcessError) as exc:
-        # _copy_vendor_task_bundle's git init/config/add/commit calls run with
-        # check=True and raise CalledProcessError, not OSError, on failure.
+        # _copy_vendor_task_bundle's git init/config/add/commit calls run with check=True and raise
+        # CalledProcessError, not OSError, on failure.
         result = _normalized(
             2,
             "",
@@ -4171,22 +3583,17 @@ def _run_claimed_vendor_playbook(
         "" if loop_outcome.error is None else str(loop_outcome.error),
         time.time() - started,
     )
-    # kernel_optimization.py's build_verification() only recognizes a forge
-    # attempt's measured speedup when total_improved/mean_case_speedup are
-    # BOTH present on the result dict it reads (see run_attempt's field
-    # copy); leaving any of these out silently downgrades a real KEEP-worthy
-    # improvement to PARTIAL ("no measurable speedup found"), even though
-    # forge-loop itself committed and validated a faster config.
+    # kernel_optimization.py's build_verification() only recognizes a forge attempt's measured speedup when
+    # total_improved/mean_case_speedup are BOTH present on the result dict it reads (see run_attempt's field copy);
+    # leaving any of these out silently downgrades a real KEEP-worthy improvement to PARTIAL ("no measurable speedup
+    # found"), even though forge-loop itself committed and validated a faster config.
     result.update(
         {
-            # NOTE: cli_workspace intentionally equals output_dir here (the
-            # convention the ordinary per-file forge path uses, see
-            # `res["cli_workspace"] = str(output_dir)` elsewhere in this
-            # module), NOT the git worktree -- optimized_versions/ below is
-            # written directly under output_dir, and _candidate_artifact_paths()
-            # checks cli_workspace/optimized_versions first. forge_workspace
-            # separately carries the real git worktree for anything that needs
-            # the live tree (e.g. a future patch-based snapshot).
+            # NOTE: cli_workspace intentionally equals output_dir here (the convention the ordinary per-file forge
+            # path uses, see `res["cli_workspace"] = str(output_dir)` elsewhere in this module), NOT the git worktree
+            # -- optimized_versions/ below is written directly under output_dir, and _candidate_artifact_paths()
+            # checks cli_workspace/optimized_versions first. forge_workspace separately carries the real git worktree
+            # for anything that needs the live tree (e.g. a future patch-based snapshot).
             "cli_workspace": str(output_dir),
             "forge_workspace": str(workspace),
             "output_dir": str(output_dir),
@@ -4204,23 +3611,14 @@ def _run_claimed_vendor_playbook(
             "vendor_playbook_role": role,
             "vendor_playbook_task_bundle": str(task_bundle_root),
             "vendor_playbook_reused": False,
-            # This role is the one that actually ran forge-loop and produced
-            # the measurement; a sibling role that reuses this same result
-            # (see _submit_vendor_playbook's ``_reuse``) marks itself False
-            # so downstream benefit accounting sums this speedup once, not
-            # once per role sharing it (PR #1191 review finding #4).
+            # This role is the one that actually ran forge-loop and produced the measurement; a sibling role that
+            # reuses this same result (see _submit_vendor_playbook's ``_reuse``) marks itself False so downstream
+            # benefit accounting sums this speedup once, not once per role sharing it (PR #1191 review finding #4).
             "vendor_playbook_independently_counted": True,
         }
     )
-    # The ordinary per-file forge path's correctness signal comes from
-    # optimization_report.md's "[correctness] pass" marker (kernel_optimization
-    # .py's _extract_correctness_from_report scans cli_workspace for it). The
-    # vendor-playbook path reused this same forge-loop run but never wrote
-    # that file, so correctness_passed stayed False and make_proposal()
-    # could never return KEEP even when SNR validation had already passed
-    # inside forge-loop (PR #1191 review finding #5). cli_workspace ==
-    # output_dir here (see the NOTE above), so writing it here is exactly
-    # where the correctness scan will look.
+    # The ordinary per-file forge path's correctness signal comes from optimization_report.md's "[correctness] pass"
+    # marker (kernel_optimization .py's _extract_correctness_from_report scans cli_workspace for it).
     _write_report(
         output_dir,
         loop_outcome.baseline_ms,
@@ -4231,12 +3629,8 @@ def _run_claimed_vendor_playbook(
         improved_during_search=loop_outcome.improved_during_search,
     )
     if loop_outcome.total_improved and kernel_anchor.is_file():
-        # There is no separate "deploy" artifact for a vendor launch-config:
-        # the tuned values live in the anchor file forge-loop already
-        # committed in-place in workspace. Materialize a copy under the
-        # attempt's own optimized_versions/ so _select_source_artifact()
-        # (which only looks in that conventional directory) can find it,
-        # exactly like the ordinary per-file-rewrite forge path does.
+        # There is no separate "deploy" artifact for a vendor launch-config: the tuned values live in the anchor file
+        # forge-loop already committed in-place in workspace.
         try:
             opt_dir = output_dir / "optimized_versions"
             opt_dir.mkdir(parents=True, exist_ok=True)
@@ -4259,9 +3653,8 @@ def _submit_vendor_playbook(
     started = time.time()
     playbook = candidate.get("vendor_operator_playbook")
     if not isinstance(playbook, dict) or not playbook.get("id"):
-        # Defensive re-resolve: a candidate dict round-tripped through JSON by
-        # a caller that dropped nested fields still carries enough identity
-        # (name/library/source_file) to re-match the registry.
+        # Defensive re-resolve: a candidate dict round-tripped through JSON by a caller that dropped nested fields
+        # still carries enough identity (name/library/source_file) to re-match the registry.
         playbook = match_vendor_operator_playbook(candidate)
     if not isinstance(playbook, dict) or not playbook.get("id"):
         return _normalized(
@@ -4281,22 +3674,18 @@ def _submit_vendor_playbook(
         result = dict(cached_result)
         result["vendor_playbook_reused"] = True
         result["vendor_playbook_role"] = role
-        # This measurement was already counted once, on the role that
-        # actually ran forge-loop; a reused sibling must not add its
-        # identical mean_case_speedup/best_ms again into downstream benefit
-        # totals (PR #1191 review finding #4).
+        # This measurement was already counted once, on the role that actually ran forge-loop; a reused sibling must
+        # not add its identical mean_case_speedup/best_ms again into downstream benefit totals (PR #1191 review
+        # finding #4).
         result["vendor_playbook_independently_counted"] = False
         _stage_vendor_playbook_artifact_for_reuse(cached_result, output_dir)
         return result
 
     def _run_and_guard() -> dict:
-        # From here on we (believe we) hold the claim: any unhandled
-        # exception MUST still produce a result.json, or claimed.lock is
-        # orphaned forever and no sibling/retry for this group can ever run
-        # again (see _run_claimed_vendor_playbook's docstring).
-        # _copy_vendor_task_bundle's git subprocess calls and the forge-loop
-        # launch are the known risks, but this is a deliberate catch-all,
-        # not just those two.
+        # From here on we (believe we) hold the claim: any unhandled exception MUST still produce a result.json, or
+        # claimed.lock is orphaned forever and no sibling/retry for this group can ever run again (see
+        # _run_claimed_vendor_playbook's docstring). _copy_vendor_task_bundle's git subprocess calls and the
+        # forge-loop launch are the known risks, but this is a deliberate catch-all, not just those two.
         try:
             return _run_claimed_vendor_playbook(
                 candidate=candidate,
@@ -4337,20 +3726,15 @@ def _submit_vendor_playbook(
     if _claim_vendor_playbook_run(lock_dir, timeout_s):
         return _run_and_guard()
 
-    # A sibling role (e.g. this is "combine" and "dispatch" already claimed
-    # the group) is running the one shared session; wait for it rather than
-    # launching a second forge-loop for the same task.
+    # A sibling role (e.g. this is "combine" and "dispatch" already claimed the group) is running the one shared
+    # session; wait for it rather than launching a second forge-loop for the same task.
     deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
     cached = _wait_for_vendor_playbook_result(lock_dir, deadline, timeout_s)
     if cached is not None:
         return _reuse(cached)
 
-    # The wait ended without a result either because the deadline passed or
-    # because the holder's claim looked abandoned (SIGKILL/OOM/node restart
-    # -- PR #1191 review finding #3). Try once more to claim the group: if
-    # the claim really is stale this steals it and we run for real instead
-    # of failing outright; if the original holder is alive and simply still
-    # running, this correctly fails again.
+    # The wait ended without a result either because the deadline passed or because the holder's claim looked
+    # abandoned (SIGKILL/OOM/node restart -- PR #1191 review finding #3).
     if _claim_vendor_playbook_run(lock_dir, timeout_s):
         return _run_and_guard()
 
@@ -4375,24 +3759,15 @@ def submit(
     kernel_repo: str = "",
     invocation_spec_file: str = "",
 ) -> dict:
-    """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
-
-    Hyperloom prepares an isolated git worktree / in-place edit, then runs the
-    Forge IterationLoop in a hard-killable CLI subprocess (`kernelforge
-    forge-loop`) so a hung kernel backend can never freeze the orchestrator. Returns a
-    normalized result dict and writes optimized_versions/ +
-    optimization_report.md under output_dir.
-    """
+    """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts."""
     started = time.time()
     candidate = candidate or {}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP
-    # dispatch/combine) has no rewritable device source to worktree/rewrite --
-    # skip the entire git-worktree / kernel_backend-resolution / rewrite-route pipeline
-    # below and copy the validated KernelForge task bundle instead. See
-    # _vendor_operator_playbooks.py and KernelForge PR #88.
+    # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP dispatch/combine) has no rewritable
+    # device source to worktree/rewrite -- skip the entire git-worktree / kernel_backend-resolution / rewrite-route
+    # pipeline below and copy the validated KernelForge task bundle instead.
     if candidate.get("patch_strategy") == "vendor_playbook":
         return _submit_vendor_playbook(
             candidate=candidate,
@@ -4407,16 +3782,14 @@ def submit(
 
     knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
 
-    # Re-derive source_type from the file extension when it's unknown: an aiter
-    # .cu/.cuh kernel can arrive as "unknown" and be wrongly skipped. A real
-    # device-source extension means hip_cpp.
+    # Re-derive source_type from the file extension when it's unknown: an aiter .cu/.cuh kernel can arrive as
+    # "unknown" and be wrongly skipped.
     if (source_type or "").strip().lower() in ("", "unknown") and str(source_file).lower().endswith(
         (".cu", ".cuh", ".hip")
     ):
         source_type = "hip_cpp"
-    # Curated kernel_kind refines the kernel backend choice: an aiter CK .cu is best
-    # tuned by the ck, not generic HIP; aiter_asm is a prebuilt assembly
-    # core the agent cannot rewrite -> skip cleanly.
+    # Curated kernel_kind refines the kernel backend choice: an aiter CK .cu is best tuned by the ck, not generic HIP;
+    # aiter_asm is a prebuilt assembly core the agent cannot rewrite -> skip cleanly.
     kernel_kind = _resolve_kernel_kind(
         source_type,
         str((candidate or {}).get("kernel_kind") or ""),
@@ -4451,9 +3824,8 @@ def submit(
     branch = _new_forge_branch(output_dir, source_file)
 
     repo = kernel_repo or _git_toplevel(source_file)
-    # Editable-finder packages import the live path via a meta_path finder that
-    # PYTHONPATH can't override, so a worktree copy is invisible; edit in place
-    # on a temp branch and hard-restore afterward.
+    # Editable-finder packages import the live path via a meta_path finder that PYTHONPATH can't override, so a
+    # worktree copy is invisible; edit in place on a temp branch and hard-restore afterward.
     inplace = _needs_inplace(repo)
     restore_info: dict | None = None
     nogit_scratch = False
@@ -4473,9 +3845,8 @@ def submit(
         else:
             wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
             if wt_info is None:
-                # Non-git source (e.g. pip-installed dist-packages): scaffold an
-                # isolated scratch worktree with git init. Disable with
-                # FORGE_DISABLE_NOGIT=1.
+                # Non-git source (e.g. pip-installed dist-packages): scaffold an isolated scratch worktree with git
+                # init.
                 if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
                     return _normalized(
                         2,
@@ -4511,8 +3882,8 @@ def submit(
 
     driver = ""
     producer_temporary_paths: list[str] = []
-    # Repointed by finalization, which runs in this function's ``finally`` -- before
-    # the value reaches the caller, so mutating it there is visible to them.
+    # Repointed by finalization, which runs in this function's ``finally`` -- before the value reaches the caller, so
+    # mutating it there is visible to them.
     finalized_result: dict[str, Any] = {}
     try:
         shapes = _shapes_from_candidate(candidate)
@@ -4574,8 +3945,8 @@ def submit(
                 driver,
             )
         else:
-            # A grouped task must carry every shape before the preparer sees it;
-            # a single-shape task has nothing to check.
+            # A grouped task must carry every shape before the preparer sees it; a single-shape task has nothing to
+            # check.
             if requires_multi_case_driver and not _invocation_spec_covers_cases(
                 invocation_spec_file,
                 grouped_cases,
@@ -4592,21 +3963,15 @@ def submit(
                 len(grouped_cases),
                 driver,
             )
-        # GPU_TARGET is passed via the forge-loop child env (not the parent
-        # os.environ, which would leak to sibling ladder backends).
+        # GPU_TARGET is passed via the forge-loop child env (not the parent os.environ, which would leak to sibling
+        # ladder backends).
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"
         experiments_dir.mkdir(parents=True, exist_ok=True)
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # Run the loop in an isolated, hard-killable subprocess so a hung kernel backend
-        # can never freeze the orchestrator. KernelBackend stability env defaults are
-        # applied inside _run_loop_via_cli, scoped to the child env only.
-        # forge-loop rejects --max-hours below its own MIN_MAX_HOURS (1.0) with a
-        # click BadParameter (exit 2) that reads like a forge crash and leaves no
-        # checkpoint to salvage. Floor the soft budget at that minimum so the
-        # campaign always starts; timeout_s still bounds the hard kill, and any
-        # KEEP committed before it is recoverable from the checkpoint.
+        # Run the loop in an isolated, hard-killable subprocess so a hung kernel backend can never freeze the
+        # orchestrator.
         if timeout_s < _FORGE_MIN_BUDGET_SEC:
             log.warning(
                 "forge budget %.0f min is below the %d-min minimum forge-loop "
@@ -4617,8 +3982,8 @@ def submit(
                 _FORGE_MIN_BUDGET_SEC / 3600.0,
                 timeout_s / 60.0,
             )
-        # Returns before the generic recovery channels below, which are
-        # schema-1 forge-loop semantics an apply-back must never take.
+        # Returns before the generic recovery channels below, which are schema-1 forge-loop semantics an apply-back
+        # must never take.
         if rewrite_route.eligible:
             rewrite_result, producer_temporary_paths = _run_rewrite_attempt(
                 route=rewrite_route,
@@ -4666,16 +4031,8 @@ def submit(
             target_functions=implementation_symbols,
             source_files=implementation_sources,
         )
-        # keep/revert is decided from forge's own published best, in descending
-        # order of trust:
-        #   1. best_result.json -- rewritten atomically on every KEEP, gated on
-        #      correctness, and pointing at a commit already in the history. It
-        #      is current whether the loop finished, exhausted its soft budget,
-        #      or was hard-killed, so it is the authoritative record.
-        #   2. the caller-owned checkpoint -- same guarantees, but routed through
-        #      --experiments-dir and only as fresh as the last KEEP callback.
-        #   3. the final-result sidecar / stdout sentinel -- only produced on a
-        #      graceful return, and never sufficient on its own after a kill.
+        # keep/revert is decided from forge's own published best, in descending order of trust: 1. best_result.json --
+        # rewritten atomically on every KEEP, gated on correctness, and pointing at a commit already in the history.
         raw_published = _read_forge_best_result(workspace)
         published = _validated_forge_best_result(
             raw_published,
@@ -4740,9 +4097,7 @@ def submit(
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
         if published is not None and checkpoint_recovery is not None:
-            # Both channels are validated; disagreement means one is stale. The
-            # published manifest wins (it is rewritten per KEEP), but surface it
-            # -- a persistent mismatch is a forge-side bug, not noise.
+            # Both channels are validated; disagreement means one is stale.
             if published["best_commit"] != checkpoint_recovery["best_commit"]:
                 log.warning(
                     "forge best_result.json (%s) and checkpoint (%s) disagree; keeping the published manifest",
@@ -4778,9 +4133,8 @@ def submit(
             f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )
-        # Surface the run's LLM token spend + key-step timeline from the CLI
-        # sidecar as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so
-        # the tracer can attribute forge's cost + decision process.
+        # Surface the run's LLM token spend + key-step timeline from the CLI sidecar as the canonical markers
+        # (FORGE_LLM_USAGE / FORGE_STEPS) so the tracer can attribute forge's cost + decision process.
         forge_usage, forge_steps = _forge_trace_from_sidecar(output_dir)
         if forge_usage:
             import json as _json_usage

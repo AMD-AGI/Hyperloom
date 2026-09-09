@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MockBackend — scripted-turn LLM stub for unit / e2e tests.
-
-Deterministic, offline, token-free playback of pre-recorded turns.
-
-Usage::
-
-    plan = ScriptedPlan([
-        MockTurn(intents=[
-            Intent(IntentType.PROPOSE_ACTION, payload={...}),
-        ]),
-        MockTurn(intents=[
-            Intent(IntentType.REQUEST, payload={"target_agent": "kernel_agent", ...}),
-        ]),
-    ])
-    backend = MockBackend(plan)
-    result = await backend.run(prompt="...")  # → first MockTurn
-    result = await backend.run(prompt="...")  # → second MockTurn
-"""
+"""MockBackend — scripted-turn LLM stub for unit / e2e tests."""
 
 from __future__ import annotations
 
@@ -42,11 +25,7 @@ class MockTurn:
 
 @dataclass
 class ScriptedPlan:
-    """Sequence of pre-recorded turns.
-
-    ``loop_last`` repeats the final turn after the script is exhausted;
-    otherwise ``default_intent`` (if set) is used.
-    """
+    """Sequence of pre-recorded turns."""
 
     turns: list[MockTurn]
     loop_last: bool = False
@@ -57,12 +36,7 @@ class MockBackend:
     """Implements :class:`Backend` by playing back a :class:`ScriptedPlan`."""
 
     def __init__(self, plan: ScriptedPlan, *, name: str = "mock"):
-        """Initialise the mock backend with a scripted plan.
-
-        Args:
-            plan (ScriptedPlan): The sequence of turns to play back.
-            name (str): Human-readable backend name used in logs and metadata.
-        """
+        """Initialise the mock backend with a scripted plan."""
         self.plan = plan
         self.name = name
         self._cursor = 0
@@ -76,23 +50,9 @@ class MockBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Record the call and play back the next scripted turn.
-
-        Args:
-            prompt (str): The composed turn prompt (recorded for assertions).
-            system_prompt (str | None): Optional system prompt (recorded).
-            tools (list[str] | None): Optional tool names (recorded).
-            max_turns (int): Maximum sub-turns (recorded).
-
-        Returns:
-            BackendTurnResult: The intents, raw text, and metadata of the next
-            scripted turn.
-
-        Raises:
-            BaseException: Whatever ``MockTurn.raise_error`` holds for the
-                played-back turn, to simulate backend failures.
-        """
+        """Record the call and play back the next scripted turn."""
         self.calls.append(
             {
                 "prompt": prompt,
@@ -111,16 +71,7 @@ class MockBackend:
         )
 
     def _next_turn(self) -> MockTurn:
-        """Return the next turn to play, applying loop/default/fallback rules.
-
-        Advances the cursor while scripted turns remain. Once exhausted, repeats
-        the last turn when ``loop_last`` is set, otherwise replays
-        ``default_intent`` when present, and finally falls back to a heartbeat
-        turn so the reactor keeps ticking.
-
-        Returns:
-            MockTurn: The turn to replay for this invocation.
-        """
+        """Return the next turn to play, applying loop/default/fallback rules."""
         if self._cursor < len(self.plan.turns):
             t = self.plan.turns[self._cursor]
             self._cursor += 1
@@ -129,16 +80,15 @@ class MockBackend:
             return self.plan.turns[-1]
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
-        # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
+        # Out of script and no fallback → emit an observation so the reactor keeps ticking.
         return MockTurn(
             intents=[
-                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"}),
             ]
         )
 
 
 # Coordinator inbox row format: ``seq=<n> msg_id=<hex> from=<agent> topic=<t> payload=<...>``.
-# Group 2 is the msg_id used for dedup; group 4 is the raw payload string.
 _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",
     re.MULTILINE,
@@ -146,15 +96,7 @@ _PROPOSAL_RE = re.compile(
 
 
 class MockRowScanBackend:
-    """Row-scanning reactor mock: one intent per matched inbox row, else heartbeat.
-
-    Generalises the always-approve Critic mock: scan the rendered inbox in
-    ``prompt`` for rows matching ``row_regex`` and emit one intent (built by
-    ``intent_builder``) per not-yet-seen row — keyed by ``dedup_key`` (msg_id
-    by default) so reactor fan-out re-renders don't double-emit. When no row
-    matches, emit a single heartbeat ``send_message`` so the reactor loop
-    always sees signal of life. Implements :class:`Backend`.
-    """
+    """Row-scanning reactor mock: one intent per matched inbox row, else idle."""
 
     def __init__(
         self,
@@ -162,28 +104,15 @@ class MockRowScanBackend:
         name: str,
         row_regex: re.Pattern[str],
         intent_builder: Callable[[re.Match[str]], Intent],
-        heartbeat_body: str,
+        idle_body: str,
         raw_text: str,
         dedup_key: Callable[[re.Match[str]], str] = lambda m: m.group(2),
     ):
-        """Initialise the row-scan mock backend.
-
-        Args:
-            name (str): Human-readable backend name used in logs and metadata.
-            row_regex (re.Pattern[str]): Multiline regex matched against the
-                rendered inbox; each match yields one intent.
-            intent_builder (Callable[[re.Match[str]], Intent]): Builds the intent
-                for a matched (not-yet-seen) row.
-            heartbeat_body (str): ``body_md`` of the fallback heartbeat message
-                emitted when no row matches.
-            raw_text (str): Raw text stamped on the returned turn result.
-            dedup_key (Callable[[re.Match[str]], str]): Extracts the dedup key
-                from a match (defaults to the msg_id capture group).
-        """
+        """Initialise the row-scan mock backend."""
         self.name = name
         self._row_regex = row_regex
         self._intent_builder = intent_builder
-        self._heartbeat_body = heartbeat_body
+        self._idle_body = idle_body
         self._raw_text = raw_text
         self._dedup_key = dedup_key
         self.calls: list[dict[str, Any]] = []
@@ -198,19 +127,9 @@ class MockRowScanBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Emit one intent per not-yet-seen matched row, else a heartbeat.
-
-        Args:
-            prompt (str): The composed turn prompt containing the rendered inbox.
-            system_prompt (str | None): Unused; accepted for protocol parity.
-            tools (list[str] | None): Unused; accepted for protocol parity.
-            disallowed_tools (list[str] | None): Unused; accepted for protocol parity.
-            max_turns (int): Unused; accepted for protocol parity.
-
-        Returns:
-            BackendTurnResult: The per-row intents and/or heartbeat for this turn.
-        """
+        """Emit one intent per not-yet-seen matched row, else an idle message."""
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in self._row_regex.finditer(prompt):
@@ -223,24 +142,14 @@ class MockRowScanBackend:
             intents.append(
                 Intent(
                     type=IntentType.SEND_MESSAGE,
-                    payload={"topic": "heartbeat", "body_md": self._heartbeat_body},
+                    payload={"topic": "observation", "body_md": self._idle_body},
                 )
             )
         return BackendTurnResult(intents=intents, raw_text=self._raw_text)
 
 
 def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
-    """Build the always-approve mock Critic backend.
-
-    Emits ``review_verdict{verdict="approve"}`` per visible proposal row, or a
-    heartbeat when none are present.
-
-    Args:
-        name (str): Human-readable backend name used in logs and metadata.
-
-    Returns:
-        MockRowScanBackend: A backend configured to auto-approve proposals.
-    """
+    """Build the always-approve mock Critic backend."""
 
     def _approve(match: re.Match[str]) -> Intent:
         msg_id = match.group(2)
@@ -258,7 +167,7 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
         name=name,
         row_regex=_PROPOSAL_RE,
         intent_builder=_approve,
-        heartbeat_body="ok (mock critic)",
+        idle_body="ok (mock critic, no proposals)",
         raw_text="(mock critic)",
     )
 

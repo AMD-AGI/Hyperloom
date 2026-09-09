@@ -32,18 +32,7 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 SCHEMA_VERSION = 7
-# Versions a campaign on disk may be written in and still be read back. Only
-# ``SCHEMA_VERSION`` is ever WRITTEN; ``from_dict`` normalizes an older payload
-# to it in memory, so the file itself is left untouched and the immutability
-# comparison in ``CampaignConfigStore.save`` still holds.
-#
-# 6 differs from 7 only by the absence of ``commit_new_paths``, and a campaign
-# written before the allowlist existed meant exactly what an absent allowlist
-# means now: nothing may be committed. Refusing it would strand every campaign
-# already on disk with no way out, since ``save`` guards on ``load``. The
-# 5 -> 6 bump was a different thing -- it REMOVED a field, so an old payload
-# tripped the unknown-field check and really could not be read. Precedent for
-# the read-set: ``rewrite_by_flydsl.protocol.ARTIFACT_SCHEMA_VERSIONS``.
+# Versions a campaign on disk may be written in and still be read back.
 READABLE_SCHEMA_VERSIONS = (6, 7)
 _GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -73,21 +62,16 @@ class CampaignConfig:
     base_commit: str = ""
     framework: str = ""
     operator_name: str = ""
-    # Snapshotted like every other identity dimension: a resumed campaign that
-    # re-derived it would publish under an address earlier sessions never used.
+    # Snapshotted like every other identity dimension: a resumed campaign that re-derived it would publish under an
+    # address earlier sessions never used.
     producer: str = ""
     implementation_signature: str = ""
     implementation_identity: dict = field(default_factory=dict)
-    # Measurement semantics. These decide what a number MEANS, so a resumed
-    # session that re-derived them from CLI defaults would compare candidates
-    # against an incumbent measured under different rules -- and on a
-    # collective task would also drop from nproc=4 to a single rank.
+    # Measurement semantics.
     nproc_per_node: int = 1
     bench_repeat: int = 1
-    # Paths the Implementer may CREATE and still have committed with a KEEP
-    # (see ``IterationConfig.commit_new_paths``). Immutable like the rest of
-    # this config: what a KEEP may ship and what a REVERT deletes must not
-    # change under a resumed campaign.
+    # Paths the Implementer may CREATE and still have committed with a KEEP (see
+    # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -127,16 +111,14 @@ class CampaignConfig:
             producer=str(payload.get("producer") or ""),
             implementation_signature=str(payload.get("implementation_signature") or "").lower(),
             implementation_identity=dict(payload.get("implementation_identity") or {}),
-            # to_dict() is asdict(), so these are always written; leaving them
-            # out of the reader made a resumed campaign silently fall back to
-            # one rank and single-shot benching -- measuring a
-            # different thing than the session it claims to continue.
+            # to_dict() is asdict(), so these are always written; leaving them out of the reader made a resumed
+            # campaign silently fall back to one rank and single-shot benching -- measuring a different thing than the
+            # session it claims to continue.
             nproc_per_node=max(1, int(payload.get("nproc_per_node") or 1)),
             bench_repeat=max(1, int(payload.get("bench_repeat") or 1)),
-            # Re-validated on read: this list decides which untracked files a
-            # KEEP commits and a REVERT deletes, so a hand-edited pattern the
-            # loop would read differently than its author meant is refused
-            # here rather than acted on later.
+            # Re-validated on read: this list decides which untracked files a KEEP commits and a REVERT deletes, so a
+            # hand-edited pattern the loop would read differently than its author meant is refused here rather than
+            # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload.get("commit_new_paths") or []),
         )
         if config.program_md_path and not config.program_md_sha256:
@@ -296,9 +278,8 @@ def _relative_file(workspace: Path, raw_path: str, label: str) -> str:
     if not path.is_absolute():
         path = workspace / path
     path = path.resolve()
-    # Resolve BOTH sides: ``path`` is already symlink-expanded, so comparing it
-    # against an unexpanded workspace makes every containment check fail when the
-    # caller passes a symlinked root (e.g. USER_DATA_PATH=/primus/xiaofei/... ->
+    # Resolve BOTH sides: ``path`` is already symlink-expanded, so comparing it against an unexpanded workspace makes
+    # every containment check fail when the caller passes a symlinked root (e.g. USER_DATA_PATH=/primus/xiaofei/... ->
     # /primus/data/xiaofei/...), rejecting a driver that is genuinely inside it.
     workspace = workspace.resolve()
     try:
@@ -311,20 +292,7 @@ def _relative_file(workspace: Path, raw_path: str, label: str) -> str:
 
 
 def _driver_reference(workspace: Path, raw_path: str) -> str:
-    """Resolve ``--driver`` to a campaign-stable reference.
-
-    A driver inside the workspace stays workspace-relative (the common case, and
-    what keeps a campaign relocatable). A driver OUTSIDE the workspace is not an
-    error: task preparation supports external drivers as a first-class mode,
-    staging and publishing them transactionally (``ExternalArtifactTransaction``)
-    so a failed prep cannot leak edits outside the kernel workspace. Rejecting
-    the path here killed the fresh-campaign CLI before prep could ever run, which
-    is what produced "Error: driver must be inside workspace: .../forge_autogen_driver.py"
-    for every caller that generates the driver next to its run artifacts.
-
-    The external form is stored absolute. ``workspace / <absolute>`` yields that
-    absolute path unchanged, so both consumers of ``driver_path`` keep working.
-    """
+    """Resolve ``--driver`` to a campaign-stable reference."""
     try:
         return _relative_file(workspace, raw_path, "driver")
     except ValueError as error:
@@ -401,13 +369,10 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             return "aiter"
         if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
             return "flydsl"
-        # Before Triton, and matching an import or a decorator rather than the
-        # word: Gluon IS Triton's low-level dialect, so a Gluon file imports
-        # triton and routinely keeps a `@triton.jit` sibling kernel as its
-        # fallback -- aiter's paged-MQA-logits ships exactly that shape, in a
-        # file under `aiter/ops/triton/`, so neither the path nor the presence
-        # of Triton markers distinguishes the two. Checked after flydsl because
-        # that arm keys on its own toolchain, which this one never carries.
+        # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
+        # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
+        # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
+        # path nor the presence of Triton markers distinguishes the two.
         if "triton.experimental.gluon" in text or "@gluon.jit" in text or "gluon.language" in text:
             return "gluon"
         if "@triton.jit" in text or "triton.language" in text:
@@ -478,12 +443,7 @@ def create_campaign_config(
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
 ) -> CampaignConfig:
-    """Resolve and normalize all immutable inputs for a fresh/legacy campaign.
-
-    Caller-supplied ``gpu_target``/``gpu_type``/``git_branch``/``kernel_backend``/
-    ``task_type`` and ``framework`` take precedence; each falls back to local inference. An
-    unsupported explicit kernel backend falls back to the FlyDSL kernel_backend.
-    """
+    """Resolve and normalize all immutable inputs for a fresh/legacy campaign."""
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, kernel, "kernel")
     driver_path = _driver_reference(workspace, driver)
@@ -549,12 +509,8 @@ def create_campaign_config(
         framework=resolved_framework,
         source_contents=pristine_sources,
     )
-    # Settled once, from the pristine sources, because it is part of the address
-    # the campaign's experience is filed under. Left to be re-derived later it
-    # would be read from whatever the loop has since written: a run that turns
-    # eager code into its first GPU kernel would file its result under the name
-    # of the kernel it just invented, at an address no read resolves to, and the
-    # write would report success while the experience became unreachable.
+    # Settled once, from the pristine sources, because it is part of the address the campaign's experience is filed
+    # under.
     resolved_operator = (operator_name or "").strip() or resolve_operation(
         pristine_sources.get(kernel_absolute, ""),
         kernel_absolute,

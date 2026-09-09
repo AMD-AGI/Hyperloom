@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PORT phase — translate the source kernel into a CORRECT FlyDSL kernel.
-
-Reuses the forge building blocks with a correctness-ONLY gate:
-  * ``make_agent_fn(insession_gate=True, correctness_only=True, ...)`` runs the
-    in-session Stop gate in correctness-only mode (the perf benchmark is skipped
-    entirely), so each session drives edit -> build -> test -> fix until the FlyDSL
-    output matches the source oracle (SNR gate).
-  * after each session the driver's complete correctness suite confirms the
-    port; on failure the compact error is fed into the
-    next attempt (mirrors the forge experience-ledger pattern).
-
-The source kernel (the port's reference AND the live oracle) and the driver are
-protected from edits; only the FlyDSL kernel file is editable.
-"""
+"""PORT phase — translate the source kernel into a CORRECT FlyDSL kernel."""
 
 from __future__ import annotations
 
@@ -48,21 +35,13 @@ def _validation_error_tail(report) -> str:
     return tail[-1500:]
 
 
-# Triton ships alongside FlyDSL in every rewrite environment, so reimplementing
-# the op in it is a cheat available whatever the source was written in.
+# Triton ships alongside FlyDSL in every rewrite environment, so reimplementing the op in it is a cheat available
+# whatever the source was written in.
 _BANNED_PORT_MODULES: frozenset[str] = frozenset({"triton"})
 
 
 def check_flydsl_port(spec: RewriteSpec) -> str:
-    """Reject a port that is not a genuine FlyDSL rewrite. Returns "" if OK.
-
-    Numeric correctness alone cannot tell a real FlyDSL port from one that cheats
-    by importing the source module and re-calling the original kernel, or by
-    reimplementing the op in another GPU DSL. The rule is the same for every
-    source language, so this gate takes no language argument. Returns a compact
-    human-readable reason on violation (fed back to the next attempt), or "" when
-    the port is acceptable.
-    """
+    """Reject a port that is not a genuine FlyDSL rewrite. Returns \"\" if OK."""
     import ast
 
     path = spec.flydsl_kernel
@@ -82,9 +61,8 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 imported_roots.add(node.module.split(".")[0])
-            # `from . import softmax` (relative; node.module is None) and
-            # `from pkg import softmax` both BIND the name `softmax` — catch the
-            # source module imported as a name, not just as a module root.
+            # `from . import softmax` (relative; node.module is None) and `from pkg import softmax` both BIND the name
+            # `softmax` — catch the source module imported as a name, not just as a module root.
             for alias in node.names:
                 imported_names.add(alias.name.split(".")[0])
 
@@ -108,10 +86,7 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
             "defeats the rewrite). Compute the result in FlyDSL only."
         )
 
-    # Dynamic imports evade the static import scan above. A genuine FlyDSL port has
-    # no need for `importlib.import_module(...)` / `__import__(...)`; treat one that
-    # names a forbidden module as a cheat, and one whose target cannot be resolved
-    # statically as unverifiable (reject rather than trust it).
+    # Dynamic imports evade the static import scan above.
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -169,8 +144,8 @@ async def run_port_loop(
         kernel_backend_name=kernel_backend,
         pre_task_context=pre_task_context,
         insession_gate=True,
-        # PORT is correctness-only: the in-session gate must NOT impose a perf
-        # requirement (a correct FlyDSL port is the goal; OPTIMIZE tunes speed later).
+        # PORT is correctness-only: the in-session gate must NOT impose a perf requirement (a correct FlyDSL port is
+        # the goal; OPTIMIZE tunes speed later).
         correctness_only=True,
         driver_script=driver_path,
         snr_threshold=spec.snr_threshold,
@@ -179,10 +154,8 @@ async def run_port_loop(
         # Single-file target: only the FlyDSL kernel is editable.
         source_files=[spec.flydsl_kernel],
         target_functions=[spec.builder_symbol],
-        # Protect the source kernel we port FROM — the driver imports it as the live
-        # correctness oracle + baseline, so it must not be editable during PORT.
-        # Exact absolute path (same tier as the driver); the basename glob stays as a
-        # fallback for edits the hook can only see as an unresolved relative path.
+        # Protect the source kernel we port FROM — the driver imports it as the live correctness oracle + baseline, so
+        # it must not be editable during PORT.
         extra_protected_paths=[spec.source_kernel],
         extra_protected_globs=[spec.source_kernel_name],
         usage=usage,
@@ -262,10 +235,8 @@ async def run_port_loop(
             )
             continue
 
-        # FlyDSL-only gate (security/intent): a numerically-correct kernel that
-        # cheats by re-calling the source (or reimplementing in Triton) is NOT a
-        # valid rewrite. Enforce this statically BEFORE the (more expensive)
-        # correctness pipeline so a cheat is caught + fed back immediately.
+        # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source (or
+        # reimplementing in Triton) is NOT a valid rewrite.
         flydsl_violation = check_flydsl_port(spec)
         if flydsl_violation:
             log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)

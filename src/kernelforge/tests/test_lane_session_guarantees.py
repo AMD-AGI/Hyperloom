@@ -28,7 +28,6 @@ from pathlib import Path
 import click
 import pytest
 
-import kernelforge.agent_backends.registry as registry
 import kernelforge.loop.insession_gate as gate_module
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
@@ -43,18 +42,8 @@ from kernelforge.loop import fanout
 
 
 @pytest.fixture(autouse=True)
-def isolated_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry.
-
-    Same reason as the fixture of the same name in ``test_provider_registry.py``:
-    ``register_agent_provider`` writes module-level state that no API removes, so
-    a fake registered below would stay visible to every later test in the same
-    worker process. Discovery runs first so the snapshot already holds the
-    built-ins, then the globals are rebound to copies monkeypatch drops.
-    """
-    registry.discover_agent_providers()
-    monkeypatch.setattr(registry, "_providers", dict(registry._providers))
-    monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 def _campaign(tmp_path: Path) -> tuple[Config, Path]:

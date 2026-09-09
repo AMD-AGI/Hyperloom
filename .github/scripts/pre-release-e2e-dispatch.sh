@@ -2,19 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# Pre-release E2E: create the SaFE PyTorchJob workloads that run the packaged wheel
-# through the real user path (Claude CLI + setup skill + demo skill). Unlike the PR
-# smoke test (.github/scripts/ci-e2e-dispatch.sh), which uses the orchestration
-# endpoint (POST /api/v1/orchestration/workloads, kind=hyperloom) to dispatch a git
-# SHA, this dispatches GENERIC pods (POST /api/v1/workloads) whose entrypoint is the
-# bootstrap script. kind=PyTorchJob, NOT Authoring: the Authoring mutating webhook
-# rewrites EntryPoints to `sleep infinity`, so an Authoring pod would never run our
-# bootstrap; PyTorchJob honors the submitted entrypoint. See
-# hyperloom-pre-release-e2e-ci-design.md §7.
+# Pre-release E2E: create the SaFE workloads that run the packaged wheel through the
+# real user path. Generic pods (POST /api/v1/workloads) entrypointed at the bootstrap,
+# kind=PyTorchJob because the Authoring webhook rewrites EntryPoints to `sleep infinity`.
+# See hyperloom-pre-release-e2e-ci-design.md §7.
 #
-# It creates 5 workloads for the 8 legs:
+# It creates 5 workloads for the 10 legs:
 #   * 4x non-privileged 1-GPU PyTorchJob  (one per baremetal leg)
-#   * 1x privileged   8-GPU PyTorchJob    (docker host; 4 nested containers, GPU 0-3)
+#   * 1x privileged   8-GPU PyTorchJob    (docker host; 6 nested containers, GPU 0-5)
 # and writes a dispatch map (leg -> workloadId) to $DISPATCH_MAP for the poll step.
 #
 # Requires: bash, curl, jq on the (self-hosted, in-network) runner.
@@ -37,23 +32,20 @@
 #                     into the workload env; bootstrap decodes it
 #                     into the leg's .env, which is on NFS       (required)
 #   ANTHROPIC_BASE_URL optional proxy / base url                 (optional)
-#   TASKS             comma-separated leg subset (default: all 8)
+#   TASKS             comma-separated leg subset (default: all 10)
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
 #   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
-#                     (default 196 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
-#                     uses 128 CPU; +68 for dockerd + 4 parallel agent/setup processes on
-#                     top of 4x32 CPU-capped nested containers)
+#                     (default 196 / 2048Gi / 256Gi / 1792Gi; SaFE's admission webhook
+#                     caps this -- 228 CPU was rejected 403)
 #   LEG_CPU  / LEG_MEM / LEG_EPHEMERAL   baremetal leg resource request
-#                     (default 32 / 512Gi / 512Gi -- sglang 14B-FP8 + roofline/aiter JIT
-#                     exceeded 128Gi/100Gi on 2026-08-28)
+#                     (default 32 / 512Gi / 512Gi)
 #   DOCKER_LEG_MEM_3H / DOCKER_LEG_MEM_12H / DOCKER_LEG_SHM_3H / DOCKER_LEG_SHM_12H
-#                     nested docker container caps (default 256g / 512g / 64g / 64g)
+#                     nested docker container caps (default 256g / 352g / 64g / 64g;
+#                     bootstrap repeats these fallbacks and must match)
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
-#                     (default 16200 = 3h+1h+30m / 48600 = 12h+1h+30m). The docker host
-#                     pod uses the MAX over its legs. SaFE kills the pod at the
-#                     deadline; poll then judges that leg FAIL. Timing starts when
-#                     the workload is DISPATCHED, not when it is queued.
+#                     (default 16200 / 48600; the docker host pod uses the MAX over its
+#                     legs, and timing starts at DISPATCH, not at queue)
 #   DEADLINE_FIELD    SaFE payload field for the deadline (default `timeout`, the
 #                     authoritative WorkloadSpec.Timeout field, integer seconds,
 #                     top-level in the create-workload body; set "" to omit).
@@ -62,54 +54,40 @@ set -euo pipefail
 
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
-# Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128 baseline,
-# bumped to 196 for four parallel nested legs (4x32 container CPU caps + host/agent headroom).
-# mem 2048Gi, ephemeral 1792Gi. Every writable path the DinD host has -- the container
-# rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
-# toward this one ephemeralStorage quota, so the host bootstrap requires a
-# layer-deduplicating docker storage driver (overlay2) to stay inside it.
+# Do NOT raise per added leg: SaFE's admission webhook caps the request (228 CPU was
+# rejected 403). The rootfs and the nested image store share one ephemeralStorage quota.
 HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
+# All legs share one egress IP, so anonymous hub access burns a single per-IP quota
+# and the legs reaching eval last are refused. Warm this with the pinned revision.
+HF_CACHE_ROOT="${HF_CACHE_ROOT:-${NFS_ROOT%/}/hf-cache}"
+
+# Nested limits must sum under HOST_MEM: two 3h plus four 12h legs is 1920Gi of
+# 2048Gi. Bootstrap repeats these as fallbacks and must be changed with them.
 DOCKER_LEG_MEM_3H="${DOCKER_LEG_MEM_3H:-256g}"
-DOCKER_LEG_MEM_12H="${DOCKER_LEG_MEM_12H:-512g}"
+DOCKER_LEG_MEM_12H="${DOCKER_LEG_MEM_12H:-352g}"
 DOCKER_LEG_SHM_3H="${DOCKER_LEG_SHM_3H:-64g}"
 DOCKER_LEG_SHM_12H="${DOCKER_LEG_SHM_12H:-64g}"
-# SaFE workload scheduling priority (Spec.Priority, an int): High=2, Med=1, Low=0
-# (Primus-SaFE common/constant.go). The scheduler orders the queue by this value, and
-# the webhook clamps it into [0,2]. These release-gate legs hold 8 GPUs for up to 14h
-# and block the release, so run them High so they aren't starved behind dev workloads.
+# Spec.Priority orders the scheduler queue: High=2, Med=1, Low=0, clamped to [0,2].
+# These legs hold 8 GPUs for up to 14h and block the release, so they run High.
 PRIORITY="${PRIORITY:-2}"
 DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
-# Pod hard-timeout. SaFE terminates the workload at the deadline; the poll then sees a
-# non-Succeeded terminal / missing report and judges that leg FAIL. Counted from DISPATCH
-# (not queue) time. This MUST exceed everything bootstrap can spend in-pod, which is the
-# setup budget (LEG_SETUP_DEADLINE_S, 45m) PLUS the demo wait deadline (hours*3600+3600,
-# i.e. 3h/12h demo + 1h agent buffer). An earlier version counted only the demo wait and
-# so sat 15m BELOW the bootstrap total: a leg that used its full setup budget was killed
-# by SaFE mid-wait, losing bootstrap's clean `return 1` + logs. We add a further +30m pod
-# margin on top of that total. Ordering per leg:
+# Pod hard-timeout, counted from DISPATCH. Must exceed everything bootstrap can spend
+# in-pod (setup budget + demo wait), or SaFE kills a leg mid-wait and its logs are lost:
 #   bootstrap total (setup + demo wait) < SaFE pod timeout < poll GLOBAL_TIMEOUT_S
 # 3h:  2700 + 14400 = 17100 < 18900 < 52200 ; 12h: 2700 + 46800 = 49500 < 51300 < 52200
 DEADLINE_3H_S="${DEADLINE_3H_S:-18900}"    # 45m setup + 3h demo + 1h buffer + 30m pod margin = 5.25h
 DEADLINE_12H_S="${DEADLINE_12H_S:-51300}"  # 45m setup + 12h demo + 1h buffer + 30m pod margin = 14.25h
-# The SaFE API field that carries the pod deadline. Confirmed against the Primus-SaFE
-# codebase: the create-workload body embeds WorkloadSpec inline, whose `timeout`
-# (integer seconds, top-level, from dispatch time) is enforced by WorkloadTTLController
-# for ALL workload kinds incl. Authoring. Set DEADLINE_FIELD="" to omit (then the pod
-# survival cap falls back to the workspace's per-scope maxRuntime, or the poll-side
-# GLOBAL_TIMEOUT_S if none). Ref: apis/pkg/apis/amd/v1/workload_types.go WorkloadSpec.Timeout.
+# WorkloadSpec.Timeout, enforced by WorkloadTTLController for all workload kinds.
+# Set to "" to omit; the cap then falls back to the workspace maxRuntime or the poll.
 DEADLINE_FIELD="${DEADLINE_FIELD:-timeout}"
 leg_deadline_s() { case "$1" in *-3h) echo "$DEADLINE_3H_S" ;; *-12h) echo "$DEADLINE_12H_S" ;; esac; }
 
-# SaFE caps the derived k8s object name at 44 chars (see create_workload), so we can
-# NOT embed the full CI_VERSION (e.g. 1.0.0.dev202608270954+ci) in every workload name
-# -- it would blow the limit and, once truncated, collide across legs (the leg suffix
-# gets cut). Instead build "e2e-<leg>-<short version hash>": the human-readable leg
-# stays intact up front, and a 6-hex digest of CI_VERSION+run id disambiguates across
-# runs (including repeated pushes with the same wheel version). All legs share VERSION_TAG.
+# SaFE caps the derived k8s object name at 44 chars, so the full CI_VERSION cannot be
+# embedded: truncation cuts the leg suffix and collides. Digest it instead.
 VERSION_TAG="$(printf '%s-%s' "$CI_VERSION" "${GITHUB_RUN_ID:-local}" | sha1sum | cut -c1-6)"
 workload_name() { printf 'e2e-%s-%s' "$1" "$VERSION_TAG"; }  # $1 = leg (or "docker-host")
 
@@ -135,22 +113,8 @@ fi
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 
-# ---- reclaim stale pre-release workloads BEFORE dispatching -----------------
+# ---- reclaim stale pre-release workloads ------------------------------------
 # Stale = any non-terminal e2e-* in this workspace whose VERSION_TAG differs from ours.
-# The concurrency.cancel-in-progress GitHub knob only cancels the JOB; it does NOT
-# reliably stop the SaFE PyTorchJob pods a superseded/failed run already created (the
-# `if: cancelled()` cleanup gets a short grace window, and a job that FAILS -- not
-# cancels -- after dispatch skips it entirely). Verified 2026-08-27: three `Running`
-# e2e workloads (incl. an 8-GPU docker host) leaked from a dead run and idle-held their
-# cards. So the correct, self-healing order is the reverse of "cancel job -> hope the
-# pod stops": a NEW run STOPS every stale e2e-* workload up front, frees the GPUs, then
-# dispatches its own. The old run's poll then sees phase=Stopped and judges those legs
-# FAIL -- the GitHub job ends naturally as a consequence of stopping the pod, not the
-# other way round.
-#
-# Scope: only workloads whose displayName starts `e2e-` (this CI's own), in THIS
-# workspace, that are NOT already terminal, and NOT this run's own tag (VERSION_TAG,
-# whose workloads don't exist yet anyway -- a belt-and-suspenders guard).
 reap_stale_workloads() {
   local resp
   resp="$(curl -sS "${tls[@]}" --max-time 30 "$API" "${auth[@]}" 2>/dev/null || true)"
@@ -175,13 +139,24 @@ reap_stale_workloads() {
     summary "• reclaimed stale workload \`$wid\` (stop HTTP $code)"
     n=$((n+1))
   done <<< "$stale"
-  summary "• reclaimed $n stale e2e workload(s) before dispatch"
+  summary "• reclaimed $n stale e2e workload(s) to free capacity"
 }
-reap_stale_workloads
 
-# All 8 legs. Fields: mode backend hours model_path -- gpu index within the docker host
+# Reclaiming is a last resort, not a precondition: a superseded run's legs are left
+# alive on purpose. Reclaim once, only after SaFE has refused a create for capacity.
+_reaped_for_capacity=0
+reap_stale_workloads_once() {
+  [ "$_reaped_for_capacity" -eq 0 ] || return 1
+  _reaped_for_capacity=1
+  reap_stale_workloads
+  return 0
+}
+
+# All 10 legs. Fields: mode backend hours model_path -- gpu index within the docker host
+# Keep the duration suffix LAST: the helpers parse by glob and `...-12h-forge` matches none.
 ALL_LEGS="baremetal-vllm-3h baremetal-vllm-12h baremetal-sglang-3h baremetal-sglang-12h \
-docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h"
+docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h docker-sglang-forge-12h \
+docker-vllm-forge-12h"
 REQ_TASKS="${TASKS:-$ALL_LEGS}"
 REQ_TASKS="${REQ_TASKS//,/ }"
 
@@ -189,9 +164,8 @@ leg_model_path() { case "$1" in *-3h) echo "$MODEL_3H" ;; *-12h) echo "$MODEL_12
 leg_hours()      { case "$1" in *-3h) echo "3"       ;; *-12h) echo "12"       ;; esac; }
 leg_backend()    { case "$1" in *-vllm-*) echo "vllm" ;; *-sglang-*) echo "sglang" ;; esac; }
 
-# Common env for every workload. The API key is passed base64 so it is not visible in
-# plaintext in the API payload log; bootstrap decodes it into the leg's .env, which sits
-# on NFS beside the workspace and is scrubbed by an EXIT trap. See design §9 (point D).
+# Common env for every workload. The API key travels base64 so it is not plaintext in
+# the payload log; bootstrap decodes it into the leg .env, scrubbed by an EXIT trap.
 common_env_json() {
   local model_path="$1" hours="$2" backend="$3"
   jq -n \
@@ -200,6 +174,7 @@ common_env_json() {
     --arg tgain "$TARGET_GAIN" \
     --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
+    --arg hfhome "$HF_CACHE_ROOT" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg rtag "$VERSION_TAG" \
@@ -213,7 +188,8 @@ common_env_json() {
       CLAUDE_MODEL: $cmodel,
       CLAUDE_CLI_VERSION: $cver,
       RUN_TAG: $rtag,
-      ANTHROPIC_API_KEY_B64: $keyb64
+      ANTHROPIC_API_KEY_B64: $keyb64,
+      HF_HOME:$hfhome
     }
     + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)
     + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS: $cheaders} end)'
@@ -224,13 +200,8 @@ common_env_json() {
 create_workload() {
   local name="$1" resources="$2" env="$3" privileged="$4" entry_b64="$5" deadline_s="${6:-}"
   local body resp code json wid dl_json="{}"
-  # SaFE derives the k8s object name from displayName and enforces (via the
-  # vworkload admission webhook, STRICTER than plain RFC 1123): 1-44 chars, lower
-  # case alphanumerics or '-', MUST start with an ALPHABETIC char and end with an
-  # alphanumeric. So a leading digit or a '.'/'+' (both in CI_VERSION, e.g.
-  # 1.0.0.dev...+ci) is illegal, and the full "e2e-<CI_VERSION>-<leg>" easily
-  # exceeds 44. Fold every illegal char to '-', lowercase, collapse/trim dashes,
-  # then cap at 44 chars re-trimming any trailing dash the cut may leave.
+  # The vworkload webhook is stricter than RFC 1123: 1-44 chars, lowercase alphanumeric
+  # or '-', must start alphabetic and end alphanumeric. CI_VERSION satisfies none of it.
   name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^[^a-z]+//; s/-+$//')"
   name="${name:0:44}"; name="${name%%-}"
   [ -n "$name" ] || name="e2e"
@@ -238,15 +209,8 @@ create_workload() {
   if [ -n "$DEADLINE_FIELD" ] && [ -n "$deadline_s" ]; then
     dl_json="$(jq -n --arg k "$DEADLINE_FIELD" --argjson v "$deadline_s" '{($k): $v}')"
   fi
-  # kind PyTorchJob, NOT Authoring: SaFE's mutating webhook (mutateAuthoring)
-  # unconditionally overwrites an Authoring workload's EntryPoints to `sleep infinity`,
-  # so our bootstrap entrypoint would never auto-run -- every leg would idle until
-  # something exec'd in. PyTorchJob is not in that mutate switch, so it HONORS the
-  # submitted entryPoints (run via launcher.sh) and bootstrap runs as the pod command.
-  # version stays "v1"; NO `group` field (webhook clears group, workload_webhook.go:260).
-  # privileged / 8-GPU / useWorkspaceStorage / timeout are all kind-agnostic (driven by
-  # request fields, not kind) -- confirmed against Primus-SaFE source. Pod name is
-  # <workloadId>-master-0, main container `pytorch`.
+  # PyTorchJob is not in the mutateAuthoring switch, so it honors the submitted
+  # entryPoints. Keep version "v1" and omit `group`; the webhook clears group.
   body="$(jq -n \
     --arg name "$name" --arg ws "$SAFE_WORKSPACE_ID" --arg img "$AUTHORING_IMAGE" \
     --arg entry "$entry_b64" --argjson res "$resources" --argjson env "$env" \
@@ -267,10 +231,18 @@ create_workload() {
     "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
   code="$(printf '%s' "$resp" | tail -n1)"
   json="$(printf '%s' "$resp" | sed '$d')"
+  # A refused create is the one moment reclaiming stale legs is worth their loss.
+  # The reclaim skips this run's own tag, so legs already placed are never stopped.
+  if { [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; } && reap_stale_workloads_once; then
+    echo "⚠ create '$name' refused (HTTP $code); reclaimed stale e2e workloads and retrying once" >&2
+    resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
+      "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
+    code="$(printf '%s' "$resp" | tail -n1)"
+    json="$(printf '%s' "$resp" | sed '$d')"
+  fi
   if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-    # Report to stderr: this runs inside wid="$(create_workload ...)" command
-    # substitution, so a stdout message would be captured into $wid and never
-    # reach the CI log. stderr surfaces the real HTTP status + API body.
+    # stderr, not stdout: this runs inside wid="$(create_workload ...)", so a stdout
+    # message would be captured into $wid instead of reaching the CI log.
     echo "❌ create '$name' failed (HTTP $code): $(printf '%s' "$json" | head -c 400)" >&2
     return 1
   fi
@@ -282,9 +254,8 @@ create_workload() {
   printf '%s' "$wid"
 }
 
-# Base64 the bootstrap entrypoint (SaFE requires base64-encoded entryPoints).
-# The bootstrap script is staged to NFS by the build job (from .github/pre-release/)
-# and read by the pod at ${NFS_ROOT}/bootstrap/${CI_VERSION}/bootstrap-pre-release.sh.
+# SaFE requires base64-encoded entryPoints. The build job stages the bootstrap to
+# ${NFS_ROOT}/bootstrap/${CI_VERSION}/ for the pod to read.
 bootstrap_entry_b64() {
   local extra="$1"  # extra shell prepended (e.g. E2E_DOCKER_HOST=1)
   local cmd
@@ -295,12 +266,8 @@ bootstrap_entry_b64() {
 echo "[dispatch] CI_VERSION=$CI_VERSION tasks='$REQ_TASKS'"
 declare -A DISPATCH   # leg -> workloadId
 
-# Persist the dispatch map INCREMENTALLY, one entry per created workload -- not just
-# once at the end. With concurrency.cancel-in-progress a newer push can cancel THIS run
-# mid-dispatch; the job's `if: cancelled()` cleanup then stops whatever is in
-# DISPATCH_MAP. If the map were written only after the loop, workloads created before
-# the cancel would leak their GPUs. Seed an empty map up front so the file always
-# exists, then append after every successful create.
+# Persist the map incrementally: a newer push can cancel this run mid-dispatch, and the
+# cleanup stops only what DISPATCH_MAP holds, so a map written at the end leaks GPUs.
 : > "$DISPATCH_MAP" 2>/dev/null || true
 printf '{}\n' > "$DISPATCH_MAP"
 # Hand the poll this run's tag out-of-band rather than re-deriving it there: the pods
@@ -318,9 +285,8 @@ record_dispatch() {  # leg workloadId -- add to the in-memory map AND the on-dis
 leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" --arg eph "$LEG_EPHEMERAL" \
   '{replica:1, gpu:"1", cpu:$cpu, memory:$mem, ephemeralStorage:$eph}')"
 
-# Discover requested docker legs up front so the 8-GPU host can be dispatched first.
-# It schedules more slowly and spends minutes on dockerd + image pulls before the
-# nested legs even start setup, so queue it before the four 1-GPU baremetal pods.
+# Dispatch the 8-GPU host first: it schedules more slowly and spends minutes on
+# dockerd plus image pulls before its nested legs can even start setup.
 want_docker_host=0
 docker_legs=""
 for leg in $REQ_TASKS; do
@@ -331,9 +297,8 @@ for leg in $REQ_TASKS; do
       ;;
   esac
 done
-# The host pod binds each leg to the GPU at its position in DOCKER_LEGS (design §3), so
-# there is nothing to send: the ordered list IS the assignment. Numbering it here too is
-# only for the summary below, and cannot disagree because it is the same list.
+# The host binds each leg to the GPU at its position in DOCKER_LEGS, so the ordered
+# list IS the assignment; numbering here only feeds the summary below.
 docker_leg_gpu_index() { # leg -> its position in $docker_legs, or "" when absent
   local want="$1" i=0 leg
   for leg in $docker_legs; do
@@ -348,14 +313,14 @@ if [ "$want_docker_host" = 1 ]; then
   host_resources="$(jq -n --arg cpu "$HOST_CPU" --arg mem "$HOST_MEM" --arg shm "$HOST_SHM" \
     --arg eph "$HOST_EPHEMERAL" \
     '{replica:1, gpu:"8", cpu:$cpu, memory:$mem, sharedMemory:$shm, ephemeralStorage:$eph}')"
-  # The host env carries the per-leg GPU map so the host bootstrap runs each docker leg
-  # (run_leg, docker mode) with the right GPU index; each leg's agent then `docker run`s
-  # its own single-GPU container per the demo skill.
+  # The host env carries the per-leg GPU map so run_leg starts each docker leg on the
+  # right index; the leg's agent then runs its own single-GPU container.
   host_env="$(jq -n \
     --arg civ "$CI_VERSION" --arg nfs "$NFS_ROOT" \
     --arg m3 "$MODEL_3H" --arg m12 "$MODEL_12H" \
     --arg tgain "$TARGET_GAIN" --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
+    --arg hfhome "$HF_CACHE_ROOT" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg legs "$docker_legs" \
@@ -368,6 +333,7 @@ if [ "$want_docker_host" = 1 ]; then
       TARGET_GAIN:$tgain, CLAUDE_MODEL:$cmodel, CLAUDE_CLI_VERSION:$cver,
       RUN_TAG:$rtag,
       ANTHROPIC_API_KEY_B64:$keyb64,
+      HF_HOME:$hfhome,
       HYPERLOOM_RUN_MODE:"docker",
       E2E_DOCKER_HOST:"1",
       DOCKER_LEGS:$legs,
@@ -376,9 +342,8 @@ if [ "$want_docker_host" = 1 ]; then
     }
     + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL:$baseurl} end)
     + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS:$cheaders} end)')"
-  # E2E_DOCKER_HOST=1 travels in the workload `env` (above), NOT as a command prefix:
-  # under PyTorchJob the entrypoint actually runs, and a `VAR=1;` prefix followed by a
-  # separate `exec bash` would NOT export VAR into the bootstrap's environment.
+  # E2E_DOCKER_HOST=1 travels in the workload `env`, not as a command prefix: a `VAR=1;`
+  # prefix ahead of a separate `exec bash` would not export it into the bootstrap.
   entry="$(bootstrap_entry_b64 "")"
   # The one host pod runs a mix of 3h and 12h nested legs, so its deadline must be
   # the MAX over the legs it hosts (a 3h deadline would kill a still-running 12h leg).

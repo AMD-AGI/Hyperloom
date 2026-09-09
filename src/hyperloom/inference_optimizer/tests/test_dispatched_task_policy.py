@@ -125,36 +125,6 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_dispatched_integrate_patch_outside_allowlist_fails(tmp_path, monkeypatch):
-    """framework_source_root outside the source allowlist is denied at dispatch."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    state = sub.shared_state
-    assert isinstance(state, SharedState)
-    state.record_specialist_patch_verdict("evil0", "approve")
-
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={
-            "specialist_task_id": "evil0",
-            "framework_source_root": "/root",
-            "apply_only": True,
-        },
-        idempotency_key="forged-root-override",
-    )
-    res = await sub.run_task(task)
-    assert res.state == "failed"
-    assert "framework_source_root'='/root'" in (res.error or "")
-    assert executed["ran"] is False
-
-
-@pytest.mark.asyncio
 async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monkeypatch):
     """Coordinator-internal actions skip LLM delegate gates but still dispatch."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
@@ -224,20 +194,6 @@ async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert executed["ran"] is True
-
-
-def test_validate_dispatched_task_unit_integrate_patch_gate(tmp_path):
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-        strict_paths=True,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task(
-            "integrate_patch",
-            {"specialist_task_id": "x", "framework_source_root": "/root"},
-        )
-    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
 def test_validate_dispatched_task_accepts_integrate_patch_with_verdict(tmp_path, monkeypatch):

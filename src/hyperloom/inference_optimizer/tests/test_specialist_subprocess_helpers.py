@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``specialists.subprocess_`` helpers: worktree pick/setup,
-claude argv assembly, patch discovery, and done-file parse/unwrap."""
+"""Coverage for ``specialists.subprocess_`` helpers: worktree pick/setup, claude argv assembly, patch discovery, and
+done-file parse/unwrap.
+"""
 
 from __future__ import annotations
 
@@ -106,7 +107,9 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied and "SlashCommand" in denied
-    assert str(wt) in cmd and str(ws) in cmd and str(fw) in cmd
+    # --add-dir grants writes; integrate_patch is the only writer of source.
+    assert str(wt) in cmd and str(ws) in cmd
+    assert str(fw) not in cmd
     assert cmd[-2:] == ["--foo", "bar"]
 
 
@@ -185,8 +188,8 @@ def test_read_done_non_dict(tmp_path: Path) -> None:
 
 def test_read_done_flat_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
-    p.write_text(json.dumps({"empty": True, "proposal_set": []}), encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) == {"empty": True, "proposal_set": []}
+    p.write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(p) == {"proposal_set": []}
 
 
 def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
@@ -196,7 +199,7 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
             {
                 "intent_type": "specialist_done",
                 "domain": "kernel_switch_specialist",
-                "payload": {"proposal_set": [{"name": "v1"}], "empty": False},
+                "payload": {"proposal_set": [{"name": "v1"}]},
             }
         ),
         encoding="utf-8",
