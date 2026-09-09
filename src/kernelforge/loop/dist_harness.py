@@ -232,8 +232,12 @@ def _check_case(case: Case, context: RankContext, seed: int) -> float:
     second_inputs = _seeded_inputs(case, context, seed + _PARITY_SEED_STRIDE)
     first_got = case.call_candidate(context, first_inputs)
     second_got = case.call_candidate(context, second_inputs)
-    first_want = case.reference(context, first_inputs)
-    second_want = case.reference(context, second_inputs)
+    # Rebuilt, not reused. A collective that reduces in place has overwritten
+    # the buffers above, and a reference given those would be computing from
+    # the candidate's own output -- parity that fails on an operator that did
+    # nothing wrong. The seed makes the rebuild identical to what was passed.
+    first_want = case.reference(context, _seeded_inputs(case, context, seed))
+    second_want = case.reference(context, _seeded_inputs(case, context, seed + _PARITY_SEED_STRIDE))
     torch.cuda.synchronize()
     local = min(_snr_db(first_got, first_want), _snr_db(second_got, second_want))
     return _worst_across_ranks(local, context)

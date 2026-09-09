@@ -178,6 +178,28 @@ def test_a_single_rank_probe_declares_no_rank_count(monkeypatch):
     assert "FORGE_NPROC_PER_NODE" not in captured
 
 
+def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch):
+    """The probe runs in every process on the path, so it may not raise from one.
+
+    A module named torch with no ``cuda`` is a real shape -- a test stub, or a
+    package caught mid-import -- and reading the attribute outside the guard
+    turned the lazy install into an uncaught AttributeError in whatever process
+    happened to import torch next.
+    """
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    monkeypatch.setenv("GRAPH_PROBE_OUT", str(tmp_path / "probe"))
+    namespace: dict = {}
+
+    exec(compile(task_preparer._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
+
+    assert namespace["_graph_ready"] is False
+    # The hook stays installed and must swallow the same shape on every import.
+    assert namespace["_hooked"]("torch") is not None
+
+
 def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch):
     """The shard's ``harness`` field is what the module under test actually writes.
 

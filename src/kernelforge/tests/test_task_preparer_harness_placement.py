@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from kernelforge.loop import dist_harness, task_preparer
+from kernelforge.loop import task_preparer
 
 
 def _placement_expression(name: str) -> ast.expr:
@@ -86,20 +86,39 @@ def test_what_is_shipped_is_the_module_the_tests_exercise() -> None:
     """Otherwise the harness under test and the one drivers import can drift.
 
     The copy is what every later run of the loop imports, so a divergence would
-    be found by a campaign rather than by this suite.
+    be found by a campaign rather than by this suite. Compared as text rather
+    than through the imported module, because ``dist_harness`` needs torch and
+    this file must keep collecting on an image without it -- which is also the
+    property that makes ``_dist_harness_text`` read the file instead of
+    importing it.
     """
     shipped = task_preparer._dist_harness_text()
+    on_disk = Path(task_preparer.__file__).parent / "dist_harness.py"
 
-    assert shipped == Path(dist_harness.__file__).read_text(encoding="utf-8")
+    assert shipped == on_disk.read_text(encoding="utf-8")
 
 
 def test_the_shipped_source_offers_the_entry_point_the_prompt_names() -> None:
-    """The contract note tells the agent to write ``from dist_harness import Case, run``."""
+    """The contract note tells the agent to write ``from dist_harness import Case, run``.
+
+    Read rather than executed: the module imports torch, and this suite runs on
+    images without it.
+    """
     shipped = task_preparer._dist_harness_text()
     assert shipped is not None
-    namespace: dict = {}
-    exec(compile(shipped, "dist_harness.py", "exec"), namespace)  # noqa: S102 - the file under test
+    tree = ast.parse(shipped)
+    defined = {
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
 
-    assert callable(namespace["run"])
-    assert namespace["Case"] is not None
-    assert namespace["MEASURED"] == [0]
+    assert {"run", "Case", "RankContext"} <= defined
+    # The probe reads this by name out of ``sys.modules`` to establish that the
+    # ranks measured here, so its absence would be silent on both sides.
+    assert "MEASURED" in assigned

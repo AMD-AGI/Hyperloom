@@ -21,7 +21,12 @@ from __future__ import annotations
 import math
 
 import pytest
-import torch
+
+# The harness is the one module in the loop that needs torch at import, and the
+# suite is expected to run on images without it. Production never takes this
+# path: ``_dist_harness_text`` ships the module as text rather than importing
+# it, so nothing in ``prepare_task`` pulls torch in either.
+torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from kernelforge.loop import dist_harness
 from kernelforge.loop.dist_harness import Case, HarnessError, RankContext
@@ -162,8 +167,12 @@ def test_the_two_parity_calls_cannot_receive_the_same_inputs(solo, context):
 
     dist_harness._check_case(_case(build_inputs=build_inputs), context, seed=11)
 
-    assert len(seen) == 2
-    assert not torch.equal(seen[0], seen[1])
+    # Four builds: one per parity call, and one more of each for the reference,
+    # which cannot be handed buffers an in-place candidate may have overwritten.
+    first, second, first_again, second_again = seen
+    assert not torch.equal(first, second)
+    assert torch.equal(first, first_again)
+    assert torch.equal(second, second_again)
 
 
 @requires_gpu
@@ -209,6 +218,56 @@ def test_both_candidate_calls_are_issued_before_either_is_compared(solo, context
     )
 
     assert order == ["candidate", "candidate", "reference", "reference"]
+
+
+@requires_gpu
+def test_an_in_place_candidate_is_not_failed_for_overwriting_its_input(solo, context):
+    """The reference must not be handed the buffers the candidate reduced into.
+
+    A collective that writes its result back over its input is ordinary, and
+    computing the reference from those buffers afterwards compares the
+    candidate against its own output. That fails an operator that did nothing
+    wrong, which a single-rank stub is as capable of showing as real hardware.
+    """
+
+    def call_candidate(ctx, inputs):  # noqa: ARG001
+        inputs.mul_(2)
+        return inputs
+
+    def reference(ctx, inputs):  # noqa: ARG001
+        return inputs * 2
+
+    snr = dist_harness._check_case(
+        _case(call_candidate=call_candidate, reference=reference),
+        context,
+        seed=11,
+    )
+
+    assert snr == math.inf
+
+
+@requires_gpu
+def test_the_reference_sees_the_same_inputs_the_candidate_did(solo, context):
+    """Rebuilding is only sound because the seed makes it identical."""
+    seen: list[torch.Tensor] = []
+
+    def call_candidate(ctx, inputs):  # noqa: ARG001
+        seen.append(inputs.clone())
+        return inputs * 2
+
+    def reference(ctx, inputs):  # noqa: ARG001
+        seen.append(inputs.clone())
+        return inputs * 2
+
+    dist_harness._check_case(
+        _case(call_candidate=call_candidate, reference=reference),
+        context,
+        seed=11,
+    )
+
+    candidate_first, candidate_second, reference_first, reference_second = seen
+    assert torch.equal(candidate_first, reference_first)
+    assert torch.equal(candidate_second, reference_second)
 
 
 @requires_gpu

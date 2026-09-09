@@ -160,19 +160,26 @@ _import_pid = os.getpid()
 
 
 def _install():
-    """Patch CUDAGraph.replay lazily: torch may not be imported yet."""
+    """Patch CUDAGraph.replay lazily: torch may not be imported yet.
+
+    Everything is inside the guard, not only the import. A module named torch
+    that carries no ``cuda`` is a real shape -- a test stub, a partially
+    initialized package mid-import -- and reading the attribute outside would
+    raise out of an import hook that runs in every process on the path.
+    """
     try:
         import torch
+
+        orig = torch.cuda.CUDAGraph.replay
+
+        def _replay(self, *a, **k):
+            _n[0] += 1
+            return orig(self, *a, **k)
+
+        torch.cuda.CUDAGraph.replay = _replay
+        return True
     except Exception:
         return False
-    orig = torch.cuda.CUDAGraph.replay
-
-    def _replay(self, *a, **k):
-        _n[0] += 1
-        return orig(self, *a, **k)
-
-    torch.cuda.CUDAGraph.replay = _replay
-    return True
 
 
 _graph_ready = _install()
