@@ -1,35 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Write-side of the breakdown recorder.
-
-A :class:`Recorder` lets the code that *produces* a fact record it at author
-time, into a per-session spool directory, instead of having the exporter
-re-walk heterogeneous artifacts later. Each producer owns its own files:
-
-* :meth:`Recorder.record_singleton` — one final dict per section; the owner
-  overwrites its own stable file (safe: single writer of that file).
-* :meth:`Recorder.record_item` — one fragment per event; uniquely named so
-  concurrent producers never collide. Pass ``key`` for an idempotent
-  (overwrite-on-rewrite) item that survives resume without duplicating.
-* :meth:`Recorder.record_upsert_singleton` / :meth:`Recorder.record_upsert_item`
-  — the same, but merged into the prior fragment payload instead of replacing
-  it, for producers that emit a fact in several partial updates.
-
-Every write lands atomically (tmp + ``os.replace``) and filenames are unique
-per (section, producer), so :meth:`Recorder.record_item` and
-:meth:`Recorder.record_singleton` are safe across processes and on network
-filesystems (no shared-append dependency). The ``record_upsert_*`` methods are
-NOT: they read the current fragment, merge, and rewrite it under an in-process
-lock only, so two processes upserting the same (section, producer, key) can
-lose one side of the merge. Keep every upsert for a given fragment in one
-process -- today the coordinator is the only writer, and
-``test_breakdown_recorder_no_subprocess_writers`` keeps it that way.
-
-Every write funnels through :meth:`Recorder._write`, which is where the write
-trace is emitted; ``HYPERLOOM_BREAKDOWN_TRACE=1`` turns it on (see
-:mod:`.trace`).
-"""
+"""Write-side of the breakdown recorder."""
 
 from __future__ import annotations
 
@@ -50,29 +22,8 @@ from .trace import trace_enabled, trace_write
 SectionShape = Literal["item", "singleton"]
 
 # Per-section wire-shape registry for the breakdown recorder.
-#
-# Each ``session_breakdown.json`` section has exactly one owning producer, so
-# there is never cross-producer write contention. A section is one of:
-#
-# * ``singleton`` — one final dict; the owner rewrites its own file on update
-#   (last write by ``ts`` wins at assembly time).
-# * ``item`` — an event stream assembled into a list. The v4 entity streams
-#   (phase_transitions, subjects, operations, measurements, adoptions,
-#   artifacts, trace_events) are ordered by ``ts`` then ``seq`` and deep-merged
-#   by stable entity id, so repeated partial updates for one id collapse into a
-#   single record; every other item section stays append-only and is
-#   concatenated in ``seq`` then ``ts`` order.
-#
-# Derived sections (see ``DERIVED_SECTIONS``) are NOT written by producers
-# during the run; they are computed at finalize from in-memory ``SharedState``
-# (the Coordinator owns every input), so they never appear as fragments.
-#
-# Producer-written sections and their fragment shape. Payloads match the
-# corresponding ``schema.py`` TypedDict so assembly is structure-preserving.
 SECTION_SHAPES: dict[str, SectionShape] = {
-    # Session Breakdown v4 canonical author-time streams. These names are
-    # intentionally separate from the legacy v2/v3 sections so the live v4
-    # builder can consume a closed set of SDK-authored facts.
+    # Session Breakdown v4 canonical author-time streams.
     "run_snapshot": "singleton",
     "phase_transitions": "item",
     "subjects": "item",
@@ -92,9 +43,8 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "explore_search": "singleton",
     "sweep": "singleton",
     "critic_robustness": "singleton",
-    # Author-time item substreams composed into the ``critic_robustness``
-    # singleton at assembly (recorded per-iteration so the backend's workdir
-    # pruning never erases history).
+    # Author-time item substreams composed into the ``critic_robustness`` singleton at assembly (recorded
+    # per-iteration so the backend's workdir pruning never erases history).
     "critic_iterations": "item",
     "robustness_signals": "item",
     "telemetry": "singleton",
@@ -105,25 +55,15 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "conc_sweep_summary": "singleton",
     "roofline": "item",
     "roofline_progress": "singleton",
-    # Kernel-major lifecycle substreams. Recorded by their respective owners at
-    # author time and folded into the ``kernel_journey`` view at assembly (same
-    # compose-on-read pattern as ``critic_robustness``); none of these leak into
-    # the breakdown envelope on their own.
+    # Kernel-major lifecycle substreams.
     "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
     "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
     "kernel_backend_result": "item",  # one per backend attempt
     "kernel_e2e": "item",  # one per kernel: e2e integrate gain
-    # Authoritative external-tool versions (geak/tracelens/claude/codex/...),
-    # one item per tool (idempotent by tool name); folded into the top-level
-    # ``versions`` map at assembly.
+    # Authoritative external-tool versions (geak/tracelens/claude/codex/...), one item per tool (idempotent by tool
+    # name); folded into the top-level ``versions`` map at assembly.
     "versions": "item",
-    # SBD v6 KERNEL substreams. One ``kernel_event`` fragment per event holds
-    # its mapping-shaped blocks; every row-shaped fact owns a section of its
-    # own, one fragment per row keyed by its real id, because ``_merge_lists``
-    # only merges nested rows in place by ``_ENTITY_ID_FIELDS`` and appends
-    # anything else -- a partial update to a row nested in the event-level
-    # fragment would silently duplicate it. Assembled into one ``kernel``
-    # timeline event when the phase is left.
+    # SBD v6 KERNEL substreams.
     "kernel_event": "item",  # one per KERNEL phase entry, keyed by event id
     "kernel_lane_run": "item",  # one per forge candidate, ``lane`` discriminates
     "kernel_rebench_attempt": "item",  # one per re-measurement, forge and geak alike
@@ -131,28 +71,19 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_geak_attempt": "item",  # one per kernel geak considered
     "kernel_geak_discovery": "item",  # one per geak hot-kernel discovery run
     "kernel_geak_acceptance": "item",  # one per kernel or env selection geak accepted
-    # SBD v6 roofline substreams. Written by the same executor whether it was
-    # dispatched on its own or called inline by a phase that owns an event, and
-    # the only difference between the two is the event id on the rows: the
-    # sections are the same either way, and which wire position they assemble
-    # into is the assembler's to decide.
+    # SBD v6 roofline substreams.
     "roofline_event": "item",  # one per roofline event, holding its timeline sequence
     "roofline_action": "item",  # one per roofline action, keyed by its task id
     "roofline_profile_run": "item",  # one per profile attempt within an action
     "roofline_analysis_run": "item",  # one per trace-analysis attempt within an action
-    # SBD v6 baseline substreams. The executor retries at two levels -- a pass
-    # through its core, and a Magpie round within a pass -- so runs and rounds
-    # are separate sections rather than one flat list: a pass the budget
-    # refused before it booted anything has a run and no round, and a flat
-    # model would drop it.
+    # SBD v6 baseline substreams.
     "baseline_event": "item",  # one per baseline event, holding its timeline sequence
     "baseline_action": "item",  # one per measurement dispatched, keyed by its task id
     "baseline_run": "item",  # one per pass through the executor's core
     "baseline_round": "item",  # one per Magpie round within a pass
 }
 
-# Sections computed at finalize from in-memory state, never written as
-# fragments.
+# Sections computed at finalize from in-memory state, never written as fragments.
 DERIVED_SECTIONS: frozenset[str] = frozenset(
     {
         "capability_summary",
@@ -164,15 +95,7 @@ DERIVED_SECTIONS: frozenset[str] = frozenset(
 
 
 def section_shape(section: str) -> SectionShape | None:
-    """Return the declared shape for ``section`` (``None`` if unregistered).
-
-    Args:
-        section: The breakdown section name to look up.
-
-    Returns:
-        The declared section shape (``"item"`` / ``"singleton"``), or ``None``
-        when the section is not registered.
-    """
+    """Return the declared shape for ``section`` (``None`` if unregistered)."""
     return SECTION_SHAPES.get(section)
 
 
@@ -194,14 +117,7 @@ _ENTITY_ID_FIELDS = (
 
 
 def _slug(value: str) -> str:
-    """Filesystem-safe token; empty input collapses to ``unknown``.
-
-    Args:
-        value: The raw string to sanitise into a filesystem-safe token.
-
-    Returns:
-        The sanitised token, or ``"unknown"`` when the input is empty.
-    """
+    """Filesystem-safe token; empty input collapses to ``unknown``."""
     s = _SANITIZE.sub("-", str(value or "").strip())
     return s.strip("-.") or "unknown"
 
@@ -259,14 +175,7 @@ class Recorder:
     """Per-(session, producer) writer of breakdown record fragments."""
 
     def __init__(self, parts_dir: Path | str, *, producer: str) -> None:
-        """Initialize a recorder writing into ``parts_dir`` for ``producer``.
-
-        Args:
-            parts_dir (Path | str): the spool directory fragments are written
-                into.
-            producer (str): the producer label owning the written fragments
-                (sanitized into a filesystem-safe slug).
-        """
+        """Initialize a recorder writing into ``parts_dir`` for ``producer``."""
         self._dir = Path(parts_dir)
         self._producer = _slug(producer)
         self._seq = 0
@@ -274,28 +183,16 @@ class Recorder:
 
     @property
     def producer(self) -> str:
-        """Return the sanitized producer slug owning this recorder's fragments.
-
-        Returns:
-            The sanitized producer slug.
-        """
+        """Return the sanitized producer slug owning this recorder's fragments."""
         return self._producer
 
     @property
     def parts_dir(self) -> Path:
-        """Return the spool directory fragments are written into.
-
-        Returns:
-            The spool directory path.
-        """
+        """Return the spool directory fragments are written into."""
         return self._dir
 
     def _next_seq(self) -> int:
-        """Return the next monotonically increasing per-recorder sequence number.
-
-        Returns:
-            int: the next sequence number (thread-safe).
-        """
+        """Return the next monotonically increasing per-recorder sequence number."""
         with self._lock:
             self._seq += 1
             return self._seq
@@ -305,16 +202,7 @@ class Recorder:
         section: str,
         payload: Mapping[str, Any],
     ) -> Path:
-        """Write/overwrite this producer's single final blob for ``section``.
-
-        Args:
-            section: The breakdown section name (must be declared
-                ``singleton``-shaped).
-            payload: The final payload mapping for the section.
-
-        Returns:
-            The path of the written singleton fragment.
-        """
+        """Write/overwrite this producer's single final blob for ``section``."""
         self._check_shape(section, "singleton")
         filename = f"{_slug(section)}__{self._producer}.json"
         return self._write(section, "singleton", payload, filename=filename)
@@ -356,56 +244,20 @@ class Recorder:
         *,
         key: str | None = None,
     ) -> Path:
-        """Append one event fragment to the ``section`` stream.
-
-        ``key`` (optional): a stable per-item identity. When given the fragment
-        filename is derived from it, so re-recording the same key overwrites
-        rather than duplicates (idempotent across retries / resume).
-
-        Args:
-            section: The breakdown section name (must be declared
-                ``item``-shaped).
-            payload: The event fragment payload mapping.
-            key: Optional stable per-item identity for idempotent rewrites;
-                when omitted a pid/sequence-unique filename is used.
-
-        Returns:
-            The path of the written item fragment.
-        """
+        """Append one event fragment to the ``section`` stream."""
         self._check_shape(section, "item")
         seq: int | None = None
         if key:
             filename = self._stable_item_filename(section, key)
         else:
-            # One number serves both the filename and the envelope: someone
-            # reading ``seq=N`` in a trace line must be able to find the file
-            # that write produced.
+            # One number serves both the filename and the envelope: someone reading ``seq=N`` in a trace line must be
+            # able to find the file that write produced.
             seq = self._next_seq()
             filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
         return self._write(section, "item", payload, filename=filename, seq=seq)
 
     def _stable_item_filename(self, section: str, key: str) -> str:
-        """Name the fragment file that holds ``key``'s item in ``section``.
-
-        ``_slug`` folds every character outside ``[A-Za-z0-9._-]`` to a dash, so
-        ``a/b``, ``a:b`` and ``a b`` all name the same file and the last writer
-        silently wins. A digest of the untouched key keeps the readable part
-        readable while making the name injective.
-
-        Fragments written before this digest existed keep their old name: a
-        resumed session must go on updating the file it already wrote, not
-        start a second one for the same key. That reuse is only safe when the
-        key survived sanitizing untouched -- otherwise the legacy file could
-        belong to any of the keys that fold onto that name, and adopting it
-        would merge two entities, which is the bug the digest exists to stop.
-
-        Args:
-            section (str): The breakdown section name.
-            key (str): The caller's stable item identity, unsanitized.
-
-        Returns:
-            str: The fragment filename to write within the spool directory.
-        """
+        """Name the fragment file that holds ``key``'s item in ``section``."""
         slug = _slug(key)
         prefix = f"{_slug(section)}__{self._producer}__{slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
@@ -433,12 +285,7 @@ class Recorder:
         *,
         key: str,
     ) -> Path:
-        """Merge and atomically rewrite one stable item fragment.
-
-        This is the write-side primitive used by v4 entity helpers. Repeated
-        updates from the same producer preserve fields omitted by later partial
-        updates while retaining one stable fragment file.
-        """
+        """Merge and atomically rewrite one stable item fragment."""
         self._check_shape(section, "item")
         if not key:
             raise ValueError("upsert key must be non-empty")
@@ -468,15 +315,7 @@ class Recorder:
 
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:
-        """Validate that ``section`` is used with its declared shape.
-
-        Args:
-            section: The breakdown section name being written.
-            kind: The shape being used (``"singleton"`` or ``"item"``).
-
-        Raises:
-            ValueError: If ``section`` is declared with a different shape.
-        """
+        """Validate that ``section`` is used with its declared shape."""
         declared = SECTION_SHAPES.get(section)
         if declared is not None and declared != kind:
             raise ValueError(f"section {section!r} is declared {declared!r}, not {kind!r}")
@@ -492,37 +331,7 @@ class Recorder:
         previous: Mapping[str, Any] | None = None,
         seq: int | None = None,
     ) -> Path:
-        """Atomically write one fragment record to ``filename`` in the spool dir.
-
-        Wraps ``payload`` in the fragment envelope (section / kind / seq / ts /
-        producer) and writes it via a temp file plus ``os.replace`` so readers
-        never observe a partial write.
-
-        Every write in this class funnels through here, so this is also where
-        the write trace is emitted (see :mod:`.trace`); it costs one level check
-        when switched off.
-
-        Args:
-            section (str): the breakdown section name.
-            kind (str): the fragment kind (``singleton`` or ``item``).
-            payload (Mapping[str, Any]): the record payload.
-            filename (str): the destination filename within the spool directory.
-            operation (str): ``write`` when the fragment is replaced wholesale,
-                ``upsert`` when it is merged into what was already there.
-            previous (Mapping[str, Any] | None): the payload that was already on
-                disk, so the trace can report what this write changed. ``None``
-                when there was nothing to merge into.
-            seq (int | None): a sequence number already drawn by the caller,
-                for callers that also spend it on the filename. ``None`` draws
-                a fresh one.
-
-        Returns:
-            Path: the path of the written fragment.
-
-        Raises:
-            Exception: re-raised if writing or replacing the file fails (the
-                temp file is removed first).
-        """
+        """Atomically write one fragment record to ``filename`` in the spool dir."""
         record = {
             "section": section,
             "kind": kind,
@@ -533,9 +342,8 @@ class Recorder:
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         target = self._dir / filename
-        # Whether the fragment already existed is only knowable before the
-        # write, and it is the difference between recording a new fact and
-        # replacing one, so it is resolved here rather than after.
+        # Whether the fragment already existed is only knowable before the write, and it is the difference between
+        # recording a new fact and replacing one, so it is resolved here rather than after.
         traced = trace_enabled()
         existed = target.exists() if traced else False
         try:
@@ -581,46 +389,14 @@ _RECORDERS_LOCK = threading.Lock()
 
 
 def get_recorder(*, producer: str) -> Recorder:
-    """Return the process-cached :class:`Recorder` for the bound session.
-
-    The entry point for recording: a call site needs to know what it is
-    recording and nothing else. Which session it lands in was decided once, at
-    startup, by :func:`~...session.session_binding.bind_session`.
-
-    Args:
-        producer: The producer name owning the written fragments.
-
-    Returns:
-        The process-cached :class:`Recorder` for the bound session and this
-        producer.
-
-    Raises:
-        SessionNotBoundError: If no session is bound -- either startup never
-            bound one, or this is running in a subprocess, where writing
-            fragments loses writes and is forbidden outright.
-    """
+    """Return the process-cached :class:`Recorder` for the bound session."""
     from ...session.session_binding import bound_session
 
     return recorder_for(bound_session(), producer=producer)
 
 
 def recorder_for(session_dir: Path | str, *, producer: str) -> Recorder:
-    """Return a process-cached :class:`Recorder` for an explicit session.
-
-    Exists only for the v4 ``instrument`` helpers, whose whole API already
-    takes ``session_dir`` as its first parameter. It goes away with them: no
-    new caller should appear here, and every v6 entry point uses
-    :func:`get_recorder` instead so the session path stays in one place.
-
-    Args:
-        session_dir: The session directory whose breakdown parts dir backs the
-            recorder.
-        producer: The producer name owning the written fragments.
-
-    Returns:
-        The process-cached :class:`Recorder` for the
-        ``(session_dir, producer)`` pair.
-    """
+    """Return a process-cached :class:`Recorder` for an explicit session."""
     from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     pd = breakdown_parts_dir(Path(session_dir))

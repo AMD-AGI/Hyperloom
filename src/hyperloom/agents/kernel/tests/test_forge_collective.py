@@ -27,13 +27,7 @@ import forge_collective as fc  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_environ():
-    """Restore ``os.environ`` after every test.
-
-    ``_inject_author_gateway_env`` mutates ``os.environ`` in place by design and
-    ``monkeypatch`` does not revert keys a function writes directly, so without
-    this snapshot the injected auth aliases pollute later auth/endpoint tests in
-    a full-suite run.
-    """
+    """Restore ``os.environ`` after every test."""
     saved = dict(os.environ)
     try:
         yield
@@ -228,8 +222,7 @@ def test_cmd_carries_kb_identity(tmp_path):
     assert cmd[cmd.index("--source-files") + 1] == "/repo/custom_all_reduce.cuh"
     assert cmd[cmd.index("--experiment-id") + 1] == fc.EXPERIMENT_ID
     assert cmd[cmd.index("--experience-id") + 1] == "attempt-7"
-    # Both were rejected upstream: one is a hidden legacy alias, the other a
-    # documented no-op.
+    # Both were rejected upstream: one is a hidden legacy alias, the other a documented no-op.
     assert "--workload-key" not in cmd
     assert "--max-iters" not in cmd
 
@@ -282,8 +275,7 @@ def test_cmd_resumes_an_interrupted_campaign(tmp_path):
     )
 
     assert "--resume" in cmd
-    # forge-loop owns the campaign configuration once saved and rejects these
-    # alongside --resume.
+    # forge-loop owns the campaign configuration once saved and rejects these alongside --resume.
     for rejected in (
         "--kernel",
         "--driver",
@@ -582,11 +574,7 @@ def test_a_legacy_key_does_not_outrank_the_openai_key(monkeypatch):
 
 
 def test_a_legacy_key_alone_authenticates_nothing(monkeypatch):
-    """``SAFE_API_KEY`` alone derives no credential.
-
-    The Git identity assertions pin that the rest of the seeding still runs, so
-    this cannot pass by the function doing nothing at all.
-    """
+    """``SAFE_API_KEY`` alone derives no credential."""
     _clear_author_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("SAFE_API_KEY", "stale-legacy-key")
@@ -1587,14 +1575,7 @@ def test_obsolete_precheckout_journal_does_not_block_repo(tmp_path):
 
 
 def test_interrupted_restore_is_replayed_from_an_ordinary_branch(tmp_path):
-    """A half-finished restore looks like an ordinary branch and must still recover.
-
-    ``_restore_inplace`` returns HEAD to the original branch and drops the temp
-    branch in a ``finally`` that runs even when the baseline replay raised, so a
-    crash there leaves the agent's edits in the tree under a normal branch name.
-    Judging staleness by branch name alone would discard the only record that
-    can put the user's repository back.
-    """
+    """A half-finished restore looks like an ordinary branch and must still recover."""
     repo, source = _make_repo(tmp_path)
     original_head = _git(repo, "rev-parse", "HEAD")
     baseline = source.read_bytes()

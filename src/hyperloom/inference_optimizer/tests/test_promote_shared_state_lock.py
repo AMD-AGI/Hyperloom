@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``WritebackCollaborator._promote_to_shared_state``:
-per-task_kind state writes, audit rows, and sweep/conc_sweep early-return."""
+"""Behavior-lock tests for ``WritebackCollaborator._promote_to_shared_state``: per-task_kind state writes, audit rows,
+and sweep/conc_sweep early-return.
+"""
 
 from __future__ import annotations
 
@@ -79,10 +80,8 @@ def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
     return calls
 
 
-# ---------------------------------------------------------------------------
-# GAP 1: sweep / conc_sweep early-return double-track — each records + saves +
-# returns on its own, so the unified tail record_action_attempt must not re-fire.
-# ---------------------------------------------------------------------------
+# GAP 1: sweep / conc_sweep early-return double-track — each records + saves + returns on its own, so the unified tail
+# record_action_attempt must not re-fire.
 @pytest.mark.asyncio
 async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_dir, monkeypatch):
     coord = _coord(session_dir)
@@ -98,8 +97,8 @@ async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_d
         task=_task("conc_sweep"),
     )
 
-    # conc_sweep is NOT in _AUDIT_ACTIONS, so the in-branch record_action_attempt
-    # is a no-op recorder, and the tail also skips it. Exactly one CALL, zero effect.
+    # conc_sweep is NOT in _AUDIT_ACTIONS, so the in-branch record_action_attempt is a no-op recorder, and the tail
+    # also skips it.
     assert "conc_sweep" not in _AUDIT_ACTIONS
     assert len(calls) == 1
     assert calls[0]["action"] == "conc_sweep"
@@ -110,9 +109,7 @@ async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_d
     assert s.last_conc_sweep.get("summary", {}).get("best_speedup") == 1.3
 
 
-# ---------------------------------------------------------------------------
 # GAP 2: changed / audit convergence for baseline / profile / explore / roofline.
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_promote_baseline_writes_state_and_audit(session_dir):
     coord = _coord(session_dir)
@@ -326,15 +323,7 @@ async def test_roofline_with_an_analysis_anchors_the_watermark(session_dir):
 
 @pytest.mark.asyncio
 async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_dir):
-    """An empty analysis must not buy a cycle of silence.
-
-    The anchor is what stops the watermark firing again until throughput climbs
-    another 10%. A roofline that recorded nothing once anchored anyway, so the
-    specialist kept reading "(none — no fresh roofline snapshot has been
-    recorded yet)" while the anchor insisted one had been taken there, and the
-    only thing that could have lifted throughput past the anchor was the
-    evidence the empty snapshot was standing in for.
-    """
+    """An empty analysis must not buy a cycle of silence."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -351,9 +340,7 @@ async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_d
     assert s.last_roofline_tput == 0.0
 
 
-# ---------------------------------------------------------------------------
 # GAP 3: successful profile with a trace clears the stale trace_analyze cache.
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_promote_profile_with_trace_clears_last_trace_analyze(session_dir):
     coord = _coord(session_dir)
@@ -374,10 +361,8 @@ async def test_promote_profile_with_trace_clears_last_trace_analyze(session_dir)
     assert s.last_trace_analyze == {}
 
 
-# ---------------------------------------------------------------------------
-# GAP 4: profile "skipped" arm audits as skipped and clears the pending roofline
-# task, without touching current_best / last_profile_trace.
-# ---------------------------------------------------------------------------
+# GAP 4: profile "skipped" arm audits as skipped and clears the pending roofline task, without touching current_best /
+# last_profile_trace.
 @pytest.mark.asyncio
 async def test_promote_profile_skipped_audits_and_clears_pending(session_dir):
     coord = _coord(session_dir)
@@ -403,10 +388,8 @@ async def test_promote_profile_skipped_audits_and_clears_pending(session_dir):
     assert not s.current_best or s.current_best.get("action") != "profile"
 
 
-# ---------------------------------------------------------------------------
-# GAP 5: integrate_patch KEEP lifts current_best and clears pending_integrate;
-# integrate_patch is NOT in _AUDIT_ACTIONS so no last_integrate_patch is written.
-# ---------------------------------------------------------------------------
+# GAP 5: integrate_patch KEEP lifts current_best and clears pending_integrate; integrate_patch is NOT in
+# _AUDIT_ACTIONS so no last_integrate_patch is written.
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir):
     coord = _coord(session_dir)
@@ -572,18 +555,14 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(session_dir, tmp_p
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
     assert KnowledgeSections(draft).staged("explore") is None
-    # Explore and framework KEEPs share the one patch column, so both record the
-    # same owner marker rather than the old per-column explore/framework label.
+    # Explore and framework KEEPs share the one patch column, so both record the same owner marker rather than the old
+    # per-column explore/framework label.
     assert coord.shared_state.optimization_stack[-1]["kb_required_owner"] == "PATCH"
 
 
 @pytest.mark.asyncio
 async def test_a_config_lever_keep_stages_under_the_configuration_section(session_dir, tmp_path, monkeypatch):
-    """A KEEP that touched nothing on disk belongs to the configuration lever.
-
-    The section it stages into is the other half of the routing an authored
-    diff exercises: reading the phase instead would file both under one owner.
-    """
+    """A KEEP that touched nothing on disk belongs to the configuration lever."""
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
@@ -698,9 +677,8 @@ async def test_postbaseline_enablement_config_is_not_recipe_publishable(
     )
 
     assert state.optimization_stack[-1]["recipe_publishable"] is False
-    # recipe_publishable is a config-layer filter applied inside
-    # build_publishable_recipe_config; has_new_keep counts an enablement
-    # KEEP as "new work" so the KB write proceeds and publishes patches.
+    # recipe_publishable is a config-layer filter applied inside build_publishable_recipe_config; has_new_keep counts
+    # an enablement KEEP as "new work" so the KB write proceeds and publishes patches.
     assert has_new_keep(state) is True
 
 
@@ -726,11 +704,7 @@ async def test_promote_integrate_patch_reverted_keeps_current_best(session_dir):
     assert s.current_best["tput"] == 100.0
 
 
-# ---------------------------------------------------------------------------
-# GAP 6: an upstream-PR integrate_patch lifts current_best on KEEP. The
-# candidate's progress row is the dispatcher's authored-outcome bridge, not
-# this promote (see test_framework_agent_authoring).
-# ---------------------------------------------------------------------------
+# GAP 6: an upstream-PR integrate_patch lifts current_best on KEEP.
 @pytest.mark.asyncio
 async def test_promote_framework_agent_kept_lifts_and_records_progress(session_dir):
     coord = _coord(session_dir)
@@ -763,8 +737,8 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["tput"] == 130.0
     assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
-    # The stack variant must be the canonical candidate key, undecorated, so
-    # resume can reconcile it against the recorded KEEP.
+    # The stack variant must be the canonical candidate key, undecorated, so resume can reconcile it against the
+    # recorded KEEP.
     assert s.optimization_stack[-1]["variant_name"] == "https://x/pull/1"
 
 
@@ -845,8 +819,8 @@ async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path,
     assert row["realized"] is True
     assert row["base_sha"] == "abc123"
     assert row["artifacts_outside_root"] == 2
-    # Where the KEEP came from has to survive the handoff, not just the result,
-    # and it lands on the ref so overlays from two trees stay distinguishable.
+    # Where the KEEP came from has to survive the handoff, not just the result, and it lands on the ref so overlays
+    # from two trees stay distinguishable.
     assert row["host_origin"]["apply_roots"] == {ref: "/sglang"}
     assert row["host_origin"]["snapshot"] == str(realized.parent)
     assert row["host_origin"]["sources"] == [str(realized)]
@@ -903,12 +877,12 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(sessio
         task=_task("integrate_patch"),
     )
 
-    # Final config comes from current_best at CLOSE; an explicit empty patch
-    # list neither scans stale workspace files nor creates an owner section.
+    # Final config comes from current_best at CLOSE; an explicit empty patch list neither scans stale workspace files
+    # nor creates an owner section.
     assert KnowledgeSections(draft).staged("framework") is None
     assert coord.shared_state.kb_stage_outbox == []
-    # A config-only KEEP must not mark a required patch owner; otherwise CLOSE
-    # would reject the record for missing required section staging.
+    # A config-only KEEP must not mark a required patch owner; otherwise CLOSE would reject the record for missing
+    # required section staging.
     assert "kb_required_owner" not in coord.shared_state.optimization_stack[-1]
 
 
@@ -1033,14 +1007,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
     session_dir,
     monkeypatch,
 ):
-    """The outbox drains after the recovery pass, from the durable config.
-
-    Resume no longer rebuilds ``current_best`` from an ``optimization_stack``
-    replay: the lift writes both together, so the replay could only ever
-    reintroduce an env a later ablation removed. What still has to hold is the
-    ordering — recovery settles and saves, and only then does the outbox stage
-    whatever ``current_best`` durably holds.
-    """
+    """The outbox drains after the recovery pass, from the durable config."""
     coord = _coord(session_dir)
     coord._resumed_from = {"is_resume": True}
     coord.shared_state.optimization_stack = [
@@ -1106,10 +1073,8 @@ async def test_resume_settles_state_before_draining_kb_outbox(
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
-# ---------------------------------------------------------------------------
-# GAP 7: replay_warm_recipe routes through _promote_warm_replay (self-saves) and
-# never sets outcome.changed, so the unified tail neither audits nor re-saves.
-# ---------------------------------------------------------------------------
+# GAP 7: replay_warm_recipe routes through _promote_warm_replay (self-saves) and never sets outcome.changed, so the
+# unified tail neither audits nor re-saves.
 @pytest.mark.asyncio
 async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, monkeypatch):
     coord = _coord(session_dir)
@@ -1120,8 +1085,8 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     def _spy_warm(result, *, task=None):
         warm_calls.append({"result": result, "task": task})
 
-    # _promote_warm_replay lives on the writeback collaborator; also stub the
-    # deferred PRELUDE analysis enqueue so the test stays hermetic.
+    # _promote_warm_replay lives on the writeback collaborator; also stub the deferred PRELUDE analysis enqueue so the
+    # test stays hermetic.
     monkeypatch.setattr(coord.writeback, "_promote_warm_replay", _spy_warm)
 
     async def _noop_prelude(*a, **k):
@@ -1146,10 +1111,8 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     assert all(c["action"] != "replay_warm_recipe" for c in calls)
 
 
-# ---------------------------------------------------------------------------
-# GAP 8: roofline failure (status != succeeded/skipped) bumps the failure streak
-# and audits as discarded (roofline IS an audited action).
-# ---------------------------------------------------------------------------
+# GAP 8: roofline failure (status != succeeded/skipped) bumps the failure streak and audits as discarded (roofline IS
+# an audited action).
 @pytest.mark.asyncio
 async def test_promote_roofline_failed_bumps_streak_and_audits_discarded(session_dir):
     coord = _coord(session_dir)
@@ -1179,10 +1142,8 @@ async def test_promote_roofline_failed_bumps_streak_and_audits_discarded(session
     assert s.last_roofline["extras"]["phase"] == "trace_analyze"
 
 
-# ---------------------------------------------------------------------------
-# GAP 9: explore resume_stack_revalidate (native, non-GEAK) with a valid tput
-# clears resume_pending_revalidation and does NOT promote a variant.
-# ---------------------------------------------------------------------------
+# GAP 9: explore resume_stack_revalidate (native, non-GEAK) with a valid tput clears resume_pending_revalidation and
+# does NOT promote a variant.
 @pytest.mark.asyncio
 async def test_promote_explore_resume_revalidate_clears_pending(session_dir):
     coord = _coord(session_dir)
@@ -1238,10 +1199,8 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
     assert s.resume_pending_revalidation is True
 
 
-# ---------------------------------------------------------------------------
-# GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class,
-# so a typo or unregistered handler is caught at test time, not at runtime.
-# ---------------------------------------------------------------------------
+# GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class, so a typo or unregistered handler is
+# caught at test time, not at runtime.
 @pytest.mark.parametrize(
     "task_kind,handler_name",
     list(WritebackCollaborator._PROMOTE_HANDLERS.items()),
@@ -1251,9 +1210,7 @@ def test_promote_handlers_are_callable(task_kind, handler_name):
     assert callable(handler), f"{task_kind!r} -> {handler_name!r} is not a callable on WritebackCollaborator"
 
 
-# ---------------------------------------------------------------------------
 # Env preservation across layers and source_snapshot propagation
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1761,8 +1718,7 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
     s = coord.shared_state
     s.baseline_tput = 1000.0
 
-    # Winner A: gains 10 %, measured tput 1100.  Winner B is applied on top:
-    # gains another 10 % over the new 1100 base, measured tput 1210.
+    # Winner A: gains 10 %, measured tput 1100.
     winner_a = {
         "name": "w-a",
         "fingerprint": "fp_a",
@@ -1864,11 +1820,7 @@ async def test_promote_explore_multi_winner_dedup_skips_already_stacked(session_
 
 
 async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
-    """A kernel integrate publishes args and envs from the same config.
-
-    Writing ``current_best`` without ``extra_envs`` published a config whose args
-    and envs came from different layers, and every dispatch site seeded from it.
-    """
+    """A kernel integrate publishes args and envs from the same config."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 1000.0
@@ -1902,14 +1854,7 @@ async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
 
 
 async def test_fusion_origin_integrate_keep_lifts_as_fusion(session_dir):
-    """A fusion sibling drained through the shared lane must land as ``fusion``.
-
-    The generic drain calls ``_record_integrate_keep`` for every KEEP; a fusion
-    sibling is marked ``source='forge_fusion'`` on its result so the lift uses
-    ``action='fusion'`` (read by the idempotency short-circuit and the
-    remote-recipe export) and ``last_fusion_integrate`` is set (the export gates
-    on it being a KEEP). Without the marker the same call stays a plain integrate.
-    """
+    """A fusion sibling drained through the shared lane must land as ``fusion``."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 1000.0

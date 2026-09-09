@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pre-flight variant filtering and ordering for the explore grid.
-
-Operates purely on lists of ``GridVariant``: user skip patterns, multi-node
-invalid-variant drops and prioritisation, aiter-MoE pinning, xDiT env
-blacklisting, and model/framework compatibility filtering. The filter helpers
-return ``(kept, dropped)``; nothing here renders YAML, launches Magpie, or
-reads ``benchmark_report.json`` — that lives in :mod:`._grid_runner`.
-"""
+"""Pre-flight variant filtering and ordering for the explore grid."""
 
 from __future__ import annotations
 
@@ -30,20 +23,7 @@ log = logging.getLogger(__name__)
 
 
 def resolve_skip_spec(params: dict | None) -> str:
-    """Resolve the active skip spec from task params + process env.
-
-    ``params["skip_variants"]`` may be a list[str] or a single str; both are
-    flattened to comma-joined form before pattern parsing. Resolution order
-    is ``params["skip_variants"]`` > ``$SKIP_VARIANTS`` > ``""``.
-
-    Args:
-        params (dict | None): Task params; ``skip_variants`` (list/tuple/str)
-            takes precedence over the environment when present and non-empty.
-
-    Returns:
-        str: The stripped skip spec string, or ``""`` when neither source
-        supplies a value.
-    """
+    """Resolve the active skip spec from task params + process env."""
     val = ""
     if params and "skip_variants" in params:
         raw = params.get("skip_variants")
@@ -57,18 +37,7 @@ def resolve_skip_spec(params: dict | None) -> str:
 
 
 def _parse_skip_spec(spec: str) -> list[str]:
-    """Split ``spec`` on commas and whitespace; drop empties.
-
-    Newlines are treated as commas, then each comma-separated token is
-    further split on whitespace so mixed separators all flatten into one
-    list of patterns.
-
-    Args:
-        spec (str): Raw skip spec (e.g. ``"attn_*, sched_dfs\nvllm_aiter"``).
-
-    Returns:
-        list[str]: Non-empty, stripped pattern tokens in source order.
-    """
+    """Split ``spec`` on commas and whitespace; drop empties."""
     if not spec:
         return []
     out: list[str] = []
@@ -80,16 +49,10 @@ def _parse_skip_spec(spec: str) -> list[str]:
     return out
 
 
-# Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures
-# the integer value.
+# Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures the integer value.
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
-# Multi-node grid prioritisation + invalid-variant filtering. In multi-node
-# mode a ``--max-hours`` cut may stop the loop before the whole grid is benched,
-# so we drop known regressions and reorder survivors so strong candidates run
-# first. Both are STRICT no-ops outside multi-node mode. ``priority_tags`` ranks
-# variants by the first tag matching their ``note``/``name`` (lower = higher);
-# params priority is concatenated ahead of backends priority by callers.
+# Multi-node grid prioritisation + invalid-variant filtering.
 _MN_PARAMS_PRIORITY: tuple[str, ...] = (
     "cuda_graph_max_bs",
     "max_running_requests",
@@ -112,22 +75,7 @@ _MN_BACKENDS_PRIORITY: tuple[str, ...] = (
 
 
 def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
-    """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
-
-    Matches the first ``priority_tags`` entry that is a substring of the
-    variant's ``note`` (falling back to ``name`` when ``note`` is empty).
-    Untagged variants return ``len(priority_tags)`` so a stable sort sinks them
-    to the end while preserving their relative order.
-
-    Args:
-        variant (GridVariant): The variant to rank.
-        priority_tags (tuple[str, ...] | list[str]): Ordered category tags;
-            lower index == higher priority.
-
-    Returns:
-        int: The index of the first matching tag, or ``len(priority_tags)`` when
-        none match.
-    """
+    """Return the rank of ``variant`` against ``priority_tags`` (lower = first)."""
     haystack = variant.note or variant.name or ""
     for idx, tag in enumerate(priority_tags):
         if tag and tag in haystack:
@@ -140,23 +88,7 @@ def reorder_grid_for_multi_node(
     *,
     priority_tags: "tuple[str, ...] | list[str]",
 ) -> list["GridVariant"]:
-    """Stable-sort ``grid`` so likely multi-node winners run first.
-
-    Single-node mode (``is_multi_node()`` False) returns ``grid`` unchanged,
-    bit-for-bit (hard requirement: never alter single-node grid order). In
-    multi-node mode variants are stably sorted by ``_mn_priority_index`` so
-    tagged variants surface ahead of untagged ones and a ``--max-hours`` cut
-    still benches the strong candidates.
-
-    Args:
-        grid (list[GridVariant]): The variants to reorder.
-        priority_tags (tuple[str, ...] | list[str]): Ordered category tags used
-            to rank variants.
-
-    Returns:
-        list[GridVariant]: ``grid`` unchanged in single-node mode, else a stably
-        sorted copy with higher-priority variants first.
-    """
+    """Stable-sort ``grid`` so likely multi-node winners run first."""
     from ._multi_node_env import is_multi_node
 
     if not is_multi_node():
@@ -168,25 +100,7 @@ def reorder_grid_for_multi_node(
 def apply_multi_node_invalid_variants(
     grid: list["GridVariant"],
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants that are known regressions/invalid on multi-node fabrics.
-
-    Returns ``(kept, dropped)``. ``dropped`` entries carry ``name`` / ``source``
-    / ``reason`` keys (matching the explore-loop ``skipped_dup`` shape). A
-    STRICT no-op outside multi-node mode: returns ``(grid, [])`` so single-node
-    behaviour is never altered.
-
-    Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
-    in multi-node mode (cuda-graph cache misses every cross-node decode tick),
-    so it is dropped from the explore grid here.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``; ``(grid, [])`` outside
-        multi-node mode.
-    """
+    """Drop variants that are known regressions/invalid on multi-node fabrics."""
     from ._multi_node_env import is_multi_node
 
     if not is_multi_node():
@@ -220,15 +134,7 @@ _RE_AITER_MOE_RUNNER = re.compile(r"--moe[-_]runner[-_]backend[= ]+aiter\b")
 
 
 def _operator_pinned_envs() -> dict[str, str]:
-    """Return the operator's ``--extra-env`` pins from the CLI handoff env.
-
-    The CLI serializes ``--extra-env NAME=VALUE`` pairs into
-    ``$INFERENCE_OPTIMIZER_EXTRA_ENV`` (JSON object). Any parse failure yields
-    an empty dict so the caller degrades to "no pin".
-
-    Returns:
-        dict[str, str]: The operator-pinned env, or ``{}`` when unset/invalid.
-    """
+    """Return the operator's ``--extra-env`` pins from the CLI handoff env."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
     if not raw:
         return {}
@@ -242,27 +148,7 @@ def _operator_pinned_envs() -> dict[str, str]:
 def apply_aiter_moe_pin_filter(
     grid: list["GridVariant"],
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants that re-enable the aiter MoE runner when it is pinned off.
-
-    When the operator pins ``SGLANG_USE_AITER=0`` (via ``--extra-env``), the
-    aiter fused-MoE runner is deliberately disabled (it hangs/crashes server
-    launch on some ROCm images). Explore variants that flip it back on —
-    ``SGLANG_USE_AITER=1`` in ``extra_envs`` (the master switch also gates the
-    aiter MoE runner) or ``--moe-runner-backend aiter`` in ``extra_server_args``
-    — would re-trigger that failure and burn the budget, so they are dropped.
-    Aiter *attention* / allreduce / rmsnorm variants (which do NOT select the
-    aiter MoE runner) are kept, since those are stable and can still win.
-
-    A STRICT no-op when ``SGLANG_USE_AITER`` is not operator-pinned off.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason`` (``source`` is
-        ``"aiter_moe_pinned_off"``).
-    """
+    """Drop variants that re-enable the aiter MoE runner when it is pinned off."""
     pins = _operator_pinned_envs()
     aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(pins["SGLANG_USE_AITER"], default=True)
     if not aiter_pinned_off:
@@ -291,18 +177,15 @@ def apply_aiter_moe_pin_filter(
     return kept, dropped
 
 
-# Framework / hardware compatibility filter: each entry maps an
-# ``extra_server_args`` substring to a required model class.
+# Framework / hardware compatibility filter: each entry maps an ``extra_server_args`` substring to a required model
+# class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
     ("--enable-flashinfer-mla", "mla"),
     ("--enable-deepep-moe", "moe"),
     ("--enable-ep-moe", "moe"),
 )
 
-# xDiT (diffusion) do-not-set blacklist — env knobs that crash or regress on
-# FLUX.2-class DiT models with Ulysses SP. Each entry maps an env key to the
-# set of forbidden values (``"*"`` = any truthy value) and a short reason.
-# Applied for the ``xdit`` framework only, by :func:`apply_compatibility_filter`.
+# xDiT (diffusion) do-not-set blacklist — env knobs that crash or regress on FLUX.2-class DiT models with Ulysses SP.
 _XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "XDIT_ATTENTION_BACKEND": (
         frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
@@ -328,14 +211,7 @@ _XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
 def xdit_blacklist_reason(
     extra_envs: dict[str, str] | None,
 ) -> str | None:
-    """Return a drop reason if a variant trips the xDiT do-not-set blacklist.
-
-    Args:
-        extra_envs (dict[str, str] | None): The variant's env overrides.
-
-    Returns:
-        str | None: A human-readable reason when blacklisted, else ``None``.
-    """
+    """Return a drop reason if a variant trips the xDiT do-not-set blacklist."""
     envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
     for key, (bad_values, reason) in _XDIT_ENV_BLACKLIST.items():
         if key not in envs:
@@ -361,8 +237,7 @@ _HELP_PROBE_RETRY_SEC: float = 300.0
 # more on a cold pod). The result is cached per framework, so this is paid once.
 _HELP_PROBE_TIMEOUT_SEC: float = 30.0
 
-# Per-framework ``--help`` extraction commands, as argv tails: the interpreter is
-# resolved per framework at call time.
+# Per-framework ``--help`` argv tails; resolve the interpreter at call time.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     # Both build a parser and hand it to the framework's own registrar, the shape
     # `atom` already used: neither exposes a ready-made parser at module scope.
@@ -389,23 +264,7 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
 
 
 def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for flag validation.
-
-    Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
-    Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
-    fall through to NOT filtering.
-
-    A failure is held off for ``_HELP_PROBE_RETRY_SEC`` rather than re-paying a
-    ten-second import on every variant, and is logged once: a silently empty
-    probe means the flag rules stopped running with nothing to say so.
-
-    Args:
-        framework (str): Framework name; matched case-insensitively.
-
-    Returns:
-        str: The combined stdout+stderr ``--help`` text, or ``""`` on any
-        failure or unknown framework.
-    """
+    """Best-effort fetch of ``<framework> --help`` text for flag validation."""
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
         return _HELP_TEXT_CACHE[fw]
@@ -426,9 +285,8 @@ def _probe_server_help_text(framework: str) -> str:
             text=True,
             timeout=_HELP_PROBE_TIMEOUT_SEC,
         )
-        # Only a clean exit is help text. stderr on a failed run is a
-        # traceback, and treating that as help makes every flag look absent,
-        # which drops the variants carrying them rather than sparing them.
+        # Only a clean exit is help text. stderr on a failed run is a traceback, and treating that as help makes every
+        # flag look absent, which drops the variants carrying them rather than sparing them.
         out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
         reason = f"exit={proc.returncode}"
         if proc.returncode != 0:
@@ -453,20 +311,7 @@ def _probe_server_help_text(framework: str) -> str:
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
-    """Heuristic detect of (is_mla_model, is_moe_model) from model path.
-
-    Lowercased substring match — a cheap check to skip an obviously-wrong
-    variant before a 10-min doomed sglang restart. Misclassifications cost at
-    most one restart. MLA: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2; MoE: MLA set +
-    Qwen3-MoE.
-
-    Args:
-        model_path (str): Model path/identifier; matched as a lowercased
-            substring.
-
-    Returns:
-        tuple[bool, bool]: ``(is_mla_model, is_moe_model)``.
-    """
+    """Heuristic detect of (is_mla_model, is_moe_model) from model path."""
     p = model_path.lower()
     mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
     moe_keys = (
@@ -491,24 +336,7 @@ def apply_compatibility_filter(
     framework: str,
     model_path: str,
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Skip variants known to be incompatible with current model/framework.
-
-    Three dimensions, each conservative (assume compatible) when it cannot
-    tell: the xDiT do-not-set list, model class (MLA / MoE flags dropped when
-    the model path lacks the family keyword), and framework version (flags
-    absent from the server's ``--help`` dropped). Returns the ``(kept,
-    dropped)`` shape of ``apply_user_skip_list``.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-        framework (str): Framework the grid will run against.
-        model_path (str): Model the grid will run against; ``""`` means unknown,
-            which keeps every model-class-gated flag.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``.
-    """
+    """Skip variants known to be incompatible with current model/framework."""
     if model_path:
         is_mla, is_moe = _detect_model_class(model_path)
     else:
@@ -572,20 +400,7 @@ def apply_user_skip_list(
     *,
     skip_spec: str,
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants whose name matches any pattern in ``skip_spec``.
-
-    Returns ``(kept, dropped)`` where each dropped entry is
-    ``{"name", "reason", "source"}`` with source=``"user_skip"``.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-        skip_spec (str): Comma/whitespace skip patterns (exact or fnmatch glob)
-            matched against ``GridVariant.name``.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason``.
-    """
+    """Drop variants whose name matches any pattern in ``skip_spec``."""
     patterns = _parse_skip_spec(skip_spec)
     if not patterns:
         return list(grid), []

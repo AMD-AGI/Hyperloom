@@ -2,15 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PD-disaggregation router launcher (head pod, multi-node).
-
-In PD mode the prefill/decode groups listen on internal ports only; this
-script starts the router fronting them at the public 8888 port, detached
-via ``nohup`` + ``setsid`` so the dashboard job can exit. Supports the
-sglang_router and vllm routers (vllm command overridable via
-``--vllm-router-cmd``). If the router dies within 0.5 s of spawn it reads
-the log tail and raises; otherwise returns 0 and emits the router PID.
-"""
+"""PD-disaggregation router launcher (head pod, multi-node)."""
 
 from __future__ import annotations
 
@@ -33,31 +25,14 @@ _DEFAULT_LOG_FILE = str(Path(tempfile.gettempdir()) / "multi_node_logs" / "route
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp.
-
-    Args:
-        msg: The message text to emit.
-    """
+    """Stderr line with timestamp."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_router {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _router_alive(pid: int) -> bool:
-    """Whether ``pid`` is a live, non-zombie router.
-
-    Same reasoning as ``kill_multinode._pid_alive``: the router is spawned under
-    ``nohup setsid``, so it is reparented to a PID 1 that does not reap, and a
-    dead one lingers as ``<defunct>`` where a bare ``os.kill(pid, 0)`` still
-    succeeds. A zombie holds no port, so treating it as running would only stall
-    the replacement.
-
-    Args:
-        pid: Process id to probe.
-
-    Returns:
-        bool: True only when the process exists and is not a zombie.
-    """
+    """Whether ``pid`` is a live, non-zombie router."""
     try:
         os.kill(pid, 0)
     except OSError:
@@ -74,24 +49,7 @@ def _router_alive(pid: int) -> bool:
 
 
 def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0, port_grace_s: float = 30.0) -> None:
-    """Stop the router this PID file names, if one is still running.
-
-    The spawn below ends with ``echo $! > pid_file``, so without this step the
-    previous router is not replaced but orphaned: it goes on holding the public
-    port while the file that named it now points at the newcomer, which puts it
-    beyond the reach of ``kill_multinode``'s ``router*.pid`` sweep for the rest
-    of the pod's life. The new router then finds its port taken.
-
-    Reached on every restart, including the resume paths that skip KILL+LAUNCH
-    and so never sweep the pid dir. Nothing is being interrupted mid-flight --
-    a restart is the caller -- and a router is a proxy rather than a model
-    server, so replacing one costs a moment instead of a weight load.
-
-    Args:
-        pid_file: Path the previous router's PID was written to.
-        grace_s: Seconds to wait for a clean exit before SIGKILL.
-        port_grace_s: Seconds to wait for the public port to become bindable.
-    """
+    """Stop the router this PID file names, if one is still running."""
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
@@ -110,33 +68,14 @@ def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0, port_grace_
         _log(f"router pid={pid} ignored SIGTERM for {grace_s:.0f}s; sending SIGKILL")
         _signal_router(pid, signal.SIGKILL)
 
-    # The listener is what the replacement needs, and it can outlive the pid:
-    # the router is a session leader, so a child that inherited the socket keeps
-    # it bound. Binding is the only question worth asking, so ask it directly.
+    # The listener is what the replacement needs, and it can outlive the pid: the router is a session leader, so a
+    # child that inherited the socket keeps it bound.
     if not _wait_port_free(_PUBLIC_PORT, port_grace_s):
         _log(f"WARN port {_PUBLIC_PORT} still bound after {port_grace_s:.0f}s; the replacement may fail to bind")
 
 
 def _signal_router(pid: int, sig: int) -> bool:
-    """Signal the router, taking its process group only when it leads one.
-
-    Reaching the group matters: the router is spawned under ``setsid``, so
-    anything it forks shares its group and inherits the listening socket, and
-    signalling the PID alone leaves those children holding the port the
-    replacement wants. ``kill_multinode`` signals groups for the same reason.
-
-    But only when ``setsid`` actually happened. A PID that is not its own group
-    leader belongs to somebody else's group -- after PID reuse, that group can
-    be anything at all, including the caller's -- and blanketing it would kill
-    processes this has no business touching.
-
-    Args:
-        pid: The router PID recorded by the spawn.
-        sig: Signal to deliver.
-
-    Returns:
-        bool: False when the process is already gone or cannot be signalled.
-    """
+    """Signal the router, taking its process group only when it leads one."""
     try:
         leads_group = os.getpgid(pid) == pid
     except OSError:
@@ -152,22 +91,12 @@ def _signal_router(pid: int, sig: int) -> bool:
 
 
 def _wait_port_free(port: int, timeout_s: float) -> bool:
-    """Poll until a fresh listener can bind ``port``.
-
-    Args:
-        port: TCP port the replacement router will bind.
-        timeout_s: Max seconds to wait.
-
-    Returns:
-        bool: True once the port is bindable, False at timeout.
-    """
+    """Poll until a fresh listener can bind ``port``."""
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            # No SO_REUSEADDR: a live holder must report EADDRINUSE. A dead
-            # process releases a listen socket at once, so this has no
-            # TIME_WAIT false positives.
+            # No SO_REUSEADDR: a live holder must report EADDRINUSE.
             sock.bind(("0.0.0.0", port))  # nosec B104 - bind probe for the public router port.
             return True
         except OSError:
@@ -184,16 +113,7 @@ def _build_sglang_router_cmd(
     decode_url: str,
     public_port: int,
 ) -> list[str]:
-    """Compose the sglang_router PD-disaggregation launch command.
-
-    Args:
-        prefill_url: Internal prefill group HTTP endpoint.
-        decode_url: Internal decode group HTTP endpoint.
-        public_port: Port the router binds for the client.
-
-    Returns:
-        list[str]: The argv for launching the sglang router.
-    """
+    """Compose the sglang_router PD-disaggregation launch command."""
     return [
         "python3",
         "-m",
@@ -216,18 +136,7 @@ def _build_vllm_router_cmd(
     public_port: int,
     override_cmd: str = "",
 ) -> list[str]:
-    """Compose the vllm router/proxy launch command (``override_cmd`` supports {prefill}/{decode}/{port} placeholders).
-
-    Args:
-        prefill_url: Internal prefill group HTTP endpoint.
-        decode_url: Internal decode group HTTP endpoint.
-        public_port: Port the router binds for the client.
-        override_cmd: Optional full command template; supports ``{prefill}``,
-            ``{decode}``, and ``{port}`` placeholders.
-
-    Returns:
-        list[str]: The argv for launching the vllm router/proxy.
-    """
+    """Compose the vllm router/proxy launch command (``override_cmd`` supports {prefill}/{decode}/{port} placeholders)."""
     if override_cmd:
         rendered = (
             override_cmd.replace("{prefill}", prefill_url)
@@ -255,20 +164,7 @@ def _detach_router(
     log_file: Path,
     pid_file: Path,
 ) -> int:
-    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit.
-
-    Args:
-        cmd: The router argv to launch.
-        log_file: Path the router's stdout/stderr is appended to.
-        pid_file: Path the spawned router PID is written to.
-
-    Returns:
-        int: The PID of the detached router process.
-
-    Raises:
-        RuntimeError: If the spawn shell fails, the PID file is missing or
-            invalid, or the router is not alive 0.5s after launch.
-    """
+    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     _retire_previous_router(pid_file)
@@ -325,15 +221,7 @@ def _detach_router(
 
 
 def main() -> int:
-    """Parse CLI arguments and detach the PD router on the head pod.
-
-    Builds the framework-specific router command, detaches it, prints a JSON
-    summary (framework, PID, URLs, file paths) to stdout, and returns.
-
-    Returns:
-        int: Process exit code; ``0`` on success, ``1`` if the router failed
-        to stay alive after launch.
-    """
+    """Parse CLI arguments and detach the PD router on the head pod."""
     p = argparse.ArgumentParser(
         prog="launch_router.py",
         description="Detach the PD-disaggregation router on the head pod.",

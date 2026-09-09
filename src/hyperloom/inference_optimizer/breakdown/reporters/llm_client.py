@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Thin LLM client adapters for the report narrative pass.
-
-The report layer only needs ``(system, user) -> str`` (not the
-orchestrator's MCP-coupled backend), so this exposes
-:class:`OpenAIHttpClient`, :class:`AnthropicClient`, and a no-op
-:class:`NullClient`. :func:`build_client_from_env` picks one from
-``HYPERLOOM_REPORT_LLM_BACKEND``, falling back to ``None``
-(deterministic-only) when config is missing.
-
-Provider credentials, client construction, and the request/response shape
-belong to ``hyperloom.common.llm_config``, which also owns the choice of
-Anthropic transport; this module keeps only the report-specific surface
-(``model``/``max_output_tokens`` defaults and the
-``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring).
-"""
+"""Thin LLM client adapters for the report narrative pass."""
 
 from __future__ import annotations
 
@@ -28,8 +14,8 @@ from hyperloom.common import llm_config
 
 log = logging.getLogger(__name__)
 
-# Report narratives are a single long generation; the gateway is allowed a
-# generous window because the alternative is a deterministic-only report.
+# Report narratives are a single long generation; the gateway is allowed a generous window because the alternative is
+# a deterministic-only report.
 REPORT_HTTP_TIMEOUT_SEC = 60.0
 
 __all__ = [
@@ -46,15 +32,7 @@ class NullClient:
     """No-op client; compose treats this exactly like ``llm_client=None``."""
 
     def complete(self, *, system: str, user: str) -> str:  # noqa: D401
-        """Return an empty string, disabling the narrative pass.
-
-        Args:
-            system (str): The system prompt (ignored).
-            user (str): The user message (ignored).
-
-        Returns:
-            str: Always an empty string.
-        """
+        """Return an empty string, disabling the narrative pass."""
         return ""
 
 
@@ -67,15 +45,7 @@ class OpenAIHttpClient:
     max_output_tokens: int = 1024
 
     def complete(self, *, system: str, user: str) -> str:
-        """Issue a single chat completion and return the text.
-
-        Args:
-            system: System prompt content.
-            user: User prompt content.
-
-        Returns:
-            The reply text.
-        """
+        """Issue a single chat completion and return the text."""
         return llm_config.chat_completion(
             self.client,
             component="breakdown",
@@ -92,11 +62,7 @@ class OpenAIHttpClient:
 
 @dataclass
 class AnthropicClient:
-    """Anthropic client for the narrative pass.
-
-    Holds no transport: :func:`llm_config.anthropic_completion` picks between
-    the Messages API and the Claude CLI from the configured credential.
-    """
+    """Anthropic client for the narrative pass."""
 
     model: str = "claude-opus-5"
     max_output_tokens: int = 1024
@@ -104,15 +70,7 @@ class AnthropicClient:
     timeout_s: float = REPORT_HTTP_TIMEOUT_SEC
 
     def complete(self, *, system: str, user: str) -> str:
-        """Issue one single-shot completion and return the reply text.
-
-        Args:
-            system (str): The system prompt.
-            user (str): The user message.
-
-        Returns:
-            str: The reply text.
-        """
+        """Issue one single-shot completion and return the reply text."""
         return llm_config.anthropic_completion(
             component="breakdown",
             operation="compose_report",
@@ -126,17 +84,7 @@ class AnthropicClient:
 
 
 def build_client_from_env() -> Any | None:
-    """Construct an LLM client from environment.
-
-    Reads ``HYPERLOOM_REPORT_LLM_BACKEND`` (default ``none``),
-    ``HYPERLOOM_REPORT_MODEL`` and ``HYPERLOOM_REPORT_MAX_TOKENS``; the
-    provider credentials come from ``hyperloom.common.llm_config``. Returns
-    ``None`` (deterministic-only) when the backend is off or unconfigured.
-
-    Returns:
-        A configured backend client instance, or ``None`` when the backend
-        is disabled or the provider credentials are missing.
-    """
+    """Construct an LLM client from environment."""
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
         return None

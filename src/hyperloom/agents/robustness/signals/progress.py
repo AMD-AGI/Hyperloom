@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Progress-stagnation detectors.
-
-Two stateful rules: ``gain_plateau`` (validated gain flat within
-``epsilon_pct`` across ``window_ticks`` while still proposing actions →
-suggest ``report``) and ``no_levers_found`` (after
-``min_observation_minutes`` the optimization_stack is empty and validated
-gain still 0). Both short-circuit in ``closing_phase`` or once a
-``stop_reason`` is set.
-"""
+"""Progress-stagnation detectors."""
 
 from __future__ import annotations
 
@@ -26,14 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class ProgressConfig:
-    """Tunables for :class:`ProgressDetector`.
-
-    ``gain_plateau`` only fires once the ``gain_window_ticks`` buffer is
-    full; ``gain_epsilon_pct`` is the unchanged-gain window.
-    ``no_levers_min_minutes`` (default 45) is the elapsed-time floor so
-    cold-start alone doesn't look "empty"; multi-node large-model runs
-    should override it higher (host passes 60.0 when ``nodes >= 2``).
-    """
+    """Tunables for :class:`ProgressDetector`."""
 
     gain_window_ticks: int = 6
     gain_epsilon_pct: float = 0.5
@@ -43,11 +28,7 @@ class ProgressConfig:
 
 
 class ProgressDetector:
-    """Stateful per-tick rule for ``gain_plateau`` + ``no_levers_found``.
-
-    Keeps a per-tick rolling history of ``cumulative_gain_validated``;
-    an empty history short-circuits on a degraded tick.
-    """
+    """Stateful per-tick rule for ``gain_plateau`` + ``no_levers_found``."""
 
     def __init__(
         self,
@@ -55,18 +36,10 @@ class ProgressDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore the persisted gain history.
-
-        Args:
-            config (ProgressConfig | None): Tunables; defaults to
-                :class:`ProgressConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view used to
-                load/persist the rolling gain history and last tick.
-        """
+        """Initialise the detector and restore the persisted gain history."""
         self._config = config or ProgressConfig()
         self._state_view = state_view
-        # Disk-backed rolling history; without it neither rule can fire
-        # under the subprocess-per-tick transport.
+        # Disk-backed rolling history; without it neither rule can fire under the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         raw_history = loaded.get("gain_history") or []
         if isinstance(raw_history, list):
@@ -102,22 +75,7 @@ class ProgressDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Update the gain history and evaluate the stagnation rules.
-
-        Appends one gain sample per new Coordinator tick, then runs the
-        ``gain_plateau`` and ``no_levers_found`` checks. Short-circuits when the
-        run is already closing or has a stop reason.
-
-        Args:
-            ctx (ReactorContext): Reactor context providing the shared-state
-                snapshot.
-            data (SourceData): Collected source data (unused but kept for a
-                uniform rule signature).
-
-        Returns:
-            list[Symptom]: Any ``gain_plateau`` / ``no_levers_found`` symptoms
-                for this tick, possibly empty.
-        """
+        """Update the gain history and evaluate the stagnation rules."""
         snap = ctx.shared_state
         if snap.closing_phase or snap.stop_reason:
             return []
@@ -142,22 +100,12 @@ class ProgressDetector:
         return out
 
     def _gain_plateau_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
-        """Build a ``gain_plateau`` symptom when validated gain has flatlined.
-
-        Args:
-            snap (SharedStateSnapshot): Current shared-state snapshot.
-
-        Returns:
-            Symptom | None: A MEDIUM-severity ``gain_plateau`` symptom (the
-                suggestion text differs depending on whether a shippable gain
-                exists), or ``None`` when the window is not full, the stack is
-                empty, or the gain is still moving.
-        """
+        """Build a ``gain_plateau`` symptom when validated gain has flatlined."""
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
-        # Plateau requires "explored but stalled"; an empty stack is the
-        # zero-by-construction case that ``no_levers_found`` owns instead.
+        # Plateau requires "explored but stalled"; an empty stack is the zero-by-construction case that
+        # ``no_levers_found`` owns instead.
         if snap.optimization_stack_size == 0:
             return None
         window = self._gain_history[-cfg.gain_window_ticks :]
@@ -193,33 +141,21 @@ class ProgressDetector:
         )
 
     def _no_levers_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
-        """Build a ``no_levers_found`` symptom for an empty, gainless run.
-
-        Fires only after the explore phase has started and the configured
-        elapsed-minute and tick floors are met, while no kernel_opt work is in
-        flight.
-
-        Args:
-            snap (SharedStateSnapshot): Current shared-state snapshot.
-
-        Returns:
-            Symptom | None: A MEDIUM-severity ``no_levers_found`` symptom, or
-                ``None`` when any guard condition defers the fire.
-        """
+        """Build a ``no_levers_found`` symptom for an empty, gainless run."""
         cfg = self._config
         if snap.optimization_stack_size > 0:
             return None
         if snap.cumulative_gain_validated >= cfg.productive_gain_pct:
             # Validated gain with stack count 0 — odd but not our problem.
             return None
-        # Don't claim "no lever" while kernel_opt is in flight or a KEEP
-        # is waiting to integrate (avoids burning a pending win).
+        # Don't claim "no lever" while kernel_opt is in flight or a KEEP is waiting to integrate (avoids burning a
+        # pending win).
         if snap.kernel_opt_attempts_count > 0:
             return None
         if snap.has_keep_pending_integrate:
             return None
-        # Defer until an explore family has actually run; otherwise
-        # stack==0 + gain==0 are by-construction during cold start, not diagnostic.
+        # Defer until an explore family has actually run; otherwise stack==0 + gain==0 are by-construction during cold
+        # start, not diagnostic.
         if not snap.explore_started:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:

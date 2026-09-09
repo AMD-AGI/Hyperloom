@@ -11,13 +11,7 @@ from typing import Any
 
 
 class SymptomSeverity(str, Enum):
-    """Severity level of a :class:`Symptom`.
-
-    Attributes:
-        LOW: Informational; soft actions only.
-        MEDIUM: Actionable alert; strategy nudges become reachable.
-        HIGH: Urgent; hard actions and wind-down become reachable.
-    """
+    """Severity level of a :class:`Symptom`."""
 
     LOW = "low"
     MEDIUM = "medium"
@@ -25,37 +19,13 @@ class SymptomSeverity(str, Enum):
 
     @property
     def rank(self) -> int:
-        """Ordinal rank used for severity comparison and sorting.
-
-        Returns:
-            int: ``0`` for LOW, ``1`` for MEDIUM, ``2`` for HIGH.
-        """
+        """Ordinal rank used for severity comparison and sorting."""
         return {"low": 0, "medium": 1, "high": 2}[self.value]
 
 
 @dataclass
 class Symptom:
-    """One rule firing, ready for the ActionLadder.
-
-    Attributes
-    ----------
-    name:
-        Stable identifier the ActionLadder dispatches on.
-    severity:
-        :class:`SymptomSeverity`; gates whether soft / hard actions are reachable.
-    summary:
-        One-line summary surfaced in alerts and findings.
-    evidence:
-        Structured ``detail`` payload; keep it small (persisted verbatim).
-    subject:
-        Identifying tuple for de-dup and downstream targetting.
-    source:
-        Data source that produced the signal (``"local"`` / ``"server"`` /
-        ``"coordinator_events"`` / ``"inbox"`` / ``"shared_state"``; defaults to
-        ``"unknown"``).
-    suggestion:
-        Optional hint for the ``escalate_strategy_change`` next_action_hint.
-    """
+    """One rule firing, ready for the ActionLadder."""
 
     name: str
     severity: SymptomSeverity
@@ -66,12 +36,7 @@ class Symptom:
     suggestion: str = ""
 
     def dedup_key(self) -> tuple[str, ...]:
-        """Stable identity used by the classifier to drop duplicates.
-
-        Returns:
-            tuple[str, ...]: ``(name,)`` when there is no subject, otherwise the
-                name followed by sorted ``key=value`` subject pairs.
-        """
+        """Stable identity used by the classifier to drop duplicates."""
         if not self.subject:
             return (self.name,)
         return (self.name, *sorted(f"{k}={v}" for k, v in self.subject.items()))

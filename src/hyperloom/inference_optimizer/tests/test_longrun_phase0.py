@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long-run infrastructure acceptance tests.
-
-Covers bounded SharedState ledgers + events/tasks DB retention, the GPU-lease
-reaper + coordinator maintenance tick, and transient-failure retry/backoff for
-LLM backend calls. All deterministic + offline.
-"""
+"""Long-run infrastructure acceptance tests."""
 
 from __future__ import annotations
 
@@ -138,9 +133,7 @@ async def test_prune_events_protects_pending_proposal(conn):
 
 @pytest.mark.asyncio
 async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
-    """The pruning guard's pending set must agree with the resume reconstruct
-    logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to
-    its msg_id (empty/missing targets do not decide anything)."""
+    """The pruning guard's pending set must agree with the resume reconstruct logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to its msg_id (empty/missing targets do not decide anything)."""
     bus = MessageBus(conn)
     p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
     p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})

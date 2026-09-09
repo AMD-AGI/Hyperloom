@@ -1,14 +1,4 @@
-"""Resolve a producer-owned ``kernel:`` recipe identity for a rewrite record.
-
-The rewrite path used to address records by operator and framework alone and
-carry the GPU as a filter applied after reading. Here the GPU is part of the
-address, because a port validated on one architecture is not a candidate for
-another and should not be fetched only to be discarded.
-
-``framework_version`` is the dimension the rewrite path never tracked. It is
-read from the installed distribution, so records stop being shared across
-framework upgrades that change the very source the port was written against.
-"""
+"""Resolve a producer-owned ``kernel:`` recipe identity for a rewrite record."""
 
 from __future__ import annotations
 
@@ -52,12 +42,7 @@ _FINGERPRINT_LEN = 12
 
 
 def segment(value: str, *, fallback: str) -> str:
-    """Fold a free-form value into one identity dimension.
-
-    Dimensions are lowercase ASCII and colon-free because they are the address:
-    a value that cannot be rendered would otherwise silently file the record
-    somewhere the next reader will not look.
-    """
+    """Fold a free-form value into one identity dimension."""
     folded = _DISALLOWED.sub("-", str(value or "").strip().lower())
     folded = _LEADING.sub("", folded).strip("-")
     if not folded:
@@ -77,17 +62,7 @@ def framework_version(framework: str) -> str:
 
 
 def session_id(canonical_id: str, kernel_name: str, port_digest: str) -> str:
-    """Name one candidate under one identity.
-
-    Artifact keys are partitioned by session id alone, so an id that repeated
-    across identities would let two of them collide on any shared artifact
-    path. The identity fingerprint is what keeps this id distinct per identity.
-    The port digest is what keeps it stable, so re-recording the same port
-    updates one candidate instead of accumulating one per run.
-
-    The kernel name is here only to keep the id legible, and is budgeted rather
-    than trusted: a dimension may be longer than a whole id is allowed to be.
-    """
+    """Name one candidate under one identity."""
     name = _UNSAFE_IN_SESSION_ID.sub("-", str(kernel_name or "")).strip("-.")
     legible = name[:_NAME_BUDGET].strip("-.") or UNKNOWN_SEGMENT
     identity_fingerprint = hashlib.sha256(str(canonical_id or "").encode()).hexdigest()[:_FINGERPRINT_LEN]

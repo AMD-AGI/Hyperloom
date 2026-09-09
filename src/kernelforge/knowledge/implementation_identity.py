@@ -106,10 +106,7 @@ def canonical_editable_source_map(
     source_files: Iterable[str] | None,
     framework: str,
 ) -> dict[str, str]:
-    """Map declared source hints to canonical consumer-relative paths.
-
-    The map supports cross-repository KB matching; it is not an edit allowlist.
-    """
+    """Map declared source hints to canonical consumer-relative paths."""
     mapping: dict[str, str] = {}
     for raw in [kernel_path, *(source_files or [])]:
         if not raw:

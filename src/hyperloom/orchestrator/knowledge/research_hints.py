@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Research-hint artifacts collected by the research scout (advisory, source-backed priors).
-
-Produces ``research_hints.{md,json}`` and ``competitor_target.json``
-(sourceless entries dropped). All reads/writes are fail-soft.
-"""
+"""Research-hint artifacts collected by the research scout (advisory, source-backed priors)."""
 
 from __future__ import annotations
 
@@ -23,14 +19,7 @@ log = logging.getLogger("hyperloom.research_hints")
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
-    """Normalize one incoming hint; return ``None`` when it has no source.
-
-    Args:
-        raw: A raw incoming hint value.
-
-    Returns:
-        The normalized hint dict, or ``None`` when it lacks a source/claim.
-    """
+    """Normalize one incoming hint; return ``None`` when it has no source."""
     if not isinstance(raw, dict):
         return None
     source = str(raw.get("source") or "").strip()
@@ -54,26 +43,12 @@ def _coerce_hint(raw: Any) -> dict[str, Any] | None:
 
 
 def _hint_key(hint: dict[str, Any]) -> str:
-    """Dedup key for append-merge: claim + source (case-insensitive).
-
-    Args:
-        hint: A normalized hint dict.
-
-    Returns:
-        The case-insensitive dedup key string.
-    """
+    """Dedup key for append-merge: claim + source (case-insensitive)."""
     return f"{hint['what'].lower()}::{hint['source'].lower()}"
 
 
 def load_hints(session_dir: Path) -> list[dict[str, Any]]:
-    """Return the structured hints written so far (empty on miss/parse error).
-
-    Args:
-        session_dir: Session directory to read hints from.
-
-    Returns:
-        The list of normalized hint dicts (empty on miss/parse error).
-    """
+    """Return the structured hints written so far (empty on miss/parse error)."""
     path = session_paths.research_hints_json(session_dir)
     try:
         if not path.exists():
@@ -94,14 +69,7 @@ def load_hints(session_dir: Path) -> list[dict[str, Any]]:
 
 
 def _render_md(hints: list[dict[str, Any]]) -> str:
-    """Render research hints as a Markdown document.
-
-    Args:
-        hints: Normalized hint records.
-
-    Returns:
-        Markdown text, with a placeholder note when there are no hints.
-    """
+    """Render research hints as a Markdown document."""
     lines = ["# Research Hints", ""]
     if not hints:
         lines += [
@@ -124,11 +92,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
 
 
 def write_hints_skeleton(session_dir: Path) -> None:
-    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints).
-
-    Args:
-        session_dir: Session directory whose hint artifacts are ensured.
-    """
+    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints)."""
     md_path = session_paths.research_hints_md(session_dir)
     if md_path.exists():
         return
@@ -137,12 +101,7 @@ def write_hints_skeleton(session_dir: Path) -> None:
 
 
 def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
-    """Persist hints to the session's JSON and Markdown artifacts.
-
-    Args:
-        session_dir: Session directory to write into.
-        hints: Hint records to serialize.
-    """
+    """Persist hints to the session's JSON and Markdown artifacts."""
     sd = Path(session_dir)
     sd.mkdir(parents=True, exist_ok=True)
     try:
@@ -159,15 +118,7 @@ def append_hints(
     session_dir: Path,
     incoming: list[Any],
 ) -> tuple[int, int]:
-    """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added).
-
-    Args:
-        session_dir: Session directory to merge hints into.
-        incoming: Raw incoming hint values from the scout.
-
-    Returns:
-        A ``(added, dropped)`` tuple of counts.
-    """
+    """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added)."""
     existing = load_hints(session_dir)
     seen = {_hint_key(h) for h in existing}
     added = 0
@@ -188,14 +139,7 @@ def append_hints(
 
 
 def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
-    """Drop a per-concurrency target row that lacks a source.
-
-    Args:
-        raw: A raw per-concurrency target row value.
-
-    Returns:
-        The normalized row dict, or ``None`` when it lacks a source.
-    """
+    """Drop a per-concurrency target row that lacks a source."""
     if not isinstance(raw, dict):
         return None
     if not str(raw.get("source") or "").strip():
@@ -211,15 +155,7 @@ def write_competitor_target(
     session_dir: Path,
     target: Any,
 ) -> bool:
-    """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written.
-
-    Args:
-        session_dir: Session directory to write the target into.
-        target: The competitor target payload.
-
-    Returns:
-        True when at least one sourced row was written, else False.
-    """
+    """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written."""
     if not isinstance(target, dict):
         return False
     per_conc_in = target.get("per_conc") or []
@@ -248,14 +184,7 @@ def write_competitor_target(
 
 
 def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
-    """Read ``competitor_target.json`` keeping only sourced per-conc rows; ``None`` when absent/malformed/sourceless. Fail-soft.
-
-    Args:
-        session_dir: Session directory to read the target from.
-
-    Returns:
-        The competitor target dict, or ``None`` when absent/malformed/sourceless.
-    """
+    """Read ``competitor_target.json`` keeping only sourced per-conc rows; ``None`` when absent/malformed/sourceless. Fail-soft."""
     path = session_paths.competitor_target_json(session_dir)
     try:
         if not path.exists():
@@ -286,15 +215,7 @@ def _match_target_row(
     target: dict[str, Any],
     conc: int | None,
 ) -> dict[str, Any] | None:
-    """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown).
-
-    Args:
-        target: A competitor target dict carrying ``per_conc`` rows.
-        conc: The concurrency to match, or ``None``.
-
-    Returns:
-        The best-matching per-conc row, or ``None`` when there are no rows.
-    """
+    """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown)."""
     rows = target.get("per_conc") or []
     if not rows:
         return None
@@ -318,17 +239,7 @@ def gap_analysis(
     our_tpot_ms: float | None,
     conc: int | None = None,
 ) -> dict[str, Any] | None:
-    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is "latency" when TPOT ratio outweighs throughput gap.
-
-    Args:
-        target: A competitor target dict, or ``None``.
-        our_tput_per_gpu: Our achieved throughput per GPU, when known.
-        our_tpot_ms: Our achieved TPOT in milliseconds, when known.
-        conc: Concurrency to match the target row against.
-
-    Returns:
-        A gap-analysis dict, or ``None`` when no comparable row exists.
-    """
+    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is \"latency\" when TPOT ratio outweighs throughput gap."""
     if not target:
         return None
     row = _match_target_row(target, conc)
@@ -373,15 +284,7 @@ def full_gap_summary(
     *,
     tpot_ratio_threshold: float = 1.3,
 ) -> str:
-    """Render an advisory "External target gap" block (empty when no gap; advisory only, never gates).
-
-    Args:
-        gap: A gap-analysis dict, or ``None``.
-        tpot_ratio_threshold: TPOT ratio above which latency is called out.
-
-    Returns:
-        The advisory block text, or ``""`` when there is no gap.
-    """
+    """Render an advisory \"External target gap\" block (empty when no gap; advisory only, never gates)."""
     if not gap:
         return ""
     lines = [
@@ -409,14 +312,7 @@ def full_gap_summary(
 
 
 def _to_num(value: Any) -> float | None:
-    """Coerce a value to ``float``, returning ``None`` on failure.
-
-    Args:
-        value: Arbitrary value to convert.
-
-    Returns:
-        The float value, or ``None`` if it cannot be parsed.
-    """
+    """Coerce a value to ``float``, returning ``None`` on failure."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -473,17 +369,7 @@ _STOPWORDS: frozenset[str] = frozenset(
 
 
 def _tokens(text: str) -> set[str]:
-    """Tokenize text into a set of lowercase content words.
-
-    Splits on non-alphanumeric characters and drops short tokens and
-    stopwords so the remaining set is useful for overlap matching.
-
-    Args:
-        text: Free-form text to tokenize.
-
-    Returns:
-        Set of distinct content tokens (length >= 3, non-stopword).
-    """
+    """Tokenize text into a set of lowercase content words."""
     out: set[str] = set()
     for raw in re.split(r"[^a-z0-9]+", str(text).lower()):
         tok = raw.strip()
@@ -498,16 +384,7 @@ def match_variants_to_priors(
     *,
     primary_gap: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap.
-
-    Args:
-        variants: Candidate variant dicts to annotate.
-        hints: Normalized prior hint dicts.
-        primary_gap: The dominant external gap (e.g. ``"latency"``), when known.
-
-    Returns:
-        Mapping of variant name to its match info dict.
-    """
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap."""
     out: dict[str, dict[str, Any]] = {}
     latency_dominant = str(primary_gap or "").strip().lower() == "latency"
     hint_tokens: list[tuple[str, set[str]]] = []
@@ -554,17 +431,7 @@ def priors_match_summary(
     primary_gap: str | None = None,
     max_rows: int = 12,
 ) -> str:
-    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only).
-
-    Args:
-        variants: Candidate variant dicts to check.
-        hints: Normalized prior hint dicts.
-        primary_gap: The dominant external gap, when known.
-        max_rows: Maximum number of variant rows to render.
-
-    Returns:
-        The advisory block text, or ``""`` when no variants match.
-    """
+    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only)."""
     matches = match_variants_to_priors(
         variants,
         hints,
@@ -594,15 +461,7 @@ def summarise_for_prompt(
     *,
     max_entries: int = 8,
 ) -> str:
-    """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only).
-
-    Args:
-        session_dir: Session directory to load hints from.
-        max_entries: Maximum number of hint entries to render inline.
-
-    Returns:
-        The advisory prompt block text, or ``""`` when there are no hints.
-    """
+    """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only)."""
     hints = load_hints(session_dir)
     if not hints:
         return ""

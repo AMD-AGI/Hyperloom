@@ -24,20 +24,11 @@ class EnablementRevalidation(CoordinatorCollaborator):
     """Re-measures a kept enablement round against a real baseline."""
 
     async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
-        """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
-
-        Uses the accepted config from the KEEP'd candidate bench (preferred) or
-        falls back to the original probe config, plus that bench's env/arg layers,
-        which the YAML does not carry and without which a different configuration
-        would be graded. The frozen eval controls from the carrier params ensure
-        RUN_EVAL and eval task/limit match the trigger contract. Idempotent and
-        one-at-a-time.
-        """
+        """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch."""
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
             return ""
-        # If we already have a tracked revalidation task that is still alive, do
-        # not create another one.
+        # If we already have a tracked revalidation task that is still alive, do not create another one.
         tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if tracked_tid:
             try:
@@ -46,13 +37,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                         return tracked_tid
             except Exception:  # noqa: BLE001 — defensive
                 pass
-        # Do not open a row the dispatcher would cancel on sight. A revalidation
-        # is a full baseline, and the queue scan drops a queued one the session
-        # budget can no longer fit -- which leaves a cancelled row owning this
-        # window's idempotency key, and a row cancelled at dispatch never
-        # produces a result to route, so nothing would advance the generation
-        # past it. Holding the window shut for now costs nothing: it stays open,
-        # and the resume that has budget again enqueues it.
+        # Do not open a row the dispatcher would cancel on sight.
         denied = self._time_budget_denial_for_action("baseline")
         if denied is not None:
             log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
@@ -72,8 +57,8 @@ class EnablementRevalidation(CoordinatorCollaborator):
         for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
             if effective.get(key):
                 params[key] = effective[key]
-        # Carry the active runtime override so the revalidation baseline runs
-        # under the same framework runtime as the KEEP'd candidate.
+        # Carry the active runtime override so the revalidation baseline runs under the same framework runtime as the
+        # KEEP'd candidate.
         active_rt = state.enablement.active_runtime or {}
         if isinstance(active_rt, dict) and active_rt:
             from ..framework.stack_actions import FrameworkRuntime
@@ -96,15 +81,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         return task_id
 
     async def _open_revalidation_row(self, params: dict[str, Any]) -> "Task | None":
-        """Resolve this revalidation window's task row, on a generation it can use.
-
-        Args:
-            params: The baseline params for the revalidation row.
-
-        Returns:
-            The row to track, or ``None`` when this tick found only spent
-            generations -- the window stays open and the next tick tries again.
-        """
+        """Resolve this revalidation window's task row, on a generation it can use."""
         state = self.shared_state
         _baseline_lanes, _baseline_ttl = self._registry_lanes_ttl("baseline")
         task, generation = await self._open_row_past_spent_generations(
@@ -113,8 +90,8 @@ class EnablementRevalidation(CoordinatorCollaborator):
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
             label="revalidation",
-            # Both halves of the catalogue contract: a baseline re-launches the
-            # server, so it must hold the same lanes any other baseline does.
+            # Both halves of the catalogue contract: a baseline re-launches the server, so it must hold the same lanes
+            # any other baseline does.
             requires_lanes=_baseline_lanes,
             lease_ttl_sec=_baseline_ttl,
         )
@@ -132,32 +109,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         attempts: int = 2,
         **create_kwargs: Any,
     ) -> tuple["Task | None", int]:
-        """Create or re-use a task row, skipping generations already spent.
-
-        A generation in the idempotency key is what lets one piece of work get a
-        fresh row after an earlier attempt at it went terminal. That only holds if
-        a key resolving to a terminal row is recognised as a spent generation
-        rather than an enqueue: a row cancelled at dispatch -- which is what the
-        queue scan does to work the wall-clock budget can no longer fit -- never
-        produces a result to route, so nothing downstream advances the generation
-        past it, and every later attempt resolves to a row that measured nothing.
-
-        Args:
-            kind: The task kind to create.
-            params: The task params.
-            key_for: Builds the idempotency key for a generation number.
-            generation: The generation to try first.
-            label: How this work is named in the log when a generation is spent.
-            attempts: How many generations to try before giving up this pass.
-            **create_kwargs: Passed through to
-                :meth:`TaskRegistry.create_or_return_existing` (lanes, TTL).
-
-        Returns:
-            The row to use and the generation it sits on, or ``None`` with the
-            generation to try next when every attempt this pass found a spent
-            one. The caller persists the generation, since only the caller knows
-            where it lives.
-        """
+        """Create or re-use a task row, skipping generations already spent."""
         from ..state.task_registry import TERMINAL_STATES
 
         for _attempt in range(max(1, attempts)):

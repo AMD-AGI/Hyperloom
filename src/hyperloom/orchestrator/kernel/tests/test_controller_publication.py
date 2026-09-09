@@ -125,10 +125,7 @@ def test_discovery_ignores_incomplete_and_hidden_versions(tmp_path: Path) -> Non
 
 
 def _mutate(patch_dir: Path, **changes: object) -> None:
-    """Rewrite the publication payload with ``changes`` applied.
-
-    A key mapped to ``_DROP`` is removed rather than overwritten.
-    """
+    """Rewrite the publication payload with ``changes`` applied."""
     path = patch_dir / "publication.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     for key, value in changes.items():

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cyclic phase machine acceptance tests.
-
-Covers ``compute_next_phase`` SWEEP back-edge branches, the per-cycle budget
-window, Coordinator loopback application, PolicyGate re-entry after a loopback,
-and short-run macro-loop behaviour. All deterministic + offline.
-"""
+"""Cyclic phase machine acceptance tests."""
 
 from __future__ import annotations
 
@@ -210,8 +205,7 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
 
 
 def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
-    # 12h bounded run: macro-loop is available even though budget accounting
-    # stays in short-run charge-back mode.
+    # 12h bounded run: macro-loop is available even though budget accounting stays in short-run charge-back mode.
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
@@ -246,7 +240,6 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
 def test_reloop_blocked_when_insufficient_budget_remains():
     # 12h session: effective floor = min(10800, 12*3600*0.15) = min(10800, 6480) = 6480s.
-    # Reloop is blocked when remaining < 6480s, i.e. elapsed > 12h - 1.8h = 10.2h.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
@@ -308,8 +301,8 @@ def test_per_cycle_budget_shrinks_phase_window():
     budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
     pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
 
-    # Long bounded runs charge back (base * pct / denom); the per-cycle window
-    # caps the base, so a 6h cycle plans a smaller EXPLORE than the 96h run.
+    # Long bounded runs charge back (base * pct / denom); the per-cycle window caps the base, so a 6h cycle plans a
+    # smaller EXPLORE than the 96h run.
     denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :] if budget[p] > 0)
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
@@ -335,8 +328,8 @@ def test_long_run_chargeback_cap_and_tail():
         for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :]
         if ps.DEFAULT_PHASE_BUDGET_PCT[p] > 0
     )
-    # A 48h long bounded run with a 24h cycle window: early on, remaining session
-    # (>24h) exceeds the window, so the window caps the charge-back base.
+    # A 48h long bounded run with a 24h cycle window: early on, remaining session (>24h) exceeds the window, so the
+    # window caps the charge-back base.
     early_start = datetime.fromtimestamp(now - 1 * 3600.0, tz=timezone.utc).isoformat()
     early = SharedState(
         session_id="t",
@@ -349,8 +342,8 @@ def test_long_run_chargeback_cap_and_tail():
     total_early = ps._phase_budget_total_seconds(early, now_unix=now)
     assert total_early == pytest.approx(24 * 3600 * pct / denom)  # capped at the window
 
-    # Near the tail (only 3h of session left, < the 24h window), the remaining
-    # session time — not the window — is the charge-back base.
+    # Near the tail (only 3h of session left, < the 24h window), the remaining session time — not the window — is the
+    # charge-back base.
     tail_start = datetime.fromtimestamp(now - 45 * 3600.0, tz=timezone.utc).isoformat()
     tail = SharedState(
         session_id="t",
@@ -373,8 +366,8 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase
-    # budgets stay anchored on the whole session even if cycle_minutes was pinned.
+    # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase budgets stay anchored on the whole
+    # session even if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=600, cycle_minutes=360.0)
     assert ps._budget_minutes(st) == 600.0
 

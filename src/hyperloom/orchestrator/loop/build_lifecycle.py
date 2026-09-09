@@ -34,10 +34,7 @@ class BuildLifecycleCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
-        """Enqueue a ``targeted_build`` row (idempotent by novelty key).
-
-        Returns the task id; returns an existing row's id on a repeat novelty tuple.
-        """
+        """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""
         from ..framework.targeted_build import _resolve_budget_sec
 
         ttl = int(_resolve_budget_sec(action)) + _LEASE_GRACE_SEC
@@ -52,11 +49,7 @@ class BuildLifecycleCollaborator:
 
 
 def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]:
-    """Return the spawn argv for this action.
-
-    Passes ``action.build_command`` through verbatim when set; otherwise writes
-    ``plan.json`` into ``attempt_root`` and returns the driver module entrypoint.
-    """
+    """Return the spawn argv for this action."""
     if action.build_command:
         return list(action.build_command)
     from pathlib import Path as _Path

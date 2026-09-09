@@ -48,9 +48,8 @@ def _submit_with_stubbed_loop(
     )
     monkeypatch.setattr(forge_submit, "_remove_worktree", lambda *_args, **_kwargs: None)
 
-    # Shapes no longer cross the CLI boundary, so the recovery gate is the only
-    # consumer left that submit() has to hand them to. Spying on the real gate
-    # keeps that half of the chain under test without stubbing its verdict.
+    # Shapes no longer cross the CLI boundary, so the recovery gate is the only consumer left that submit() has to
+    # hand them to.
     real_gate = forge_submit._validated_forge_checkpoint
 
     def spy_gate(checkpoint, **kwargs):
@@ -95,12 +94,7 @@ def _assert_staged_placeholder(driver: str, workspace: Path) -> None:
 
 
 def test_submit_names_the_card_alongside_the_target(monkeypatch, tmp_path):
-    """The card reaches the loop, resolved from the candidate.
-
-    KernelForge files a kernel's experience under the card and skips its KB
-    without one, carrying on as though nothing were wrong, so a submit that
-    resolved the target but forgot the card would optimize and remember nothing.
-    """
+    """The card reaches the loop, resolved from the candidate."""
     _result, captured = _submit_with_stubbed_loop(
         monkeypatch,
         tmp_path,
@@ -112,11 +106,7 @@ def test_submit_names_the_card_alongside_the_target(monkeypatch, tmp_path):
 
 
 def test_submit_reports_the_card_it_could_not_name(monkeypatch, tmp_path, caplog):
-    """A candidate that names no card leaves the run without a KB address.
-
-    Nothing downstream fails on this: the loop optimizes and the result looks
-    ordinary, so the only evidence is what is said here.
-    """
+    """A candidate that names no card leaves the run without a KB address."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
     with caplog.at_level("WARNING"):
         _result, captured = _submit_with_stubbed_loop(
@@ -202,9 +192,9 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
 
     assert result["returncode"] == 0
     _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
-    # The grouped selectors are resolved on this side and no longer travel on the
-    # argv, so both halves are checked here: that the resolution is right, and
-    # that submit() hands the resolved value to the consumer that still reads it.
+    # The grouped selectors are resolved on this side and no longer travel on the argv, so both halves are checked
+    # here: that the resolution is right, and that submit() hands the resolved value to the consumer that still reads
+    # it.
     assert forge_submit._shapes_from_candidate(candidate)["validation"] == selectors
     assert captured["gate_kwargs"]["shapes"]["validation"] == selectors
 

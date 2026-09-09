@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel profiling renderer.
-
-Surfaces profile / TraceLens runs: launch args, artifact paths and
-parsed top-k kernels. Artifact locations are reported as recorded; this
-renderer reads no files.
-"""
+"""Kernel profiling renderer."""
 
 from __future__ import annotations
 
@@ -18,15 +13,7 @@ _MAX_KERNEL_ROWS = 15
 
 
 def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
-    """Build table rows for the top-k profiled kernels.
-
-    Args:
-        kernels (list[dict[str, Any]]): Parsed top-kernel records.
-
-    Returns:
-        list[list[Any]]: Up to ``_MAX_KERNEL_ROWS`` rows of
-            ``[kernel_id, name, gpu_pct, duration_us, bottleneck]``.
-    """
+    """Build table rows for the top-k profiled kernels."""
     rows: list[list[Any]] = []
     for k in kernels[:_MAX_KERNEL_ROWS]:
         rows.append(
@@ -43,18 +30,7 @@ def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
 
 @register_renderer("kernel_profiling")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the kernel-profiling section from recorded profile runs.
-
-    Lists each profile / TraceLens run with its launch args, artifact
-    paths and top-k kernel table. Skipped when no runs were recorded.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered section, or a skipped placeholder when
-            there are no profiling runs.
-    """
+    """Render the kernel-profiling section from recorded profile runs."""
     runs = breakdown.get("kernel_profiling") or []
 
     if not runs:

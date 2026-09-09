@@ -160,8 +160,8 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertEqual(skip, "")
 
     def test_flydsl_env_configured_root_is_reusable(self) -> None:
-        # A DSL2_ROOT/FLYDSL_ROOT-configured checkout is reusable; no personal
-        # or internal storage path is assumed as a built-in default.
+        # A DSL2_ROOT/FLYDSL_ROOT-configured checkout is reusable; no personal or internal storage path is assumed as
+        # a built-in default.
         with mock.patch.dict(os.environ, {"FLYDSL_ROOT": "/opt/flydsl"}):
             cand = self._flydsl_candidate(
                 "/opt/flydsl/kernels/moe_gemm_2stage.py",

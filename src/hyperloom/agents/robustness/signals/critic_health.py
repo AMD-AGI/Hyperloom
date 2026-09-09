@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic-health signals.
-
-Critic is the reviewer and no one reviews the reviewer; these detectors catch the
-session silently losing its decision gate:
-
-* **``critic_kb_outage``** — ``judge_bundle.json`` marks
-  ``kb_read_skipped_reason="kb_unreachable"`` for ``min_outage_judges`` consecutive turns.
-* **``critic_unavailable_streak``** — ``review_verdict`` events with
-  ``source="critic_unavailable"`` for ``min_unavailable_verdicts`` consecutive verdicts.
-* **``critic_prune_stuck``** — ``critic-workdir/`` count past ``max_workdir_count`` (pruner broken).
-* **``critic_runtime_stuck``** — runtime-cli timeout pattern in server logs
-  (reuses :data:`local_log_errors`), collapsed into one critic-attributed symptom.
-"""
+"""Critic-health signals."""
 
 from __future__ import annotations
 
@@ -28,10 +16,7 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class CriticHealthConfig:
-    """Tunables for :func:`evaluate_critic_health_signals`.
-
-    Threshold defaults are permissive; escalate only when an outage persists.
-    """
+    """Tunables for :func:`evaluate_critic_health_signals`."""
 
     # KB unreachable across N+ consecutive recent turns.
     min_outage_judges: int = 3
@@ -51,19 +36,7 @@ def evaluate_critic_health_signals(
     *,
     config: CriticHealthConfig | None = None,
 ) -> list[Symptom]:
-    """Run the critic-health rules and aggregate their symptoms.
-
-    Args:
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data including critic-health and
-            log telemetry.
-        config (CriticHealthConfig | None): Tunables; defaults to
-            :class:`CriticHealthConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: All critic-health symptoms found this tick, possibly
-            empty.
-    """
+    """Run the critic-health rules and aggregate their symptoms."""
     cfg = config or CriticHealthConfig()
     view = build_event_view(ctx.inbox, data.coordinator_events)
     out: list[Symptom] = []
@@ -74,27 +47,14 @@ def evaluate_critic_health_signals(
     return out
 
 
-# ---------------------------------------------------------------------------
 # KB outage streak
-# ---------------------------------------------------------------------------
 
 
 def _kb_outage_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Fire ``critic_kb_outage`` for a streak of KB-unreachable judges.
-
-    Args:
-        data (SourceData): Collected source data including
-            ``local_critic_health``.
-        cfg (CriticHealthConfig): Tunables (provides the outage streak
-            threshold).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``critic_kb_outage`` symptom
-            when the streak threshold is met, otherwise an empty list.
-    """
+    """Fire ``critic_kb_outage`` for a streak of KB-unreachable judges."""
     critic = data.local_critic_health
     if not isinstance(critic, dict) or not critic:
         return []
@@ -141,27 +101,14 @@ def _kb_outage_symptoms(
     ]
 
 
-# ---------------------------------------------------------------------------
 # critic_unavailable verdict streak
-# ---------------------------------------------------------------------------
 
 
 def _unavailable_streak_symptoms(
     view: list[EventRow],
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Detect a streak of consecutive ``critic_unavailable`` verdicts.
-
-    Walks the view newest-first, counting until a verdict from a live critic
-    breaks the run.
-
-    Args:
-        view: Shared event view for this tick.
-        cfg: Critic-health configuration thresholds.
-
-    Returns:
-        A list with one :class:`Symptom` when the streak trips, else empty.
-    """
+    """Detect a streak of consecutive ``critic_unavailable`` verdicts."""
     streak = 0
     samples: list[str] = []
     for ev in reversed(view):
@@ -203,26 +150,14 @@ def _unavailable_streak_symptoms(
     ]
 
 
-# ---------------------------------------------------------------------------
 # workdir prune stuck
-# ---------------------------------------------------------------------------
 
 
 def _prune_stuck_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Fire ``critic_prune_stuck`` when the workdir count leaks past cap.
-
-    Args:
-        data (SourceData): Collected source data including
-            ``local_critic_health``.
-        cfg (CriticHealthConfig): Tunables (provides the max workdir count).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``critic_prune_stuck`` symptom
-            when the workdir count is over cap, otherwise an empty list.
-    """
+    """Fire ``critic_prune_stuck`` when the workdir count leaks past cap."""
     critic = data.local_critic_health
     if not isinstance(critic, dict) or not critic:
         return []
@@ -253,24 +188,14 @@ def _prune_stuck_symptoms(
     ]
 
 
-# ---------------------------------------------------------------------------
 # runtime-cli timeout
-# ---------------------------------------------------------------------------
 
 
 def _runtime_stuck_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Collapse ``runtime.cli .* timed out`` log hits into one symptom.
-
-    Args:
-        data: Collected source data (logs).
-        cfg: Critic-health configuration thresholds.
-
-    Returns:
-        A list with one :class:`Symptom` when timeouts are found, else empty.
-    """
+    """Collapse ``runtime.cli .* timed out`` log hits into one symptom."""
     errors = data.local_log_errors
     if not isinstance(errors, list) or not errors:
         return []

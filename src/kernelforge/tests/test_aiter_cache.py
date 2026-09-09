@@ -13,15 +13,7 @@ from kernelforge.loop import aiter_cache
 
 @pytest.fixture(autouse=True)
 def _isolate_aiter_env():
-    """Keep the cache-isolation env vars from leaking across tests.
-
-    ``configure_aiter_cache_isolation`` writes ``os.environ`` directly (its job
-    is to steer aiter's build trees for child processes). We snapshot and restore
-    those keys around each test so the temp paths it sets do not pollute later
-    tests (e.g. resolve_aiter_root in kernelforge.gemm_tune). monkeypatch cannot cover
-    this: it only rolls back keys it recorded, and delenv on an absent key
-    records nothing.
-    """
+    """Keep the cache-isolation env vars from leaking across tests."""
     keys = (
         "AITER_ROOT_DIR",
         "AITER_JIT_DIR",
@@ -57,16 +49,7 @@ def test_configure_isolates_every_aiter_build_tree(tmp_path):
 
 
 def test_flydsl_cache_claim_survives_a_later_aiter_import(tmp_path):
-    """The claim has to be made BEFORE aiter runs, and has to stick.
-
-    ``aiter/__init__.py`` points FLYDSL_RUNTIME_CACHE_DIR at
-    ``<aiter package>/jit/flydsl_cache`` whenever that directory exists and the
-    variable is unset -- and in a run that package sits inside the workspace, so
-    the cache lands in a git-visible directory the guard then fails the session
-    over. aiter only claims the variable when it is absent, which is the whole
-    reason setting it up front is sufficient. This reproduces aiter's rule
-    rather than importing aiter, which is not a dependency of the test suite.
-    """
+    """The claim has to be made BEFORE aiter runs, and has to stick."""
     isolation = aiter_cache.configure_aiter_cache_isolation(tmp_path)
 
     in_workspace = tmp_path / "aiter" / "jit" / "flydsl_cache"
@@ -80,12 +63,7 @@ def test_flydsl_cache_claim_survives_a_later_aiter_import(tmp_path):
 
 
 def test_child_environment_carries_the_flydsl_cache_too(tmp_path):
-    """A lane subprocess gets its own FlyDSL shard, not the workspace's.
-
-    Lane sessions are where this bit hardest: each lane is a copy of the
-    workspace with its own git index, so a FlyDSL entry written into the copy is
-    an untracked file the lane's own guard rejects, losing the whole session.
-    """
+    """A lane subprocess gets its own FlyDSL shard, not the workspace's."""
     env = aiter_cache.child_cache_environment(tmp_path / "shard")
 
     assert env["FLYDSL_RUNTIME_CACHE_DIR"] == str(tmp_path / "shard" / "flydsl_cache")
@@ -320,12 +298,7 @@ def test_cleanup_refuses_foreign_owner_marker(tmp_path, monkeypatch):
 
 
 def test_profiler_droppings_do_not_fail_a_session(tmp_path):
-    """rocprofv3 writes into the cwd it is handed; that is not the agent's doing.
-
-    Observed in the archives: `.rocprofv3/<pid>-<pid>-counter_values.dat` and a
-    `<pid>_results.db` beside it failed a session outright. The declaration is
-    per-path on purpose -- an undeclared stray file is still a violation.
-    """
+    """rocprofv3 writes into the cwd it is handed; that is not the agent's doing."""
     import subprocess
 
     from kernelforge.agent_backends.base import AgentRunSpec
@@ -369,20 +342,7 @@ def test_profiler_droppings_do_not_fail_a_session(tmp_path):
 
 
 def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
-    """The loop's own JIT cache must not be read as the agent's doing.
-
-    ``configure_aiter_cache_isolation`` roots its tree at
-    ``<experiments-dir>/aiter_cache``, and the shipped AITER example puts
-    ``--experiments-dir`` inside the workspace. A candidate that triggers a JIT
-    build therefore creates untracked files mid-turn. Without a declaration the
-    turn is rejected for files the framework wrote -- which is not theoretical:
-    a 1.027x candidate the in-session gate had already ALLOWed as correct and
-    faster was reverted as a "Protected integrity violation", and having never
-    been committed it could not be recovered from git afterwards.
-
-    Asserted against the list that actually ships, not a copy of it, so a future
-    edit to the globs cannot pass this test while breaking the real run.
-    """
+    """Accept mid-turn JIT shards using the exact tool-owned glob list."""
     import subprocess
 
     from kernelforge.agent_backends.base import AgentRunSpec
@@ -430,11 +390,7 @@ def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
 
 
 def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
-    """The declaration stays per-path; it is not a blanket allow_untracked.
-
-    Guards the fix against being "simplified" into forgiving everything: a file
-    the agent invents next to the cache must still fail the turn.
-    """
+    """Tool-owned globs do not permit unrelated untracked files."""
     import subprocess
 
     from kernelforge.agent_backends.base import AgentRunSpec
@@ -474,16 +430,7 @@ def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
 
 
 def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
-    """The guard reports paths from the git toplevel; the profiler runs deeper.
-
-    ``run_cwd`` is the kernel file's parent, not the workspace root (see
-    ``orchestrator/agent.py``), and only a backend declaring
-    ``requires_workspace_cwd`` moves it up. So the real observed droppings are
-    nested -- ``aiter/ops/triton/.rocprofv3/...`` and ``<hash>/<pid>_results.db``
-    -- and a pattern anchored at the root misses every one of them. ``fnmatch``
-    crosses "/", so ``*_results.db`` reaches any depth on its own; ``.rocprofv3/``
-    does not and needs the second spelling.
-    """
+    """The guard reports paths from the git toplevel; the profiler runs deeper."""
     import subprocess
 
     from kernelforge.agent_backends.base import AgentRunSpec

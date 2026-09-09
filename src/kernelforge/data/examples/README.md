@@ -51,7 +51,7 @@ file in the scratch workspace.
 | `hip_gemma_fused_add_rmsnorm/` | HIP | Fused residual-add + Gemma RMSNorm from Gemma-4-26B-A4B-it, shape `(64, 2816)` BF16. |
 | `triton2flydsl-softmax-flydsl-rewrite/` | Triton → FlyDSL | Correctness-first softmax port followed by FlyDSL optimization. |
 | `triton2flydsl-mxfp8-grouped-gemm/` | Triton → FlyDSL | SGLang MXFP8 grouped GEMM for MiniMax-M3 MoE on MI355X, covering decode and prefill. |
-| `mori_ep_dispatch_combine/` | aiter (MoRI-EP) | Distributed 8-GPU multi-rank task: tune MoRI-EP dispatch/combine launch config (block_num, warp_per_block, kernel_type, buffer mode) for EP8 MoE all-to-all. No `graph_harness.py` — a real 8-process collective can't be captured under one CUDA/HIP graph; see `driver.py`'s docstring. |
+| `mori_ep_dispatch_combine/` | aiter (MoRI-EP) | Distributed 8-GPU multi-rank task: tune MoRI-EP dispatch/combine launch config (block_num, warp_per_block, kernel_type, buffer mode) for EP8 MoE all-to-all. No `graph_harness.py` — each rank captures its own graph through `driver.py --graph-mode`. |
 
 Production tasks ship a correct-but-slow eager-Torch seed so forge can measure a
 real `baseline_ms` before editing anything. That is also why they have obvious

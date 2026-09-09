@@ -107,10 +107,7 @@ class InMemoryKBStore:
         }
 
     def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
-        # Mirrors the SDK: "merge" shallow-merges over the stored section and
-        # "replace" overwrites it. Always replacing would let a caller that
-        # relies on merge keeping the other fields pass here and lose them
-        # against the real store.
+        # Mirrors the SDK: "merge" shallow-merges over the stored section and "replace" overwrites it.
         if mode not in ("merge", "replace"):
             raise record_store.KBStoreError(f"mode must be 'merge' or 'replace', got {mode!r}")
         key = (canonical_id, session_id)
@@ -228,8 +225,7 @@ def _use_in_memory_kb_store(monkeypatch):
     return store
 
 
-# --------------------------------------------------------------------------- #
-# identity
+# --------------------------------------------------------------------------- # identity
 # --------------------------------------------------------------------------- #
 def test_a_rewrite_is_filed_under_the_flydsl_producer_identity(tmp_path, monkeypatch):
     store = _use_in_memory_kb_store(monkeypatch)
@@ -265,8 +261,8 @@ def test_a_namespaced_operator_name_stays_out_of_the_identifiers(
     tmp_path,
     monkeypatch,
 ):
-    # A logical name carries separators the identity and the session id both use,
-    # so an unnormalized one would let the operator re-partition either of them.
+    # A logical name carries separators the identity and the session id both use, so an unnormalized one would let the
+    # operator re-partition either of them.
     store = _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
     spec.op_name = "vllm::softmax"
@@ -331,9 +327,8 @@ def test_the_same_port_on_another_gpu_is_a_different_identity(tmp_path, monkeypa
         f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:flydsl:mi300x",
         SOFTMAX_IDENTITY,
     ]
-    # Artifact keys are partitioned by session id alone, so two identities
-    # sharing one would put both ports on one object and let the second
-    # overwrite the first.
+    # Artifact keys are partitioned by session id alone, so two identities sharing one would put both ports on one
+    # object and let the second overwrite the first.
     assert len({session for _, session in store.knowledge}) == 2
 
 
@@ -383,8 +378,7 @@ def test_a_session_id_is_stable_so_one_port_stays_one_candidate():
     assert first == second
 
 
-# --------------------------------------------------------------------------- #
-# round trip
+# --------------------------------------------------------------------------- # round trip
 # --------------------------------------------------------------------------- #
 def test_a_recorded_port_is_materialized_and_revalidated(tmp_path, monkeypatch):
     _use_in_memory_kb_store(monkeypatch)
@@ -528,8 +522,7 @@ def test_the_ported_file_is_an_artifact_not_a_document_field(tmp_path, monkeypat
     assert not any("content" in name for name in value)
 
 
-# --------------------------------------------------------------------------- #
-# champion is a pointer, not a filter
+# --------------------------------------------------------------------------- # champion is a pointer, not a filter
 # --------------------------------------------------------------------------- #
 def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
     tmp_path,
@@ -611,8 +604,7 @@ def test_a_weaker_later_port_does_not_take_the_champion_pointer(tmp_path, monkey
     assert len(store.knowledge) == 2
 
 
-# --------------------------------------------------------------------------- #
-# contract gates
+# --------------------------------------------------------------------------- # contract gates
 # --------------------------------------------------------------------------- #
 def test_a_changed_driver_contract_is_rejected_and_the_seed_restored(
     tmp_path,
@@ -709,8 +701,7 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
     assert "Reference 2" in restored.reference_context
 
 
-# --------------------------------------------------------------------------- #
-# local mode uses the same record layout
+# --------------------------------------------------------------------------- # local mode uses the same record layout
 # --------------------------------------------------------------------------- #
 def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     spec, driver = _spec(tmp_path)
@@ -795,8 +786,7 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
     assert config.gbrain_url == ""
 
 
-# --------------------------------------------------------------------------- #
-# configuration
+# --------------------------------------------------------------------------- # configuration
 # --------------------------------------------------------------------------- #
 def test_config_defaults_and_normalizes_gpu_type_independently_from_target(
     monkeypatch,
@@ -931,9 +921,8 @@ def test_rewrite_validates_its_kb_store_pair_without_using_gbrain():
 
 def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):
     spec, driver = _spec(tmp_path)
-    # Built directly: from_env refuses this combination, which is exactly how a
-    # misconfigured run is caught at startup. This covers the path that stays
-    # reachable when a caller supplies its own configuration.
+    # Built directly: from_env refuses this combination, which is exactly how a misconfigured run is caught at
+    # startup.
     knowledge = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=tmp_path / "knowledge",
@@ -970,14 +959,7 @@ def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):
 
 
 def test_kb_store_rewrite_keeps_the_measurement_a_consumer_recorded(tmp_path):
-    """The remote backend must preserve a measurement across a replacing write.
-
-    ``write`` replaces the session document so a rewrite cannot leave stale
-    fields behind, but the measured value is the one field its producer never
-    wrote: a consumer recorded it after running the candidate, and the ranking
-    trusts it over the claim. Replacing it away would restore the inflated claim
-    the measurement exists to correct.
-    """
+    """The remote backend must preserve a measurement across a replacing write."""
     client = InMemoryKBStore()
     store = record_store.KBStoreRewriteRecords(client)
     source = tmp_path / "kernel.py"

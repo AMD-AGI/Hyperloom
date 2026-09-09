@@ -5,8 +5,7 @@ from __future__ import annotations
 from kernelforge.knowledge import experience_sink as sink
 
 
-# --------------------------------------------------------------------------- #
-# resolve_operation
+# --------------------------------------------------------------------------- # resolve_operation
 # --------------------------------------------------------------------------- #
 def test_resolve_operation_prefers_compute_kernel(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
@@ -31,8 +30,8 @@ def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
 
 
 def test_resolve_operation_fallback_is_order_independent(monkeypatch):
-    # A producer and consumer may hand the same target-function set in different
-    # orders; the resolved op (and thus the slug) must not depend on that order.
+    # A producer and consumer may hand the same target-function set in different orders; the resolved op (and thus the
+    # slug) must not depend on that order.
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
@@ -54,8 +53,7 @@ def test_resolve_operation_survives_derive_exception(monkeypatch):
     assert sink.resolve_operation("", "/p/stem.py") == "stem"
 
 
-# --------------------------------------------------------------------------- #
-# detect_backend_language
+# --------------------------------------------------------------------------- # detect_backend_language
 # --------------------------------------------------------------------------- #
 def test_detect_backend_language_kernel_backend_wins():
     assert sink.detect_backend_language("flydsl") == "flydsl"
@@ -75,9 +73,8 @@ def test_detect_framework_from_path():
 
 
 def test_detect_framework_explicit_override_wins_over_path():
-    # A flattened/scratch workspace can drop the 'vllm/' dir from the path; an
-    # explicit --framework must still yield the right framework so the slug does
-    # not diverge between producer and consumer.
+    # A flattened/scratch workspace can drop the 'vllm/' dir from the path; an explicit --framework must still yield
+    # the right framework so the slug does not diverge between producer and consumer.
     assert (
         sink.detect_framework(
             "/tmp/scratch/k.py",
@@ -108,8 +105,7 @@ def test_detect_framework_standalone_sentinel_is_unknown():
     )
 
 
-# --------------------------------------------------------------------------- #
-# find_defining_source
+# --------------------------------------------------------------------------- # find_defining_source
 # --------------------------------------------------------------------------- #
 def test_find_defining_source_empty_op_returns_anchor():
     assert sink.find_defining_source("", "/a.py", "anchor body", None) == "anchor body"
@@ -138,8 +134,7 @@ def test_find_defining_source_matches_global_kernel():
     assert sink.find_defining_source("my_kernel", "/a.cu", anchor, None) == anchor
 
 
-# --------------------------------------------------------------------------- #
-# signature -> dtype parsing
+# --------------------------------------------------------------------------- # signature -> dtype parsing
 # --------------------------------------------------------------------------- #
 def test_extract_input_dtypes_python():
     src = "def f(x: float, y: int = 3, *args, self_unused=1):\n    pass\n"
@@ -209,8 +204,7 @@ def test_balanced_parens_unbalanced_returns_sentinel():
 
 
 def test_signature_params_skips_unbalanced_candidate():
-    # First call-like match is unbalanced (no closing paren) -> skipped; the real
-    # definition below is returned.
+    # First call-like match is unbalanced (no closing paren) -> skipped; the real definition below is returned.
     src = "k(a, b\nvoid k(int a) {\n  return;\n}"
     assert sink._signature_params(src, "k") == "int a"
 
@@ -225,8 +219,7 @@ def test_parse_param_c_reference_marker():
     assert "&" in typ
 
 
-# --------------------------------------------------------------------------- #
-# LLM summary helpers
+# --------------------------------------------------------------------------- # LLM summary helpers
 # --------------------------------------------------------------------------- #
 def test_extract_json_from_code_fence():
     text = 'noise\n```json\n{"category": "GEMM", "strategy": "x"}\n```\ntail'
@@ -290,8 +283,7 @@ def test_summary_prompt_truncates_inputs():
     assert "Operator under optimization: op" in prompt
 
 
-# --------------------------------------------------------------------------- #
-# diff parsing
+# --------------------------------------------------------------------------- # diff parsing
 # --------------------------------------------------------------------------- #
 def test_changed_files_from_diff_dedups():
     diff = "diff --git a/x.py b/x.py\ndiff --git a/y.c b/y.c\ndiff --git a/x.py b/x.py\n"

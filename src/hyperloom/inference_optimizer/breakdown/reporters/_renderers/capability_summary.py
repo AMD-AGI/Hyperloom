@@ -19,19 +19,7 @@ _CAPABILITY_ORDER = (
 
 @register_renderer("capability_summary")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the capability-summary section.
-
-    Produces a status/attempts/keeps table for each capability in a
-    stable order, one structured :class:`Decision` per non-``not_attempted``
-    capability, and a one-line fact per row. Skipped when no capabilities
-    were recorded.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered capability-summary section.
-    """
+    """Render the capability-summary section."""
     cap = breakdown.get("capability_summary") or {}
     rows: list[list[Any]] = []
     facts: list[str] = []
@@ -58,9 +46,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"validated_gain={fmt_pct(v['last_validated_gain_pct'])}")
         if "grid_size" in v and v["grid_size"] is not None:
             extras.append(f"grid={v['grid_size']}")
-        # Kernel-lane outcomes that ``keeps`` deliberately excludes. Without
-        # them a reader cannot tell a lane that failed from one whose wins are
-        # still waiting on integrate.
+        # Kernel-lane outcomes that ``keeps`` deliberately excludes.
         if v.get("micro_only_keeps"):
             extras.append(f"micro_only={v['micro_only_keeps']}")
         if v.get("pending_integrate"):

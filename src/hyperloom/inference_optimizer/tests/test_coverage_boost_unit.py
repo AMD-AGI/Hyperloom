@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Focused unit coverage for small pure-logic helpers.
-
-Each test pins one concrete branch so the contract stays covered without
-standing up the full runtime.
-"""
+"""Focused unit coverage for small pure-logic helpers."""
 
 from __future__ import annotations
 
@@ -16,8 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 
-# --------------------------------------------------------------------------- #
-# hyperloom.common.gain_math                                                   #
+# --------------------------------------------------------------------------- # hyperloom.common.gain_math #
 # --------------------------------------------------------------------------- #
 def test_gain_math_branches() -> None:
     from hyperloom.common import gain_math
@@ -36,8 +31,7 @@ def test_gain_math_branches() -> None:
     assert gain_math.incremental_gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.knowledge.kb_writeback                                         #
+# --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
 def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
@@ -87,8 +81,7 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
     assert rec["tps_delta_pct"] == 3.5
 
 
-# --------------------------------------------------------------------------- #
-# baseline_comparison.target_analyzer                                         #
+# --------------------------------------------------------------------------- # baseline_comparison.target_analyzer #
 # --------------------------------------------------------------------------- #
 def test_name_mapping_paths() -> None:
     from hyperloom.inference_optimizer.baseline_comparison import target_analyzer as nm
@@ -100,8 +93,7 @@ def test_name_mapping_paths() -> None:
     assert nm.to_inferencex_name("totally-unknown-model") is None
 
 
-# --------------------------------------------------------------------------- #
-# framework_registry                                                          #
+# --------------------------------------------------------------------------- # framework_registry #
 # --------------------------------------------------------------------------- #
 def test_framework_registry_surface() -> None:
     from hyperloom.inference_optimizer import framework_registry as fr
@@ -121,7 +113,7 @@ def test_framework_registry_surface() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.phases.quantization_schemes                                    #
+# orchestrator.phases.quantization_schemes #
 # --------------------------------------------------------------------------- #
 def test_quantization_join_and_prompt() -> None:
     from hyperloom.orchestrator.phases import quantization_schemes as qs
@@ -137,8 +129,7 @@ def test_quantization_join_and_prompt() -> None:
     assert "Quantization strategy" in prompt
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.state.objective                                                #
+# --------------------------------------------------------------------------- # orchestrator.state.objective #
 # --------------------------------------------------------------------------- #
 def test_tput_objective_progress_zero() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
@@ -170,8 +161,7 @@ def test_baseline_objective_invalid_dir() -> None:
         TargetBaselineObjective(baseline_dir="/nonexistent/path/zzz")
 
 
-# --------------------------------------------------------------------------- #
-# recipe_kb.canonical_id                                                      #
+# --------------------------------------------------------------------------- # recipe_kb.canonical_id #
 # --------------------------------------------------------------------------- #
 def test_canonical_id_roundtrip_and_errors() -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import canonical_id as cid
@@ -204,8 +194,7 @@ def test_canonical_id_for_path_errors(tmp_path) -> None:
         cid.canonical_id_for_path(root=root, recipe_dir=shallow)
 
 
-# --------------------------------------------------------------------------- #
-# recipe_kb.schema.Attempt                                                    #
+# --------------------------------------------------------------------------- # recipe_kb.schema.Attempt #
 # --------------------------------------------------------------------------- #
 def test_attempt_from_dict_with_fitness() -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb.schema import Attempt
@@ -220,7 +209,7 @@ def test_attempt_from_dict_with_fitness() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.actions.executors._file_lock                                   #
+# orchestrator.actions.executors._file_lock #
 # --------------------------------------------------------------------------- #
 def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
     import builtins
@@ -249,7 +238,7 @@ def test_file_lock_acquires(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.actions.executors._framework_gap_composer                      #
+# orchestrator.actions.executors._framework_gap_composer #
 # --------------------------------------------------------------------------- #
 def test_framework_gap_bottleneck(tmp_path) -> None:
     from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
@@ -277,8 +266,7 @@ def test_framework_gap_compose() -> None:
     assert isinstance(desc, str) and desc
 
 
-# --------------------------------------------------------------------------- #
-# manifest                                                                     #
+# --------------------------------------------------------------------------- # manifest #
 # --------------------------------------------------------------------------- #
 def test_gpu_specialist_capacity_coercions() -> None:
     from hyperloom.inference_optimizer.session import manifest
@@ -289,8 +277,7 @@ def test_gpu_specialist_capacity_coercions() -> None:
     assert isinstance(val, int) and val >= 0
 
 
-# --------------------------------------------------------------------------- #
-# protocol.intent                                                             #
+# --------------------------------------------------------------------------- # protocol.intent #
 # --------------------------------------------------------------------------- #
 def test_validate_envelope_structural_errors() -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
@@ -336,8 +323,7 @@ def test_validate_envelope_happy_path() -> None:
     assert intents[0].type is IntentType.ALERT
 
 
-# --------------------------------------------------------------------------- #
-# paths                                                                        #
+# --------------------------------------------------------------------------- # paths #
 # --------------------------------------------------------------------------- #
 def test_paths_helpers(monkeypatch, tmp_path) -> None:
     from hyperloom.inference_optimizer.session import paths
@@ -362,8 +348,7 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
         paths.asset_root()
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.roles._runtime_bridge                                          #
+# --------------------------------------------------------------------------- # orchestrator.roles._runtime_bridge #
 # --------------------------------------------------------------------------- #
 def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.roles import _runtime_bridge as rb

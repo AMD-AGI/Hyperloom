@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The Coordinator prompt describes the transport the Coordinator actually has.
-
-``orchestration.md`` was written for the Claude tool surface and rendered
-unconditionally: it told every OpenAI-only Coordinator turn that "every reply
-MUST include at least one `emit_intent` tool_use block", and pointed it at
-`get_recent_outcomes`, `run_action_now`, `WebSearch` and `WebFetch`. The Codex
-session exposes none of those. The per-tick delta note did the same, telling
-the model to "pull anything else you need with the read-only context tools"
-even though ``CodexBackend`` has no ``set_context_provider`` and the
-Coordinator's attach call was a no-op for it.
-
-Retry parity is the third half of the same story: the Claude path retries
-transient gateway failures with bounded backoff, while the Codex path failed
-the whole tick on the first one.
-"""
+"""The Coordinator prompt describes the transport the Coordinator actually has."""
 
 from __future__ import annotations
 
@@ -48,8 +34,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
-# The tool surface the system prompt actually documents. ``Read`` is matched in
-# backticks only: the prompt legitimately uses the English word.
+# The tool surface the system prompt actually documents.
 _TOOL_SURFACE_TOKENS: tuple[str, ...] = (
     "emit_intent",
     "tool_use",
@@ -78,7 +63,6 @@ def _prompt(transport: str, *, phase: str = "") -> str:
     )
 
 
-# ---------------------------------------------------------------------------
 # The prompt must not name a tool the transport does not mount.
 
 
@@ -135,7 +119,6 @@ def test_backends_declare_their_transport(tmp_path: Path) -> None:
     assert ClaudeBackend.transport == TRANSPORT_TOOLS
 
 
-# ---------------------------------------------------------------------------
 # The delta note must not point at tools that were never mounted.
 
 
@@ -205,7 +188,6 @@ async def test_delta_turn_with_context_tools_still_names_them(session_dir: Path)
         assert tool in delta
 
 
-# ---------------------------------------------------------------------------
 # Retry parity with the Claude path.
 
 

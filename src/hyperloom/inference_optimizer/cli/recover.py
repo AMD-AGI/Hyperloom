@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Offline ``recover-session`` subcommand.
-
-Inspects a crashed session dir, rebuilds ``session_breakdown.json`` from the
-recorder fragments, and flushes / reconciles Langfuse.
-"""
+"""Offline ``recover-session`` subcommand."""
 
 from __future__ import annotations
 
@@ -20,22 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
-    """Inspect on-disk artifacts to judge whether a session finished cleanly.
-
-    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
-    Returns flags used by :func:`_run_recover_session` to decide whether the
-    session still needs a (re)build + Langfuse push.
-
-    Args:
-        session_dir (Path): The session directory to inspect.
-
-    Returns:
-        dict[str, Any]: A status mapping with ``close_done``,
-            ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
-            and ``looks_complete``, which requires ``close_done``,
-            ``breakdown_recorded`` and ``breakdown_exists`` together so a
-            breakdown recorded before going missing is still rebuilt.
-    """
+    """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 
     from ..breakdown import BREAKDOWN_FILENAME
 
@@ -67,22 +48,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
 
 
 def _run_recover_session(args: argparse.Namespace) -> int:
-    """Offline recovery for a session that exited abnormally.
-
-    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
-    (the merge step), reconciles + flushes Langfuse, splices the post-flush
-    receipt into the breakdown, and attaches the full breakdown JSON to the
-    session's trace. Idempotent across processes (guarded by the persisted
-    Langfuse receipt), so re-running is safe.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``session_dir``, ``force``, and ``backfill_trace``).
-
-    Returns:
-        int: The process exit code (``0`` on success, ``2`` when the session
-            dir is missing, ``1`` on breakdown rebuild failure).
-    """
+    """Offline recovery for a session that exited abnormally."""
     session_dir = args.session_dir.resolve()
     if not session_dir.is_dir():
         print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)

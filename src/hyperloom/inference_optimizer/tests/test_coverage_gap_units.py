@@ -307,15 +307,7 @@ def _restart_args(**overrides) -> argparse.Namespace:
 def test_pd_restart_against_an_aggregated_state_fails_instead_of_reporting_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A restart that touches nothing must not report that it launched servers.
-
-    ``--pd-mode disaggregated`` is honoured even when the state's own pd_mode is
-    aggregated, but the pod lists are chosen by the state alone, so both legs
-    resolved empty. Each was then skipped, ``rc_total`` stayed 0, and the
-    command printed "infera servers launched" and exited 0 without opening a
-    single SSH connection -- after which the round benchmarked whatever was
-    already running and recorded it as this candidate's result.
-    """
+    """A restart that touches nothing must not report that it launched servers."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     state = {
@@ -355,14 +347,7 @@ def test_infera_state_errors_are_config_errors_not_transient(
     state: dict,
     match: str,
 ) -> None:
-    """Rerunning cannot supply an SSH key, so these must not read as retryable.
-
-    ``main`` classifies a bare RuntimeError by message substring and none of
-    these matched, so all three fell through to EXIT_TRANSIENT -- which the
-    controller is told means "rerun the same subcommand". A permanently
-    misconfigured hand-off was retried forever. ConfigurationError is matched by
-    type instead, which is what it exists for.
-    """
+    """Rerunning cannot supply an SSH key, so these must not read as retryable."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
@@ -372,12 +357,7 @@ def test_infera_state_errors_are_config_errors_not_transient(
 
 
 def test_missing_gpu_pods_names_the_mode_that_chose_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The message has to explain why IPs that ARE set look absent.
-
-    A PD hand-off invoked without ``PD_MODE=disaggregated`` synthesizes as
-    aggregated, so only ``_WORKER_IPS`` is consulted and the error read "check
-    PREFILL / DECODE / WORKER" while both of those were in fact set.
-    """
+    """The message has to explain why IPs that ARE set look absent."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     monkeypatch.setattr(

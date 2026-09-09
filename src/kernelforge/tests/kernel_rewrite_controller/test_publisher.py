@@ -58,11 +58,7 @@ def test_publication_records_the_scope_git_reports_not_the_manifest_claim(
     tmp_path: Path,
     task_dir: Path,
 ) -> None:
-    """What integration stages has to come from the patch, not from the optimizer.
-
-    ``source_files`` is orientation for forge-loop rather than an edit allowlist,
-    so the manifest's account of what it edited cannot bound the patch.
-    """
+    """What integration stages has to come from the patch, not from the optimizer."""
     layout = ControllerLayout(tmp_path / "output")
     task = load_task(task_dir, record_state=False).task
     assert task is not None
@@ -95,9 +91,8 @@ def test_new_keep_atomically_replaces_the_public_operator_result(
 
     assert destination.resolve() != first_target
     assert (destination / "change.patch").read_text(encoding="utf-8") == "second patch\n"
-    # Only one operator is exposed, and the superseded version survives: the
-    # version store is content-addressed and immutable, and the pointer swap is
-    # atomic where removing the old tree would not be, so a reader that already
+    # Only one operator is exposed, and the superseded version survives: the version store is content-addressed and
+    # immutable, and the pointer swap is atomic where removing the old tree would not be, so a reader that already
     # resolved it keeps what it resolved.
     assert len(publisher.published_operator_dirs(layout)) == 1
     assert (first_target / "change.patch").read_text(encoding="utf-8") == "first patch\n"
@@ -168,12 +163,7 @@ def test_a_version_directory_that_disagrees_with_its_commit_is_refused(
     tmp_path: Path,
     task_dir: Path,
 ) -> None:
-    """One commit means one patch. A version that says otherwise is corrupt.
-
-    The version directory is keyed by best commit and treated as immutable, so a
-    second publication claiming the same commit with different bytes cannot be
-    reconciled -- publishing either one would misreport what the commit contains.
-    """
+    """One commit means one patch. A version that says otherwise is corrupt."""
     layout = ControllerLayout(tmp_path / "output")
     publisher.publish_operator_result(layout, _publication(task_dir, "b" * 40, "original\n"))
 

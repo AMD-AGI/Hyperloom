@@ -7,20 +7,11 @@ from __future__ import annotations
 
 
 def context_sections_block(*, knowledge_content: str) -> str:
-    """Render the knowledge tail as a multi-line XML block.
-
-    Does not append a trailing newline; the caller provides it via the
-    closing triple-quote boundary.
-    """
+    """Render the knowledge tail as a multi-line XML block."""
     return f"\n<knowledge>\n{knowledge_content}\n</knowledge>"
 
 
-# Always-resident pointer to the two shared method cards under
-# ``local_knowledge/common_methodology/optimization/``. The knowledge tree is
-# Read-on-demand, so a card nobody opens teaches nothing: the rules an agent
-# must not have to go looking for are restated here, and the detail stays in
-# the card. Every kernel backend carries this block -- the two campaigns that lost these
-# moves ran on a kernel backend whose own prompt never mentioned them.
+# Always-resident pointer to the two shared method cards under ``local_knowledge/common_methodology/optimization/``.
 EDIT_SURFACE_AND_SWEEPS_PROMPT = """\
 ## Edit surface & cheap sweeps (shared cards — read before pricing a direction)
 

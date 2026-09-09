@@ -85,8 +85,7 @@ def test_input_reaches_the_command(tmp_path):
 
 
 def test_a_wedged_command_is_bounded_by_the_timeout(tmp_path):
-    """The sync path takes the group down too: subprocess.run would kill git
-    and leave whatever an alias started holding the pipes it inherited."""
+    """The sync path takes the group down too: subprocess.run would kill git and leave whatever an alias started holding the pipes it inherited."""
     root = _repo(tmp_path)
     marker = f"forge-sync-{uuid.uuid4().hex[:12]}"
 
@@ -125,8 +124,8 @@ def test_a_failure_in_bytes_mode_still_reads_as_words(tmp_path):
 async def test_a_cancelled_await_takes_the_git_process_with_it(tmp_path):
     """A lane giving up mid-clone must not race its own directory removal."""
     root = _repo(tmp_path)
-    # Tagged uniquely: the assertion reads the whole process table, and a
-    # sibling test or a parallel shard sleeping too would otherwise answer it.
+    # Tagged uniquely: the assertion reads the whole process table, and a sibling test or a parallel shard sleeping
+    # too would otherwise answer it.
     marker = f"forge-cancel-{uuid.uuid4().hex[:12]}"
 
     task = asyncio.ensure_future(git_async("-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root))
@@ -134,16 +133,13 @@ async def test_a_cancelled_await_takes_the_git_process_with_it(tmp_path):
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        # Bounded so a cancellation that does not take fails the test rather
-        # than hanging it.
+        # Bounded so a cancellation that does not take fails the test rather than hanging it.
         await asyncio.wait_for(task, timeout=5)
     assert marker not in subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
 
 
 async def test_a_wedged_await_is_bounded_too(tmp_path):
-    """``asyncio.TimeoutError`` names the right class on every version: before
-    3.11 it is not the builtin one, which is what let a timeout slip past the
-    kill on 3.10."""
+    """``asyncio.TimeoutError`` names the right class on every version: before 3.11 it is not the builtin one, which is what let a timeout slip past the kill on 3.10."""
     root = _repo(tmp_path)
     marker = f"forge-wedged-{uuid.uuid4().hex[:12]}"
 
@@ -154,8 +150,7 @@ async def test_a_wedged_await_is_bounded_too(tmp_path):
 
 
 def test_a_replaced_file_keeps_the_permissions_it_had(tmp_path):
-    """The temp file is created owner-only; a replaced driver must not come back
-    less readable than the one it replaced."""
+    """The temp file is created owner-only; a replaced driver must not come back less readable than the one it replaced."""
     from kernelforge.durable_io import atomic_write_bytes
 
     driver = tmp_path / "forge_driver.py"

@@ -56,8 +56,8 @@ class TestFillIntegrateDefaultsFromState:
             session_dir=session_dir,
         )
 
-        # base_tput prefers current_best.tput (900) over the raw baseline (800):
-        # the candidate must beat the recipe it stacks onto, not just baseline.
+        # base_tput prefers current_best.tput (900) over the raw baseline (800): the candidate must beat the recipe it
+        # stacks onto, not just baseline.
         assert out["base_tput"] == 900.0
         assert out["config_path"] == "/tmp/base.yaml"
         assert out["extra_server_args"] == "--page-size 16"
@@ -124,13 +124,7 @@ class TestFillIntegrateDefaultsFromState:
         }
 
     def test_fusion_record_activates_the_env_flag_and_keep_bar(self, session_dir):
-        """A fusion sibling's env flag + keep bar are folded in from its record.
-
-        The drain builds a bare ``{kernel_id, integration_id, ...}`` payload; the
-        fused path is inert until its env flag is set and fusion keeps its own
-        keep bar, so both have to be pulled from the pending record here or
-        integrate measures the un-fused path against the wrong threshold.
-        """
+        """A fusion sibling's env flag + keep bar are folded in from its record."""
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
         from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
 
@@ -215,14 +209,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 750.0
 
     def test_base_tput_prefers_current_best_over_baseline(self, session_dir):
-        """A candidate must be judged against the CURRENT BEST recipe it stacks
-        onto (current_best.tput), not the raw baseline.
-
-        Otherwise a kernel/fusion that beats baseline but regresses vs the
-        established best (e.g. a warm-replay recipe) is wrongly KEEP'd instead of
-        REVERT'd (observed: forge_fusion adopted at negative gain vs current_best
-        while still positive vs baseline, dragging the final recipe down).
-        """
+        """A candidate must be judged against the CURRENT BEST recipe it stacks onto (current_best.tput), not the raw baseline."""
         _seed_state(
             session_dir,
             baseline_tput=800.0,
@@ -237,8 +224,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 900.0  # current_best, NOT baseline 800
 
     def test_base_tput_falls_back_to_baseline_without_current_best(self, session_dir):
-        # No current_best recorded yet (early kernel phase) -> baseline is the
-        # only reference available.
+        # No current_best recorded yet (early kernel phase) -> baseline is the only reference available.
         _seed_state(session_dir, baseline_tput=800.0)
 
         out = krh._fill_integrate_defaults_from_state(
@@ -250,15 +236,7 @@ class TestFillIntegrateDefaultsFromState:
 
 
 class TestBareKernelIdMustNotGuessBetweenSiblings:
-    """One ``kernel_id`` can name several pending siblings.
-
-    ``kernel_id`` comes from the patch's ``kernel_name``, so a nomination round
-    that authored two patches against different files queues two pending records
-    under one ``kernel_id``. Resolving a bare ``{kernel_id}`` payload to whichever
-    sibling sorts first would stamp the KEEP/REVERT verdict onto a record the
-    caller never named, and ``record_kernel_integrate_result`` cannot catch it
-    because this filler hands it a fully-populated ``integration_id``.
-    """
+    """One ``kernel_id`` can name several pending siblings."""
 
     @staticmethod
     def _enqueue(state, *, kernel_name: str, target_file: str, micro_speedup: float) -> dict:
@@ -367,10 +345,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
 
 
 class TestVendorPlaybookDeployBlocked:
-    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach
-    apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle
-    config copy, not a rewrite of the real installed operator source
-    (PR #1191 review finding #1)."""
+    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle config copy, not a rewrite of the real installed operator source (PR #1191 review finding #1)."""
 
     def test_backfilled_from_kernel_opt_attempts_ledger(self, session_dir):
         state = SharedState.load_or_init(session_dir)
@@ -390,8 +365,7 @@ class TestVendorPlaybookDeployBlocked:
         assert out["_vendor_playbook_deploy_blocked"] is True
 
     def test_backfilled_from_last_kernel_opt_when_ledger_missing(self, session_dir):
-        """An LLM-initiated integrate can name a kernel_id that never made it
-        into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
+        """An LLM-initiated integrate can name a kernel_id that never made it into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
         state = SharedState.load_or_init(session_dir)
         state.last_kernel_opt = {
             "kernel_id": "k010",
@@ -567,15 +541,7 @@ class TestIntegrateHandlerHonoursStateDefault:
 
 
 class TestApplybackProvenanceSurvivesTheLedgerFallbacks:
-    """An apply-back must arm the strict accuracy gate however it was resolved.
-
-    Provenance used to reach the payload only through the pending record, so
-    every KEEP that fell back to a ledger -- which is what the ``source_file``
-    dedup forces for the second and later KEEPs against one file -- looked like
-    an ordinary kernel patch. That is the one artifact whose correctness was
-    proven against a standalone reference only, so it must never be gradeable on
-    throughput alone.
-    """
+    """An apply-back must arm the strict accuracy gate however it was resolved."""
 
     def _seed_attempt_ledger(self, session_dir: Path, *, kernel_id: str) -> None:
         state = SharedState.load_or_init(session_dir)

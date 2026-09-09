@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase-independent internal task handler: research-scout, static-recon, and
-trajectory-reviewer auto-enqueue helpers used across multiple phases."""
+"""Phase-independent internal task handler: research-scout, static-recon, and trajectory-reviewer auto-enqueue helpers used across multiple phases."""
 
 from __future__ import annotations
 import logging as _logging
@@ -24,17 +23,7 @@ class InternalTasksPhase(PhaseHandler):
         reason: str,
         round_id: int,
     ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft).
-
-        Args:
-            reason: Tag distinguishing the enqueue site, recorded on the task.
-            round_id: The config-arm round (or 0 for PRELUDE) scoping the
-                idempotency key.
-
-        Returns:
-            The created (or existing) specialist :class:`Task`, or ``None`` when
-            the scout is disabled or enqueue fails.
-        """
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft)."""
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
@@ -161,20 +150,7 @@ class InternalTasksPhase(PhaseHandler):
         *,
         reason: str,
     ) -> "Task | None":
-        """Enqueue the Coordinator-owned read-only static-recon specialist task.
-
-        Seeds a source-code reconnaissance mandate: the specialist greps the
-        framework source for un-bridged capability switches and produces bridge
-        candidates only (read-only). Idempotency keyed to the session (PRELUDE
-        one-shot). Returns None when disabled or enqueue fails.
-
-        Args:
-            reason: Tag distinguishing the enqueue site, recorded on the task.
-
-        Returns:
-            The created (or existing) specialist :class:`Task`, or ``None`` when
-            static-recon is disabled or enqueue fails.
-        """
+        """Enqueue the Coordinator-owned read-only static-recon specialist task."""
         state = self.shared_state
         if not bool(getattr(state, "static_recon_enabled", True)):
             return None
@@ -252,14 +228,7 @@ class InternalTasksPhase(PhaseHandler):
             log.exception("static-recon: PRELUDE dispatch failed")
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
-        """On a plateau, dispatch a Coordinator-owned readonly specialist seeded
-        with the deterministic trajectory digest to propose fresh directions.
-
-        Gated by ``INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW`` (default on; set
-        to a falsy value to opt out); idempotent per macro-cycle. The specialist
-        targets the dominant bottleneck's domain so its proposals flow through
-        the standard specialist → explore pipeline. Fail-soft.
-        """
+        """On a plateau, dispatch a Coordinator-owned readonly specialist seeded with the deterministic trajectory digest to propose fresh directions."""
         if os.getenv(
             "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW",
             "1",
@@ -326,18 +295,7 @@ class InternalTasksPhase(PhaseHandler):
             )
 
     def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
-        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft).
-
-        Reads the specialist's ``recon`` block, validates each
-        ``bridge_candidate``, and upserts one gap per candidate so the config-arm
-        freeform specialist later dispatches against it with a precise mandate
-        (predicate location + consequence + bridge sketch). Read-only producer:
-        no patch is applied here; the normal KEEP gate still governs landing.
-
-        Args:
-            done_payload: The completed static-recon task payload; its ``recon``
-                block carries ``bridge_candidates``.
-        """
+        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft)."""
         block = done_payload.get("recon")
         if not isinstance(block, dict):
             return

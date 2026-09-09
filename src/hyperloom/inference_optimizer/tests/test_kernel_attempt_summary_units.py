@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for pure helpers in ``kernel_attempt_summary``.
-
-Targets the small, file-/dict-only functions (artifact path check, failure
-classification, kernel-agent results harvesting, per-kernel classification)
-that the higher-level ``build_kernel_optimization_summary`` tests do not
-exercise directly.
-"""
+"""Unit tests for pure helpers in ``kernel_attempt_summary``."""
 
 from __future__ import annotations
 
@@ -267,9 +261,8 @@ def test_kernel_outcome_class_mapping():
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
 
 
-# CATEGORY_DISPATCH — single source of truth consumed by the summary builder
-# and both count sites; pin the count-key mapping + per-category summary output
-# so the three formerly-duplicated dispatch sites can never drift apart.
+# CATEGORY_DISPATCH — single source of truth consumed by the summary builder and both count sites; pin the count-key
+# mapping + per-category summary output so the three formerly-duplicated dispatch sites can never drift apart.
 def test_category_dispatch_count_keys():
     # The table covers exactly the four terminal categories.
     assert set(kas.CATEGORY_DISPATCH) == {
@@ -283,8 +276,7 @@ def test_category_dispatch_count_keys():
     assert kas._category_count_key(kas.CATEGORY_KEEP_PENDING) == "keep_pending"
     assert kas._category_count_key(kas.CATEGORY_ATTEMPTED_REJECTED) == "rejected"
     assert kas._category_count_key(kas.CATEGORY_IN_FLIGHT) == "in_flight"
-    # Unknown/blank category falls back to the ``in_flight`` counter (the old
-    # ``else`` branch), never a KeyError.
+    # Unknown/blank category falls back to the ``in_flight`` counter (the old ``else`` branch), never a KeyError.
     assert kas._category_count_key("NOT_A_CATEGORY") == "in_flight"
     assert kas._category_count_key("") == "in_flight"
 
@@ -498,11 +490,7 @@ def test_classify_collective_attempt_return_paths(record, expected):
 
 
 def test_collective_row_marks_a_microbenchmark_only_speedup():
-    """A micro ratio with no E2E number must not read as a measured gain.
-
-    The 8-GPU run landed 1.108x micro on a kernel holding 27.8% of GPU time and
-    still only moved E2E by 0.39%, so an unvalidated row needs to say so.
-    """
+    """A micro ratio with no E2E number must not read as a measured gain."""
     row = kas._render_collective_attempt_row(
         {
             "collective_attempt_id": "collective-1",
@@ -815,8 +803,8 @@ def test_build_summary_collective_filtering_and_kernel_deduplication(
     assert all(row["kernel_id"] == "shared-kernel" for row in collective_rows)
     assert sum(row["kernel_id"] == "shared-kernel" for row in summary["by_kernel"]) == 2
 
-    # A collective attempt filtered out as skipped leaves no ledger row, and a
-    # hot kernel without one is no longer reported at all.
+    # A collective attempt filtered out as skipped leaves no ledger row, and a hot kernel without one is no longer
+    # reported at all.
     assert {"status-skipped-kernel", "decision-skipped-kernel"}.isdisjoint(
         {row["kernel_id"] for row in summary["by_kernel"]}
     )

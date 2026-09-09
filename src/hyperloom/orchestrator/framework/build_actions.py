@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed data model for targeted (compiled-component) builds.
-
-A :class:`TargetedBuildAction` describes the one missing *compiled* component
-the enablement loop must build (an AITER FP4 MoE / MLA / NSA op, sgl-kernel, or
-vLLM from source). A :class:`BuildResult` carries the outcome plus the resolved
-:class:`FrameworkRuntime` a KEEP promotes. :func:`build_novelty_key` gives the
-repeat-vs-novel identity the stall gate keys on.
-
-Pure Python: no network, subprocess, or filesystem access. The compile itself
-lives in ``targeted_build.py``. :class:`FrameworkRuntime` is the shared runtime
-contract owned by :mod:`stack_actions`; it is re-exported here so build callers
-import one type.
-"""
+"""Typed data model for targeted (compiled-component) builds."""
 
 from __future__ import annotations
 
@@ -27,8 +15,8 @@ from .stack_actions import FrameworkRuntime
 # Components a targeted build may acquire.
 _COMPONENTS: frozenset[str] = frozenset({"aiter", "sgl_kernel", "vllm_source", "framework_ext"})
 
-# The acquisition-attempt outcome (a second axis from FailureSignature.kind):
-# what happened to the *build*, distinguishing "ran out of time" from a defect.
+# The acquisition-attempt outcome (a second axis from FailureSignature.kind): what happened to the *build*,
+# distinguishing "ran out of time" from a defect.
 FAILURE_CLASSES: tuple[str, ...] = (
     "ok",
     "preflight_disk",
@@ -51,28 +39,7 @@ def normalize_failure_class(value: Any) -> str:
 
 @dataclass(frozen=True)
 class TargetedBuildAction:
-    """One compiled-component build the enablement loop may run.
-
-    Attributes:
-        gap_id: Canonical gap id the build addresses.
-        framework: Target framework (``vllm`` / ``sglang``).
-        component: One of :data:`_COMPONENTS`.
-        capability: The missing capability (``fp4_moe`` / ``mla`` / ``nsa`` / ...).
-        reason: Human-readable justification / evidence summary.
-        repo_url: Origin-allowlisted git URL.
-        ref: Pinned ref; empty means tag-descending autoselect.
-        autoselect_tag_glob: Tag glob for autoselect when ``ref`` is empty.
-        gpu_arch: EXPLICIT ``gfx942`` / ``gfx950`` (never inferred).
-        max_jobs: Parallelism cap; 0 means the per-component default.
-        build_command: argv-only build command (no shell strings).
-        torch_constraint_mode: How the ROCm torch pin is applied.
-        build_budget_sec: Wall-clock hard timeout; 0 means per-component default.
-        server_args: Extra server args routed to ``EXTRA_{FW}_ARGS``.
-        envs: Extra structured build env.
-        attempt_root: ``$SESSION_DIR/enablement/builds/<attempt_id>``.
-        source_pr_url: Source PR URL that drove the ref choice (provenance; does
-            not affect :func:`build_novelty_key`).
-    """
+    """One compiled-component build the enablement loop may run."""
 
     gap_id: str
     framework: str
@@ -162,20 +129,7 @@ class TargetedBuildAction:
 
 @dataclass(frozen=True)
 class BuildResult:
-    """Outcome of one :class:`TargetedBuildAction`.
-
-    Attributes:
-        ok: Whether the build probe and install succeeded.
-        attempt_root: The attempt directory the build ran in.
-        runtime: The resolved runtime a KEEP promotes (empty on failure).
-        build_probes: Successful post-build probe descriptors (e.g. ``"import aiter: ok"``).
-        installed_versions: torch(+hip) / ref-tag+sha / arch, for reproducibility.
-        build_log_path: Path to the compile log.
-        verify_log_path: Path to the verify log.
-        error: Failure reason when ``ok`` is False.
-        failure_class: One of :data:`FAILURE_CLASSES` (time vs defect axis).
-        failure_summary: Human/agent-readable summary fed to the framework channel.
-    """
+    """Outcome of one :class:`TargetedBuildAction`."""
 
     ok: bool
     attempt_root: str = ""
@@ -228,10 +182,7 @@ class BuildResult:
 def build_novelty_key(
     action: TargetedBuildAction,
 ) -> tuple[str, str, str, str, str, tuple[str, ...]]:
-    """Repeat-vs-novel identity for the stall gate.
-
-    Build requests are distinct across repositories and capabilities.
-    """
+    """Repeat-vs-novel identity for the stall gate."""
     repo_url = action.repo_url.strip().rstrip("/").removesuffix(".git").lower()
     return (
         action.component,
@@ -245,40 +196,14 @@ def build_novelty_key(
 
 _GITHUB_PR_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", _re.IGNORECASE)
 _PR_REF_RE = _re.compile(r"^PR:(\d+)$")
-# An issue is a discussion thread, not a branch: GitHub publishes
-# ``refs/pull/{n}/head`` for pull requests but nothing checkoutable for issues.
+# An issue is a discussion thread, not a branch: GitHub publishes ``refs/pull/{n}/head`` for pull requests but nothing
+# checkoutable for issues.
 _GITHUB_ISSUE_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/issues/(\d+)", _re.IGNORECASE)
 _ISSUE_REF_RE = _re.compile(r"^issues?:(\d+)$", _re.IGNORECASE)
 
 
 def resolve_build_ref(candidate: str, default_repo_url: str) -> tuple[str, str, str]:
-    """Resolve a discovered candidate string to ``(repo_url, ref, source_pr_url)``.
-
-    Handles the forms discovery and the enablement specialist produce:
-    - ``https://github.com/{owner}/{repo}/pull/{n}`` → PR ref with full provenance.
-    - ``PR:{n}`` bare ref → PR ref against ``default_repo_url``.
-    - an issue URL or ``issue:{n}`` → repo with an EMPTY ref, i.e. fall back to
-      tag autoselect (see below).
-    - plain tag/branch/sha → verbatim ref against ``default_repo_url``.
-    - any other URL → ``("", "", "")`` (skip; cannot derive a checkoutable ref).
-
-    Issues need their own branch because they are *not* checkoutable. GitHub
-    publishes ``refs/pull/{n}/head`` for a PR but exposes no ref for an issue,
-    so an ``issue:{n}`` string that reaches ``git worktree add`` verbatim dies
-    with ``fatal: invalid reference``. A specialist citing an upstream issue as
-    the rationale for a from-source build is a normal and useful signal, so the
-    issue number is dropped from the ref rather than the whole request being
-    rejected: the empty ref makes the builder autoselect the newest matching
-    tag, which is exactly where an issue fix would have landed. The issue URL is
-    still returned as provenance so the audit trail keeps the citation.
-
-    Args:
-        candidate: The candidate ref string from discovery.
-        default_repo_url: Repo URL to use when the candidate carries no origin.
-
-    Returns:
-        ``(repo_url, ref, source_pr_url)`` — all empty strings on skip.
-    """
+    """Resolve a discovered candidate string to ``(repo_url, ref, source_pr_url)``."""
     s = candidate.strip()
     if not s:
         return ("", "", "")

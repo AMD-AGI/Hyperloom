@@ -46,8 +46,8 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         max_minutes=120,
     )
     assert "PHASE CONTRACT" in text
-    # Driven off the phase table: a hand-written list keeps naming a phase the
-    # build dropped, and passes on any other string that happens to contain it.
+    # Driven off the phase table: a hand-written list keeps naming a phase the build dropped, and passes on any other
+    # string that happens to contain it.
     for phase in PHASE_NAMES:
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
@@ -118,12 +118,7 @@ def test_orchestration_md_carries_phase_awareness():
 
 
 def test_critic_phase_orientation_is_delivered_not_inlined():
-    """Critic phase awareness lives in the per-phase injector, not in critic.md.
-
-    ``critic.md`` keeps the framing (how to treat a phase question) and points
-    at the delivered fields; the per-phase contracts are injected one at a time
-    so the Critic never reads five phases' rules to use one.
-    """
+    """Critic phase awareness lives in the per-phase injector, not in critic.md."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
     from hyperloom.orchestrator.phases import machine_state as _ps
     from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
@@ -145,8 +140,8 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     from hyperloom.orchestrator.phases import machine_state as _ps
 
     s = SharedState(max_minutes=60)
-    # Pin start_ts to the same clock as now_unix so the (charge-back) budget math
-    # is well-defined; session and phase both start at 1_000_000.
+    # Pin start_ts to the same clock as now_unix so the (charge-back) budget math is well-defined; session and phase
+    # both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     phase = _ps.PHASE_FRAMEWORK_AGENT
     s.record_phase_transition(
@@ -340,13 +335,7 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
 
 @pytest.mark.asyncio
 async def test_running_tasks_reader_reports_held_resources(coordinator_with_mocks):
-    """Lease expiry, lanes and GPU ids reach the planner.
-
-    These four fields are the whole point of the on-demand path: the prompt
-    tells the planner to weigh "what is queued behind the lane or GPUs it
-    holds" and to extend a lease that is near expiry, so each has to survive
-    the join from ``leases`` / ``gpu_leases`` into the rendered line.
-    """
+    """Lease expiry, lanes and GPU ids reach the planner."""
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
@@ -356,9 +345,8 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
             lease_ttl_sec=1800,
         )
         await c.tasks.transition(task.task_id, "running")
-        # Two lanes, deliberately out of sorted order and with different
-        # expiries: the renderer must sort the lanes and report the SOONEST
-        # expiry, because that is when reclaim starts.
+        # Two lanes, deliberately out of sorted order and with different expiries: the renderer must sort the lanes
+        # and report the SOONEST expiry, because that is when reclaim starts.
         for lane, holder, expires in (
             ("research_lane", "h-late", "2099-12-31T23:59:59+00:00"),
             ("gpu_research_lane", "h-soon", "2099-01-01T00:00:00+00:00"),
@@ -395,8 +383,8 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
         out = c._context_running_tasks_reader()
         assert "lanes=['gpu_research_lane', 'research_lane']" in out
         assert "gpu_ids=[1, 3]" in out
-        # Soonest expiry wins: reclaim starts at the FIRST lane to lapse, so
-        # reporting the latest would overstate the remaining window by a year.
+        # Soonest expiry wins: reclaim starts at the FIRST lane to lapse, so reporting the latest would overstate the
+        # remaining window by a year.
         reported = int(out.split("lease_expires_in_sec=")[1].split()[0])
         now = datetime.now(timezone.utc)
         soonest = int((datetime.fromisoformat("2099-01-01T00:00:00+00:00") - now).total_seconds())
@@ -412,13 +400,7 @@ async def test_running_tasks_reader_reports_heartbeat_age(
     coordinator_with_mocks,
     session_dir,
 ):
-    """Heartbeat age is read from the same files the reap loop polls.
-
-    ``process.log`` counts as proof of life alongside ``heartbeat.json`` — a
-    specialist mid-benchmark can go minutes without restamping the heartbeat
-    while its log grows, and treating that as silence would invite a spurious
-    kill.
-    """
+    """Heartbeat age is read from the same files the reap loop polls."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     c = coordinator_with_mocks
@@ -446,12 +428,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
     coordinator_with_mocks,
     session_dir,
 ):
-    """The kind guard holds even when a same-named workspace exists.
-
-    ``runs_dir`` is keyed on task_id, so a non-specialist whose id collides
-    with a specialist workspace would otherwise inherit a heartbeat that
-    describes someone else's process.
-    """
+    """The kind guard holds even when a same-named workspace exists."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     c = coordinator_with_mocks
@@ -477,12 +454,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
 
 @pytest.mark.asyncio
 async def test_running_tasks_reader_survives_db_failure(coordinator_with_mocks):
-    """A read failure degrades to a message, never an exception.
-
-    This reader backs a context tool the planner calls on its own turn; an
-    exception here would surface as an SDK stream failure and discard every
-    intent already collected in that turn.
-    """
+    """A read failure degrades to a message, never an exception."""
     c = coordinator_with_mocks
     try:
 
@@ -562,8 +534,8 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert updated.updated_at == before.updated_at
         rows = await c.db.fetchall("SELECT lane, expires_at FROM leases WHERE task_id=?", (task.task_id,))
         assert [r["lane"] for r in rows] == ["research_lane"]
-        # The lane must expire at the REMAINING budget (cumulative TTL minus the
-        # elapsed run time), not at now + the full cumulative TTL.
+        # The lane must expire at the REMAINING budget (cumulative TTL minus the elapsed run time), not at now + the
+        # full cumulative TTL.
         expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
         assert expires_in <= 2400
         started = _parse_iso_unix(updated.updated_at)
@@ -719,11 +691,7 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
 
 @pytest.mark.asyncio
 async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mocks):
-    """The handler must hand the grant to the reaper, not just move DB rows.
-
-    The reap-loop side of this (that the deadline actually moves) is covered in
-    test_specialist_subprocess.py; here we pin the wiring.
-    """
+    """The handler must hand the grant to the reaper, not just move DB rows."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.specialists import subprocess_ as _sub
 
@@ -854,8 +822,8 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
         )
 
         c.tasks.get = real_get  # type: ignore[method-assign]
-        # Lane still moved — falling back to the full TTL is the safe direction
-        # (a lease that outlives the task beats one reaped mid-run).
+        # Lane still moved — falling back to the full TTL is the safe direction (a lease that outlives the task beats
+        # one reaped mid-run).
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
         assert _parse_iso_unix(str(rows[0]["expires_at"])) > time.time()
         updated = await c.tasks.get(task.task_id)

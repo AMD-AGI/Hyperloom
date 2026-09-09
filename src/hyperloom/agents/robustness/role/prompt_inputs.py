@@ -1,35 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parse Coordinator-rendered prompts into a ReactorContext.
-
-The Coordinator's ``_compose_prompt`` emits blocks separated by ``=== X ===``
-headers. For the robustness role the expected blocks are:
-
-    === Phase ===
-    phase     : FRAMEWORK_AGENT
-    ...
-
-    === Shared session state ===
-    tick=...
-    ...
-
-    === Time budget ===
-    elapsed=...min  remaining=...min  budget=...min  closing_phase=False
-
-    === Phase budget telemetry ===
-      PRELUDE: elapsed=123s cap=456s used=27%
-      FRAMEWORK_AGENT: elapsed=789s cap=unlimited used=0%
-
-    === Conversation progress ===
-    ticks_without_progress=3 threshold=12 severity=ok last_progress_tick=45
-
-    === Inbox for <agent> [(newest last)] ===
-    seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload={'k': 'v', ...}
-
-Parse failures surface as an empty :class:`ReactorContext` rather than
-raising, keeping the reactor's heartbeat fallback alive.
-"""
+"""Parse Coordinator-rendered prompts into a ReactorContext."""
 
 from __future__ import annotations
 
@@ -47,17 +19,14 @@ from hyperloom.common.coerce import to_float, to_int
 log = logging.getLogger(__name__)
 
 
-# Anchored to the two-space row prefix; ``\S+`` topic guards against payloads
-# whose dict repr contains a literal ``topic=``. ``msg_id`` is absent on
-# messages carrying none, and the fields after ``topic`` are per-topic
-# (``_format_inbox_event``), so the remainder is captured as a tail.
+# Anchored to the two-space row prefix; ``\S+`` topic guards against payloads whose dict repr contains a literal
+# ``topic=``.
 _INBOX_LINE_RE = re.compile(
     r"^\s+seq=(?P<seq>\d+)\s+(?:msg_id=(?P<msg_id>\S+)\s+)?from=(?P<from_agent>\S+)\s+"
     r"topic=(?P<topic>\S+)\s*(?P<tail>.*)$"
 )
 
-# One ``key=<python literal>`` pair of a tail. Quoted values are matched whole so
-# a ``k=v`` inside a rendered ``error=``/``notes=`` string cannot split it.
+# One ``key=<python literal>`` pair of a tail.
 _INBOX_FIELD_RE = re.compile(r"(?P<key>\w+)=(?P<value>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)")
 
 _SHARED_HEADER = "=== Shared session state ==="
@@ -99,8 +68,8 @@ _SCALAR_KEYS = {
     "last_explore",
 }
 
-# Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
-# flips :attr:`SharedStateSnapshot.explore_started` to True.
+# Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value flips
+# :attr:`SharedStateSnapshot.explore_started` to True.
 _EXPLORE_FAMILY_KEYS = frozenset({"last_explore"})
 
 # Coordinator Time-budget body line; ``budget=0min`` is the "no wall-clock budget" sentinel.
@@ -114,15 +83,7 @@ _TIME_BUDGET_LINE_RE = re.compile(
 
 @dataclass
 class PhaseBudgetRow:
-    """One parsed row from the ``=== Phase budget telemetry ===`` block.
-
-    Attributes:
-        phase (str): Phase name in upper-case (e.g. ``"FRAMEWORK_AGENT"``).
-        elapsed_sec (int): Seconds elapsed in this phase.
-        cap_sec (int): Budget cap in seconds; ``-1`` when unlimited.
-        used_pct (float): Fraction of budget consumed (0–100). Meaningful
-            only when ``cap_sec >= 0``.
-    """
+    """One parsed row from the ``=== Phase budget telemetry ===`` block."""
 
     phase: str
     elapsed_sec: int
@@ -132,16 +93,7 @@ class PhaseBudgetRow:
 
 @dataclass
 class ConversationProgress:
-    """Parsed ``=== Conversation progress ===`` block.
-
-    Attributes:
-        ticks_without_progress (int): Ticks since the last measurable
-            advancement (new KEEP / stack growth / validated-gain / phase).
-        threshold (int): Tick count above which severity is ``"high"``.
-        severity (str): ``"ok"`` or ``"high"`` as emitted by the Coordinator.
-        last_progress_tick (int): Session-wide tick index of the most recent
-            progress event.
-    """
+    """Parsed ``=== Conversation progress ===`` block."""
 
     ticks_without_progress: int
     threshold: int
@@ -151,16 +103,7 @@ class ConversationProgress:
 
 @dataclass
 class InboxItem:
-    """One parsed inbox row from the Coordinator's rendered prompt.
-
-    Attributes:
-        seq (int): Monotonic per-agent sequence number of the message.
-        msg_id (str): Hex message id assigned by the Coordinator.
-        from_agent (str): Name of the agent that sent the message.
-        topic (str): Message topic string.
-        payload (dict[str, Any]): Decoded payload dict; empty when the
-            payload was absent or could not be decoded.
-    """
+    """One parsed inbox row from the Coordinator's rendered prompt."""
 
     seq: int
     msg_id: str
@@ -171,40 +114,7 @@ class InboxItem:
 
 @dataclass
 class SharedStateSnapshot:
-    """Subset of the Coordinator SharedState the robustness reactor reads.
-
-    Only the fields the reactor consumes are parsed; every other
-    rendered line is ignored. All fields default to a neutral value so a
-    parse miss degrades to "no signal" rather than raising.
-
-    Attributes:
-        model_name (str): Target model name, or ``""`` when unset.
-        model_class (str): Target model class, or ``""`` when unset.
-        baseline_tput (float): Baseline throughput reported by the
-            Coordinator.
-        cumulative_gain_validated (float): Cumulative validated gain
-            percentage.
-        crash_count (int): Number of crashes recorded this session.
-        current_action (str): Currently dispatched action name, or ``""``
-            when idle.
-        tick (int): Coordinator's session-wide monotonic tick counter.
-        stop_reason (str): Stop reason, or ``""`` on a live run.
-        optimization_stack_size (int): Number of validated entries on the
-            optimization stack.
-        explore_started (bool): True once any explore family has produced
-            at least one record.
-        elapsed_minutes (float): Minutes elapsed against the wall-clock
-            budget.
-        remaining_minutes (float): Minutes remaining against the budget.
-        budget_minutes (float): Total wall-clock budget in minutes; ``0.0``
-            means no budget configured.
-        closing_phase (bool): True when the Coordinator signals the
-            closing phase.
-        kernel_opt_attempts_count (int): Count of unique kernel task identities with at
-            least one recorded kernel_opt attempt.
-        has_keep_pending_integrate (bool): True when a multi-KEEP integrate
-            queue still has work pending.
-    """
+    """Subset of the Coordinator SharedState the robustness reactor reads."""
 
     model_name: str = ""
     model_class: str = ""
@@ -227,24 +137,7 @@ class SharedStateSnapshot:
 
 @dataclass
 class ReactorContext:
-    """Per-tick input for :class:`Reactor`.
-
-    Built by :func:`from_coordinator_prompt` from the rendered Coordinator
-    prompt, which is the only transport.
-
-    Attributes:
-        tick_index (int): In-process tick counter.
-        shared_state (SharedStateSnapshot): Parsed SharedState fields.
-        inbox (list[InboxItem]): Parsed inbox messages for this tick.
-        now_unix (float): Wall-clock timestamp for this tick.
-        parse_warnings (list[str]): Non-fatal parse issues; logged once.
-        phase (str): Current pipeline phase from ``=== Phase ===``; ``""``
-            when the block is absent.
-        phase_budget (list[PhaseBudgetRow]): Per-phase budget rows from
-            ``=== Phase budget telemetry ===``; empty when absent.
-        conversation_progress (ConversationProgress | None): Parsed progress
-            signal from ``=== Conversation progress ===``; ``None`` when absent.
-    """
+    """Per-tick input for :class:`Reactor`."""
 
     tick_index: int = 0
     shared_state: SharedStateSnapshot = field(default_factory=SharedStateSnapshot)
@@ -262,23 +155,7 @@ def from_coordinator_prompt(
     tick_index: int = 0,
     now_unix: float | None = None,
 ) -> ReactorContext:
-    """Parse the text produced by ``Coordinator._compose_prompt``.
-
-    Returns an empty / partially populated context on parse drift; the
-    reactor's heartbeat fallback ensures liveness, and a single WARN is
-    logged so deployments notice schema drift.
-
-    Args:
-        prompt (str): The rendered Coordinator prompt text. An empty
-            string yields an empty context with a parse warning.
-        tick_index (int): In-process tick index to stamp on the context.
-        now_unix (float | None): Override for the context's wall-clock
-            timestamp; ``None`` uses the current time.
-
-    Returns:
-        ReactorContext: The parsed context, possibly partial when the
-        prompt drifts from the expected schema.
-    """
+    """Parse the text produced by ``Coordinator._compose_prompt``."""
     if now_unix is None:
         now_unix = time.time()
     if not prompt:
@@ -309,25 +186,11 @@ def from_coordinator_prompt(
     )
 
 
-# ---------------------------------------------------------------------------
 # Section splitting
-# ---------------------------------------------------------------------------
 
 
 def _split_sections(prompt: str) -> dict[str, str]:
-    """Walk the prompt line-by-line and group lines by section.
-
-    Returns a dict keyed by section name. Recognised keys:
-    ``shared_state``, ``time_budget``, ``inbox``, ``kb``,
-    ``phase``, ``phase_budget``, ``conversation_progress``.
-
-    Args:
-        prompt (str): The full rendered Coordinator prompt text.
-
-    Returns:
-        dict[str, str]: Mapping of recognised section name to the joined
-        body lines for that section.
-    """
+    """Walk the prompt line-by-line and group lines by section."""
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for line in prompt.splitlines():
@@ -366,26 +229,11 @@ def _split_sections(prompt: str) -> dict[str, str]:
     return {k: "\n".join(v) for k, v in sections.items()}
 
 
-# ---------------------------------------------------------------------------
 # Shared state parsing
-# ---------------------------------------------------------------------------
 
 
 def _parse_shared_state(body: str) -> SharedStateSnapshot:
-    """Decode the ``=== Shared session state ===`` body into a snapshot.
-
-    Only keys in :data:`_SCALAR_KEYS` (plus the ``model=`` line) are
-    consumed; unknown or unparsable lines are skipped. Parsing stays
-    idempotent so repeated explore-family lines never clear the
-    ``explore_started`` flag once set.
-
-    Args:
-        body (str): The joined body lines of the shared-state section.
-
-    Returns:
-        SharedStateSnapshot: Populated snapshot with defaults for any
-        field whose line was absent.
-    """
+    """Decode the ``=== Shared session state ===`` body into a snapshot."""
     snapshot = SharedStateSnapshot()
     for raw in body.splitlines():
         line = raw.strip()
@@ -414,17 +262,7 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
 
 
 def _count_optimization_stack(head: str) -> int:
-    """Decode the size of the rendered ``optimization_stack`` value.
-
-    ``SharedState._format_optimization_stack`` emits ``"(none)"`` (empty) or a
-    Python list repr (e.g. ``['baseline:v1', 'integrate:v2']``).
-
-    Args:
-        head: The rendered ``optimization_stack`` head value.
-
-    Returns:
-        The number of stack entries (``0`` when empty/unparseable).
-    """
+    """Decode the size of the rendered ``optimization_stack`` value."""
     if not head or head == "(none)":
         return 0
     try:
@@ -440,17 +278,7 @@ def _count_optimization_stack(head: str) -> int:
 
 
 def _coerce_cumulative_gain_validated(head: str) -> float:
-    """Decode a ``cumulative_gain_validated`` head into a float percentage.
-
-    Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``;
-    take the leading number only.
-
-    Args:
-        head: The rendered ``cumulative_gain_validated`` head value.
-
-    Returns:
-        The leading percentage as a float (``0.0`` when unparseable).
-    """
+    """Decode a ``cumulative_gain_validated`` head into a float percentage."""
     head_clean = head.rstrip("%")
     for sep in (" ", "%"):
         head_clean = head_clean.split(sep, 1)[0]
@@ -477,14 +305,7 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
 
 
 def _parse_phase(body: str) -> str:
-    """Extract the phase name from the ``phase : <NAME>`` line.
-
-    Args:
-        body (str): The phase block body text.
-
-    Returns:
-        str: Upper-case phase name, or ``""`` when absent.
-    """
+    """Extract the phase name from the ``phase : <NAME>`` line."""
     for raw in body.splitlines():
         key, sep, value = raw.strip().partition(":")
         if sep and key.strip() == "phase":
@@ -493,17 +314,7 @@ def _parse_phase(body: str) -> str:
 
 
 def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
-    """Parse the phase budget block into typed rows.
-
-    ``cap=unlimited`` maps to ``cap_sec=-1``; unmatched lines (including the
-    ``(no phase history yet)`` sentinel) are skipped.
-
-    Args:
-        body (str): The phase budget block body text.
-
-    Returns:
-        list[PhaseBudgetRow]: One entry per recognised phase line.
-    """
+    """Parse the phase budget block into typed rows."""
     rows: list[PhaseBudgetRow] = []
     for raw in body.splitlines():
         match = _PHASE_BUDGET_LINE_RE.match(raw)
@@ -523,15 +334,7 @@ def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
 
 
 def _parse_conversation_progress(body: str) -> ConversationProgress | None:
-    """Parse the conversation progress block.
-
-    Args:
-        body (str): The conversation progress block body text.
-
-    Returns:
-        ConversationProgress | None: Parsed progress, or ``None`` when the
-        block is absent or the body line does not match.
-    """
+    """Parse the conversation progress block."""
     for raw in body.splitlines():
         match = _CONVERSATION_PROGRESS_LINE_RE.match(raw)
         if match:
@@ -545,16 +348,7 @@ def _parse_conversation_progress(body: str) -> ConversationProgress | None:
 
 
 def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
-    """Decode the ``=== Time budget ===`` section in place onto ``snapshot``.
-
-    The Coordinator emits one body line below the header; an absent section
-    leaves defaults so ``evaluate_budget_signals`` / ``deadline_imminent``
-    short-circuit.
-
-    Args:
-        snapshot: Snapshot mutated in place with parsed budget fields.
-        body: The time-budget section body text.
-    """
+    """Decode the ``=== Time budget ===`` section in place onto ``snapshot``."""
     if not body:
         return
     for raw in body.splitlines():
@@ -569,15 +363,7 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
 
 
 def _parse_model_line(line: str) -> tuple[str, str]:
-    """Decode ``model=<name>  class=<klass>`` (double-space separator).
-
-    Args:
-        line (str): The rendered ``model=`` line.
-
-    Returns:
-        tuple[str, str]: The ``(model_name, model_class)`` pair, with the
-        ``(unset)`` sentinel mapped to ``""``.
-    """
+    """Decode ``model=<name> class=<klass>`` (double-space separator)."""
     body = line[len("model=") :]
     name, _, rest = body.partition("  class=")
     name = name.strip()
@@ -590,39 +376,15 @@ def _parse_model_line(line: str) -> tuple[str, str]:
 
 
 def _split_double_space(value: str) -> str:
-    """Trim a SharedState scalar value at the next ``key=`` neighbour.
-
-    ``to_prompt_summary`` joins two scalars with two spaces
-    (``baseline_tput=...  baseline_acc=...``); cut at that boundary.
-
-    Args:
-        value: The raw scalar text possibly containing a trailing neighbour.
-
-    Returns:
-        The value trimmed at the first double-space boundary.
-    """
+    """Trim a SharedState scalar value at the next ``key=`` neighbour."""
     return value.split("  ", 1)[0].strip()
 
 
-# ---------------------------------------------------------------------------
 # Inbox parsing
-# ---------------------------------------------------------------------------
 
 
 def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
-    """Parse the inbox section body into items plus parse warnings.
-
-    Lines that do not match :data:`_INBOX_LINE_RE` are skipped with a
-    warning rather than raising. The ``(no new messages)`` sentinel
-    short-circuits to an empty item list.
-
-    Args:
-        body (str): The joined body lines of the inbox section.
-
-    Returns:
-        tuple[list[InboxItem], list[str]]: The parsed inbox items and a
-        list of human-readable parse warnings.
-    """
+    """Parse the inbox section body into items plus parse warnings."""
     items: list[InboxItem] = []
     warnings: list[str] = []
     for raw in body.splitlines():
@@ -655,19 +417,7 @@ def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
 
 
 def _decode_tail(tail: str) -> tuple[dict[str, Any], list[str]]:
-    """Decode the per-topic field tail of an inbox line into a payload dict.
-
-    ``payload=`` carries the whole dict and wins; the summary fields rendered
-    before it are folded in underneath, so a topic that emits no ``payload=``
-    (``delegated_result``) still yields ``kind`` / ``state`` / ``error``.
-
-    Args:
-        tail (str): Everything after ``topic=<topic>`` on the line.
-
-    Returns:
-        tuple[dict[str, Any], list[str]]: The payload dict and any decode
-        warnings.
-    """
+    """Decode the per-topic field tail of an inbox line into a payload dict."""
     head, sep, payload_text = tail.strip().partition("payload=")
     fields: dict[str, Any] = {}
     warnings: list[str] = []
@@ -687,19 +437,7 @@ def _decode_tail(tail: str) -> tuple[dict[str, Any], list[str]]:
 
 
 def _decode_payload(text: str) -> tuple[dict[str, Any], str | None]:
-    """Decode a rendered payload literal into a dict.
-
-    The payload is expected to be a Python literal dict. Non-dict literals
-    and unparsable text are wrapped so the caller never loses the raw
-    value.
-
-    Args:
-        text (str): The raw payload text from an inbox line.
-
-    Returns:
-        tuple[dict[str, Any], str | None]: The decoded payload dict and an
-        optional warning string when decoding fell back to a raw wrapper.
-    """
+    """Decode a rendered payload literal into a dict."""
     text = text.rstrip()
     if not text:
         return {}, None

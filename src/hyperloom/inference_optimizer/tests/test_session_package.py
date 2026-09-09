@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for breakdown.session_package.package_session_artifacts.
-
-Builds a synthetic session dir mixing curated artifacts with bulky
-``runs/`` traces + per-turn agent dumps, then asserts the zip contains
-exactly the curated set (plus the manifest log) and excludes the noise.
-"""
+"""Tests for breakdown.session_package.package_session_artifacts."""
 
 from __future__ import annotations
 
