@@ -525,6 +525,9 @@ if [ "${PROFILE:-0}" = "1" ]; then
   PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
   _require_uint AGENTX_PHASE_WAIT_TIMEOUT_S "$PHASE_WAIT_TIMEOUT"
   CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
+  TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
+  TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
+  case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_PROGRESS_PORT=""
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
@@ -598,9 +601,20 @@ if [ "${PROFILE:-0}" = "1" ]; then
   _trace_stat() {  # -> "<current count> <total bytes>"
     _trace_command trace-stat --snapshot "$TRACE_SNAPSHOT"
   }
+  _trace_remaining_ns() {
+    printf '%s\n' "$(( TRACE_FLUSH_DEADLINE_NS - $(date +%s%N) ))"
+  }
+  _trace_seconds() {
+    printf '%d.%09d' "$(( $1 / 1000000000 ))" "$(( $1 % 1000000000 ))"
+  }
   _trace_complete() {
-    [ -n "$TRACE_SNAPSHOT" ] && \
-      _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}"
+    local _remaining_ns
+    [ -n "$TRACE_SNAPSHOT" ] || return 1
+    _remaining_ns="$(_trace_remaining_ns)"
+    [ "$_remaining_ns" -gt 0 ] || return 1
+    _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
+      --cache-file "$TRACE_CACHE_FILE" --timeout-seconds "$(_trace_seconds "$_remaining_ns")" || return 1
+    [ "$(_trace_remaining_ns)" -gt 0 ]
   }
   _wait_for_trace_flush() {
     # Nothing was ever pointed at a directory, so there is nothing to flush.
@@ -613,8 +627,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     fi
     _want="${TP:-0}"
     case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
-    _budget="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
-    case "$_budget" in "" | *[!0-9]*) _budget=1800 ;; esac
+    _budget="$TRACE_FLUSH_BUDGET"
     # A separate, much shorter bound for "no file has appeared at all". A
     # capture that produced zero files is a failed capture (a rejected
     # /start_profile, a profiler that never armed) -- waiting out the full
@@ -624,33 +637,45 @@ if [ "${PROFILE:-0}" = "1" ]; then
     case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
     [ "$_first" -gt "$_budget" ] && _first="$_budget"
     log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
-    _t0=$(date +%s); _prev=""; _stable=0
+    _prev=""; _stable=0; _cnt=0
+    _first_deadline_ns=$(( TRACE_FLUSH_START_NS + _first * 1000000000 ))
     while :; do
-      sleep 10
+      _remaining_ns="$(_trace_remaining_ns)"
+      if [ "$_remaining_ns" -gt 0 ]; then
+        _sleep_ns=10000000000
+        [ "$_sleep_ns" -gt "$_remaining_ns" ] && _sleep_ns="$_remaining_ns"
+        if [ "$_cnt" -eq 0 ]; then
+          _first_remaining_ns=$(( _first_deadline_ns - $(date +%s%N) ))
+          [ "$_first_remaining_ns" -lt 0 ] && _first_remaining_ns=0
+          [ "$_sleep_ns" -gt "$_first_remaining_ns" ] && _sleep_ns="$_first_remaining_ns"
+        fi
+        [ "$_sleep_ns" -gt 0 ] && sleep "$(_trace_seconds "$_sleep_ns")"
+      fi
       _now=$(_trace_stat) || return 4
-      _cnt="${_now%% *}"; _el=$(( $(date +%s) - _t0 ))
+      _cnt="${_now%% *}"; _now_ns=$(date +%s%N)
+      if [ "$_cnt" -eq 0 ] && [ "$_now_ns" -ge "$_first_deadline_ns" ]; then
+        log "WARN no trace file appeared within ${_first}s of the trace completion check; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
+        return 3
+      fi
+      [ "$_now_ns" -ge "$TRACE_FLUSH_DEADLINE_NS" ] && break
       if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
         _stable=$((_stable + 1))
       else
         _stable=0
       fi
-      if [ "$_cnt" -eq 0 ] && [ "$_el" -ge "$_first" ]; then
-        log "WARN no trace file appeared within ${_first}s of stop_profile; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
-        return 3
-      fi
       # Three identical samples AND, when TP is known, one file per rank. The
       # count check matters: ranks appear one at a time, so a set that is merely
       # "not growing right now" can still be missing half its ranks.
       if [ "$_stable" -ge 3 ] && [ "$_want" -gt 0 ] && [ "$_cnt" -ge "$_want" ] && _trace_complete; then
+        _el=$(( ( $(date +%s%N) - TRACE_FLUSH_START_NS ) / 1000000000 ))
         log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
         return 0
       fi
-      if [ "$_el" -ge "$_budget" ]; then
-        log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
-        return 4
-      fi
+      [ "$(_trace_remaining_ns)" -le 0 ] && break
       _prev="$_now"
     done
+    log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
+    return 4
   }
   log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
   run_aiperf & APID=$!
@@ -698,6 +723,9 @@ if [ "${PROFILE:-0}" = "1" ]; then
       fi
       STOP_OK=0
       FLUSH_RC=0
+      # Auto-stop validation and any subsequent flush share one completion budget.
+      TRACE_FLUSH_START_NS=$(date +%s%N)
+      TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
       # Native num_steps may already have stopped SGLang. Never POST a redundant
       # stop unless current complete traces cannot prove that auto-stop finished.
       if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
