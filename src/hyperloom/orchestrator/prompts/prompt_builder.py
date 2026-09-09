@@ -772,12 +772,14 @@ allowed action until the patch lands on `optimization_stack`:
           params: {kernel_id, patch_path, target_file, base_tput,
                    extra_server_args, config_path, mode}}
 
-  `mode` is `patch` (the default) to apply a kernel patch, or `env_only`
-  to measure an env / serve-flag change with no patch at all; `env_only`
-  needs `extra_envs` or `extra_server_args` and takes no patch fields.
+  `mode` is REQUIRED and has no default: `patch` to apply a kernel patch,
+  or `env_only` to measure an env / serve-flag change with no patch at all.
+  `env_only` needs `extra_envs` or `extra_server_args` and takes no patch
+  fields. Omitting it is denied rather than guessed, because the two modes
+  differ in whether a patch gets applied and measured.
 
-  Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
-  fills them from `current_best.tput` and the per-kernel
+  Under `mode='patch'`, omit `base_tput` / `patch_path` / `source_file` and
+  the Coordinator fills them from `current_best.tput` and the per-kernel
   `kernel_opt_task_attempts` ledger (this is what drains a multi-KEEP queue).
   PARTIAL / REVERT → do NOT integrate; pick the next action normally.
 

@@ -389,7 +389,11 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
+            payload={
+                "target_agent": "kernel_agent",
+                "kind": "integrate",
+                "params": {"patch_path": "/tmp/p.patch", "mode": "patch"},
+            },
         )
         await c._handle_intent("orchestration", intent)
 

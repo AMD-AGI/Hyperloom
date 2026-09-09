@@ -515,6 +515,7 @@ def test_policy_source_like_fields_are_exempt_from_path_checks(tmp_path):
             "kind": "integrate",
             "params": {
                 "kernel_id": "k1",
+                "mode": "patch",
                 "source_file": "/sgl-workspace/aiter/csrc/attn.cu",
                 "framework_source_root": "/sgl-workspace/aiter",
             },
