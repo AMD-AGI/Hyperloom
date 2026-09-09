@@ -1,0 +1,738 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Per-root identity, base_sha capture point, and content capture at the KEEP."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
+from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _git_head_sha
+from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
+from hyperloom.orchestrator.enablement.recipe.keep_records import (
+    accepted_stack_artifacts,
+    build_root_records,
+    capture_root_snapshots,
+    classify_root,
+    collect_contributions,
+    declared_targets,
+)
+from hyperloom.orchestrator.enablement.recipe.keep_probe import (
+    _probe_env,
+    keep_assertion_packages,
+    probe_environment_closure,
+    resolve_keep_interpreter,
+)
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+BUILD_TASK = "tb-1"
+PROBE_TASK = "probe-9"
+BASE_TEXT = "value = 1\n"
+PATCHED_TEXT = "value = 2\n"
+TARGET = "srt/module.py"
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    root = tmp_path / "framework"
+    (root / "srt").mkdir(parents=True)
+    (root / TARGET).write_text(BASE_TEXT, encoding="utf-8")
+    _git(root.parent, "init", "-q", str(root))
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    return root
+
+
+def test_base_sha_is_the_tree_the_patches_apply_to(repo: Path):
+    """The recorded sha must predate the KEEP commit for that root.
+
+    Reading HEAD after the KEEP commit records a tree that already contains the
+    patch, so a replay applying the recorded patch step to the recorded base
+    would apply it a second time.
+    """
+    recorded = _git_head_sha(repo)
+
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    ok, _note = _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+    assert ok
+
+    post_keep = _git_head_sha(repo)
+    assert recorded != post_keep
+    assert recorded == _git(repo, "rev-parse", "HEAD~1")
+    # The patch applies exactly once against the recorded base: that tree still
+    # holds the pre-patch content.
+    assert _git(repo, "show", f"{recorded}:{TARGET}") == BASE_TEXT.strip()
+    assert _git(repo, "show", f"{post_keep}:{TARGET}") == PATCHED_TEXT.strip()
+
+
+def test_a_kept_patch_applies_exactly_once_to_the_recorded_base(repo: Path, tmp_path: Path):
+    """The recorded base is the tree an R1a patch step replays against.
+
+    Applying it to the post-KEEP commit is the failure the capture point exists
+    to prevent: that tree already holds the change.
+    """
+    patch = tmp_path / "1.patch"
+    patch.write_text(
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT.strip()}\n+{PATCHED_TEXT.strip()}\n",
+        encoding="utf-8",
+    )
+    recorded = _git_head_sha(repo)
+
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    ok, _note = _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+    assert ok
+
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): recorded},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    replay = tmp_path / "replay"
+    _git(repo.parent, "clone", "-q", str(repo), str(replay))
+    _git(replay, "checkout", "-q", records[0]["base_sha"])
+
+    _git(replay, "apply", str(patch))
+    assert (replay / TARGET).read_text(encoding="utf-8") == PATCHED_TEXT
+
+    # A second application has nothing left to change, which is what proves the
+    # recorded base was not already patched.
+    second = subprocess.run(
+        ["git", "-C", str(replay), "apply", "--check", str(patch)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode != 0
+
+
+def test_a_patch_replayed_against_the_post_keep_commit_is_a_second_application(repo: Path, tmp_path: Path):
+    patch = tmp_path / "1.patch"
+    patch.write_text(
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT.strip()}\n+{PATCHED_TEXT.strip()}\n",
+        encoding="utf-8",
+    )
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+
+    refused = subprocess.run(
+        ["git", "-C", str(repo), "apply", "--check", str(patch)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+
+
+def test_root_record_carries_the_pre_keep_base_sha(repo: Path):
+    recorded = _git_head_sha(repo)
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): recorded},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    assert records[0]["base_sha"] == recorded
+    assert records[0]["base_sha"] != _git_head_sha(repo)
+
+
+def test_non_git_root_has_a_null_base_sha_beside_its_is_git_flag():
+    records = build_root_records(
+        contributions={"/plain/tree": {"artifact_install"}},
+        base_sha_by_root={},
+        git_roots=[],
+        session_framework_root="/fr",
+    )
+    assert records[0]["is_git"] is False and records[0]["base_sha"] == ""
+
+
+def test_root_kinds_and_replay_anchors():
+    assert classify_root("/fr", session_framework_root="/fr") == (
+        "framework_checkout",
+        {"anchor": "framework_root", "rel": ""},
+    )
+    kind, target = classify_root("/opt/venv/lib/python3.10/site-packages/aiter", session_framework_root="/fr")
+    assert kind == "site_packages" and target == {"anchor": "site_packages", "rel": "aiter"}
+    assert classify_root("/elsewhere", session_framework_root="/fr")[1]["anchor"] == "unmappable"
+
+
+def test_contributions_split_inputs_from_output_targets():
+    contributions = collect_contributions(
+        framework_root="/fr",
+        patch_roots={"/p/1.patch": "/fr"},
+        artifacts=[{"target": "/pkg/a.py", "rel_target": "a.py", "root": "/pkg"}],
+    )
+    assert contributions["/fr"] == {"patch_apply"}
+    assert contributions["/pkg"] == {"artifact_install"}
+
+
+def test_artifact_only_contributions_do_not_fabricate_a_patch_binding():
+    contributions = collect_contributions(
+        framework_root="/fr",
+        patch_roots={},
+        artifacts=[{"target": "/pkg/a.py", "rel_target": "a.py", "root": "/pkg"}],
+    )
+    assert contributions == {"/pkg": {"artifact_install"}}
+
+
+def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tmp_path: Path, monkeypatch):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    evidence = {
+        "framework": "sglang",
+        "requested_server_args": "--tp 2",
+        "requested_server_env": {"HF_TOKEN": "secret", "SAFE_SWITCH": "1"},
+        "materialized_config_path": "/host/session/config.yaml",
+        "actual_server_log_path": "/host/session/server.log",
+    }
+    out = executor._enablement_keep_records(
+        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=SimpleNamespace(enablement=None)),
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[],
+        done_payload={},
+        provision_result=None,
+        bench_result={"launch_evidence": evidence},
+    )
+    durable = out["enablement_launch_evidence"]
+    assert durable["requested_server_env_keys"] == ["SAFE_SWITCH"]
+    assert "requested_server_env" not in durable
+    assert "materialized_config_path" not in durable
+    assert "actual_server_log_path" not in durable
+    assert "secret" not in str(durable)
+
+
+@pytest.mark.parametrize("argv_key", ["requested_server_args", "observed_server_launch_flags"])
+def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
+    repo: Path, tmp_path: Path, monkeypatch, argv_key
+):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    state = SimpleNamespace(enablement=EnablementRound(attempts=1, origin="eval"))
+    for argv, refused in (("--flag 'unterminated", True), ("", False)):
+        evidence = {
+            "framework": "sglang",
+            "requested_model_digest": "sha256:model",
+            "observed_model_binding": {"model_digest": "sha256:model"},
+            "requested_server_args": "",
+            "observed_server_launch_flags": "",
+            argv_key: argv,
+        }
+        result = executor._enablement_keep_records(
+            SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
+            params={},
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[],
+            applied_artifacts=[],
+            done_payload={},
+            provision_result=None,
+            bench_result={"launch_evidence": evidence},
+        )
+        if refused:
+            assert argv_key not in result["enablement_launch_evidence"]
+        _rearm_on_kept(state, result)
+        state.enablement = EnablementRound.from_dict(asdict(state.enablement))
+        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+        decision = collected["replay_sufficiency"]
+        activation_reasons = [reason for reason in decision["reasons"] if reason["code"] == "activation_incomplete"]
+        expected = {"code": "activation_incomplete", "scope": "observed_server_launch_flags", "blocks": "both"}
+        assert activation_reasons == ([expected] if refused else [])
+        if refused:
+            assert decision["status"] == "insufficient"
+
+
+def test_declared_targets_separate_upserts_from_deletions():
+    targets = declared_targets(
+        framework_root="/fr",
+        upserted=["srt/a.py"],
+        deleted=["srt/gone.py"],
+        artifacts=[{"rel_target": "srt/art.py", "root": "/fr"}],
+    )
+    assert targets["/fr"] == {"srt/a.py": "upsert", "srt/gone.py": "delete", "srt/art.py": "upsert"}
+
+
+def test_snapshot_capture_is_portable_and_records_declared_ops(repo: Path, tmp_path: Path):
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): "a" * 40},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    session_dir = tmp_path / "session"
+    manifests = capture_root_snapshots(
+        records=records,
+        targets={str(repo): {TARGET: "upsert", "srt/gone.py": "delete"}},
+        dest_root=session_dir / "optimization_stack" / "enablement",
+        session_dir=session_dir,
+    )
+    manifest = manifests[0]
+    assert manifest["complete"] is True
+    assert {f["rel"]: f["op"] for f in manifest["files"]} == {TARGET: "upsert", "srt/gone.py": "delete"}
+    assert "framework_root" not in manifest and "snapshot_dir" not in manifest
+    assert manifest["snapshot_ref"] == f"optimization_stack/enablement/{records[0]['id']}"
+    assert (session_dir / manifest["snapshot_ref"] / "files" / TARGET).read_text() == PATCHED_TEXT
+
+
+def test_a_later_capture_of_one_root_leaves_no_earlier_target_behind(repo: Path, tmp_path: Path):
+    """The overlay is the declared set, and one root captures into one directory."""
+    (repo / "srt" / "b.py").write_text("value = 3\n", encoding="utf-8")
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): "a" * 40},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    capture_root_snapshots(
+        records=records, targets={str(repo): {TARGET: "upsert"}}, dest_root=dest_root, session_dir=session_dir
+    )
+    manifests = capture_root_snapshots(
+        records=records,
+        targets={str(repo): {"srt/b.py": "upsert"}},
+        dest_root=dest_root,
+        session_dir=session_dir,
+    )
+    overlay = session_dir / manifests[0]["snapshot_ref"] / "files"
+    assert (overlay / "srt/b.py").is_file()
+    assert not (overlay / TARGET).exists()
+
+
+def test_a_root_absent_from_this_keep_leaves_no_packageable_overlay(repo: Path, tmp_path: Path):
+    """Packaging selects the overlay by path, so a stale directory would ship."""
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    other = tmp_path / "other"
+    (other / "srt").mkdir(parents=True)
+    (other / TARGET).write_text("value = 9\n", encoding="utf-8")
+
+    def _capture(root: Path):
+        records = build_root_records(
+            contributions={str(root): {"patch_apply"}},
+            base_sha_by_root={},
+            git_roots=[],
+            session_framework_root=str(repo),
+        )
+        return records, capture_root_snapshots(
+            records=records,
+            targets={str(root): {TARGET: "upsert"}},
+            dest_root=dest_root,
+            session_dir=session_dir,
+        )
+
+    stale_records, _stale = _capture(other)
+    stale_dir = dest_root / stale_records[0]["id"]
+    assert (stale_dir / "files" / TARGET).is_file()
+
+    _records, manifests = _capture(repo)
+    assert not stale_dir.exists()
+    assert (session_dir / manifests[0]["snapshot_ref"] / "files" / TARGET).is_file()
+
+
+def test_a_record_declaring_no_target_keeps_no_earlier_overlay(repo: Path, tmp_path: Path):
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={},
+        git_roots=[],
+        session_framework_root=str(repo),
+    )
+    capture_root_snapshots(
+        records=records, targets={str(repo): {TARGET: "upsert"}}, dest_root=dest_root, session_dir=session_dir
+    )
+    assert capture_root_snapshots(records=records, targets={}, dest_root=dest_root, session_dir=session_dir) == []
+    assert not (dest_root / records[0]["id"]).exists()
+
+
+def test_the_captured_stack_is_the_accepted_one_not_this_rounds_installs():
+    inherited = [{"target": "/fr/srt/base.py", "rel_target": "srt/base.py", "root": "/fr"}]
+    applied = [{"target": "/fr/srt/new.py", "rel_target": "srt/new.py", "root": "/fr"}]
+    stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
+    assert declared_targets(framework_root="/fr", upserted=[], deleted=[], artifacts=stack)["/fr"] == {
+        "srt/base.py": "upsert",
+        "srt/new.py": "upsert",
+    }
+
+
+def test_this_rounds_install_supersedes_the_inherited_record_at_one_target():
+    inherited = [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root": "/fr", "source": "old"}]
+    applied = [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root": "/fr", "source": "new"}]
+    stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
+    assert [a["source"] for a in stack] == ["new"]
+
+
+def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path, tmp_path: Path):
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    manifests = capture_root_snapshots(
+        records=records,
+        targets={str(repo): {"srt/never.py": "upsert"}},
+        dest_root=tmp_path / "dest",
+        session_dir=tmp_path,
+    )
+    assert manifests[0]["complete"] is False
+    assert manifests[0]["files"][0]["op"] == "missing"
+
+
+def test_keep_interpreter_prefers_the_override_then_the_bypass_backend():
+    assert (
+        resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}, backend_name="bypass")
+        == "/a/py"
+    )
+    assert resolve_keep_interpreter({"framework_python": "/b/py"}, backend_name="magpie") == "/b/py"
+    assert resolve_keep_interpreter({}, backend_name="bypass", bypass_interpreter="/c/py") == "/c/py"
+    # Under any other backend the launching interpreter is not resolvable, and
+    # naming a plausible one would reproduce the defect this closes.
+    assert resolve_keep_interpreter({}, backend_name="magpie", bypass_interpreter="/c/py") == ""
+
+
+def _installed_dist(root: Path, name: str, version: str) -> str:
+    """Materialize an importable distribution and return its ``sys.path`` entry."""
+    info = root / f"site-{version}" / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    return str(info.parent)
+
+
+def _build_manifest(installed_versions: dict[str, str]) -> list[dict]:
+    """The single row routing leaves for an executed build: attempt and sentinel."""
+    return [
+        {
+            "ok": True,
+            "task_id": BUILD_TASK,
+            "probe_task_id": PROBE_TASK,
+            "attempt_root": f"/s/enablement/builds/{BUILD_TASK}",
+            "installed_versions": installed_versions,
+        }
+    ]
+
+
+def test_the_graded_override_decides_what_the_probe_observes(tmp_path: Path):
+    """A source build reaches its packages only through the override's prefixes.
+
+    A bare-environment probe would name a distribution set the graded server
+    never imported.
+    """
+    override = {"pythonpath_prefixes": [_installed_dist(tmp_path, "overlaid", "3.1")]}
+    closure, assertions = probe_environment_closure(sys.executable, override=override, packages=("overlaid",))
+    bare_closure, bare_assertions = probe_environment_closure(sys.executable, override=None, packages=("overlaid",))
+    assert closure["distributions"]["overlaid"] == "3.1" and assertions == {"overlaid": "3.1"}
+    assert "overlaid" not in bare_closure["distributions"] and bare_assertions == {}
+
+
+def test_a_build_reached_keep_asserts_the_linked_attempts_versions():
+    packages = keep_assertion_packages(
+        provision_versions=None,
+        build_manifest=_build_manifest({"torch": "2.6", "aiter_sha": "abc1234"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ("torch", "aiter_sha")
+
+
+def test_a_provisioned_keep_asserts_its_own_map():
+    packages = keep_assertion_packages(
+        provision_versions={"sglang": "0.4"},
+        build_manifest=_build_manifest({"torch": "2.6"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ("sglang",)
+
+
+def test_neither_provisioning_nor_a_linked_build_names_a_package():
+    """A build whose probe is another round's is not this KEEP's version source."""
+    assert (
+        keep_assertion_packages(
+            provision_versions=None,
+            build_manifest=_build_manifest({"torch": "2.6"}),
+            specialist_task_id="some-other-round",
+        )
+        == ()
+    )
+    assert keep_assertion_packages(provision_versions=None, build_manifest=[], specialist_task_id=PROBE_TASK) == ()
+
+
+def test_a_provisioning_stage_that_installed_nothing_borrows_no_build_names():
+    """An empty provisioning map is a stage that named nothing, not an absent one.
+
+    The build's names belong to a KEEP that reached its runtime through the
+    build; a round that provisioned its own asserts what that stage installed.
+    """
+    packages = keep_assertion_packages(
+        provision_versions={},
+        build_manifest=_build_manifest({"torch": "2.6"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ()
+
+
+def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Path):
+    """The build map names the packages; only the KEEP probe supplies the versions.
+
+    Sourcing the names from ``provision_result`` alone left the launch-only probe
+    path -- the principal path carrying version assertions -- with an empty set,
+    which reads as never observed. The recorded version is the one the probe
+    finds, so a build-time map carried forward is visible as a stale value.
+    """
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+        }
+    }
+    closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    assert assertions == {"demo": "2.0"}
+    assert closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
+    """Fail closed: no provisioning and no linked build is no version source."""
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+        }
+    }
+    _closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id="some-other-round", provision_result=None
+    )
+    assert assertions == {}
+
+
+def test_an_override_naming_no_interpreter_off_the_bypass_path_observes_nothing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """An AITER runtime names no interpreter, and only bypass can say which ran.
+
+    Under any other backend both probes report nothing rather than an
+    environment the graded server never ran in.
+    """
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
+    assert executor._probe_keep_environment(ctx, params, specialist_task_id=PROBE_TASK, provision_result=None) == (
+        {},
+        {},
+    )
+
+
+def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path, monkeypatch):
+    """The counterpart: the backend, not the override, is what decides."""
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
+    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
+    closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    assert executor._probe_keep_environment(ctx, {}, specialist_task_id=PROBE_TASK, provision_result=None) == ({}, {})
+
+
+def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path, tmp_path: Path):
+    """Each contributing tree carries its own binding, git flag and base commit."""
+    second = tmp_path / "artifacts_root"
+    (second / "lib").mkdir(parents=True)
+    (second / "lib" / "a.so").write_bytes(b"\x00artifact")
+    _git(second.parent, "init", "-q", str(second))
+    _git(second, "config", "user.email", "t@example.com")
+    _git(second, "config", "user.name", "t")
+    _git(second, "add", "-A")
+    _git(second, "commit", "-qm", "artifact base")
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo), str(second): _git_head_sha(second)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
+        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    records = {r["path"]: r for r in out["enablement_roots"]}
+    assert set(records) == {str(repo), str(second)}
+    assert records[str(repo)]["contributions"] == ["patch_apply"]
+    assert records[str(second)]["contributions"] == ["artifact_install"]
+    assert all(r["is_git"] for r in records.values())
+    assert records[str(second)]["base_sha"] == _git(second, "rev-parse", "HEAD")
+    assert records[str(second)]["base_sha"] != records[str(repo)]["base_sha"]
+
+
+def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Path, tmp_path: Path):
+    """The lane replaces these records with the latest KEEP's, so a round that
+    captured only its own installs would drop an earlier round's payload."""
+    inherited_rel = "srt/inherited.py"
+    (repo / inherited_rel).write_text("value = 7\n", encoding="utf-8")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={
+            "enablement_base_artifacts": [
+                {"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}
+            ]
+        },
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        done_payload={},
+        provision_result=None,
+        bench_result={},
+    )
+    root_id = out["enablement_roots"][0]["id"]
+    assert out["enablement_accepted_stack_targets"][root_id] == {TARGET: "upsert", inherited_rel: "upsert"}
+    snapshot = out["enablement_source_snapshots"][0]
+    assert {f["rel"] for f in snapshot["files"]} == {TARGET, inherited_rel}
+    overlay = executor.session_dir / snapshot["snapshot_ref"] / "files"
+    assert (overlay / inherited_rel).read_text(encoding="utf-8") == "value = 7\n"
+
+
+def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path: Path):
+    plain = tmp_path / "plain_root"
+    (plain / "lib").mkdir(parents=True)
+    (plain / "lib" / "a.so").write_bytes(b"\x00artifact")
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
+    assert record["is_git"] is False and record["base_sha"] == ""
+
+
+def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Path):
+    """The caller must distinguish an absent provisioning result from an empty one."""
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    override = {
+        "runtime_python_exe": sys.executable,
+        "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+    }
+    provisioned = SimpleNamespace(
+        ok=True,
+        installed_versions={},
+        runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
+    )
+    closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    )
+    assert assertions == {}
+    assert closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: Path):
+    """Provisioning names the package; the version is the probe's observation.
+
+    The provisioning stage runs before the setup replay, so carrying its map
+    forward would report the version a later install had already replaced.
+    """
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    override = {
+        "runtime_python_exe": sys.executable,
+        "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+    }
+    provisioned = SimpleNamespace(
+        ok=True,
+        installed_versions={"demo": "1.0"},
+        runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
+    )
+    _closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    )
+    assert assertions == {"demo": "2.0"}
+
+
+def test_the_probe_environment_carries_the_prefixes_and_the_runtime_env(tmp_path: Path):
+    """An AITER runtime names no interpreter: a prefix list and a runtime_env
+    are the whole of what makes its build importable."""
+    prefix = _installed_dist(tmp_path, "overlaid", "3.1")
+    env = _probe_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}})
+    assert env["PYTHONPATH"].split(":")[0] == prefix
+    assert env["AITER_REBUILD"] == "1"
+
+
+def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
+    """Fail closed on the invocation too, not only on an unresolved interpreter."""
+    assert probe_environment_closure(str(tmp_path / "absent-python"), override=None, packages=("demo",)) == ({}, {})
+    silent = tmp_path / "silent-python"
+    silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    silent.chmod(0o755)
+    assert probe_environment_closure(str(silent), override=None, packages=("demo",)) == ({}, {})

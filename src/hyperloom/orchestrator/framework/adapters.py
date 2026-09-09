@@ -20,6 +20,7 @@ Isolation & safety:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -131,6 +132,65 @@ def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return getattr(cp, "returncode", 1) == 0
+
+
+def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
+    """Return the commit a shallow clone landed on, or ``""``.
+
+    The provisioner clones a branch or tag verbatim, so the action's own ``ref``
+    names different bytes tomorrow; this is the identity it lacks.
+    """
+    try:
+        cp = run(["git", "-C", str(checkout), "rev-parse", "HEAD"], dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
+def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _default_run) -> dict[str, dict[str, str]]:
+    """Return ``{name: {version, artifact_digest}}`` for each installed name.
+
+    The digest is a sha256 over the distribution's own ``RECORD`` manifest, read
+    in the same interpreter: a version names the release the metadata claims,
+    not the bytes installed. A distribution publishing no ``RECORD`` carries an
+    empty digest, which is a judged condition rather than a default.
+    """
+    if not names:
+        return {}
+    # Source for the attempt interpreter, not this one: a name it cannot resolve
+    # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
+    # anything else fails the probe and is caught by the exit-status check below.
+    probe = (
+        "import hashlib,json,sys\n"
+        "import importlib.metadata as m\n"
+        "out={}\n"
+        "for name in sys.argv[1:]:\n"
+        "    try:\n"
+        "        dist=m.distribution(name)\n"
+        "    except m.PackageNotFoundError:\n"
+        "        continue\n"
+        "    digest=''\n"
+        "    try:\n"
+        "        record=dist.read_text('RECORD') or ''\n"
+        "        digest='sha256:'+hashlib.sha256(record.encode()).hexdigest() if record else ''\n"
+        "    except (OSError, ValueError):\n"
+        "        digest=''\n"
+        "    out[name]={'version': dist.version or '', 'artifact_digest': digest}\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        cp = run([python_path, "-c", probe, *names], dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if getattr(cp, "returncode", 1) != 0:
+        return {}
+    try:
+        parsed = json.loads((getattr(cp, "stdout", "") or "").strip() or "{}")
+    except ValueError:
+        return {}
+    return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in parsed.items()}
 
 
 def _installed_version(python_path: str, package: str, *, run: RunFn = _default_run) -> str:
@@ -467,6 +527,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             "vllm": _installed_version(str(python_path), "vllm", run=self._run),
             "torch": _installed_version(str(python_path), "torch", run=self._run),
         }
+        resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["vllm"], run=self._run)
         runtime = FrameworkRuntime(
             bin_path=str(bin_dir),
             python_path=str(python_path),
@@ -479,6 +540,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             runtime=runtime,
             installed_versions={k: v for k, v in versions.items() if v},
             log_path=log_path,
+            resolved_packages=resolved_packages,
         )
 
     def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
@@ -566,6 +628,8 @@ class SglangAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""
+        resolved_ref = ""
+        resolved_packages: dict[str, dict[str, str]] = {}
         if action.acquisition_method == "editable_ref":
             if not action.repo_url or not action.ref:
                 return ProvisionResult(ok=False, log_path=log_path, error="editable_ref requires repo_url and ref")
@@ -581,8 +645,10 @@ class SglangAdapter(_VenvProvisionMixin):
                 )
             cp = self._pip_install(python_path, [], editable=str(checkout / "python"))
             pythonpath_prefix = str(checkout / "python")
+            resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
             cp = self._pip_install(python_path, list(action.packages) or ["sglang"], index_url=action.index_url)
+            resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["sglang"], run=self._run)
         else:
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
@@ -607,6 +673,8 @@ class SglangAdapter(_VenvProvisionMixin):
             runtime=runtime,
             installed_versions={k: v for k, v in versions.items() if v},
             log_path=log_path,
+            resolved_ref=resolved_ref,
+            resolved_packages=resolved_packages,
         )
 
 

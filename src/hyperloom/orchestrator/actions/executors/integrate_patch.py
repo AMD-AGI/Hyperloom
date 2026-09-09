@@ -75,6 +75,9 @@ from ._nogit_patch import (
     _is_within,
     _revert_patches_no_git,
 )
+from ...enablement.recipe.credentials import detect_credential_channels
+from ...enablement.recipe.projections import project_launch_evidence
+from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
@@ -373,7 +376,69 @@ def _resolve_setup_commands(
     return out
 
 
-def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dict[str, Any]:
+def _setup_command_sources(
+    *,
+    params: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Map each candidate command to whether it was inherited or proposed here.
+
+    A command replayed from the durable base and one this round's specialist
+    proposed carry different replay meaning, and the resolved list dedups them
+    into one string.
+    """
+    inherited = {str(c or "").strip() for c in (params.get("enablement_setup_commands") or [])}
+    sources: dict[str, str] = {cmd: "inherited" for cmd in inherited if cmd}
+    proposed = (done_payload or {}).get("setup_commands") or []
+    for raw in proposed:
+        cmd = str(raw or "").strip()
+        if cmd and cmd not in sources:
+            sources[cmd] = "proposed"
+    return sources
+
+
+def _execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path: Path) -> bool:
+    """Run one allowlisted setup command, appending its output to the replay log.
+
+    Returns:
+        True when the command exited zero. A non-zero install is recorded but
+        does not hard-fail the integration -- the subsequent boot/gate is the
+        source of truth for runnability.
+    """
+    log.info("integrate_patch: enablement setup replay: %s", cmd)
+    try:
+        proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+            cmd,
+            shell=True,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_SETUP_CMD_TIMEOUT_SEC,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
+        return False
+    try:
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
+    except OSError:
+        # Logging is best-effort.
+        pass
+    if proc.returncode != 0:
+        log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
+    return proc.returncode == 0
+
+
+def _run_setup_commands(
+    commands: list[str],
+    *,
+    cwd: Path,
+    log_dir: Path,
+    sources: dict[str, str] | None = None,
+    round_task_id: str = "",
+    seq_start: int = 0,
+) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
     Runs each allowlisted command non-interactively with a per-command timeout,
@@ -387,15 +452,23 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
 
+    Args (continued):
+        sources: ``{cmd: "inherited"|"proposed"}`` for the ledger rows.
+        round_task_id: The round the executions belong to.
+        seq_start: Highest ledger ``seq`` already durable, so occurrence
+            identity stays monotonic across rounds.
+
     Returns:
-        dict[str, Any]: ``{"applied": [...], "skipped": [...], "failed": [...]}``
-        where ``applied`` are the allowlisted commands that ran (rc==0).
+        dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
+        ``applied`` are the allowlisted commands that ran (rc==0) and
+        ``executions`` is one ledger row per ATTEMPTED command.
     """
     applied: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
+    executions: list[dict[str, Any]] = []
     if not commands:
-        return {"applied": applied, "skipped": skipped, "failed": failed}
+        return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -405,7 +478,21 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    for cmd in commands:
+
+    def _record(cmd: str, index: int, outcome: str) -> None:
+        executions.append(
+            build_execution_row(
+                seq=int(seq_start) + len(executions) + 1,
+                round_task_id=round_task_id,
+                cmd_index=index,
+                cmd=cmd,
+                source=(sources or {}).get(str(cmd).strip(), "proposed"),
+                outcome=outcome,
+                env=env,
+            )
+        )
+
+    for cmd_index, cmd in enumerate(commands):
         if not _is_allowlisted_setup_command(cmd):
             # Sanitised HERE, not at the reporting sites. This list is copied
             # verbatim into every result payload that carries
@@ -421,33 +508,95 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
             # re-authored and re-dropped until the budget ran out. The log is a
             # disk-backed surface too, so it gets the sanitised form as well.
             log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
+            _record(cmd, cmd_index, "skipped")
             continue
-        log.info("integrate_patch: enablement setup replay: %s", cmd)
-        try:
-            proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
-                cmd,
-                shell=True,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_SETUP_CMD_TIMEOUT_SEC,
-            )
-            try:
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-            except OSError:
-                # Logging is best-effort.
-                pass
-            if proc.returncode == 0:
-                applied.append(cmd)
-            else:
-                failed.append(cmd)
-                log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        if _execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
+            applied.append(cmd)
+            _record(cmd, cmd_index, "applied")
+        else:
             failed.append(cmd)
-            log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
-    return {"applied": applied, "skipped": skipped, "failed": failed}
+            _record(cmd, cmd_index, "failed")
+    return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
+
+
+def _git_head_sha(framework_root: Path | None) -> str:
+    """Return ``framework_root``'s HEAD, or ``""`` when it is not a git tree.
+
+    Read BEFORE any candidate mutation: ``base_sha`` names the tree the patches
+    apply to, so a read taken after the KEEP commit would name a tree that
+    already contains them and every recorded patch would replay onto its own
+    result.
+    """
+    if framework_root is None:
+        return ""
+    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None or getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
+def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
+    """Return every tree this round could mutate, before it mutates any of them.
+
+    Read from the payload alone -- the root the round will apply into, the roots
+    the authoring stage bound per patch, and the root each artifact target
+    resolves into -- because the resolvers that return them run after the setup
+    commands have already installed into those same trees.
+
+    A declared ``framework_source_root`` is resolved here too: it is the tree the
+    patches land in whenever it differs from the session's own, and the round
+    does not otherwise name it until the stash, by which point setup has run.
+    """
+    explicit = str(params.get("framework_source_root") or "").strip() or None
+    # No patch input, so this returns the declared root when one is admitted and
+    # the session root otherwise -- the pair the apply itself chooses between.
+    effective = _resolve_framework_root(explicit, patch_paths=[])
+    roots: list[str] = [str(resolve_session_framework_root() or ""), str(effective or "")]
+    roots.extend(str(v) for v in ((done_payload or {}).get("patch_roots") or {}).values())
+    entries = params.get("artifacts")
+    if not isinstance(entries, list) or not entries:
+        entries = (done_payload or {}).get("artifacts_written") or []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        resolved = _resolve_artifact_target(str(entry.get("target") or "").strip())
+        if resolved is not None:
+            roots.append(str(resolved[2]))
+    return list(dict.fromkeys(r for r in roots if r))
+
+
+def _note_pre_mutation_head(ctx: Any, root: str | Path | None) -> None:
+    """Record ``root``'s HEAD once, the first time the round is about to touch it.
+
+    Never replaced: a later read would name a tree this round has already
+    changed, and every patch the recipe carries would replay onto its own result.
+    """
+    heads: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
+    key = str(root or "")
+    if key and key not in heads:
+        heads[key] = _git_head_sha(Path(key))
+    ctx._ip_base_sha_by_root = heads
+
+
+def _durable_execution_seq(shared_state: Any) -> int:
+    """Return the highest ``seq`` already in the durable setup ledger."""
+    ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
+    return max((int(row.get("seq") or 0) for row in ledger if isinstance(row, dict)), default=0)
+
+
+def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
+    """Append this round's execution rows to the durable, append-only ledger."""
+    rows = [row for row in (setup_result.get("executions") or []) if isinstance(row, dict)]
+    if shared_state is None or not rows:
+        return
+    ledger = list(getattr(shared_state.enablement, "setup_executions", None) or [])
+    ledger.extend(rows)
+    shared_state.enablement.setup_executions = ledger
+    try:
+        shared_state.save(session_dir)
+    except OSError:
+        # The rows are on the in-memory state either way, and the rearm saves again.
+        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
 def allowlisted_explicit_root(
@@ -2256,7 +2405,11 @@ class IntegratePatchExecutor:
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
         self._ip_base_artifact_replayed = False
-        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
+        # Before the setup commands, which are the round's first mutation: an
+        # install writes into the same trees the patches and artifacts land in.
+        for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
+            _note_pre_mutation_head(ctx, candidate)
+        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
             if setup_cmds:
@@ -2264,7 +2417,15 @@ class IntegratePatchExecutor:
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
+                    sources=_setup_command_sources(params=params, done_payload=done_payload),
+                    round_task_id=specialist_task_id,
+                    seq_start=_durable_execution_seq(shared_state),
                 )
+                # Appended where the commands run, not where the round reports:
+                # several exits below return after setup has already mutated the
+                # shared venv, and one of them carries no enablement flag at all,
+                # so the rearm that would have recorded them never runs.
+                _append_setup_executions(shared_state, setup_result, session_dir=self.session_dir)
 
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         explicit_patches = params.get("patches") or None
@@ -2617,6 +2778,9 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
+        # Normally already recorded before the setup commands; a root that
+        # resolved only here is still recorded before the stash and the apply.
+        _note_pre_mutation_head(ctx, framework_root)
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -2924,6 +3088,55 @@ class IntegratePatchExecutor:
             verdict["dropped_env_overrides"] = dropped_env_overrides
         return verdict
 
+    @staticmethod
+    def _enablement_correctness(
+        params: dict[str, Any],
+        gate_evidence: dict[str, Any],
+    ) -> tuple[bool | None, dict[str, Any]]:
+        """Judge the candidate's accuracy against the floor its origin demands.
+
+        Returns:
+            ``(correctness_ok, eval_provenance)``. ``correctness_ok`` is ``None``
+            only for a boot-origin round with no score at all, which claimed
+            nothing about accuracy; every other absence fails closed.
+        """
+        enablement_accuracy = gate_evidence.get("enablement_accuracy")
+        param_floor = params.get("enablement_accuracy_floor")
+        floor = float(param_floor) if isinstance(param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+        eval_origin = _is_eval_origin(params)
+        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
+        correctness_ok: bool | None
+        if enablement_accuracy is None:
+            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+            correctness_ok = False if eval_origin else None
+        else:
+            # Present but below floor / non-positive / non-finite is a refusal.
+            correctness_ok = accuracy_meets_floor(enablement_accuracy, floor)
+        # eval-origin only: a score with no task/metric did not come from a real
+        # eval, so it cannot clear the gate. This reads the candidate's OWN run
+        # (both keys are stamped beside the accuracy it is judging), unlike the
+        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
+        # field, so an eval-less re-baseline could poison the stored digest and
+        # veto every later candidate without ever consulting its accuracy.
+        if (
+            eval_origin
+            and correctness_ok
+            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+        ):
+            correctness_ok = False
+            log.warning(
+                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+                enablement_accuracy,
+            )
+        return correctness_ok, {
+            "enablement_origin": str(params.get("enablement_origin") or ""),
+            "enablement_observed_accuracy": enablement_accuracy,
+            "enablement_accuracy_floor": floor,
+            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+            "enablement_eval_failure_kind": accuracy_kind or "",
+        }
+
     async def _gate_enablement(
         self,
         *,
@@ -2995,44 +3208,7 @@ class IntegratePatchExecutor:
         booted = isinstance(new_tput, (int, float)) and new_tput > 0
         probe_timed_out = bool(gate_evidence.get("timed_out"))
 
-        enablement_accuracy = gate_evidence.get("enablement_accuracy")
-        _param_floor = params.get("enablement_accuracy_floor")
-        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-        eval_origin = _is_eval_origin(params)
-        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
-        correctness_ok: bool | None
-        if enablement_accuracy is None:
-            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
-            correctness_ok = False if eval_origin else None
-        elif accuracy_meets_floor(enablement_accuracy, floor):
-            correctness_ok = True
-        else:
-            # Present but below floor / non-positive / non-finite.
-            correctness_ok = False
-        # eval-origin only: a score with no task/metric did not come from a real
-        # eval, so it cannot clear the gate. This reads the candidate's OWN run
-        # (both keys are stamped beside the accuracy it is judging), unlike the
-        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
-        # field, so an eval-less re-baseline could poison the stored digest and
-        # veto every later candidate without ever consulting its accuracy.
-        if (
-            eval_origin
-            and correctness_ok
-            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
-        ):
-            correctness_ok = False
-            log.warning(
-                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
-                enablement_accuracy,
-            )
-        eval_provenance = {
-            "enablement_origin": str(params.get("enablement_origin") or ""),
-            "enablement_observed_accuracy": enablement_accuracy,
-            "enablement_accuracy_floor": floor,
-            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
-            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
-            "enablement_eval_failure_kind": accuracy_kind or "",
-        }
+        correctness_ok, eval_provenance = self._enablement_correctness(params, gate_evidence)
 
         after_signature = classify_failure(str(bench_result.get("error") or ""))
         before_signature: FailureSignature | None = None
@@ -3182,7 +3358,20 @@ class IntegratePatchExecutor:
         # Record the KEEP'd attempt runtime so it survives rearm and every later
         # bench in this session re-activates it.
         if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
-            kept_result["enablement_kept_stack_action"] = stack_action.to_state()
+            # The action names a branch, a tag or an unpinned spec list; the
+            # resolved identity beside it is what makes the acquisition a
+            # rebuild path rather than a source that moves.
+            kept_result["enablement_kept_stack_action"] = {
+                **stack_action.to_state(),
+                "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
+                "resolved_packages": {
+                    str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
+                },
+                # The clone and the install inherit the whole process
+                # environment, so a runtime acquired over an authenticated
+                # remote replays no better than an install that was.
+                "credential_channels": detect_credential_channels(os.environ),
+            }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
         # Editable-refresh the localized closure + snapshot a manifest that
@@ -3195,7 +3384,169 @@ class IntegratePatchExecutor:
         )
         if manifest:
             kept_result["enablement_localization_manifest"] = manifest
+        try:
+            kept_result.update(
+                self._enablement_keep_records(
+                    ctx,
+                    params=params,
+                    specialist_task_id=specialist_task_id,
+                    framework_root=framework_root,
+                    applied=applied,
+                    applied_artifacts=applied_artifacts,
+                    done_payload=done_payload,
+                    provision_result=provision_result,
+                    bench_result=bench_result,
+                )
+            )
+        except (OSError, subprocess.SubprocessError):
+            # Every field this fills is one the decision refuses the replay for
+            # when absent, so a capture that cannot read the tree or spawn the
+            # probe leaves the recipe insufficient rather than failing the round.
+            log.exception("integrate_patch: enablement KEEP record capture failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
+
+    def _enablement_keep_records(
+        self,
+        ctx: Any,
+        *,
+        params: dict[str, Any],
+        specialist_task_id: str,
+        framework_root: Path | None,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+        done_payload: dict[str, Any] | None,
+        provision_result: Any,
+        bench_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Capture the per-root identity, payload and assertions of this KEEP.
+
+        Every value here is read at the KEEP: the roots the resolvers bound, the
+        pre-mutation ``base_sha`` captured before the apply, the byte-exact
+        content of each declared target, and the versions observed through the
+        interpreter the accepted bench launched. The declared set is the whole
+        accepted stack, inherited artifacts included: the lane replaces these
+        records with the latest KEEP's, so a round capturing only its own
+        installs would drop an earlier round's payload from the recipe.
+        """
+        from ...enablement.recipe.keep_records import (
+            accepted_stack_artifacts,
+            build_root_records,
+            capture_root_snapshots,
+            collect_contributions,
+            declared_targets,
+        )
+        from ...framework.paths import resolve_session_framework_root
+        from ._patch_snapshot import _patch_touched_paths_split
+
+        root = str(framework_root or "")
+        patch_roots = {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)}
+        base_artifacts = params.get("enablement_base_artifacts")
+        stack_artifacts = accepted_stack_artifacts(
+            inherited=base_artifacts if isinstance(base_artifacts, list) else [],
+            applied=applied_artifacts,
+        )
+        contributions = collect_contributions(
+            framework_root=root,
+            patch_roots=patch_roots,
+            artifacts=stack_artifacts,
+        )
+        upserted, deleted = (
+            _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
+        )
+        git_roots = [r for r in contributions if r and _is_git_tree(Path(r))]
+        # Only what was captured before this round touched each tree. A root with
+        # no capture keeps no sha, which the decision refuses rather than
+        # answering with a HEAD that has moved since.
+        captured: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
+        base_sha_by_root = {r: captured.get(r, "") for r in git_roots}
+        records = build_root_records(
+            contributions=contributions,
+            base_sha_by_root=base_sha_by_root,
+            git_roots=git_roots,
+            session_framework_root=resolve_session_framework_root(),
+        )
+        targets = declared_targets(
+            framework_root=root,
+            upserted=upserted,
+            deleted=deleted,
+            artifacts=stack_artifacts,
+        )
+        snapshots = capture_root_snapshots(
+            records=records,
+            targets=targets,
+            dest_root=self.session_dir / "optimization_stack" / "enablement",
+            session_dir=self.session_dir,
+        )
+        closure, assertions = self._probe_keep_environment(
+            ctx,
+            params,
+            specialist_task_id=specialist_task_id,
+            provision_result=provision_result,
+        )
+        launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
+        return {
+            "enablement_roots": records,
+            "enablement_patch_roots": patch_roots,
+            "enablement_base_sha": captured.get(root, ""),
+            "enablement_source_snapshots": snapshots,
+            "enablement_accepted_stack_targets": {
+                str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
+            },
+            "enablement_launch_evidence": launch_evidence or {},
+            "enablement_launch_argv_refused": argv_refused,
+            "enablement_environment_closure": closure,
+            "enablement_installed_versions_at_keep": assertions,
+        }
+
+    def _probe_keep_environment(
+        self,
+        ctx: Any,
+        params: dict[str, Any],
+        *,
+        specialist_task_id: str,
+        provision_result: Any,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Observe the closure and assertion set under the accepted runtime.
+
+        The runtime is the round's own provisioning result when it provisioned
+        one, else the override the round was dispatched with -- a KEEP reached
+        through a build's launch-only probe has no provisioning stage at all, so
+        keying on it would leave every accepted build permanently unobserved.
+        The packages named in the assertion set are sourced the same way, from
+        the build attempt this round's probe was opened for when no provisioning
+        stage ran; their versions are the probe's observation either way.
+        """
+        from ...enablement.recipe.keep_probe import (
+            keep_assertion_packages,
+            probe_environment_closure,
+            resolve_keep_interpreter,
+        )
+        from .benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
+
+        override: dict[str, Any] = {}
+        if provision_result is not None and getattr(provision_result, "ok", False):
+            override = provision_result.runtime.to_runtime_override()
+        if not override:
+            raw = params.get("runtime_override")
+            override = dict(raw) if isinstance(raw, dict) else {}
+        if not override:
+            return {}, {}
+        backend = resolve_backend_name()
+        interpreter = resolve_keep_interpreter(
+            override,
+            backend_name=backend,
+            bypass_interpreter=resolve_benchmark_interpreter() if backend == "bypass" else "",
+        )
+        enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+        provision_versions = (
+            None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
+        )
+        packages = keep_assertion_packages(
+            provision_versions=provision_versions,
+            build_manifest=getattr(enablement, "build_manifest", None) or [],
+            specialist_task_id=specialist_task_id,
+        )
+        return probe_environment_closure(interpreter, override=override, packages=packages)
 
     def _finalize_localization_keep(
         self,

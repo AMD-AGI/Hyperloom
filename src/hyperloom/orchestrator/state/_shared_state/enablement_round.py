@@ -85,6 +85,37 @@ class EnablementRound:
     # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
     # target); re-installed as a base before the next round's patch.
     kept_artifacts: list = field(default_factory=list)
+    # Append-only, one row per ATTEMPTED setup execution. Parallel to
+    # setup_commands, which stays a deduped command list: a command that ran
+    # twice, or ran and failed, has no representation there at all.
+    setup_executions: list = field(default_factory=list)
+    # One record per root that contributed a patch or artifact to the accepted
+    # stack; patch steps and artifacts carry its id, so a round spanning several
+    # trees stays representable where framework_root keeps only the last one.
+    roots: list = field(default_factory=list)
+    # Per-patch apply root, where the authoring stage recorded one.
+    patch_roots: dict = field(default_factory=dict)
+    # HEAD of the session framework root BEFORE the accepted round mutated it:
+    # the tree the kept patches apply to. Read pre-mutation, never after a KEEP
+    # commit, or the recorded sha would already contain the patches.
+    base_sha: str = ""
+    # Per-root snapshot manifests captured at the enablement KEEP.
+    source_snapshots: list = field(default_factory=list)
+    # {root_id: {rel: op}} the accepted stack declares, checked against what each
+    # snapshot actually captured.
+    accepted_stack_targets: dict = field(default_factory=dict)
+    # Which branch produced accepted_config: a booted kept bench, or an advanced
+    # round's proposal merge, which is by construction never booted.
+    accepted_config_source: str = ""
+    # Persisted projection of the graded launch evidence; raw env values and
+    # host-internal paths are removed before the result reaches durable state.
+    launch_evidence: dict = field(default_factory=dict)
+    launch_argv_refused: bool = False
+    # Version assertions observed AT the KEEP, after every mutation that reaches
+    # the launched image.
+    installed_versions_at_keep: dict = field(default_factory=dict)
+    # {interpreter_tag, distributions} of the accepted runtime.
+    environment_closure: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":

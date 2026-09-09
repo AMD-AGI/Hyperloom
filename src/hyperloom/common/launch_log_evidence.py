@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import re
 import shlex
@@ -19,6 +20,10 @@ log = logging.getLogger(__name__)
 _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
     {
         "--model-path",
+        # vLLM's own spelling. Without it the projected argv keeps a run-local
+        # model operand the SGLang spelling has always had stripped.
+        "--model",
+        "--tokenizer",
         "--tokenizer-path",
         "--served-model-name",
         "--host",
@@ -108,6 +113,100 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     except OSError:
         return ""
     return ""
+
+
+#: Every spelling of the model operand the supported launchers emit. SGLang
+#: writes ``--model-path``; vLLM is launched either as ``-m ...api_server
+#: --model <model>`` or as the bare console script ``vllm serve <model>``, so a
+#: read keyed on ``--model-path`` alone is one vLLM cannot satisfy.
+_MODEL_OPERAND_FLAGS: tuple[str, ...] = ("--model-path", "--model")
+_TOKENIZER_OPERAND_FLAGS: tuple[str, ...] = ("--tokenizer-path", "--tokenizer")
+_SERVED_NAME_FLAGS: tuple[str, ...] = ("--served-model-name",)
+_TP_FLAGS: tuple[str, ...] = ("--tensor-parallel-size", "--tp-size", "--tp")
+_DP_FLAGS: tuple[str, ...] = ("--data-parallel-size", "--dp-size")
+_PP_FLAGS: tuple[str, ...] = ("--pipeline-parallel-size", "--pp-size")
+
+
+def _operand_for(tokens: list[str], flags: tuple[str, ...]) -> str:
+    """Return the operand of the first of ``flags`` present in ``tokens``."""
+    for index, token in enumerate(tokens):
+        name, separator, attached = token.partition("=")
+        if name not in flags:
+            continue
+        if separator:
+            return attached
+        if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+            return tokens[index + 1]
+    return ""
+
+
+def _serve_subcommand_operand(tokens: list[str]) -> str:
+    """Return the positional model operand of a ``serve`` subcommand."""
+    for index, token in enumerate(tokens):
+        if token != "serve":
+            continue
+        for candidate in tokens[index + 1 :]:
+            if not candidate.startswith("-"):
+                return candidate
+        return ""
+    return ""
+
+
+def _digest(value: str) -> str:
+    """Digest a model operand: it compares, while the path could not travel."""
+    text = str(value or "").strip()
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
+
+
+def _binding_from_tokens(tokens: list[str]) -> dict[str, Any]:
+    model = _operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens)
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest(model),
+        "tokenizer_digest": _digest(_operand_for(tokens, _TOKENIZER_OPERAND_FLAGS)),
+        "served_model_digest": _digest(_operand_for(tokens, _SERVED_NAME_FLAGS)),
+        "tp": _operand_for(tokens, _TP_FLAGS),
+        "dp": _operand_for(tokens, _DP_FLAGS),
+        "pp": _operand_for(tokens, _PP_FLAGS),
+    }
+
+
+def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]:
+    """Read the model and parallelism the server was actually launched with.
+
+    Read from the raw launch line, before :func:`split_launch_flags` removes
+    those operands as run-local: without it the evidence carries only the
+    *requested* model, and a server that resolved a different one yields
+    evidence that is non-empty and wrong.
+
+    Returns:
+        ``{model_digest, tokenizer_digest, served_model_digest, tp, dp, pp}``,
+        or ``{}`` for a framework whose launch line this reader cannot match.
+    """
+    marker = _LAUNCH_ARGV_MARKERS.get(str(framework or "").strip().lower())
+    if not marker:
+        return {}
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if marker not in line:
+                    continue
+                start = line.find("--")
+                serve_at = line.find(" serve ")
+                if start < 0 and serve_at < 0:
+                    continue
+                tail = line[min(x for x in (start, serve_at) if x >= 0) :].strip()
+                try:
+                    tokens = shlex.split(tail)
+                except ValueError:
+                    tokens = tail.split()
+                binding = _binding_from_tokens(tokens)
+                if binding:
+                    return binding
+    except OSError:
+        return {}
+    return {}
 
 
 _SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")

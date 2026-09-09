@@ -16,10 +16,25 @@ from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..phases._enablement_artifacts import role_path, snapshot_round, write_setting_script
+from .recipe.setup_ledger import mark_round_disposition
 
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+#: Identity and payload of the accepted stack, accumulated across the rounds
+#: that contributed to it: a round that contributes none leaves the standing
+#: records alone.
+_KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
+
+#: Declared targets and observations of this KEEP replace the previous KEEP's
+#: records, including when a target set is empty or a probe could not run.
+_KEEP_OBSERVED_FIELDS = (
+    "accepted_stack_targets",
+    "launch_evidence",
+    "environment_closure",
+    "installed_versions_at_keep",
+)
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -260,135 +275,13 @@ class EnablementLane(CoordinatorCollaborator):
         if _spec_tid:
             state.enablement.last_specialist_task_id = _spec_tid
 
-        def _stack_setup_commands() -> None:
-            """Append this round's applied setup commands to the durable stack."""
-            cur = list(state.enablement.setup_commands or [])
-            for c in res.get("setup_commands_applied") or []:
-                sc = str(c)
-                if sc and sc not in cur:
-                    cur.append(sc)
-            state.enablement.setup_commands = cur
-
-        def _push_kept_round(patches_this_round: list[str]) -> None:
-            """Append this round to kept_rounds and re-derive the flat projections.
-
-            Artifacts dedupe last-wins per target so a later round supersedes an
-            earlier fix to the same file.
-            """
-            rounds = list(state.enablement.kept_rounds or [])
-            rounds.append(
-                {
-                    "patches": list(patches_this_round),
-                    "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
-                }
-            )
-            state.enablement.kept_rounds = rounds
-
-            flat_patches: list[str] = []
-            artifact_by_target: dict[str, dict] = {}
-            for rnd in rounds:
-                for p in rnd.get("patches") or []:
-                    if p not in flat_patches:
-                        flat_patches.append(p)
-                for art in rnd.get("artifacts") or []:
-                    target = str(art.get("target") or "")
-                    if target:
-                        artifact_by_target[target] = art
-            state.enablement.kept_patches = flat_patches
-            state.enablement.kept_artifacts = list(artifact_by_target.values())
-
-        def _reset_baseline_failure_backstop() -> None:
-            """Clear the baseline-failure counters on enablement forward progress.
-
-            A serial enablement makes the baseline re-fail on purpose (each round
-            clears gap #n and the next boot stops at a deeper gap), so those
-            crashes are progress, not a stuck baseline. Reset the backstop
-            counters so ``enablement_stalled`` is the sole enablement-phase
-            fast-fail.
-            """
-            state.baseline_failure_streak = 0
-            state.baseline_arg_error_streak = 0
-            state.baseline_total_failures = 0
-
-        def _stack_kept_runtime() -> None:
-            """Persist the KEEP'd attempt runtime + localization manifest so they
-            survive rearm."""
-            action = res.get("enablement_kept_stack_action")
-            if isinstance(action, dict) and action:
-                state.enablement.kept_stack_action = action
-            runtime = res.get("enablement_active_runtime")
-            if isinstance(runtime, dict) and runtime:
-                state.enablement.active_runtime = runtime
-                # Retain the attempt-runtime record (cap at 5 newest).
-                records = list(state.enablement.attempt_runtimes or [])
-                records.append(runtime)
-                state.enablement.attempt_runtimes = records[-5:]
-            # Record the localized closure manifest so it is not re-fetched on
-            # the next round.
-            manifest = res.get("enablement_localization_manifest")
-            if isinstance(manifest, dict) and manifest:
-                existing = list(state.enablement.localization_manifest or [])
-                existing.append(manifest)
-                state.enablement.localization_manifest = existing
-
         if status == "kept":
-            _reset_baseline_failure_backstop()
-            _stack_setup_commands()
-            _stack_kept_runtime()
-            _push_kept_round([str(p) for p in (res.get("patches_applied") or []) if str(p)])
-            accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
-            if accepted_cfg:
-                state.enablement.accepted_config_path = accepted_cfg
-            effective = res.get("enablement_effective_config")
-            if isinstance(effective, dict) and effective:
-                # Replaced, not merged: what the KEEP bench launched already
-                # supersedes every advanced round that fed into it.
-                state.enablement.accepted_config = dict(effective)
-            if str(state.enablement.origin or "") == "eval":
-                # eval-origin: the patch boots and re-passed accuracy in the gate,
-                # but tput/accuracy only become official once a GENUINE baseline
-                # promotes. Hold succeeded; open the revalidation window. Keep the
-                # stall streak so repeated KEEP->revalidation-fail cycles still
-                # reach the stall cap.
-                state.enablement.validation_pending = True
-                # Increment generation so the new window gets a fresh idempotency
-                # key and cannot reuse a prior terminal TaskRegistry row.
-                state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
-                state.enablement.revalidation_task_id = ""
-            else:
-                state.enablement.succeeded = True
-                state.enablement.stall_streak = 0
+            _rearm_on_kept(state, res)
         elif status == "advanced" or bool(res.get("advanced")):
-            # Forward progress on a serial enablement: stack the progressing
-            # patches + setup commands and pivot to the newly-revealed gap.
-            _push_kept_round([str(p) for p in (res.get("patches_applied") or []) if str(p)])
-            _stack_setup_commands()
-            _stack_kept_runtime()
-            # Accumulated so a later kept round replays every advance, not just patches.
-            adv_envs = res.get("extra_envs_applied") or {}
-            adv_args = str(res.get("extra_server_args_applied") or "").strip()
-            if adv_envs or adv_args:
-                cfg = dict(state.enablement.accepted_config or {})
-                merged = dict(cfg.get("extra_envs") or {})
-                merged.update({str(k): str(v) for k, v in adv_envs.items()})
-                cfg["extra_envs"] = merged
-                # Folded by flag keeping the last value, so this round overrides an earlier one.
-                cfg["extra_server_args"] = _dedupe_extra_server_args(
-                    merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
-                )
-                cfg.setdefault("args_mode", "append")
-                state.enablement.accepted_config = cfg
-            new_log = str(res.get("enablement_launch_log") or "").strip()
-            if new_log:
-                state.enablement.launch_log = new_log
-            state.enablement.stall_streak = 0
-            _reset_baseline_failure_backstop()
+            _rearm_on_advanced(state, res)
         else:
-            # No progress: count toward the stall cap.
-            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
-                state.set_stop_reason("enablement_stalled")
-                stop_set = "enablement_stalled"
+            stop_set = _rearm_on_no_progress(state)
+        _mark_setup_ledger(state, _spec_tid, status or "unreported", accepted=status == "kept")
         # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
@@ -470,3 +363,178 @@ class EnablementLane(CoordinatorCollaborator):
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.exception("ENABLEMENT pump (%s) failed", caller)
+
+
+def _stack_setup_commands(state: Any, res: dict[str, Any]) -> None:
+    """Append this round's applied setup commands to the durable stack."""
+    cur = list(state.enablement.setup_commands or [])
+    for c in res.get("setup_commands_applied") or []:
+        sc = str(c)
+        if sc and sc not in cur:
+            cur.append(sc)
+    state.enablement.setup_commands = cur
+
+
+def _push_kept_round(state: Any, res: dict[str, Any], patches_this_round: list[str]) -> None:
+    """Append this round to kept_rounds and re-derive the flat projections.
+
+    Artifacts dedupe last-wins per target so a later round supersedes an
+    earlier fix to the same file.
+    """
+    rounds = list(state.enablement.kept_rounds or [])
+    rounds.append(
+        {
+            "patches": list(patches_this_round),
+            "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
+        }
+    )
+    state.enablement.kept_rounds = rounds
+
+    flat_patches: list[str] = []
+    artifact_by_target: dict[str, dict] = {}
+    for rnd in rounds:
+        for p in rnd.get("patches") or []:
+            if p not in flat_patches:
+                flat_patches.append(p)
+        for art in rnd.get("artifacts") or []:
+            target = str(art.get("target") or "")
+            if target:
+                artifact_by_target[target] = art
+    state.enablement.kept_patches = flat_patches
+    state.enablement.kept_artifacts = list(artifact_by_target.values())
+
+
+def _stack_keep_recipe_records(state: Any, res: dict[str, Any]) -> None:
+    """Persist the KEEP's per-root identity, payload and assertions."""
+    for field_name in _KEEP_STACK_FIELDS:
+        value = res.get(f"enablement_{field_name}")
+        if value:
+            setattr(state.enablement, field_name, value)
+    for field_name in _KEEP_OBSERVED_FIELDS:
+        setattr(state.enablement, field_name, res.get(f"enablement_{field_name}") or {})
+    state.enablement.launch_argv_refused = bool(res.get("enablement_launch_argv_refused"))
+
+
+def _mark_setup_ledger(state: Any, round_task_id: str, disposition: str, *, accepted: bool) -> None:
+    """Record this round's outcome onto the executions it performed.
+
+    A round with no task id of its own claims no rows: leaving them
+    ``unreported`` states that no lane observed them, which no rule reads
+    as verified.
+    """
+    ledger = list(state.enablement.setup_executions or [])
+    if not ledger or not round_task_id:
+        return
+    state.enablement.setup_executions = mark_round_disposition(
+        ledger,
+        round_task_id=round_task_id,
+        disposition=disposition,
+        accepted=accepted,
+    )
+
+
+def _reset_baseline_failure_backstop(state: Any) -> None:
+    """Clear the baseline-failure counters on enablement forward progress.
+
+    A serial enablement makes the baseline re-fail on purpose (each round
+    clears gap #n and the next boot stops at a deeper gap), so those
+    crashes are progress, not a stuck baseline. Reset the backstop
+    counters so ``enablement_stalled`` is the sole enablement-phase
+    fast-fail.
+    """
+    state.baseline_failure_streak = 0
+    state.baseline_arg_error_streak = 0
+    state.baseline_total_failures = 0
+
+
+def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
+    """Persist the KEEP'd attempt runtime + localization manifest so they
+    survive rearm."""
+    action = res.get("enablement_kept_stack_action")
+    if isinstance(action, dict) and action:
+        state.enablement.kept_stack_action = action
+    runtime = res.get("enablement_active_runtime")
+    if isinstance(runtime, dict) and runtime:
+        state.enablement.active_runtime = runtime
+        # Retain the attempt-runtime record (cap at 5 newest).
+        records = list(state.enablement.attempt_runtimes or [])
+        records.append(runtime)
+        state.enablement.attempt_runtimes = records[-5:]
+    # Record the localized closure manifest so it is not re-fetched on
+    # the next round.
+    manifest = res.get("enablement_localization_manifest")
+    if isinstance(manifest, dict) and manifest:
+        existing = list(state.enablement.localization_manifest or [])
+        existing.append(manifest)
+        state.enablement.localization_manifest = existing
+
+
+def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
+    """Record the accepted stack and terminate, or open the eval revalidation."""
+    _reset_baseline_failure_backstop(state)
+    _stack_setup_commands(state, res)
+    _stack_kept_runtime(state, res)
+    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
+    accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
+    if accepted_cfg:
+        state.enablement.accepted_config_path = accepted_cfg
+    effective = res.get("enablement_effective_config")
+    if isinstance(effective, dict) and effective:
+        # Replaced, not merged: what the KEEP bench launched already
+        # supersedes every advanced round that fed into it.
+        state.enablement.accepted_config = dict(effective)
+        state.enablement.accepted_config_source = "kept_bench"
+    _stack_keep_recipe_records(state, res)
+    if str(state.enablement.origin or "") == "eval":
+        # eval-origin: the patch boots and re-passed accuracy in the gate,
+        # but tput/accuracy only become official once a GENUINE baseline
+        # promotes. Hold succeeded; open the revalidation window. Keep the
+        # stall streak so repeated KEEP->revalidation-fail cycles still
+        # reach the stall cap.
+        state.enablement.validation_pending = True
+        # Increment generation so the new window gets a fresh idempotency
+        # key and cannot reuse a prior terminal TaskRegistry row.
+        state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
+        state.enablement.revalidation_task_id = ""
+    else:
+        state.enablement.succeeded = True
+        state.enablement.stall_streak = 0
+
+
+def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
+    """Stack the progressing round and pivot the mandate to the new gap."""
+    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
+    _stack_setup_commands(state, res)
+    _stack_kept_runtime(state, res)
+    # Accumulated so a later kept round replays every advance, not just patches.
+    adv_envs = res.get("extra_envs_applied") or {}
+    adv_args = str(res.get("extra_server_args_applied") or "").strip()
+    if adv_envs or adv_args:
+        cfg = dict(state.enablement.accepted_config or {})
+        merged = dict(cfg.get("extra_envs") or {})
+        merged.update({str(k): str(v) for k, v in adv_envs.items()})
+        cfg["extra_envs"] = merged
+        # Folded by flag keeping the last value, so this round overrides an earlier one.
+        cfg["extra_server_args"] = _dedupe_extra_server_args(
+            merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
+        )
+        cfg.setdefault("args_mode", "append")
+        state.enablement.accepted_config = cfg
+        # An advanced round is by construction not booted, so nothing
+        # observed this configuration; the tag is what keeps "verified"
+        # and "unverified" distinguishable at all.
+        state.enablement.accepted_config_source = "advanced_merge"
+    new_log = str(res.get("enablement_launch_log") or "").strip()
+    if new_log:
+        state.enablement.launch_log = new_log
+    state.enablement.stall_streak = 0
+    _reset_baseline_failure_backstop(state)
+
+
+def _rearm_on_no_progress(state: Any) -> str:
+    """Count the round toward the stall cap; return the stop reason it set."""
+    state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+    if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+        state.set_stop_reason("enablement_stalled")
+        return "enablement_stalled"
+    return ""

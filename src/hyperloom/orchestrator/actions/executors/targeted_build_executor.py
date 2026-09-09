@@ -18,9 +18,11 @@ This derivation must stay identical to the fallback in
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...enablement.recipe.build_inputs import build_driver_for, build_input_record
 from ...framework.build_actions import BuildResult, TargetedBuildAction
 from ...framework.stack_actions import FrameworkRuntime
 from ...framework.targeted_build import (
@@ -89,7 +91,7 @@ class TargetedBuildExecutor:
                 shared_state.pending_targeted_build = {}
                 shared_state.save(session_dir)
 
-        self._record_result(result, shared_state)
+        self._record_result(result, shared_state, action=action)
         if not result.ok:
             raise RuntimeError(
                 f"targeted_build failed: failure_class={result.failure_class!r}"
@@ -98,12 +100,26 @@ class TargetedBuildExecutor:
         return result.to_state()
 
     @staticmethod
-    def _record_result(result: Any, shared_state: Any) -> None:
-        """Append the build result to the manifest; record failure carrier."""
+    def _record_result(result: Any, shared_state: Any, *, action: Any = None) -> None:
+        """Append the build result to the manifest; record failure carrier.
+
+        The inputs are recorded here because this is the one point where the
+        action and the result are both in scope: the action's sentinel is
+        cleared on finish, so a succeeded build's own recipe is otherwise
+        unrecoverable from the row it leaves behind.
+        """
         if shared_state is None:
             return
         manifest = list(getattr(shared_state.enablement, "build_manifest", []) or [])
-        manifest.append(result.to_state())
+        row = result.to_state()
+        if action is not None:
+            row["build_driver"] = build_driver_for(action)
+            row["build_inputs"] = build_input_record(
+                action,
+                installed_versions=getattr(result, "installed_versions", {}) or {},
+                ambient_env=os.environ,
+            )
+        manifest.append(row)
         shared_state.enablement.build_manifest = manifest
         if not result.ok:
             shared_state.enablement.last_build_failure = {

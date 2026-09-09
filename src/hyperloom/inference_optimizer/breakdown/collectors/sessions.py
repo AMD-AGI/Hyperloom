@@ -33,7 +33,6 @@ from ._common import (
     _to_int,
 )
 
-
 log = logging.getLogger(__name__)
 
 
@@ -1526,55 +1525,149 @@ def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_enablement(
-    session_dir: Path,
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Collect the enablement observability section.
+#: ``EnablementRound`` fields the recipe projection and its decision read.
+_RECIPE_STATE_FIELDS: tuple[str, ...] = (
+    "active_runtime",
+    "accepted_config",
+    "accepted_config_source",
+    "accepted_stack_targets",
+    "base_sha",
+    "build_manifest",
+    "environment_closure",
+    "framework_root",
+    "installed_versions_at_keep",
+    "kept_artifacts",
+    "kept_patches",
+    "kept_stack_action",
+    "last_specialist_task_id",
+    "launch_argv_refused",
+    "launch_evidence",
+    "patch_roots",
+    "roots",
+    "setup_commands",
+    "setup_executions",
+    "source_snapshots",
+)
 
-    Covers the whole subsystem, not just the artifacts it happens to leave
-    behind: the admitted lane, the round lifecycle (dispatch / attempts / stall /
-    outcome), the boot- or eval-origin trigger, the patches and stack actions it
-    landed, the attempt runtimes it provisioned, and the targeted builds it ran.
 
-    A boot-origin round repaired by a plain source patch provisions no runtime
-    and builds nothing, so gating emission on those artifacts alone made the most
-    common kind of enablement invisible. Emission is therefore keyed on the lane
-    having done something, or on it having been explicitly turned off — with
-    ``all`` the default, "armed but never needed" is the uninteresting case and
-    stays hidden, while "opted out" explains why nothing tried to repair a run
-    that failed to establish a baseline.
+#: Reasons that specifically deny a closed dependency set. The status cannot read
+#: "verified" while one stands: pinned components are not a pinned environment,
+#: and a closure captured over the Python layer alone does not cover a build or
+#: an installer outside it.
+_CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
+    {
+        "build_inputs_incomplete",
+        "build_attempt_unjoined",
+        "environment_closure_absent",
+        "closure_scope_incomplete",
+        "setup_occurrences_unknown",
+        "setup_ledger_truncated",
+    }
+)
+
+
+def _closure_status(decision: dict[str, Any], enablement: dict[str, Any]) -> str:
+    """Return whether the recipe pins the dependency set, not merely components.
+
+    Args:
+        decision: The ``replay_sufficiency`` verdict this section carries.
+        enablement: The projected round state, read for its execution ledger.
     """
-    active_runtime_raw = _eg(state, "active_runtime")
-    attempt_runtimes_raw = _eg(state, "attempt_runtimes")
-    failure_kind = str(_eg(state, "failure_kind", "") or "")
-    build_manifest_raw = _eg(state, "build_manifest")
-    last_build_failure_raw = _eg(state, "last_build_failure")
-    kept_patches_raw = _eg(state, "kept_patches")
-    kept_stack_action_raw = _eg(state, "kept_stack_action")
+    # The ledger is the only record of which installer families ran, and the
+    # only durable one that records a failed execution, so an empty one leaves
+    # the closure's scope unobserved rather than clean.
+    if not (enablement.get("setup_executions") or []):
+        return "unverified"
+    denied = {str(r.get("code")) for r in decision.get("reasons") or []} & _CLOSURE_DENYING_CODES
+    return "unverified" if denied else "verified"
 
+
+def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Read the enablement fields the recipe contract is projected from."""
+    return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
+
+
+def _collect_recipe(
+    out: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    session_dir: Path,
+) -> None:
+    """Emit the ordered replay contract and the verdict over it.
+
+    ``recipe_steps`` is emitted only when non-empty, so a session that
+    contributed nothing emits no key at all. ``replay_sufficiency`` is emitted
+    unconditionally beside it: its own absence is the one absence that carries
+    meaning, and a consumer must read it as insufficient.
+    """
+    from hyperloom.orchestrator.enablement.recipe import build_recipe_steps, evaluate_replay_sufficiency
+    from hyperloom.orchestrator.enablement.recipe.projections import (
+        project_accepted_config,
+        project_launch_evidence,
+        project_roots,
+        project_runtime_provenance,
+        project_source_snapshots,
+    )
+
+    enablement = _recipe_state(state)
+    steps = build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
+    if steps:
+        out["recipe_steps"] = steps
+    accepted_config = project_accepted_config(enablement.get("accepted_config"))
+    if accepted_config:
+        archived = str(_eg(state, "accepted_config_path", "") or "")
+        config_path = archived or str(_eg(state, "probe_config_path", "") or "")
+        if config_path:
+            accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
+        out["accepted_config"] = accepted_config
+    evidence, argv_refused = project_launch_evidence(enablement.get("launch_evidence"))
+    out["accepted_config_source"] = str(enablement.get("accepted_config_source") or "") or None
+    out["launch_evidence"] = evidence
+    for key, value in (
+        ("roots", project_roots(enablement.get("roots"))),
+        ("source_snapshots", project_source_snapshots(enablement.get("source_snapshots"))),
+        ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
+        ("base_sha", str(enablement.get("base_sha") or "") or None),
+        ("runtime_provenance", project_runtime_provenance(enablement)),
+        ("environment_closure", enablement.get("environment_closure") or None),
+        ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
+    ):
+        if value:
+            out[key] = value
+    decision = evaluate_replay_sufficiency(
+        enablement,
+        steps=steps,
+        section=out,
+        launch_argv_refused=argv_refused or bool(enablement.get("launch_argv_refused")),
+    )
+    out["replay_sufficiency"] = decision
+    out["dependency_closure_status"] = _closure_status(decision, enablement)
+
+
+def _enablement_lane_status(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the lane's own status keys, or ``None`` when nothing is emitted.
+
+    The section exists when the lane did something or was explicitly turned off;
+    with ``all`` the default, "armed but never needed" is the case that stays
+    hidden.
+    """
     origin = str(_eg(state, "origin", "") or "")
     # eval_kind is NOT cleared on success, so it can identify an eval-origin
     # enablement even after the run succeeds and origin is reset to "".
     eval_kind = str(_eg(state, "baseline_eval_kind", "") or "")
-    # Sessions predating the flag load with the SharedState default, so that is
-    # also the right value to report for them.
+    # A state document carrying no mode is read as the SharedState default,
+    # which is the value the lane actually ran under.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
     attempts = _as_int(_eg(state, "attempts"))
     dispatched = bool(_eg(state, "inflight_task_id"))
-    have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
-    have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
-    have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
-    have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
-    have_kept_patches = isinstance(kept_patches_raw, list) and bool(kept_patches_raw)
-    # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
-    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_eval)
-    if not (engaged or mode == "off" or have_active or have_attempts or have_build_manifest or have_last_failure):
-        return {}
-
-    out: dict[str, Any] = {
+    engaged = bool(attempts > 0 or dispatched or have_eval or _eg(state, "kept_patches"))
+    provisioned = any(
+        _eg(state, name) for name in ("active_runtime", "attempt_runtimes", "build_manifest", "last_build_failure")
+    )
+    if not (engaged or mode == "off" or provisioned):
+        return None
+    return {
         "mode": mode,
         "engaged": engaged,
         "origin": "eval" if have_eval else "boot",
@@ -1585,53 +1678,60 @@ def collect_enablement(
         "validation_pending": bool(_eg(state, "validation_pending")),
         "stall_streak": _as_int(_eg(state, "stall_streak")),
     }
-    inflight_tid = str(_eg(state, "inflight_task_id", "") or "")
-    if inflight_tid:
-        out["inflight_task_id"] = inflight_tid
-    last_spec_tid = str(_eg(state, "last_specialist_task_id", "") or "")
-    if last_spec_tid:
-        out["last_specialist_task_id"] = last_spec_tid
-    reval_gen = _as_int(_eg(state, "revalidation_generation"))
-    if reval_gen:
-        out["revalidation_generation"] = reval_gen
-    reval_tid = str(_eg(state, "revalidation_task_id", "") or "")
-    if reval_tid:
-        out["revalidation_task_id"] = reval_tid
+
+
+def _collect_round_identity(out: dict[str, Any], state: dict[str, Any]) -> None:
+    """Emit the task identities and the trigger log of the current round."""
+    for key, value in (
+        ("inflight_task_id", str(_eg(state, "inflight_task_id", "") or "")),
+        ("last_specialist_task_id", str(_eg(state, "last_specialist_task_id", "") or "")),
+        ("revalidation_generation", _as_int(_eg(state, "revalidation_generation"))),
+        ("revalidation_task_id", str(_eg(state, "revalidation_task_id", "") or "")),
+    ):
+        if value:
+            out[key] = value
     # The boot-origin trigger evidence: without it a launch-failure round shows
     # no reason for having run at all.
     launch_log = str(_eg(state, "launch_log", "") or "")
     if launch_log:
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
-    if have_kept_patches:
+
+
+def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
+    """Emit what the lane landed: patches, artifacts, stack action and setup."""
+    from hyperloom.orchestrator.enablement.recipe.steps import root_ids_by_path
+
+    kept_patches_raw = _eg(state, "kept_patches")
+    if isinstance(kept_patches_raw, list) and kept_patches_raw:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
     kept_artifacts_raw = _eg(state, "kept_artifacts")
+    framework_root = str(_eg(state, "framework_root", "") or "")
     if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
+        root_ids = root_ids_by_path({"roots": _eg(state, "roots")})
         out["kept_artifacts"] = [
             {
                 "target": str(a.get("target") or ""),
                 "rel_target": str(a.get("rel_target") or ""),
                 "kind": str(a.get("kind") or ""),
+                "root_id": root_ids.get(str(a.get("root") or "") or framework_root) or None,
             }
             for a in kept_artifacts_raw
             if isinstance(a, dict) and a.get("target")
         ]
-    framework_root = str(_eg(state, "framework_root", "") or "")
     if framework_root:
         out["framework_root"] = framework_root
+    kept_stack_action_raw = _eg(state, "kept_stack_action")
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
         out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
-    candidate_refs = _eg(state, "candidate_refs")
-    if isinstance(candidate_refs, list) and candidate_refs:
-        out["candidate_refs"] = [str(r) for r in candidate_refs]
-    setup_commands = _eg(state, "setup_commands")
-    if isinstance(setup_commands, list) and setup_commands:
-        out["setup_commands"] = [str(c) for c in setup_commands]
-    localization = _eg(state, "localization_manifest")
-    if isinstance(localization, list) and localization:
-        out["localization_manifest"] = [str(p) for p in localization]
-    build_novelty = _eg(state, "build_novelty")
-    if isinstance(build_novelty, list) and build_novelty:
-        out["build_novelty"] = [str(k) for k in build_novelty]
+    for key, name, project in (
+        ("candidate_refs", "candidate_refs", str),
+        ("setup_commands", "setup_commands", str),
+        ("localization_manifest", "localization_manifest", str),
+        ("build_novelty", "build_novelty", str),
+    ):
+        raw = _eg(state, name)
+        if isinstance(raw, list) and raw:
+            out[key] = [project(v) for v in raw]
     human_review = _eg(state, "human_review_logged")
     if isinstance(human_review, list) and human_review:
         out["human_review_count"] = len(human_review)
@@ -1643,38 +1743,43 @@ def collect_enablement(
         out["setting_script"] = str(
             _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
         )
-    accepted_config = _eg(state, "accepted_config")
-    if isinstance(accepted_config, dict) and accepted_config:
-        out["accepted_config"] = {
-            "extra_server_args": str(accepted_config.get("extra_server_args") or ""),
-            "extra_envs": {str(k): str(v) for k, v in (accepted_config.get("extra_envs") or {}).items()},
-        }
-    if have_eval:
-        out["trigger_kind"] = eval_kind
-        out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)
-        out["accuracy_floor"] = float(_eg(state, "accuracy_floor", 0.0) or 0.0)
-        out["observed_task"] = str(_eg(state, "observed_task", "") or "")
-        out["observed_metric"] = str(_eg(state, "observed_metric", "") or "")
-        out["eval_contract_fingerprint"] = str(_eg(state, "eval_contract_fingerprint", "") or "")
-        probe_cfg = str(_eg(state, "probe_config_path", "") or "")
-        if probe_cfg:
-            out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
-        evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
-        if evidence:
-            out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
+
+
+def _collect_eval_trigger(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
+    """Emit the eval-origin trigger the round was opened against."""
+    out["trigger_kind"] = str(_eg(state, "baseline_eval_kind", "") or "")
+    out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)
+    out["accuracy_floor"] = float(_eg(state, "accuracy_floor", 0.0) or 0.0)
+    out["observed_task"] = str(_eg(state, "observed_task", "") or "")
+    out["observed_metric"] = str(_eg(state, "observed_metric", "") or "")
+    out["eval_contract_fingerprint"] = str(_eg(state, "eval_contract_fingerprint", "") or "")
+    probe_cfg = str(_eg(state, "probe_config_path", "") or "")
+    if probe_cfg:
+        out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
+    evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
+    if evidence:
+        out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
+
+
+def _collect_runtimes_and_builds(out: dict[str, Any], state: dict[str, Any]) -> None:
+    """Emit the runtimes the lane provisioned and the targeted builds it ran."""
+    active_runtime_raw = _eg(state, "active_runtime")
+    have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""
     if have_active:
         out["active_runtime"] = _runtime_summary(active_runtime_raw, promoted=True)
-    if have_attempts:
+    attempt_runtimes_raw = _eg(state, "attempt_runtimes")
+    if isinstance(attempt_runtimes_raw, list) and attempt_runtimes_raw:
         out["attempt_runtimes"] = [
             _runtime_summary(r, promoted=(str(r.get("venv_root") or "") == active_root))
             for r in attempt_runtimes_raw
             if isinstance(r, dict)
         ]
+    failure_kind = str(_eg(state, "failure_kind", "") or "")
     if failure_kind:
         out["failure_kind"] = failure_kind
-    # targeted-build attempt history
-    if have_build_manifest:
+    build_manifest_raw = _eg(state, "build_manifest")
+    if isinstance(build_manifest_raw, list) and build_manifest_raw:
         build_attempts = [
             _build_attempt_summary(e)
             for e in build_manifest_raw
@@ -1683,9 +1788,33 @@ def collect_enablement(
         if build_attempts:
             out["build_attempts"] = build_attempts
             out["build_attempt_count"] = len(build_attempts)
-    if have_last_failure:
+    last_build_failure_raw = _eg(state, "last_build_failure")
+    if isinstance(last_build_failure_raw, dict) and last_build_failure_raw:
         out["last_build_failure"] = {
             "failure_class": str(last_build_failure_raw.get("failure_class") or ""),
             "failure_summary": str(last_build_failure_raw.get("failure_summary") or ""),
         }
+
+
+def collect_enablement(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the enablement observability section.
+
+    Covers the whole subsystem, not just the artifacts it happens to leave
+    behind: the admitted lane, the round lifecycle (dispatch / attempts / stall /
+    outcome), the boot- or eval-origin trigger, the patches and stack actions it
+    landed, the attempt runtimes it provisioned, and the targeted builds it ran.
+    """
+    out = _enablement_lane_status(state)
+    if out is None:
+        return {}
+    _collect_round_identity(out, state)
+    _collect_landed_stack(out, state, session_dir=session_dir)
+    if out["origin"] == "eval":
+        _collect_eval_trigger(out, state, session_dir=session_dir)
+    _collect_runtimes_and_builds(out, state)
+    _collect_recipe(out, state, session_dir=session_dir)
     return out
