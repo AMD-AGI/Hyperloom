@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Action-executor wiring for the CLI."""
+"""Action-executor wiring for the CLI.
+
+Holds the declarative real-executor table, the specialist / dynamic-action
+executor factories, and ``_register_executors`` which wires everything onto
+a live :class:`Coordinator`. Imports from the orchestrator packages only — it
+must not import ``cli`` (one-way dependency).
+"""
 
 from __future__ import annotations
 
@@ -25,7 +31,7 @@ from hyperloom.orchestrator.actions.executors.targeted_build_executor import Tar
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
-from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -34,7 +40,8 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 log = logging.getLogger(__name__)
 
 
-# Declarative action_kind -> ExecutorFn map.
+# Declarative action_kind -> ExecutorFn map. Keep in sync with
+# session_paths._RUNS_ACTIONS (not enforced by a test).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
@@ -42,7 +49,8 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
     "profile": profile_executor,
     "explore": explore_executor,
-    # conc_sweep: the Coordinator-internal CONC-ladder benchmark, and the only sweep there is.
+    # conc_sweep: the Coordinator-internal CONC-ladder benchmark, and the only
+    # sweep there is.
     "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
@@ -57,7 +65,25 @@ def _build_specialist_executor(
     session_dir: Path,
     knowledge_plane: Any,
 ) -> "Callable[[Any], Awaitable[dict]]":
-    """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a SpecialistRunner)."""
+    """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a
+    SpecialistRunner). Production uses the subprocess dispatcher, spawning the
+    agent CLI the deployment's credentials can drive (``claude`` on the Anthropic
+    side, ``codex`` on the OpenAI side) in a per-task worktree.
+    Explicit in-process dispatch uses the matching agent SDK backend.
+
+    Args:
+        args: Parsed CLI arguments (specialist model, turns, dispatch mode).
+        session_dir: The current session directory.
+        knowledge_plane: The live KnowledgePlane used to wire MCP config.
+
+    Returns:
+        Callable[[Any], Awaitable[dict]]: An async executor that runs a
+        specialist and returns a result envelope dict.
+
+    Raises:
+        RuntimeError: If subprocess dispatch selects Codex but no Codex runtime
+            is installed.
+    """
     import shutil
 
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
@@ -74,10 +100,9 @@ def _build_specialist_executor(
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
-    # Root the specialist worktree at the set the prompt + PolicyGate trust.
-    framework_source_roots = tuple(resolve_source_file_allowlist())
-    # Resolve the agent CLI once here so the backend, its executable and its model are chosen together and a later
-    # dispatch cannot disagree with them.
+    framework_source_roots = tuple(resolve_kernel_search_roots())
+    # Resolve the agent CLI once here so the backend, its executable and its
+    # model are chosen together and a later dispatch cannot disagree with them.
     agent_backend = resolve_specialist_agent_backend()
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
     selected_model = specialist_override or (
@@ -108,8 +133,8 @@ def _build_specialist_executor(
         )
 
     if use_subprocess:
-        # Operator --specialist-mcp-config wins; else auto-generate one from the live KnowledgePlane so the subprocess
-        # has the PR Monitor MCP wired.
+        # Operator --specialist-mcp-config wins; else auto-generate one from the
+        # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
         mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
         if mcp_config_path is None and knowledge_plane is not None:
             try:
@@ -122,7 +147,8 @@ def _build_specialist_executor(
             )
             if generated is not None:
                 mcp_config_path = str(generated)
-        # This setting controls the Claude runtime only.
+        # This setting controls the Claude runtime only. Codex containment is
+        # resolved independently through the canonical sandbox policy.
         specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
         sub_config_kwargs: dict[str, Any] = {
             "agent_backend": agent_backend,
@@ -144,7 +170,14 @@ def _build_specialist_executor(
     else:
 
         def _backend_factory(domain: Any) -> Any:
-            """Build the selected in-process agent SDK backend."""
+            """Build the selected in-process agent SDK backend.
+
+            Args:
+                domain: The specialist domain requesting a backend.
+
+            Returns:
+                A configured Claude or Codex Agent SDK backend.
+            """
             if agent_backend == AGENT_BACKEND_CODEX:
                 from hyperloom.orchestrator.roles.codex_agent import CodexAgentBackend
 
@@ -161,8 +194,8 @@ def _build_specialist_executor(
                 model=selected_model,
                 max_turns_default=max_turns,
                 allowed_intents=SPECIALIST_INTENTS,
-                # Same label the subprocess dispatch mode reports, so switching modes does not move this spend between
-                # components.
+                # Same label the subprocess dispatch mode reports, so switching
+                # modes does not move this spend between components.
                 attribution_component="specialist",
                 attribution_operation="run_agent",
             )
@@ -174,7 +207,17 @@ def _build_specialist_executor(
         )
 
     async def _executor(ctx: Any) -> dict:
-        """Adapter SubAgentRunner.run_task -> SpecialistRunner.run."""
+        """Adapter SubAgentRunner.run_task -> SpecialistRunner.run. Always
+        returns a dict (even on failure); runner_status preserves the
+        SpecialistRunResult distinctions for breakdown analytics.
+
+        Args:
+            ctx: The action context passed by ``SubAgentRunner.run_task``.
+
+        Returns:
+            dict: A result envelope with runner status, task/domain ids,
+            transcript paths, and any allocated GPU ids.
+        """
         run_result = await runner.run(ctx)
         return {
             "runner_status": run_result.status,
@@ -201,7 +244,18 @@ def _register_executors(
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
-    """Wire all available action executors onto ``coordinator``: the _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors, and the optional specialist executor."""
+    """Wire all available action executors onto ``coordinator``: the
+    _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors,
+    and the optional specialist executor.
+
+    Kernel-owned actions get no executor: they are REQUEST-only.
+
+    Args:
+        coordinator: The live Coordinator to register executors on.
+        compare_against_gpu: Optional GPU type for the target-analysis executor.
+        session_dir: Optional session directory passed to executors.
+        specialist_executor: Optional specialist executor to register.
+    """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
 
@@ -216,7 +270,8 @@ def _register_executors(
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
 
-    # IntegratePatchExecutor: applies specialist worktree patches, benches, decides KEEP/REVERT.
+    # IntegratePatchExecutor: applies specialist worktree patches, benches,
+    # decides KEEP/REVERT.
     coordinator.sub.register_executor(
         "integrate_patch",
         IntegratePatchExecutor(session_dir=session_dir),
@@ -224,14 +279,17 @@ def _register_executors(
 
     # FRAMEWORK per-candidate executor — Coordinator-internal only.
 
-    # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10% watermark crossing, so always
-    # registered.
+    # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%
+    # watermark crossing, so always registered.
     coordinator.sub.register_executor(
         "roofline",
         make_roofline_executor(shared_state=coordinator.shared_state),
     )
 
-    # targeted_build: off-loop compiled-component builds.
+    # targeted_build: off-loop compiled-component builds.  Coordinator-internal
+    # only (in INTERNAL_ONLY_ACTION_NAMES); dispatched by the enablement phase,
+    # not proposed by LLM agents.  The executor runs via run_task_registered so
+    # cancel_inflight_actions can stop it at shutdown or on a spent budget.
     coordinator.sub.register_executor(
         "targeted_build",
         TargetedBuildExecutor(),

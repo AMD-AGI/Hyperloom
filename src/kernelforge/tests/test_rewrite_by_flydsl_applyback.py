@@ -17,24 +17,20 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 
 @pytest.fixture(autouse=True)
-def isolated_agent_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry."""
-    agent_registry.discover_agent_providers()
-    monkeypatch.setattr(
-        agent_registry,
-        "_providers",
-        dict(agent_registry._providers),
-    )
-    monkeypatch.setattr(
-        agent_registry,
-        "_plugin_errors",
-        dict(agent_registry._plugin_errors),
-    )
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 @pytest.fixture
-def available_agent_provider(isolated_agent_provider_registry):
-    """Register one available provider so ``auto`` backend selection resolves."""
+def available_agent_provider(isolated_provider_registry):
+    """Register one available provider so ``auto`` backend selection resolves.
+
+    ``Config.agent_backend`` defaults to ``auto``, and both built-in providers
+    report themselves unavailable unless their optional SDK is installed, so a
+    test that reaches provider selection has to supply an available provider
+    itself instead of inheriting whichever one another test left behind. Every
+    caller replaces backend construction, so the factory only has to exist.
+    """
 
     def factory(runtime):
         """Refuse construction; callers monkeypatch create_registered_backend."""
@@ -238,7 +234,8 @@ def test_applyback_failure_publishes_no_canonical_result(tmp_path, monkeypatch):
 
     assert result.ok is False
     assert "no repository changes" in result.error
-    # The standalone best is neither republished as an apply-back result nor echoed back as the framework best commit.
+    # The standalone best is neither republished as an apply-back result nor
+    # echoed back as the framework best commit.
     assert result.best_commit == ""
     assert result.canonical_result_path == ""
     namespace = repo / "forge_experiments" / "rewrite_applyback"
@@ -557,8 +554,10 @@ def test_an_abnormal_agent_end_is_not_mistaken_for_a_finished_integration(
     available_agent_provider,
     end_reason,
 ):
-    # A turn cap or an SDK error leaves the worktree at whatever partial state the agent reached -- routinely "kernel
-    # swapped, dispatch not yet rewired", which passes host validation and every gate after it.
+    # A turn cap or an SDK error leaves the worktree at whatever partial state
+    # the agent reached -- routinely "kernel swapped, dispatch not yet rewired",
+    # which passes host validation and every gate after it. Only the end reason
+    # separates that from a finished integration.
     repo, _base, spec = _repo_spec(tmp_path)
     monkeypatch.setattr(
         applyback,

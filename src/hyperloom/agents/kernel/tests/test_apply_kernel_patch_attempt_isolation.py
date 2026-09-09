@@ -23,7 +23,6 @@ def _apply(tmp_path: Path, target: Path, marker: str, kernel_id: str) -> dict:
         backup_root=tmp_path / "backup",
         kernel_id=kernel_id,
         skip_rebuild=True,
-        allow_unknown_target=True,
     )
 
 

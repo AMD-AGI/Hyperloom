@@ -5,10 +5,24 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build (and cache) a kernel-name -> source-file index for the v2 resolver."""
+"""Build (and cache) a kernel-name -> source-file index for the v2 resolver.
+
+The index answers "which native source file (and line) defines kernel
+``<base_name>`` in the *currently installed* tree?". It is built once per
+container by scanning the discovered ``csrc`` dirs for ``__global__`` kernel
+definitions, and cached keyed by a version fingerprint so later runs are ~free.
+
+``symbol_index`` maps a base kernel name (the demangled ``__global__`` identifier)
+to the list of ``{file, line, framework}`` records that define it. Finding the kernel
+wherever the installed version put it is what makes moves/renames self-healing.
+
+Triton/Python launchers (``.py``) are intentionally NOT indexed here; the
+resolver resolves those lazily via ``ast`` (vLLM ships thousands of ``.py``).
+"""
 
 from __future__ import annotations
 
+import ast
 import getpass
 import json
 import logging
@@ -21,19 +35,125 @@ from pathlib import Path
 
 try:  # package import (TraceLens route / tests)
     from . import source_env
-except ImportError:  # flat top-level import (bypass route puts tools/ on sys.path)
+except ImportError:  # flat top-level import (tools/ on sys.path)
     import source_env  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 
-# ``FrameworkRoot`` is referenced via the module (``source_env.FrameworkRoot``) to keep a single import style for
-# ``source_env`` across both branches above.
+# ``FrameworkRoot`` is referenced via the module (``source_env.FrameworkRoot``) to
+# keep a single import style for ``source_env`` across both branches above.
 
-# Native source extensions to scan.
+# Native source extensions to scan, and the editability filter's native set (one
+# and the same): a ``__global__`` def indexed from an extension
+# ``is_editable_source`` would later reject as non-editable is dead weight, so the
+# scan set and the editability set are a single tuple.
 _NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h")
 
-# --- kernel-definition scanning --------------------------------------------- A definition head is ``__global__``
-# <attrs / return type> NAME ( params ).
+
+def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool:
+    """Return whether ``path`` is a source we can route a kernel rewrite at.
+
+    Editable == native device code (``.cu``/``.cuh``/``.hip``/``.h``) or a
+    repo-resident Triton/TileLang ``.py``. Generated Triton is excluded
+    (``triton_inductor_generated`` kind and any ``torchinductor`` / ``/tmp/``
+    path).
+
+    Args:
+        path: Candidate source path (from a trace ``kernel_file`` or the finder).
+        kernel_kind: Optional kernel-kind hint.
+
+    Returns:
+        ``True`` when the path is an editable source, else ``False``.
+    """
+    if not path:
+        return False
+    low = path.lower()
+    if low.endswith(_NATIVE_EXTS):
+        return True
+    if low.endswith(".py"):
+        if kernel_kind == "triton_inductor_generated":
+            return False
+        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
+            return False
+        return True
+    return False
+
+
+# --- Triton .py AST pinning -------------------------------------------------
+# Triton decorators marking a device-kernel def (``@triton.jit`` / ``@jit`` and
+# the autotune/heuristics wrappers that sit on top of a jit'd kernel).
+_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
+
+
+def _is_triton_kernel_def(node: ast.AST) -> bool:
+    """Return whether an AST function node carries a Triton kernel decorator."""
+    for dec in getattr(node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = getattr(target, "attr", None) or getattr(target, "id", None)
+        if name in _TRITON_DECORATORS:
+            return True
+    return False
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Reduce a device kernel symbol to a bare identifier core for matching.
+
+    Triton device symbols often wrap the ``@triton.jit`` function name with a
+    leading ``triton_``/``_`` prefix and a trailing autotune/hash suffix
+    (e.g. ``_fwd_kernel_0d1d2``). Strip the common decorations so a fuzzy match
+    against the def name has a chance.
+    """
+    core = re.sub(r"[^0-9A-Za-z_].*$", "", str(symbol or "").strip())
+    core = re.sub(r"_+\d[\dA-Za-z]*$", "", core)  # drop trailing autotune/hash suffix
+    return core.strip("_").lower()
+
+
+def triton_def_line(py_path: str, *, func: str = "", symbol: str = "", require_name_match: bool = False) -> int | None:
+    """Find a Triton kernel's ``def`` line in a ``.py`` via AST (no import).
+
+    Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
+    name matches the normalized device ``symbol`` (exact then substring); (3) the
+    sole ``@triton.jit`` def when unambiguous and ``require_name_match`` is ``False``.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+
+    jit_defs: dict[str, int] = {}
+    all_defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_defs.setdefault(node.name, node.lineno)
+            if _is_triton_kernel_def(node):
+                jit_defs.setdefault(node.name, node.lineno)
+
+    if func and func in all_defs:
+        return all_defs[func]
+
+    core = _normalize_symbol(symbol)
+    if core:
+        for name, line in jit_defs.items():
+            if name.lower() == core:
+                return line
+        for name, line in jit_defs.items():
+            low = name.lower()
+            if core in low or low in core:
+                return line
+
+    if not require_name_match and len(jit_defs) == 1:
+        return next(iter(jit_defs.values()))
+    return None
+
+
+# --- kernel-definition scanning ---------------------------------------------
+# A definition head is ``__global__`` <attrs / return type> NAME ( params ).
+# The tricky part is attributes that carry their own parentheses -- notably
+# ``__launch_bounds__(NUM_THREADS)`` (on ~40% of aiter kernels) and
+# ``__attribute__((...))``. A naive ``__global__[^()]*?NAME(`` regex stops at the
+# attribute's ``(`` and captures the *attribute* as the kernel name. So we scan
+# token by token from ``__global__``, skip any attribute call (balanced parens),
+# and take the first remaining identifier that is directly followed by ``(``.
 _GLOBAL_TOKEN_RE = re.compile(r"\b__global__\b")
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 _ATTR_KEYWORDS = frozenset(
@@ -55,7 +175,13 @@ def _skip_balanced_parens(text: str, open_pos: int) -> int:
 
 
 def _iter_global_defs(text: str):
-    """Yield ``(name, name_pos)`` for each ``__global__`` kernel *definition*."""
+    """Yield ``(name, name_pos)`` for each ``__global__`` kernel *definition*.
+
+    Only definitions (a parameter list immediately followed by a ``{`` body) are
+    yielded. Forward declarations (``... );``), and ``__global__`` text living
+    inside comments or string literals, are rejected so the index never points a
+    rewrite at a header declaration or dead code.
+    """
     n = len(text)
     for gm in _GLOBAL_TOKEN_RE.finditer(text):
         pos = gm.end()
@@ -77,8 +203,10 @@ def _iter_global_defs(text: str):
                 if ident in _ATTR_KEYWORDS:
                     pos = _skip_balanced_parens(text, after)
                     continue
-                # Definition, not a declaration: the first non-space character after the matching ``)`` must open a
-                # body ``{``.
+                # Definition, not a declaration: the first non-space character
+                # after the matching ``)`` must open a body ``{``. A ``;`` (fwd
+                # decl) or anything else (a match inside a comment/string) is
+                # skipped -- this ``__global__`` yields no name.
                 cursor = _skip_balanced_parens(text, after)
                 while cursor < n and text[cursor].isspace():
                     cursor += 1
@@ -152,7 +280,13 @@ def build_index(frameworks: dict[str, source_env.FrameworkRoot]) -> SourceIndex:
 
 # --- cache ------------------------------------------------------------------
 def _cache_path(fingerprint: str) -> Path:
-    """Cache file path (dir from ``$HYPERLOOM_KSI_CACHE_DIR`` or a temp subdir)."""
+    """Cache file path (dir from ``$HYPERLOOM_KSI_CACHE_DIR`` or a temp subdir).
+
+    When falling back to the system temp root (typically a shared, world-writable
+    ``/tmp`` on a multi-user host), the subdir is scoped to the current user and
+    created owner-only (0o700), so users cannot collide on or shadow each other's
+    cache. An explicit ``$HYPERLOOM_KSI_CACHE_DIR`` is used verbatim.
+    """
     raw = os.environ.get("HYPERLOOM_KSI_CACHE_DIR", "").strip()
     if raw:
         d = Path(raw)
@@ -169,6 +303,7 @@ def _cache_path(fingerprint: str) -> Path:
             os.chmod(d, 0o700)
     except OSError:
         # Best-effort: the on-disk index cache is an optimization, not required.
+        # If the dir can't be created, _save_cache no-ops and the index rebuilds.
         pass
     return d / f"ksi_{fingerprint}.json"
 
@@ -198,12 +333,21 @@ def _save_cache(index: SourceIndex) -> None:
         log.debug("kernel index: cache write failed (%s): %s", index.fingerprint, exc)
 
 
-# Process-level singleton for the no-argument (production) call.
+# Process-level singleton for the no-argument (production) call. The agent path
+# otherwise re-runs ``discover_frameworks()`` + ``fingerprint()`` + ``json.load``
+# on every resolve; memoizing here makes "built once per container, later resolves
+# ~free" true.
 _PROCESS_INDEX: SourceIndex | None = None
 
 
 def load_or_build(frameworks: dict[str, source_env.FrameworkRoot] | None = None) -> SourceIndex:
-    """Return a cached index for the current versions, or build + cache one."""
+    """Return a cached index for the current versions, or build + cache one.
+
+    On the no-argument production path the result is memoized in-process, so
+    repeated resolves within one run do not re-discover frameworks or re-read the
+    on-disk cache. ``build_ms`` is ``0.0`` on a cache hit and the real build time
+    on a miss.
+    """
     global _PROCESS_INDEX
     if frameworks is None and _PROCESS_INDEX is not None:
         return _PROCESS_INDEX
@@ -265,4 +409,4 @@ if __name__ == "__main__":
     raise SystemExit(_main())
 
 
-__all__ = ["SourceIndex", "build_index", "load_or_build"]
+__all__ = ["SourceIndex", "build_index", "is_editable_source", "load_or_build", "triton_def_line"]

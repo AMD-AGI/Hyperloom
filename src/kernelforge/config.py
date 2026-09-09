@@ -50,11 +50,13 @@ def _env_json_object(name: str) -> dict:
 class Config:
     """Runtime configuration loaded from environment + optional overrides."""
 
-    # GPU environment ROCm compilation target.
+    # GPU environment
+    # ROCm compilation target.
     gpu_target: str = "gfx942"
     # Hardware model used in KB identities.
     gpu_type: str = "mi355x"
-    # System owning the candidate stream this run files under; a producer has its own index in the KB identity scheme.
+    # System owning the candidate stream this run files under; a producer has its
+    # own index in the KB identity scheme. Empty means the forge-loop's own.
     producer: str = ""
 
     # Workspace where kernel source trees live
@@ -70,31 +72,51 @@ class Config:
     agent_precheck: bool = True
     agent_fallback_provider: str = "claude"
     agent_options: dict = field(default_factory=dict)
-    # Provider conversation-turn ceiling.
+    # Provider conversation-turn ceiling. Kept HIGH and used only as a runaway
+    # backstop: the intended per-session stop is the in-session gate's block
+    # budget (max_blocks), which ends the session on a clean, resumable path.
+    # Claude enforces this in the SDK and preserves the resume handle when the
+    # cap raises; providers without a native turn cap rely on their timeout and
+    # the same block budget.
     max_turns: int = 500
 
     # Paths (derived)
     project_root: Path = field(default_factory=default_project_root)
     experiments_dir: Path = field(default=None)
-    # There is no `knowledge_dir` here any more.
+    # There is no `knowledge_dir` here any more. It used to resolve the packaged
+    # `data/knowledge_base` tree, which no caller ever read; the tree is gone and
+    # the field went with it.
+    # Curated per-backend knowledge tree injected into the forge-loop system
+    # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)
 
     # Bounded scratch measurement for the read-only planning specialists (see
-    # orchestrator.specialists.SpecialistProbeConfig).
+    # orchestrator.specialists.SpecialistProbeConfig). On by default: a
+    # specialist that can only argue about a dispatch constant is the failure
+    # this answers, and the probe's own budgets are what make it safe. The two
+    # budgets are the analysis PHASE's, shared by every specialist of the round.
     specialist_probe: bool = True
     specialist_probe_max: int = 6
     specialist_probe_budget_sec: float = 600.0
-    # Where the round scratch trees are created.
+    # Where the round scratch trees are created. Empty derives it from
+    # experiments_dir; it must be absolute -- a relative value would resolve
+    # against whatever the process CWD happens to be -- and it must lie outside
+    # the canonical workspace, which is the one place the probe refuses to run.
     specialist_probe_scratch_root: str = ""
 
-    # Experience storage. gbrain_url/gbrain_token remain compatibility fields for the broader remote knowledge index
-    # and are populated only in remote mode.
+    # Experience storage. gbrain_url/gbrain_token remain compatibility fields for
+    # the broader remote knowledge index and are populated only in remote mode.
     gbrain_url: str = field(default="")
     gbrain_token: str = field(default="")
     knowledge_config: KnowledgeConfig | None = field(default=None)
 
-    # Experimental / off by default: inject framework/mori/ into the forge-loop knowledge block alongside
-    # framework/aiter/.
+    # Experimental / off by default: inject framework/mori/ into the forge-loop
+    # knowledge block alongside framework/aiter/. Not wired to any CLI flag yet
+    # (ablation-only knob) — set via KERNELFORGE_INCLUDE_MORI_KB=1.
+    # None means "unset, defer to the env var" -- using a plain bool here
+    # (default False) made an explicit `Config(include_mori_kb=False)` and
+    # "not specified" indistinguishable, so __post_init__ would silently
+    # overwrite an explicit False with whatever the env var said.
     include_mori_kb: bool | None = field(default=None)
 
     def __post_init__(self):
@@ -138,8 +160,10 @@ class Config:
             )
         self.gbrain_url = self.knowledge_config.gbrain_base_url
         self.gbrain_token = self.knowledge_config.gbrain_token
-        # Only fall back to the env var when the caller didn't pass an explicit value at all -- an explicit True/False
-        # (from either direct construction or `from_env(include_mori_kb=...)`) always wins over the environment.
+        # Only fall back to the env var when the caller didn't pass an
+        # explicit value at all -- an explicit True/False (from either
+        # direct construction or `from_env(include_mori_kb=...)`) always
+        # wins over the environment.
         if self.include_mori_kb is None:
             self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
 

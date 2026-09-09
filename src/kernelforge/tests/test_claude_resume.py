@@ -178,13 +178,12 @@ def test_run_does_not_pass_a_resume_option():
     assert "resume" not in captured["options"].kwargs
 
 
-def test_opus_5_uses_max_effort_adaptive_thinking_and_fallback():
+def test_opus_5_uses_max_effort_adaptive_thinking():
     captured: dict = {}
     backend = _backend(
         [_result_message(session_id="s-opus-48")],
         captured,
     )
-    backend.runtime.fallback_model = "claude-opus-4-8"
     policy = AgentToolPolicy(
         read=True,
         write=True,
@@ -205,7 +204,6 @@ def test_opus_5_uses_max_effort_adaptive_thinking_and_fallback():
 
     kwargs = captured["options"].kwargs
     assert kwargs["model"] == "claude-opus-5"
-    assert kwargs["fallback_model"] == "claude-opus-4-8"
     assert kwargs["effort"] == "max"
     assert kwargs["thinking"] == {"type": "adaptive"}
 

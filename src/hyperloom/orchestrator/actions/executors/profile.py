@@ -793,10 +793,10 @@ class ProfileExecutor(BaselineExecutor):
             log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
             return ""
 
-        from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+        from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
         try:
-            roots = list(resolve_source_file_allowlist())
+            roots = list(resolve_kernel_search_roots())
         except Exception:  # noqa: BLE001 - attribution is advisory
             roots = []
         probe_env = _evidence.build_probe_env(

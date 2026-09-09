@@ -77,7 +77,6 @@ class AgentRuntimeConfig:
 
     provider: str
     model: str
-    fallback_model: str = ""
     executable: str = ""
     timeout_sec: int = 1800
     reasoning_effort: str = "high"

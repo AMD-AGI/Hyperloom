@@ -1187,6 +1187,63 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_explore_no_eval_disables_magpie_warmup_and_decision(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Session ``--no-eval`` turns Magpie RUN_EVAL off for every explore round."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.eval_disabled = True
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-session-noeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "session_noeval",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-session-noeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert seen
+    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
+    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+
+
+@pytest.mark.asyncio
 async def test_explore_cold_decision_keeps_eval(
     sub_agent_runner,
     tmp_path,

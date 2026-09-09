@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import patch_integrate_patch_allowlist
+from .conftest import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
@@ -46,7 +46,7 @@ index 0000000..1111111 100644
 
 @pytest.fixture(autouse=True)
 def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -145,6 +145,8 @@ async def test_rejected_by_critic(tmp_path):
 @pytest.mark.asyncio
 async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     # Dispatch replays PolicyGate before queued→running (see test_dispatched_task_policy).
+    # This case still covers the executor-layer critic gate: with SharedState present
+    # but no recorded verdict, integrate_patch must refuse to apply the patch.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -169,38 +171,10 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_executor_slash_framework_root_override_rejected(tmp_path):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-
-    class _SS:
-        def get_specialist_patch_verdict(self, tid):
-            return "approve"
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": "/",
-                "apply_only": True,
-            },
-            extra={"shared_state": _SS()},
-        )
-    )
-    assert res["status"] == "apply_failed"
-    assert res["error_class"] == "framework_source_root_rejected"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
 async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch):
-    # SWSPLAT-42420 (all-or-nothing): the Critic gate must fire BEFORE setup replay / patch apply, so a forged
-    # enablement task never runs its setup_commands (no pip install / live-tree mutation) before being refused.
+    # SWSPLAT-42420 (all-or-nothing): the Critic gate must fire BEFORE setup
+    # replay / patch apply, so a forged enablement task never runs its
+    # setup_commands (no pip install / live-tree mutation) before being refused.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -249,7 +223,12 @@ def _capture_bench(captured: dict, result: dict, gate: dict):
 
 @pytest.mark.asyncio
 async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
-    """The patch bench is handed the session budget, as the other arms are."""
+    """The patch bench is handed the session budget, as the other arms are.
+
+    Its declared cap answers "how long before this counts as hung", not "how much
+    budget is left", so without the session deadline a patch benched near the end
+    of a run outlives the run itself.
+    """
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -286,7 +265,8 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
 
     assert res["status"] == "kept"
     assert captured["session_deadline_sec"] == 4242.0
-    # The expected runtime, not the backstop cap: admitting on the backstop abandons the tail of the budget.
+    # The expected runtime, not the backstop cap: admitting on the backstop
+    # abandons the tail of the budget.
     assert captured["variant_expected_sec"] == 600.0
 
 
@@ -563,9 +543,10 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, monkeypatch):
-    """A same-framework config-lever deliverable has no ``specialist:serving: framework`` provenance on its own (only
-    the cross-framework prompt path emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB write
-    still fires.
+    """A same-framework config-lever deliverable has no ``specialist:serving:
+    framework`` provenance on its own (only the cross-framework prompt path
+    emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
+    write still fires.
     """
     session = tmp_path / "s"
     session.mkdir()
@@ -724,9 +705,15 @@ def test_read_done_payload_bad_json(tmp_path):
 
 
 def _FakeVR(**kw):
-    """A real ``VariantResult`` for ``_bench_patch``."""
-    # Leave workspace empty unless a test sets it: a fake under /tmp makes _bench_patch search all of /tmp for eval
-    # sidecars under xdist.
+    """A real ``VariantResult`` for ``_bench_patch``.
+
+    Was a hand-rolled stand-in carrying ``ttft_ms`` / ``itl_ms`` -- names the
+    real dataclass does not have, copied from what the executor read while it
+    was wrong. The stand-in made the bug untestable and then broke when it was
+    fixed, so the fake is gone and the dataclass is used directly.
+    """
+    # Leave workspace empty unless a test sets it: a fake under /tmp makes
+    # _bench_patch search all of /tmp for eval sidecars under xdist.
     kw.setdefault("workspace", "")
     return variant_result(**kw)
 
@@ -836,8 +823,8 @@ async def test_bench_patch_config_not_found(tmp_path):
 
 @pytest.mark.asyncio
 async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch):
-    # An artifact-install failure with a dirty tree must restore the auto-stash; otherwise the untracked user file
-    # stays trapped in the git stash.
+    # An artifact-install failure with a dirty tree must restore the auto-stash;
+    # otherwise the untracked user file stays trapped in the git stash.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -848,7 +835,11 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     scratch = repo / "user_scratch.txt"
     scratch.write_text("user work in progress\n", encoding="utf-8")
 
-    # Force a non-empty artifact set and a failing install so the code hits the artifact_install_failed return branch.
+    # Force a non-empty artifact set and a failing install so the code hits the
+    # artifact_install_failed return branch. It must be a real _ArtifactSpec:
+    # integrate_patch inspects each spec (see _is_aiter_gemm_model_config, which
+    # reads .source/.target/.kind), so a bare placeholder object raises
+    # AttributeError before the branch under test is reached.
     def _fake_resolve(*args, **kwargs):
         spec = ip._ArtifactSpec(
             source=tmp_path / "tuned.json",
@@ -876,14 +867,27 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
 
     assert res["status"] == "apply_failed"
     assert res["error_class"] == "artifact_install_failed"
-    # The user's untracked file must be back in the working tree, not stranded in the stash.
+    # The user's untracked file must be back in the working tree, not stranded
+    # in the stash. This is the regression the fix guards against.
     assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
     assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
 
 
 @pytest.mark.asyncio
 async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypatch):
-    """A cancel unwinds the gate, so the tree it mutated must not outlive it."""
+    """A cancel unwinds the gate, so the tree it mutated must not outlive it.
+
+    The dispatcher cancels in-flight actions when the run is shutting down or
+    the session wall-clock budget is spent. ``CancelledError`` is not an
+    ``Exception``, so the gate's own revert handlers never see it: the patch
+    would stay in the framework tree, the operator's auto-stash would stay
+    unpopped, and the session would run its CLOSE phase against a tree carrying
+    an ungraded patch.
+
+    The cancel is re-raised rather than graded as a REVERT: SubAgentRunner
+    records a cancelled executor as ``cancelled``, and work the run stopped is
+    not work that failed.
+    """
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -922,7 +926,14 @@ async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, monkeypatch):
-    """The apply stage stashes and mutates the tree, then awaits, same as the gate."""
+    """The apply stage stashes and mutates the tree, then awaits, same as the gate.
+
+    Each of its failure verdicts writes a KB record before the stash restore that
+    returns it, and a cancel arrives at whatever await the action happens to be
+    at -- a spent wall-clock budget is what makes it arrive at an arbitrary one.
+    Only the gate was guarded, so this window left the operator's uncommitted
+    work in ``git stash`` for the rest of the session.
+    """
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -977,12 +988,15 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
     )
 
 
-# ---- patches_dropped_by_grounding forwarding in _no_patches ----------------
+# ---- patches_ungrounded forwarding in _no_patches --------------------------
 
 
 @pytest.mark.asyncio
-async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
-    """When all patches were grounding-dropped, the integrate result must carry ``patches_dropped_by_grounding`` so framework.py can surface it in the next round's mandate."""
+async def test_no_patches_forwards_ungrounded_patches(tmp_path, monkeypatch):
+    """When a patch could not be grounded, the integrate result must carry
+    ``patches_ungrounded`` so framework.py can surface it in the next round's
+    mandate.  Without this forwarding the field stays in done_payload and is
+    never read by _maybe_rearm_enablement."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"
@@ -992,14 +1006,14 @@ async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
         json.dumps(
             {
                 "patches_written": [],
-                "patches_dropped_by_grounding": ["target file(s) not in any framework tree: sglang_file.py"],
+                "patches_ungrounded": ["target file(s) not in any framework tree: sglang_file.py"],
                 "proposal_set": [{"name": "p1"}],
             }
         ),
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path / "fw")])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(tmp_path / "fw")])
 
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(
@@ -1013,15 +1027,15 @@ async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
     )
 
     assert res["status"] == "no_patches"
-    assert "patches_dropped_by_grounding" in res
-    drops = res["patches_dropped_by_grounding"]
-    assert isinstance(drops, list) and len(drops) == 1
-    assert "sglang_file.py" in drops[0]
+    assert "patches_ungrounded" in res
+    ungrounded = res["patches_ungrounded"]
+    assert isinstance(ungrounded, list) and len(ungrounded) == 1
+    assert "sglang_file.py" in ungrounded[0]
 
 
 @pytest.mark.asyncio
-async def test_no_patches_without_drops_has_no_grounding_key(tmp_path, monkeypatch):
-    """When there are no grounding drops the key must be absent (not an empty list)."""
+async def test_no_patches_all_grounded_has_no_ungrounded_key(tmp_path, monkeypatch):
+    """When every patch grounded, the key must be absent (not an empty list)."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"
@@ -1031,10 +1045,10 @@ async def test_no_patches_without_drops_has_no_grounding_key(tmp_path, monkeypat
         json.dumps({"patches_written": [], "proposal_set": [{"name": "p1"}]}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path / "fw")])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(tmp_path / "fw")])
 
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec", "enablement": True}))
 
     assert res["status"] == "no_patches"
-    assert "patches_dropped_by_grounding" not in res
+    assert "patches_ungrounded" not in res

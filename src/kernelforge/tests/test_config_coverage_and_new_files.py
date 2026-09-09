@@ -36,7 +36,6 @@ def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None)
         ),
         tracker=object(),
         config=object(),
-        evolver=object(),
     )
     loop._baseline_case_times = dict(baseline)
     loop._unscored_cases = set(unscored or ())

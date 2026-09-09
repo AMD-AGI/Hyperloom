@@ -475,7 +475,6 @@ class PreludePhase(PhaseHandler):
             "target_file": target,
             "source_file": target,
             "kernel_id": kernel_id,
-            "allow_unknown_target": True,
         }
 
         patch_path = Path(str(replacement or ""))

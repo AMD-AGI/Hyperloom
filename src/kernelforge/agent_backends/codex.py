@@ -36,7 +36,6 @@ log = logging.getLogger(__name__)
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 DEFAULT_CODEX_MODEL = "gpt-5.6"
-FALLBACK_CODEX_MODEL = "gpt-5.5"
 
 
 class CodexBackendError(AgentProviderError):
@@ -368,7 +367,6 @@ class CodexBackend:
         self.runtime = runtime or AgentRuntimeConfig(
             provider=self.name,
             model=DEFAULT_CODEX_MODEL,
-            fallback_model=FALLBACK_CODEX_MODEL,
             executable=codex_bin,
             sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
         )
@@ -850,7 +848,6 @@ __all__ = [
     "CodexExecutionError",
     "CodexUnavailableError",
     "DEFAULT_CODEX_MODEL",
-    "FALLBACK_CODEX_MODEL",
     "resolve_codex_cli",
     "resolve_codex_gateway",
     "resolve_codex_model",

@@ -1,7 +1,35 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-level validation of an authored fusion (Phase 4; e2e is out of scope)."""
+"""Kernel-level validation of an authored fusion (Phase 4; e2e is out of scope).
+
+forge-fuse validates at the KERNEL level, NOT full serving e2e (that is
+Hyperloom's job). The validator this module provides is:
+
+* :func:`validate_recipe` -- the fine-grained, GPU-optional KERNEL validator used
+  by the autoloop (see ``loop.py``). Given a :class:`~kernelforge.fusion.models.Recipe`
+  and an injectable :class:`KernelValidationRunner`, it runs three gates and
+  returns a :class:`~kernelforge.fusion.models.ValidationResult`:
+
+    (a) COMPILE/IMPORT -- the fused kernel module must import and, if Triton,
+        JIT-compile on this GPU arch. "Diagnosed headroom that cannot build on
+        ROCm" is a hard FAIL (e.g. reusing a framework CUDA-only op such as
+        ``fused_qk_norm_rope`` which pulls in ``cuda_bf16.h``).
+    (b) NUMERICAL PARITY vs the REAL eager op -- compared with the shared SNR
+        gate or an rtol fallback, NEVER strict allclose (bf16 + fp32-accum is
+        not bit-exact).
+    (c) MICROBENCH speedup -- ``eager_us`` vs ``fused_us``; ``kept`` iff the
+        speedup clears ``target_speedup`` and stays under this module's own
+        absolute plausibility ceiling.
+
+The GPU/import work lives entirely behind the injectable ``KernelValidationRunner``
+so the orchestration + parity math + ROCm failure-mode classification are unit
+testable WITHOUT a GPU (tests pass a fake runner). Known ROCm failure modes are
+encoded as first-class classifiers (:func:`classify_compile_error`,
+:func:`classify_bench_skip`) so the loop's experience ledger learns the right
+lesson (author Triton, not the framework CUDA op; skip the microbench when the
+Mamba backend cannot init on ROCm).
+"""
 
 from __future__ import annotations
 
@@ -25,9 +53,11 @@ from .models import Recipe, ValidationResult
 log = logging.getLogger("forge_fusion")
 
 
-# ───────────────────────── serving smoke (CUDA-graph-ON) ───────────────────── GPU hardware-exception /
-# scheduler-crash signatures a kernel-level microbench never triggers, but the REAL sglang decode CUDA-graph loop does
-# when a fused kernel uses a data-dependent grid / per-call allocation / OOB access.
+# ───────────────────────── serving smoke (CUDA-graph-ON) ─────────────────────
+# GPU hardware-exception / scheduler-crash signatures a kernel-level microbench
+# never triggers, but the REAL sglang decode CUDA-graph loop does when a fused
+# kernel uses a data-dependent grid / per-call allocation / OOB access.
+# Strips "(EngineCore pid=123) ERROR 08-15 15:32:33 [core.py:1231] " style prefixes.
 _EXC_PREFIX_RE = re.compile(
     r"^\s*(?:\([^)]*\)\s*)?(?:(?:ERROR|CRITICAL|WARNING)\s+)?"
     r"(?:\d[\d\-: ]*)?(?:\[[^\]]*\]\s*)?"
@@ -47,9 +77,10 @@ _SERVING_CRASH_MARKERS = (
     "HIP error",
     "aborting with error",
 )
-# Ready markers cover both frameworks (aligned with Hyperloom _subprocess_kill): SGLang "...fired up..." (substring of
-# the full banner) and vLLM's uvicorn/FastAPI lines. "Uvicorn running on" is included because some vLLM builds emit it
-# while "Application startup complete" can lag.
+# Ready markers cover both frameworks (aligned with Hyperloom _subprocess_kill):
+# SGLang "...fired up..." (substring of the full banner) and vLLM's uvicorn/FastAPI
+# lines. "Uvicorn running on" is included because some vLLM builds emit it while
+# "Application startup complete" can lag.
 _SERVER_READY_MARKERS = (
     "The server is fired up",
     "Application startup complete",
@@ -89,7 +120,13 @@ def _full_log_text(path: str, limit: int = 4_000_000) -> str:
 
 
 def _serving_crash_reason(server_log_tail: str) -> str:
-    """Pull the most informative GPU-fault / crash line from the server log."""
+    """Pull the most informative GPU-fault / crash line from the server log.
+
+    A fault marker is the strongest evidence and wins. Failing that, an explicit
+    exception line still says what happened -- a server that refuses to start
+    because the install needs an env var it was not given reports that plainly,
+    and reporting "no explicit GPU-fault line" instead throws the answer away.
+    """
     for line in server_log_tail.splitlines():
         if _contains_marker(line, _SERVING_CRASH_MARKERS):
             return " ".join(line.split())[:220]
@@ -100,7 +137,14 @@ def _serving_crash_reason(server_log_tail: str) -> str:
 
 
 def _explicit_fatal_error(server_log_text: str) -> str:
-    """The first exception line the server logged, without the process prefixes."""
+    """The first exception line the server logged, without the process prefixes.
+
+    First, not last: a failing engine logs its own cause and the API server then
+    logs a wrapper around it ("Engine core initialization failed. See root cause
+    above."), so the last line is reliably the least informative one. Within a
+    single traceback the frames do not match, so the first match is still the
+    exception rather than something on the way to it.
+    """
     for raw in server_log_text.splitlines():
         line = _EXC_PREFIX_RE.sub("", raw).strip()
         if _EXC_LINE_RE.match(line):
@@ -109,7 +153,13 @@ def _explicit_fatal_error(server_log_text: str) -> str:
 
 
 def serving_failure_blames_kernel(reason: str) -> bool:
-    """Whether a serving failure is evidence against the KERNEL."""
+    """Whether a serving failure is evidence against the KERNEL.
+
+    Only a GPU fault is. Everything else -- an engine that will not initialize, a
+    missing dependency, a config the install rejects -- is a soft fail that the
+    author cannot fix by re-authoring, and telling it otherwise spends the whole
+    attempt budget rewriting a kernel that was never at fault.
+    """
     return _contains_marker(reason or "", _SERVING_CRASH_MARKERS)
 
 
@@ -119,7 +169,9 @@ def _is_vllm_framework(framework: str) -> bool:
 
 KERNEL_KEEP_CHECKPOINT = "kernel_keep_checkpoint.json"
 
-# Which stage of the smoke produced the verdict.
+# Which stage of the smoke produced the verdict. The smoke knows this directly;
+# recovering it from the reason text cannot separate a boot-time HIP OOM from a
+# fused-kernel fault (both say "HIP error") or a transport error from a crash.
 SMOKE_STAGE_OK = "ok"
 SMOKE_STAGE_FRAMEWORK_MISMATCH = "framework_mismatch"
 SMOKE_STAGE_GPU_BUSY = "gpu_busy"
@@ -131,7 +183,9 @@ SMOKE_STAGE_DECODE_BENCH = "decode_bench"
 SMOKE_STAGE_DECODE_HANG = "decode_hang"
 SMOKE_STAGE_HARNESS_ERROR = "harness_error"
 
-# A GPU that actually faulted.
+# A GPU that actually faulted. These are the only signatures that mean the fused
+# kernel itself is unusable; everything else a server can print on its way down
+# (a rejected config, a missing dependency, exhausted memory) is the environment.
 _HARD_GPU_FAULT_MARKERS = (
     "HSA_STATUS_ERROR_EXCEPTION",
     "hardware exception",
@@ -140,7 +194,9 @@ _HARD_GPU_FAULT_MARKERS = (
     "device-side assert",
     "core dumped",
 )
-# Resource exhaustion.
+# Resource exhaustion. Reported through the SAME "HIP error:" / "CUDA error:"
+# channel as a fault, so it must be excluded explicitly or every OOM reads as a
+# kernel bug and discards a KEEP that parity and the microbench both passed.
 _RESOURCE_EXHAUSTION_MARKERS = (
     "out of memory",
     "outofmemory",
@@ -154,7 +210,12 @@ _RESOURCE_EXHAUSTION_MARKERS = (
 
 @dataclass(frozen=True)
 class SmokeVerdict:
-    """What the serving smoke observed, and whether it accuses the kernel."""
+    """What the serving smoke observed, and whether it accuses the kernel.
+
+    ``stage`` is where the smoke was when it stopped, and ``blames_kernel`` is
+    the attribution made at that point -- with the server log in hand, not
+    re-inferred from ``reason`` by a caller.
+    """
 
     ok: bool
     reason: str
@@ -168,14 +229,24 @@ def _looks_resource_exhausted(text: str) -> bool:
 
 
 def _is_hard_gpu_fault(text: str) -> bool:
-    """Whether the log carries real GPU-fault evidence against the kernel."""
+    """Whether the log carries real GPU-fault evidence against the kernel.
+
+    Exhaustion wins the tie: a run that died on memory is not evidence the fused
+    kernel is unsafe, whichever error channel reported it.
+    """
     if _looks_resource_exhausted(text):
         return False
     return _contains_marker(text or "", _HARD_GPU_FAULT_MARKERS)
 
 
 def classify_serving_smoke_failure(reason: str) -> str:
-    """Reason-only fallback for callers that kept no verdict."""
+    """Reason-only fallback for callers that kept no verdict.
+
+    Prefer :class:`SmokeVerdict` from :func:`serving_smoke_verdict`: this can only
+    see the message, so it recognizes explicit GPU-fault evidence and treats
+    everything else -- boot failures, OOM, probe/transport errors -- as the
+    environment, which Hyperloom's formal e2e serving is the KEEP/REVERT gate for.
+    """
     if _is_hard_gpu_fault(reason or ""):
         return "kernel_fault"
     if "decode bench timed out" in (reason or "").casefold():
@@ -184,7 +255,12 @@ def classify_serving_smoke_failure(reason: str) -> str:
 
 
 def _hip_visible_devices(gpu: str, tp: int) -> str:
-    """Devices the smoke server may use."""
+    """Devices the smoke server may use.
+
+    ``HIP_VISIBLE_DEVICES=0`` plus ``--tensor-parallel-size 8`` cannot boot a
+    session-sized model; expand a scalar GPU id into a contiguous list of ``tp``
+    devices. An already-comma-separated ``gpu`` is left as-is.
+    """
     raw = str(gpu or "0").strip() or "0"
     n = max(1, int(tp or 1))
     if "," in raw:
@@ -209,7 +285,17 @@ def _serving_smoke_launch_cmd(
     block_size: Optional[int] = None,
     max_model_len: int = 4096,
 ) -> list[str]:
-    """Framework-specific serve launch command for the serving smoke."""
+    """Framework-specific serve launch command for the serving smoke.
+
+    vLLM and SGLang have different launchers and flags; the smoke must use the one
+    matching the target framework (else e.g. a vLLM run tries ``sglang.launch_server``
+    and fails with ``ModuleNotFoundError: sglang`` before the fusion is ever tested).
+
+    ``launcher_exe`` pins the exact executable, so a run validates the install it
+    probed and edited rather than whichever one ``PATH`` happens to resolve first.
+    ``tp`` / ``block_size`` / ``max_model_len`` must match the session serving
+    command (sparse vLLM dies on the default block size 16).
+    """
     extra = [p for p in (server_extra or "").split() if p]
     tp_n = max(1, int(tp or 1))
     mml = int(max_model_len) if max_model_len else 4096
@@ -262,7 +348,13 @@ _SITES_RE = re.compile(r"on\s+(\d+)\s+sites", re.IGNORECASE)
 
 
 def pass_activation_evidence(log_text: str) -> tuple[Optional[bool], list[str]]:
-    """Did a vLLM fusion pass actually rewrite the graph, per the server log?"""
+    """Did a vLLM fusion pass actually rewrite the graph, per the server log?
+
+    Returns ``(activated, lines)``. ``activated`` is ``None`` when the log carries
+    no site-count evidence at all (the pass may not report one, or logging is not
+    verbose enough) -- that is unknown, not proof of failure. ``False`` means the
+    pass ran and matched NOTHING, which is proof the edit bought nothing.
+    """
     lines = [ln.strip() for ln in (log_text or "").splitlines() if _SITES_RE.search(ln) or "FusionPass completed" in ln]
     counts = [int(m.group(1)) for ln in lines for m in [_SITES_RE.search(ln)] if m]
     if not counts:
@@ -280,7 +372,15 @@ def _vllm_decode_probe(
     timeout_s: int,
     metrics: Optional[dict] = None,
 ) -> tuple[bool, str]:
-    """Drive concurrent decode requests against a live vLLM OpenAI server."""
+    """Drive concurrent decode requests against a live vLLM OpenAI server.
+
+    Dependency-free (stdlib ``urllib``) replacement for ``sglang.bench_serving``:
+    resolves the served model id, then issues ``/v1/completions`` requests with
+    ``max_tokens=osl`` to exercise the CUDA-graph decode loop. Some fused-kernel
+    graph crashes only trigger under real batch/concurrency, so send a real batch
+    (>=16) with bounded parallelism rather than a couple of serial calls.
+    Returns ``(ok, detail)``; ok=False on any HTTP/error or empty output.
+    """
     import json as _json
     import time as _time
     import urllib.request as _rq
@@ -320,8 +420,8 @@ def _vllm_decode_probe(
         text = (body.get("choices") or [{}])[0].get("text") or ""
         if not text:
             return False, f"completion {i} produced no output tokens"
-        # Server-reported count when available; max_tokens is the deterministic fallback (temperature 0, fixed
-        # max_tokens) so both A/B arms count alike.
+        # Server-reported count when available; max_tokens is the deterministic
+        # fallback (temperature 0, fixed max_tokens) so both A/B arms count alike.
         used = (body.get("usage") or {}).get("completion_tokens")
         tokens.append(int(used) if isinstance(used, int) and used > 0 else int(osl))
         return True, ""
@@ -354,7 +454,17 @@ def _framework_package(framework: str) -> str:
 
 
 def framework_tree_is_the_imported_one(framework_root: str, framework: str, *, _finder=None) -> tuple[bool, str]:
-    """Whether the tree the loop patched is the tree a server would import."""
+    """Whether the tree the loop patched is the tree a server would import.
+
+    The smoke launches the framework's own entry point, which imports the
+    installed package -- so when ``--framework-root`` points somewhere else, the
+    server runs stock code with the fusion flag set and comes up cleanly. That
+    is a PASS reported for a kernel that was never loaded, which is worse than a
+    failure: it certifies the one thing the smoke exists to check.
+
+    Unknown roots are not second-guessed; the check only fires when the two
+    locations are both known and different.
+    """
     if not framework_root:
         return True, ""
     pkg = _framework_package(framework)
@@ -385,203 +495,22 @@ def _installed_package_dir(pkg: str) -> str:
     return str(Path(spec.origin).parent)
 
 
-# A fusion reaches the model by being called.
-def _imported_module_aliases(tree: ast.Module) -> set[str]:
-    """Names in this file that refer to a module rather than a value."""
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                aliases.add(alias.asname or alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                # `from pkg import mod as m` -- indistinguishable from importing a value here, and treating it as a
-                # module only widens the check.
-                aliases.add(alias.asname or alias.name)
-    return aliases
-
-
-def _published_attribute_names(source: str) -> set[str]:
-    """Attribute names this file installs onto another MODULE."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    modules = _imported_module_aliases(tree)
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Attribute):
-                continue
-            base = target.value
-            if isinstance(base, ast.Name) and base.id in modules:
-                names.add(target.attr)
-    return names
-
-
-def _top_level_names(source: str) -> set[str]:
-    """Names this module defines at its top level, excluding module metadata."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            # `short = long_name` is a synonym, not a second entry point.
-            if isinstance(node.value, ast.Name):
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-    return {n for n in names if not (n.startswith("__") and n.endswith("__"))}
-
-
-def _reads_by_owner(source: str) -> dict[str, set[str]]:
-    """Names read, keyed by the top-level definition that reads them."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return {}
-    out: dict[str, set[str]] = {}
-    for node in tree.body:
-        owner = (
-            getattr(node, "name", "") if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else ""
-        )
-        bucket = out.setdefault(owner, set())
-        exported: set[str] = set()
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Assign):
-                exported |= {t.attr for t in inner.targets if isinstance(t, ast.Attribute)}
-            if isinstance(inner, ast.Attribute) and isinstance(inner.ctx, ast.Load):
-                bucket.add(inner.attr)
-            elif isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
-                bucket.add(inner.id)
-            elif isinstance(inner, ast.Call):
-                # A name as a string is only a lookup inside a call -- `getattr(mod, "op")`.
-                bucket |= {
-                    arg.value for arg in inner.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                }
-        # `other.op = mine.op` reads `op` on the right, and that read is the publish itself -- counting it would let a
-        # publisher vouch for its own symbol, which is the exact thing being tested for.
-        bucket -= exported
-    return out
-
-
-def unreached_fusion_symbols(
-    repo_root: str,
-    changed_files: list[str],
-    *,
-    pristine_dir: str = "",
-    _walk=None,
-) -> list[str]:
-    """Fusion symbols that nothing already in the model can reach."""
-    root = Path(repo_root)
-    if not repo_root or not root.is_dir() or not changed_files:
-        return []
-    changed = [Path(f) if Path(f).is_absolute() else root / f for f in changed_files]
-    changed += _authored_modules_beside(changed, root, pristine_dir)
-    changed_set = {str(p) for p in changed}
-
-    published: set[str] = set()
-    introduced: set[str] = set()
-    for path in changed:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        published |= _published_attribute_names(text)
-        introduced |= _top_level_names(text) - _baseline_names(path, root, pristine_dir)
-
-    candidates = published | introduced
-    if not candidates:
-        return []
-
-    # Who reads what, per owning definition, across the tree.
-    walk = _walk or (lambda: root.rglob("*.py"))
-    reads: list[tuple[str, str, set[str]]] = []
-    for path in walk():
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if not any(name in text for name in candidates):
-            continue
-        for owner, names in _reads_by_owner(text).items():
-            hit = names & candidates
-            if hit:
-                reads.append((str(path), owner, hit))
-
-    # A definition is a root unless it is itself one of the new symbols.
-    reached: set[str] = set()
-    changing = True
-    while changing:
-        changing = False
-        for path_str, owner, names in reads:
-            owner_is_new = owner and path_str in changed_set and owner in candidates and owner not in reached
-            if owner_is_new:
-                continue
-            new_hits = names - reached
-            if new_hits:
-                reached |= new_hits
-                changing = True
-    # The question is whether the fusion is on the execution path, not whether every name it introduced is used.
-    if reached:
-        return []
-    return sorted(candidates)
-
-
-def _authored_modules_beside(changed: list[Path], root: Path, pristine_dir: str) -> list[Path]:
-    """Fused-kernel modules the author created next to a file it edited."""
-    known = {p.resolve() for p in changed}
-    found: list[Path] = []
-    for path in changed:
-        parent = path.parent
-        if not parent.is_dir():
-            continue
-        for sibling in sorted(parent.glob("*.py")):
-            if sibling.resolve() in known:
-                continue
-            name = sibling.name.lower()
-            if "fused" not in name and "fusion" not in name:
-                continue
-            if pristine_dir:
-                with contextlib.suppress(ValueError, OSError):
-                    snap = Path(pristine_dir) / sibling.resolve().relative_to(root.resolve())
-                    if snap.is_file():
-                        continue  # predates this run
-            found.append(sibling)
-            known.add(sibling.resolve())
-    return found
-
-
-def _baseline_names(path: Path, root: Path, pristine_dir: str) -> set[str]:
-    """Top-level names this file had before authoring."""
-    if pristine_dir:
-        with contextlib.suppress(ValueError, OSError):
-            snap = Path(pristine_dir) / path.resolve().relative_to(root.resolve())
-            if snap.is_file():
-                return _top_level_names(snap.read_text(encoding="utf-8", errors="ignore"))
-    name = path.name.lower()
-    if "fused" in name or "fusion" in name:
-        return set()
-    try:
-        return _top_level_names(path.read_text(encoding="utf-8", errors="ignore"))
-    except OSError:
-        return set()
-
-
-# The engine runs in a child process whose name does not contain the launcher's command line, so a pkill written
-# against the launcher leaves it holding the card.
+# The engine runs in a child process whose name does not contain the launcher's
+# command line, so a pkill written against the launcher leaves it holding the
+# card. Observed on this hardware: 283 of 288 GiB still allocated after the
+# server was "killed".
 _ENGINE_CHILD_PATTERNS = ("VLLM::EngineCore", "EngineCore_", "sglang::scheduler")
 
 
 def _pkill(pattern: str) -> None:
-    """Kill our own processes matching ``pattern``, and no one else's."""
+    """Kill our own processes matching ``pattern``, and no one else's.
+
+    These patterns name an engine, not a run: ``VLLM::EngineCore`` matches every
+    such process on the box. Validation hosts are shared, so an unrestricted
+    pkill here reaps a colleague's serving run as readily as the one this smoke
+    just started. Scope it to the calling user; ``getuid`` is absent off POSIX,
+    where ``pkill`` is not there to be called either.
+    """
     scope = f"-u {os.getuid()} " if hasattr(os, "getuid") else ""
     subprocess.run(f"pkill -9 {scope}-f '{pattern}'", shell=True, capture_output=True)
 
@@ -603,7 +532,18 @@ def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
 
 
 def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[bool, str]:
-    """Whether the card has room for a server, before one is launched."""
+    """Whether the card has room for a server, before one is launched.
+
+    A card still held by a previous stage fails the launch with an allocator
+    error, which reads as the fused kernel crashing the server. Three runs were
+    abandoned that way -- one of them the highest-headroom model in the set --
+    after being told across every attempt that their kernel was not CUDA-graph
+    safe. Checking first costs a subprocess and turns that into a statement
+    about the machine.
+
+    An unreadable card is not treated as busy: the probe is advisory, and a
+    false alarm here would block runs on any host without ``rocm-smi``.
+    """
     probe = _probe or _free_vram_fraction
     free = probe(gpu)
     if free is None:
@@ -622,7 +562,12 @@ def serving_smoke(
     env_flags: dict,
     **kwargs,
 ) -> tuple[bool, str]:
-    """``(ok, reason)`` view of :func:`serving_smoke_verdict`."""
+    """``(ok, reason)`` view of :func:`serving_smoke_verdict`.
+
+    Kept for callers that only ask "did it serve" (the compile-pass A/B arms).
+    Anything deciding KEEP/REVERT must use the verdict instead, so the attribution
+    comes from the stage that failed rather than from this string.
+    """
     verdict = serving_smoke_verdict(model_path, env_flags, **kwargs)
     return verdict.ok, verdict.reason
 
@@ -648,7 +593,27 @@ def serving_smoke_verdict(
     block_size: Optional[int] = None,
     max_model_len: int = 4096,
 ) -> SmokeVerdict:
-    """CUDA-graph-ON serving smoke: does the fused kernel survive REAL decode?"""
+    """CUDA-graph-ON serving smoke: does the fused kernel survive REAL decode?
+
+    A fused kernel can pass the kernel-level harness (small shapes, no CUDA graph)
+    yet crash the real scheduler with a GPU hardware exception
+    (HSA_STATUS_ERROR_EXCEPTION) once it runs inside the captured decode CUDA graph
+    over varying token counts (e.g. a data-dependent grid or a per-call allocation).
+    Launches serving with the fusion env flags ON, runs a short decode probe, and
+    returns a :class:`SmokeVerdict` naming the stage that failed and whether the
+    kernel is implicated. The reason is fed back into the autoloop experience
+    ledger so the NEXT author attempt fixes the CUDA-graph bug -- but only when
+    ``blames_kernel``, because re-authoring cannot fix an environment.
+
+    ``framework`` selects the launcher/probe (``vllm`` / ``vllm-aiter`` vs ``sglang``);
+    it MUST match the target framework or the server never boots. ``launcher_exe``
+    pins WHICH install serves (else the first one on ``PATH`` wins, which need not
+    be the install that was probed and edited).
+
+    ``metrics``, when given, receives measured decode throughput plus fusion-pass
+    activation evidence, so a caller can compare two arms instead of only asking
+    "did it boot".
+    """
     import signal
     import time as _time
 
@@ -664,8 +629,9 @@ def serving_smoke_verdict(
 
     env = dict(os.environ)
     env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(gpu, tp)
-    # AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on; plain ``vllm`` keeps vLLM's own
-    # default (do NOT force AITER, or a plain-vLLM smoke silently runs a non-target path -> false PASS/FAIL).
+    # AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on;
+    # plain ``vllm`` keeps vLLM's own default (do NOT force AITER, or a plain-vLLM
+    # smoke silently runs a non-target path -> false PASS/FAIL). Matches kernelforge.gemm_tune.
     if fw == "vllm-aiter":
         env.setdefault("VLLM_ROCM_USE_AITER", "1")
     elif not is_vllm:
@@ -685,14 +651,16 @@ def serving_smoke_verdict(
         block_size=block_size,
         max_model_len=max_model_len,
     )
-    # Wrap the WHOLE harness: any failure returns a verdict instead of raising (a serving-check must NEVER crash the
-    # loop) and the server is ALWAYS killed.
+    # Wrap the WHOLE harness: any failure returns a verdict instead of raising (a
+    # serving-check must NEVER crash the loop) and the server is ALWAYS killed. Only
+    # a stage that saw a GPU fault sets ``blames_kernel``, so the ledger distills the
+    # CUDA-graph lesson exactly when re-authoring can act on it.
     server = None
     fh: object = None
     try:
         _pkill(f"vllm serve.*{port}" if is_vllm else f"sglang.launch_server.*port={port}")
-        # The launcher's children do not carry its command line, so the pattern above misses them and they keep the
-        # card allocated.
+        # The launcher's children do not carry its command line, so the pattern
+        # above misses them and they keep the card allocated.
         for child in _ENGINE_CHILD_PATTERNS:
             _pkill(child)
         _time.sleep(2)
@@ -714,8 +682,9 @@ def serving_smoke_verdict(
         while _time.time() < deadline:
             if server.poll() is not None:
                 tail = _tail_text(slog)
-                # Boot is also where CUDA graphs are captured, so a fault here does implicate the kernel -- but a
-                # rejected config or an OOM does not, and both exit through this same path.
+                # Boot is also where CUDA graphs are captured, so a fault here does
+                # implicate the kernel -- but a rejected config or an OOM does not,
+                # and both exit through this same path.
                 return SmokeVerdict(
                     False,
                     f"server exited rc={server.returncode} before ready: {_serving_crash_reason(tail)}",
@@ -748,7 +717,8 @@ def serving_smoke_verdict(
             )
             stail = _tail_text(slog)
             if metrics is not None:
-                # Read the WHOLE log: pass activation is logged at compile time, long before the tail window.
+                # Read the WHOLE log: pass activation is logged at compile time,
+                # long before the tail window.
                 activated, evidence = pass_activation_evidence(_full_log_text(slog))
                 metrics["pass_activated"] = activated
                 metrics["activation_evidence"] = evidence
@@ -760,8 +730,8 @@ def serving_smoke_verdict(
                     _is_hard_gpu_fault(stail),
                 )
             if not probe_ok:
-                # The server is up and unfaulted, so this is the probe's own transport/response failure, not the
-                # kernel misbehaving.
+                # The server is up and unfaulted, so this is the probe's own
+                # transport/response failure, not the kernel misbehaving.
                 return SmokeVerdict(
                     False,
                     f"decode probe failed: {probe_detail}",
@@ -803,8 +773,8 @@ def serving_smoke_verdict(
                 cwd=str(_runtime_dir("serving_smoke")),
             )
         except subprocess.TimeoutExpired:
-            # A server that came up and then stopped answering is the fused kernel hanging in the decode loop; nothing
-            # in the environment stalls only here.
+            # A server that came up and then stopped answering is the fused kernel
+            # hanging in the decode loop; nothing in the environment stalls only here.
             return SmokeVerdict(
                 False,
                 "decode bench timed out (possible hang in fused kernel)",
@@ -846,16 +816,28 @@ def serving_smoke_verdict(
         _time.sleep(2)
 
 
-# ─────────────────────────── kernel-level validation ──────────────────────── Phase 4 (kernel level).
+# ─────────────────────────── kernel-level validation ────────────────────────
+# Phase 4 (kernel level). The three gates below are orchestrated by
+# ``validate_recipe`` and exercised through an injectable ``KernelValidationRunner``
+# so the decision logic is unit-testable without a GPU.
 
 # Absolute-error fallback, used only when SNR is unavailable.
 DEFAULT_RTOL = 2e-2
 DEFAULT_TARGET_SPEEDUP = 1.03
 
-# Absolute plausibility ceiling for the microbench speedup.
+# Absolute plausibility ceiling for the microbench speedup. The kernel-rewrite
+# loop dropped its equivalent bound because it measures every candidate three
+# times and can therefore judge a gain against the candidate's own noise. This
+# validator has no such luxury: the harness self-reports one ``eager_us`` and
+# one ``fused_us``, so there is no spread to compare against and nothing else
+# stands between a broken timing path -- a load-independent floor, a fused arm
+# that never ran -- and a KEEP. The highest speedup ever produced by a
+# legitimate optimization here is 5.72x.
 MAX_PLAUSIBLE_SPEEDUP = 20.0
 
-# Known ROCm compile-failure signatures.
+# Known ROCm compile-failure signatures. A framework "fused" op written for CUDA
+# pulls in CUDA-only headers/intrinsics and will NOT build on ROCm; the lesson the
+# loop must learn is "author a ROCm-native Triton kernel, do not reuse the CUDA op".
 _CUDA_ONLY_MARKERS = (
     "cuda_bf16.h",
     "cuda_fp16.h",
@@ -868,8 +850,8 @@ _CUDA_ONLY_MARKERS = (
     "mma.sync",
     "device_functions.h",
 )
-# Triton JIT/compile failures on this GPU arch (gfx942) — actionable but distinct from the CUDA-only case (the kernel
-# IS ROCm-native, it just doesn't build yet).
+# Triton JIT/compile failures on this GPU arch (gfx942) — actionable but distinct
+# from the CUDA-only case (the kernel IS ROCm-native, it just doesn't build yet).
 _TRITON_BUILD_MARKERS = (
     "out of resource",
     "shared memory",
@@ -880,13 +862,24 @@ _TRITON_BUILD_MARKERS = (
     "cannot compile",
     "no kernel image",
 )
-# The decode microbench relies on ``bench_one_batch``; on ROCm it cannot init the Mamba/SSM backend, so for hybrid
-# models the microbench must fall back / be skipped with a note rather than counting as a failure.
+# The decode microbench relies on ``bench_one_batch``; on ROCm it cannot init the
+# Mamba/SSM backend, so for hybrid models the microbench must fall back / be
+# skipped with a note rather than counting as a failure.
 _MAMBA_MARKERS = ("mamba", "causal_conv1d", "selective_scan", "ssm", "hybrid")
 
 
 def snr_db(reference: Sequence[float], test: Sequence[float]) -> Optional[float]:
-    """Signal-to-noise ratio in dB between a reference and a test signal."""
+    """Signal-to-noise ratio in dB between a reference and a test signal.
+
+    ``SNR = 10 * log10( sum(ref^2) / sum((ref - test)^2) )``. Higher is better; a
+    bit-exact match returns ``+inf``. This is the parity metric of choice because
+    bf16 storage with fp32 accumulation is NOT bit-exact — a strict ``allclose``
+    would reject numerically correct kernels, whereas the shared SNR gate accepts
+    them (fused vs eager parity typically lands at 35-60 dB).
+
+    Returns ``None`` when the inputs are empty or length-mismatched (the caller
+    treats a ``None`` metric as "no data", not as a pass).
+    """
     ref = list(reference)
     tst = list(test)
     if not ref or len(ref) != len(tst):
@@ -901,7 +894,10 @@ def snr_db(reference: Sequence[float], test: Sequence[float]) -> Optional[float]
 
 
 def max_abs_err(reference: Sequence[float], test: Sequence[float]) -> Optional[float]:
-    """Maximum absolute elementwise error between reference and test."""
+    """Maximum absolute elementwise error between reference and test.
+
+    Returns ``None`` on empty / length-mismatched inputs.
+    """
     ref = list(reference)
     tst = list(test)
     if not ref or len(ref) != len(tst):
@@ -920,7 +916,13 @@ class CompileOutcome:
 
 @dataclass
 class ParitySample:
-    """One shape's parity metrics vs the imported real eager op (gate b)."""
+    """One shape's parity metrics vs the imported real eager op (gate b).
+
+    ``snr_db`` is the primary metric; ``max_abs_err`` is the rtol fallback used
+    only when ``snr_db`` is unavailable. A runner computes these ON-DEVICE (where
+    the tensors live) so only the scalars cross the boundary; :func:`snr_db` /
+    :func:`max_abs_err` are exposed for runners (and tests) to compute them.
+    """
 
     snr_db: Optional[float] = None
     max_abs_err: Optional[float] = None
@@ -929,7 +931,11 @@ class ParitySample:
 
 @dataclass
 class BenchOutcome:
-    """Result of the microbench gate (gate c)."""
+    """Result of the microbench gate (gate c).
+
+    ``skipped`` marks a benign unavailability (e.g. the Mamba backend cannot init
+    on ROCm) — correctness still counts, but the speedup is unverified.
+    """
 
     eager_us: Optional[float] = None
     fused_us: Optional[float] = None
@@ -939,7 +945,13 @@ class BenchOutcome:
 
 @runtime_checkable
 class KernelValidationRunner(Protocol):
-    """Injectable boundary for all GPU/import work in :func:`validate_recipe`."""
+    """Injectable boundary for all GPU/import work in :func:`validate_recipe`.
+
+    Production code passes a runner that actually compiles + runs the kernel on
+    the GPU (see :class:`HarnessKernelRunner`); unit tests pass a fake so the
+    orchestration, parity math, and ROCm failure-mode classification are exercised
+    without a GPU or an LLM.
+    """
 
     def compile_check(self, recipe: Recipe) -> CompileOutcome:
         """Import the fused module and, if Triton, JIT-compile it on this arch."""
@@ -952,7 +964,13 @@ class KernelValidationRunner(Protocol):
 
 
 def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
-    """Map a compile/import error to a crisp, reusable lesson (mirrors the forge-loop experience ledger's ``_CONSTRAINT_RULES``)."""
+    """Map a compile/import error to a crisp, reusable lesson (mirrors the
+    forge-loop experience ledger's ``_CONSTRAINT_RULES``).
+
+    The CUDA-only case is first-class: a framework "fused" op authored for CUDA
+    fails to build on ROCm, and the loop must learn to author a ROCm-native Triton
+    kernel instead of reusing it.
+    """
     e = (error or "").lower()
     if any(m in e for m in _CUDA_ONLY_MARKERS):
         return (
@@ -973,7 +991,12 @@ def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
 
 
 def classify_bench_skip(reason: str) -> str:
-    """Map a microbench skip reason to a reusable note."""
+    """Map a microbench skip reason to a reusable note.
+
+    The Mamba/SSM-backend case is first-class: ``bench_one_batch`` cannot init the
+    backend on ROCm for hybrid models, so the microbench is unavailable and the
+    speedup is treated as unverified (NOT a failure) — parity remains the gate.
+    """
     r = (reason or "").lower()
     if any(m in r for m in _MAMBA_MARKERS):
         return (
@@ -985,7 +1008,14 @@ def classify_bench_skip(reason: str) -> str:
 
 
 def implausible_speedup_reason(speedup: float) -> str:
-    """Why this microbench speedup cannot be real, or \"\" when it can be."""
+    """Why this microbench speedup cannot be real, or "" when it can be.
+
+    Fusion owns this bound rather than borrowing the rewrite loop's KEEP policy:
+    the two answer different questions from different evidence, and the shared
+    import made them look like one policy until the loop, which repeats every
+    measurement, dropped its ceiling and silently took fusion's only anomaly
+    check with it.
+    """
     value = float(speedup)
     if not math.isfinite(value) or value > MAX_PLAUSIBLE_SPEEDUP:
         return f"microbench speedup {value:.6f}x exceeds the {MAX_PLAUSIBLE_SPEEDUP}x absolute plausibility ceiling"
@@ -998,7 +1028,31 @@ def _tail(text: str, n: int = 400) -> str:
 
 
 def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
-    """Whether the framework edit CALLS the fused module, or only imports it."""
+    """Whether the framework edit CALLS the fused module, or only imports it.
+
+    A fusion is delivered as two edits: a new fused-kernel module, and a wiring
+    edit that makes the framework's forward path use it. Everything downstream
+    measures only the first. The harness imports the fused entry point and times
+    it against its own eager reference, so a 37x microbench is fully explained by
+    a module that nothing calls; and the serving smoke boots the framework and
+    sends real decodes, which succeed exactly as they did before because the
+    unwired kernel never runs. Both report success for zero end-to-end gain --
+    the failure this module already names elsewhere as "a PASS reported for a
+    kernel that was never loaded, which is worse than a failure".
+
+    This is the missing wiring check, and it is deliberately static: an import
+    bound by a name that appears nowhere else in the file (the ``# noqa: F401``
+    shape an agent produces when it authors the kernel but forgets the call site)
+    cannot execute, whatever the runtime does. Everything else fails OPEN --
+    an unreadable or unparseable source, and equally a source that imports no
+    fused module at all, which is what an INLINE fusion (the fused call written
+    straight into the framework file) legitimately looks like. The gate exists
+    to catch one provable defect, not to demote a KEEP it could not inspect.
+
+    Returns:
+        ``(True, reason)`` when the fused module is referenced somewhere other
+        than its own import statement, or when the check could not run.
+    """
     from .emit import _is_fused_module_name
 
     try:
@@ -1006,8 +1060,8 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
     except (OSError, SyntaxError, ValueError) as exc:
         return True, f"unchecked ({type(exc).__name__}: {exc})"
 
-    # Names the wiring edit binds from a fused-kernel module, at any nesting depth: a lazy import inside ``forward``
-    # is a legitimate wiring style.
+    # Names the wiring edit binds from a fused-kernel module, at any nesting
+    # depth: a lazy import inside ``forward`` is a legitimate wiring style.
     bound: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -1019,11 +1073,13 @@ def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
                 if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
                     bound.add(alias.asname or alias.name.split(".")[0])
     if not bound:
-        # A fusion authored INLINE in the framework file imports nothing, and is wired by construction.
+        # A fusion authored INLINE in the framework file imports nothing, and is
+        # wired by construction. Only a bound-but-unused import is provable, so
+        # this branch fails open like the unreadable-source one above.
         return True, f"unchecked ({Path(source_file).name} imports no fused-kernel module)"
 
-    # An ``import`` statement contributes ast.alias, never ast.Name, so any Name load of a bound identifier is by
-    # construction a use outside the import.
+    # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
+    # load of a bound identifier is by construction a use outside the import.
     used = sorted(
         {
             node.id
@@ -1047,7 +1103,26 @@ def validate_recipe(
     snr_threshold_db: float = DEFAULT_SNR_THRESHOLD_DB,
     rtol: float = DEFAULT_RTOL,
 ) -> ValidationResult:
-    """Kernel-level validation of one authored fusion (gates a -> b -> c)."""
+    """Kernel-level validation of one authored fusion (gates a -> b -> c).
+
+    The gates run in order and short-circuit on the first failure, so a compile
+    failure never wastes a parity/bench run. ``kept`` is True only when the kernel
+    COMPILES, matches the eager reference (parity), AND is at least
+    ``target_speedup`` faster than eager.
+
+    Args:
+        recipe: The localized fusion plan (source of shapes, env flag, and the
+            eager-reference hint). No per-model literals are read here.
+        runner: The injectable GPU/import boundary (mock it in unit tests).
+        target_speedup: Microbench speedup required to KEEP.
+        snr_threshold_db: Numerical-parity SNR floor in dB.
+        rtol: Absolute-error fallback used only when SNR is unavailable.
+
+    Returns:
+        A :class:`~kernelforge.fusion.models.ValidationResult`. On any failure the
+        ``note`` carries a compressed error signature plus a reusable LESSON so
+        the loop's experience ledger can inject it into the next attempt.
+    """
     # ── gate (a): compile / import (+ Triton JIT on this arch) ───────────────
     comp = runner.compile_check(recipe)
     if not comp.ok:
@@ -1162,7 +1237,23 @@ def validate_recipe(
 
 
 class HarnessKernelRunner:
-    """Production :class:`KernelValidationRunner` backed by an author-written harness."""
+    """Production :class:`KernelValidationRunner` backed by an author-written harness.
+
+    The GPU/import work is genuinely environment-specific, so it is kept at the
+    process boundary: this runner executes a kernel-validation harness script (the
+    author is instructed to write a parity self-check) in a subprocess and parses a
+    single JSON object from its stdout. Unit tests never touch this class — they
+    inject a fake runner — so it is deliberately defensive and NEVER raises: a
+    missing or malformed harness degrades to a compile failure / skipped microbench
+    with an actionable note.
+
+    Harness JSON contract (one object on stdout)::
+
+        {"compiled": bool, "is_triton": bool, "error": str,
+         "parity": [{"snr_db": float|null, "max_abs_err": float|null, "label": str}],
+         "eager_us": float|null, "fused_us": float|null,
+         "skipped": bool, "skip_reason": str}
+    """
 
     def __init__(
         self,
@@ -1197,8 +1288,10 @@ class HarnessKernelRunner:
             return result
         env = dict(os.environ)
         env["HIP_VISIBLE_DEVICES"] = self.gpu
-        # The harness is authored inside the framework tree and then published to the run's output directory, so a
-        # path the author derived from ``__file__`` points somewhere else by the time it runs here.
+        # The harness is authored inside the framework tree and then published to
+        # the run's output directory, so a path the author derived from
+        # ``__file__`` points somewhere else by the time it runs here. Name the
+        # tree outright rather than leaving it to be inferred.
         if self.framework_root:
             env["FORGE_FUSION_FRAMEWORK_ROOT"] = self.framework_root
         env.update({k: str(v) for k, v in self.env_flags.items()})
@@ -1257,7 +1350,11 @@ class HarnessKernelRunner:
 
 
 def _parse_harness_json(stdout: str, stderr: str, returncode: int) -> dict:
-    """Best-effort parse of the LAST JSON object printed by the harness."""
+    """Best-effort parse of the LAST JSON object printed by the harness.
+
+    On any parse failure the harness output tail becomes a compile error so the
+    loop still learns something instead of crashing.
+    """
     for line in reversed((stdout or "").splitlines()):
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):

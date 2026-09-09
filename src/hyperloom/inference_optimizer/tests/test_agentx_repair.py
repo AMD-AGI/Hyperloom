@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -518,3 +521,555 @@ def test_an_unreadable_config_is_left_to_magpie(tmp_path, monkeypatch):
 
     assert runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=bad) is False
     assert called["deploy"] is False
+
+
+# Run the real installer block with shell executables, not the host's Python/uv.
+_FAKE_PYTHON = r"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'python|%s' "$0" >> "$FAKE_CALLS"
+printf '|%s' "$@" >> "$FAKE_CALLS"
+printf '\n' >> "$FAKE_CALLS"
+if [ "${1:-}" = -I ]; then shift; fi
+case "${1:-}" in
+  -c)
+    case "$2" in
+      *version_info*)
+        version="$(cat "$0.version")"
+        case "$version" in 3.11|3.12|3.13) exit 0 ;; *) exit 1 ;; esac ;;
+      *expanduser*|*getpwuid*) printf '%s\n' "$FAKE_USER_HOME"; exit 0 ;;
+    esac ;;
+  -)
+    source="$(cat)"
+    case "$source" in
+      *sys.base_prefix*) exit "$FAKE_PRIMARY_VENV" ;;
+      *direct_url*)
+        printf 'metadata|direct_url\n' >> "$FAKE_CALLS"
+        root="${0%/bin/python}"
+        test -f "$root/healthy" && { [ -z "${2:-}" ] || test "$(cat "$root/installed-ref")" = "$2"; }
+        exit $? ;;
+    esac ;;
+  -m)
+    [ "$2" = pip ] || exit 71
+    [ "$FAKE_PIP" = 1 ] || { printf 'ERROR: No module named pip\n' >&2; exit 72; }
+    case "$3" in
+      --version) printf 'pip 22.0 from primary\n'; exit 0 ;;
+      install)
+        for name in PIP_CONFIG_FILE PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_NO_INDEX PIP_FIND_LINKS; do
+          printf 'pip-policy|%s|%s\n' "$name" "${!name:-}" >> "$FAKE_CALLS"
+        done
+        target=''
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --target) target="$2"; shift ;; esac
+          shift
+        done
+        [ -n "$target" ] || { printf 'ERROR: refused to modify primary Python\n' >&2; exit 73; }
+        [ "$FAKE_FAILURE" != bootstrap ] || { printf 'ERROR: uv wheel download blocked\n' >&2; exit 74; }
+        mkdir -p "$target/bin"
+        cp "$FAKE_ROOT/fake-uv" "$target/bin/uv"
+        exit 0 ;;
+    esac ;;
+esac
+printf 'ERROR: unexpected Python invocation\n' >&2
+exit 75
+"""
+
+_FAKE_UV = r"""#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = --no-config ] || { printf 'ERROR: uv config files were not disabled\n' >&2; exit 79; }
+shift
+printf 'uv' >> "$FAKE_CALLS"
+printf '|%s' "$@" >> "$FAKE_CALLS"
+printf '\n' >> "$FAKE_CALLS"
+for name in UV_OFFLINE UV_PYTHON_DOWNLOADS UV_PYTHON_INSTALL_MIRROR UV_DEFAULT_INDEX UV_INDEX_URL UV_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS SSL_CERT_FILE HTTPS_PROXY; do
+  printf 'uv-policy|%s|%s\n' "$name" "${!name:-}" >> "$FAKE_CALLS"
+done
+for name in PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONPLATLIBDIR __PYVENV_LAUNCHER__ PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER UV_SYSTEM_PYTHON UV_PYTHON UV_TARGET UV_PREFIX UV_PROJECT_ENVIRONMENT UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON UV_PYTHON_PREFERENCE; do
+  [ -z "${!name:-}" ] || { printf 'ERROR: leaked %s\n' "$name" >&2; exit 80; }
+done
+printf 'uv-env|%s|%s|%s\n' "${UV_PYTHON_INSTALL_DIR:-}" "${UV_PYTHON_BIN_DIR:-}" "${UV_CACHE_DIR:-}" >> "$FAKE_CALLS"
+case "$1 $2" in
+  'python install')
+    [ "$FAKE_FAILURE" != download ] || { printf 'ERROR: managed Python download blocked\n' >&2; exit 81; }
+    mkdir -p "$UV_PYTHON_INSTALL_DIR/cpython/bin"
+    cp "$FAKE_ROOT/fake-python" "$UV_PYTHON_INSTALL_DIR/cpython/bin/python"
+    printf '3.11\n' > "$UV_PYTHON_INSTALL_DIR/cpython/bin/python.version" ;;
+  'python find') printf '%s\n' "$UV_PYTHON_INSTALL_DIR/cpython/bin/python" ;;
+  'venv '*)
+    target="${!#}"
+    mkdir -p "$target/bin"
+    [ "$FAKE_FAILURE" != venv ] || { printf 'ERROR: venv creation failed\n' >&2; exit 82; }
+    cp "$FAKE_ROOT/fake-python" "$target/bin/python"
+    printf '3.11\n' > "$target/bin/python.version" ;;
+  'pip install')
+    if [ "$FAKE_FAILURE" = slow ]; then
+      touch "$FAKE_ROOT/install-started"
+      sleep 1
+    fi
+    [ "$FAKE_FAILURE" != install ] || { printf 'ERROR: aiperf download blocked\n' >&2; exit 83; }
+    target=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in --python) target="$2"; shift ;; esac
+      shift
+    done
+    [ -n "$target" ] || exit 84
+    root="${target%/bin/python}"
+    cp "$FAKE_ROOT/fake-aiperf" "$root/bin/aiperf"
+    printf '%s\n' "$FAKE_REF" > "$root/installed-ref"
+    if [ "$FAKE_FAILURE" = metadata ]; then printf 'no-vcs\n' > "$root/installed-ref"; fi
+    touch "$root/healthy" ;;
+  *) printf 'ERROR: unexpected uv invocation\n' >&2; exit 85 ;;
+esac
+"""
+
+_FAKE_AIPERF = r"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'aiperf|%s|%s\n' "$0" "$*" >> "$FAKE_CALLS"
+[ -z "${PYTHONHOME:-}${PYTHONPATH:-}" ] || exit 86
+[ ! -f "${0%/bin/aiperf}/broken-cli" ] || exit 87
+printf 'weka-trace --scenario --benchmark-duration --api-host --api-port\n'
+"""
+
+
+@pytest.fixture
+def isolated_aiperf(tmp_path):
+    """A shell-only fixture safe on Windows and Linux, with no network access."""
+    for name, body in (("fake-python", _FAKE_PYTHON), ("fake-uv", _FAKE_UV), ("fake-aiperf", _FAKE_AIPERF)):
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    primary = bin_dir / "primary"
+    primary.write_text(_FAKE_PYTHON, encoding="utf-8", newline="\n")
+    primary.chmod(0o755)
+    (bin_dir / "primary.version").write_text("3.10", encoding="utf-8")
+
+    def run(
+        *,
+        primary_version="3.10",
+        primary_venv=False,
+        candidates=None,
+        uv_on_path=True,
+        pip=True,
+        failure="",
+        required=True,
+        mode="",
+        override=False,
+        state='"$PWD/state with spaces"',
+        home='"$PWD/home"',
+        polluted=False,
+        package_spec=None,
+        policy=None,
+        real_flock=False,
+        prepare_only=False,
+    ):
+        (bin_dir / "primary.version").write_text(primary_version, encoding="utf-8")
+        for version, actual in (candidates or {}).items():
+            candidate = bin_dir / f"python{version}"
+            candidate.write_text(_FAKE_PYTHON, encoding="utf-8", newline="\n")
+            candidate.chmod(0o755)
+            (bin_dir / f"python{version}.version").write_text(actual, encoding="utf-8")
+        uv_path = bin_dir / "uv"
+        if uv_on_path:
+            uv_path.write_text(_FAKE_UV, encoding="utf-8", newline="\n")
+            uv_path.chmod(0o755)
+        else:
+            uv_path.unlink(missing_ok=True)
+        text = repair.install_script_path().read_text(encoding="utf-8")
+        pip_gate = text[text.index("PIP_EXTRA=()") : text.index("# --- 1. inference_optimizer")]
+        block = text[text.index("# --- 2a. aiperf") : text.index("# --- 2b. Atomic-write")]
+        polluted_vars = (
+            "PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONPLATLIBDIR __PYVENV_LAUNCHER__ "
+            "PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER UV_SYSTEM_PYTHON UV_PYTHON "
+            "UV_TARGET UV_PREFIX UV_PROJECT_ENVIRONMENT UV_CONFIG_FILE "
+            "UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON UV_PYTHON_PREFERENCE"
+        )
+        policy_vars = (
+            "UV_OFFLINE UV_PYTHON_DOWNLOADS UV_PYTHON_INSTALL_MIRROR UV_DEFAULT_INDEX UV_INDEX_URL "
+            "UV_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS SSL_CERT_FILE HTTPS_PROXY PIP_CONFIG_FILE "
+            "PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_NO_INDEX PIP_FIND_LINKS"
+        )
+        runner = tmp_path / "isolated-install.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -euo pipefail",
+                    f"unset {polluted_vars} {policy_vars}",
+                    'export FAKE_ROOT="$PWD" FAKE_CALLS="${FAKE_CALLS:-$PWD/calls}" FAKE_USER_HOME="$PWD/fallback-home"',
+                    ': > "$FAKE_CALLS"',
+                    f"export FAKE_PIP={int(pip)} FAKE_FAILURE='{failure}' FAKE_REF=754356e9a39acc6cc6afb242d123bb57c3fb6f75",
+                    f"export FAKE_PRIMARY_VENV={int(primary_venv)}",
+                    'PYTHON="$PWD/bin/primary"',
+                    f"export HYPERLOOM_STATE_DIR={state}",
+                    f"export HOME={home}" if home is not None else "unset HOME",
+                    f"ONLY_AIPERF=1; AIPERF_REQUIRED={int(required)}",
+                    f"DRY_RUN={int(mode == 'dry')}; CHECK_ONLY={int(mode == 'check')}",
+                    'AIPERF_REF="$FAKE_REF"; AIPERF_REPO="https://example.test/aiperf.git"',
+                    f"AIPERF_PACKAGE_SPEC='{package_spec}'"
+                    if package_spec
+                    else 'AIPERF_PACKAGE_SPEC="aiperf @ git+${AIPERF_REPO}@$AIPERF_REF"',
+                    'AIPERF_BIN="/operator/aiperf"' if override else "unset AIPERF_BIN",
+                    'log() { printf "%s\\n" "$*"; }',
+                    'warn() { printf "%s\\n" "$*" >&2; }',
+                    'die() { warn "$*"; exit 99; }',
+                    # Hide host candidates without hiding the shell's core utilities.
+                    'command() { if [ "${1:-}" = -v ]; then case "$2" in uv|python3.11|python3.12|python3.13|aiperf) '
+                    '[ -x "$PWD/bin/$2" ] || return 1; printf "%s\\n" "$PWD/bin/$2"; return ;; esac; fi; builtin command "$@"; }',
+                    ":" if real_flock else 'flock() { printf "flock|%s\\n" "$*" >> "$FAKE_CALLS"; }',
+                    pip_gate,
+                    f"export {' '.join(name + '=polluted' for name in polluted_vars.split())}" if polluted else ":",
+                    *[f"export {name}={shlex.quote(value)}" for name, value in (policy or {}).items()],
+                    block,
+                    "ensure_aiperf",
+                    '[ "$PYTHON" = "$PWD/bin/primary" ]',
+                    '[ "${PYTHONHOME:-}" = polluted ]' if polluted else ":",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        if prepare_only:
+            return runner
+        proc = _bash(runner)
+        return proc, (tmp_path / "calls").read_text(encoding="utf-8")
+
+    return run
+
+
+def _assert_isolated_success(tmp_path, proc, calls):
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    state = tmp_path / "state with spaces"
+    assert (state / "aiperf-venv/bin/aiperf").is_file()
+    stamp = (state / "aiperf_installed_ref").read_text().splitlines()
+    assert stamp == [
+        "754356e9a39acc6cc6afb242d123bb57c3fb6f75",
+        "aiperf @ git+https://example.test/aiperf.git@754356e9a39acc6cc6afb242d123bb57c3fb6f75",
+    ]
+    installs = [line for line in calls.splitlines() if line.startswith("uv|pip|install|")]
+    assert len(installs) == 1, calls
+    assert "/aiperf-venv/bin/python" in installs[0]
+    assert "--no-deps" not in installs[0]
+    assert "--seed" not in calls and "ensurepip" not in calls
+    assert "--break-system-packages" not in calls
+
+
+@pytest.mark.parametrize("primary_venv", [False, True])
+def test_isolated_aiperf_uses_managed_python_for_310(tmp_path, isolated_aiperf, primary_venv):
+    proc, calls = isolated_aiperf(primary_venv=primary_venv)
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert "uv|python|install|" in calls and "|3.11" in calls
+    assert "uv|python|find|" in calls
+    assert "/aiperf-python/" in calls
+    assert "/aiperf-python-bin|" in calls and "/aiperf-cache" in calls
+
+
+@pytest.mark.parametrize("version", ["3.11", "3.12", "3.13"])
+def test_isolated_aiperf_reuses_compatible_primary(tmp_path, isolated_aiperf, version):
+    proc, calls = isolated_aiperf(primary_version=version)
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert "uv|python|install" not in calls
+    assert any("/bin/primary" in line for line in calls.splitlines() if line.startswith("uv|venv|"))
+
+
+def test_isolated_aiperf_validates_path_candidate_versions(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(primary_version="3.14", candidates={"3.11": "3.10", "3.12": "3.12"})
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert "uv|python|install" not in calls
+    assert any("/bin/python3.12" in line for line in calls.splitlines() if line.startswith("uv|venv|"))
+
+
+def test_isolated_aiperf_bootstraps_uv_privately_without_ensurepip(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(uv_on_path=False)
+    _assert_isolated_success(tmp_path, proc, calls)
+    bootstraps = [line for line in calls.splitlines() if "|-m|pip|install|" in line]
+    assert len(bootstraps) == 1
+    assert "--target|" in bootstraps[0] and "/aiperf-tools|" in bootstraps[0]
+    assert "uv==0.12.3" in bootstraps[0]
+    assert (tmp_path / "state with spaces/aiperf-tools/bin/uv").is_file()
+
+
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("failure", ["bootstrap", "download", "venv", "install"])
+def test_isolated_aiperf_failure_has_no_success_stamp(tmp_path, isolated_aiperf, required, failure):
+    proc, calls = isolated_aiperf(uv_on_path=failure != "bootstrap", failure=failure, required=required)
+    assert (proc.returncode != 0) is required, proc.stdout + proc.stderr
+    assert "ERROR:" in proc.stderr
+    assert "aiperf" in proc.stderr.lower()
+    assert not (tmp_path / "state with spaces/aiperf_installed_ref").exists()
+    assert "ensurepip" not in calls
+
+
+def test_isolated_aiperf_missing_pip_does_not_bootstrap_system(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(uv_on_path=False, pip=False)
+    assert proc.returncode != 0
+    assert "pip" in proc.stderr and "uv" in proc.stderr
+    assert "ensurepip" not in calls and "apt-get" not in calls
+    assert not (tmp_path / "state with spaces/aiperf_installed_ref").exists()
+
+
+def test_isolated_aiperf_path_uv_does_not_need_primary_pip(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(pip=False)
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert "|-m|pip|" not in calls
+
+
+def test_isolated_aiperf_same_pin_is_healthy_before_skip(tmp_path, isolated_aiperf):
+    first, calls = isolated_aiperf()
+    _assert_isolated_success(tmp_path, first, calls)
+    second, calls = isolated_aiperf(pip=False, uv_on_path=False)
+    assert second.returncode == 0, second.stderr
+    assert "uv|" not in calls and "|-m|pip|" not in calls
+    assert "aiperf|" in calls and "profile --help" in calls
+    assert "direct_url" in calls
+
+
+@pytest.mark.parametrize("broken", ["healthy", "bin/python", "bin/aiperf", "installed-ref", "broken-cli"])
+def test_isolated_aiperf_repairs_broken_same_pin(tmp_path, isolated_aiperf, broken):
+    first, calls = isolated_aiperf()
+    _assert_isolated_success(tmp_path, first, calls)
+    target = tmp_path / "state with spaces/aiperf-venv" / broken
+    if broken == "broken-cli":
+        target.touch()
+    else:
+        target.unlink()
+    second, calls = isolated_aiperf()
+    _assert_isolated_success(tmp_path, second, calls)
+
+
+def test_isolated_aiperf_failed_repair_removes_stale_stamp(tmp_path, isolated_aiperf):
+    first, calls = isolated_aiperf()
+    _assert_isolated_success(tmp_path, first, calls)
+    (tmp_path / "state with spaces/aiperf-venv/healthy").unlink()
+    second, _ = isolated_aiperf(failure="install")
+    assert second.returncode != 0
+    assert not (tmp_path / "state with spaces/aiperf_installed_ref").exists()
+
+
+def test_isolated_aiperf_leaves_unknown_venv_untouched(tmp_path, isolated_aiperf):
+    unknown = tmp_path / "state with spaces/aiperf-venv"
+    unknown.mkdir(parents=True)
+    sentinel = unknown / "operator-data"
+    sentinel.write_text("keep", encoding="utf-8")
+    proc, calls = isolated_aiperf()
+    assert proc.returncode != 0
+    assert "refus" in proc.stderr.lower() and "aiperf-venv" in proc.stderr
+    assert sentinel.read_text() == "keep"
+    assert "uv|venv|" not in calls
+
+
+@pytest.mark.parametrize("mode,override", [("dry", False), ("check", False), ("", True)])
+def test_isolated_aiperf_readonly_and_override_do_not_install(tmp_path, isolated_aiperf, mode, override):
+    proc, calls = isolated_aiperf(mode=mode, override=override, pip=False, uv_on_path=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "uv|" not in calls and "|-m|pip|" not in calls
+    assert not (tmp_path / "state with spaces").exists()
+
+
+def test_isolated_aiperf_rejects_relative_state(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(state="relative-state")
+    assert proc.returncode != 0
+    assert "absolute" in proc.stderr and "HYPERLOOM_STATE_DIR" in proc.stderr
+    assert not (tmp_path / "relative-state").exists()
+    assert "uv|" not in calls
+
+
+@pytest.mark.parametrize("home", ['""', None])
+def test_isolated_aiperf_empty_or_missing_home_uses_user_home(tmp_path, isolated_aiperf, home):
+    proc, _ = isolated_aiperf(state='""', home=home)
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "fallback-home/.hyperloom/aiperf-venv/bin/aiperf").is_file()
+
+
+def test_isolated_aiperf_cleans_child_environment_only(tmp_path, isolated_aiperf):
+    proc, calls = isolated_aiperf(polluted=True)
+    _assert_isolated_success(tmp_path, proc, calls)
+
+
+def test_isolated_aiperf_does_not_trust_old_path_binary(tmp_path, isolated_aiperf):
+    stale = tmp_path / "bin/aiperf"
+    stale.write_text('#!/usr/bin/env bash\nprintf "stale PATH aiperf invoked\\n" >&2\nexit 0\n', encoding="utf-8")
+    stale.chmod(0o755)
+    proc, calls = isolated_aiperf(required=False)
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert "stale PATH aiperf invoked" not in proc.stderr
+
+
+def test_isolated_aiperf_preserves_package_spec_override(tmp_path, isolated_aiperf):
+    spec = "aiperf @ https://example.test/custom.whl"
+    first, calls = isolated_aiperf(package_spec=spec, failure="metadata")
+    assert first.returncode == 0, first.stderr
+    assert spec in calls
+    second, calls = isolated_aiperf(package_spec=spec, failure="metadata")
+    assert second.returncode == 0, second.stderr
+    assert "uv|pip|install" not in calls
+    changed, calls = isolated_aiperf(package_spec="aiperf @ https://example.test/other.whl", failure="metadata")
+    assert changed.returncode == 0, changed.stderr
+    assert "uv|pip|install" in calls
+
+
+def test_isolated_aiperf_default_source_requires_real_pin(tmp_path, isolated_aiperf):
+    proc, _ = isolated_aiperf(failure="metadata")
+    assert proc.returncode != 0
+    assert not (tmp_path / "state with spaces/aiperf_installed_ref").exists()
+
+
+@pytest.mark.parametrize("layout", ["unknown", "symlink", "owned-symlink", "unknown-uv"])
+def test_isolated_aiperf_rejects_unowned_tools(tmp_path, isolated_aiperf, layout):
+    tools = tmp_path / "state with spaces/aiperf-tools"
+    tools.parent.mkdir()
+    target = tmp_path / "external" if "symlink" in layout else tools
+    (target / "bin").mkdir(parents=True)
+    sentinel = target / "bin/keep-me"
+    sentinel.write_text("operator data", encoding="utf-8")
+    if layout == "owned-symlink":
+        (target / ".hyperloom-aiperf-tools").write_text("hyperloom-aiperf-v1\n", encoding="utf-8")
+    if "symlink" in layout:
+        if os.name != "posix":
+            pytest.skip("requires POSIX symlinks")
+        tools.symlink_to(target, target_is_directory=True)
+    if layout == "unknown-uv":
+        (target / "bin/uv").write_text(_FAKE_UV, encoding="utf-8", newline="\n")
+        (target / "bin/uv").chmod(0o755)
+    before = sorted(path.relative_to(target).as_posix() for path in target.rglob("*"))
+    proc, calls = isolated_aiperf(uv_on_path=False)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "refus" in proc.stderr.lower() and "aiperf-tools" in proc.stderr
+    assert "|-m|pip|install|" not in calls and "uv|" not in calls
+    assert sentinel.read_text() == "operator data"
+    assert sorted(path.relative_to(target).as_posix() for path in target.rglob("*")) == before
+
+
+def test_isolated_aiperf_retries_owned_tools_bootstrap(tmp_path, isolated_aiperf):
+    failed, _ = isolated_aiperf(uv_on_path=False, failure="bootstrap")
+    assert failed.returncode != 0
+    assert (tmp_path / "state with spaces/aiperf-tools/.hyperloom-aiperf-tools").is_file()
+    retried, calls = isolated_aiperf(uv_on_path=False)
+    _assert_isolated_success(tmp_path, retried, calls)
+
+
+def test_isolated_aiperf_preserves_network_policy(tmp_path, isolated_aiperf):
+    policy = {
+        "UV_OFFLINE": "true",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_PYTHON_INSTALL_MIRROR": "https://python.example.test",
+        "UV_DEFAULT_INDEX": "https://packages.example.test/simple",
+        "UV_EXTRA_INDEX_URL": "https://extra.example.test/simple",
+        "SSL_CERT_FILE": "/etc/company-ca.pem",
+        "HTTPS_PROXY": "http://proxy.example.test:8080",
+    }
+    proc, calls = isolated_aiperf(policy=policy, primary_version="3.12")
+    _assert_isolated_success(tmp_path, proc, calls)
+    for name, value in policy.items():
+        assert f"uv-policy|{name}|{value}\n" in calls
+
+
+def test_isolated_aiperf_bootstrap_preserves_pip_config(tmp_path, isolated_aiperf):
+    policy = {"PIP_CONFIG_FILE": "/etc/company-pip.conf", "PIP_INDEX_URL": "https://packages.example.test/simple"}
+    proc, calls = isolated_aiperf(policy=policy, uv_on_path=False)
+    _assert_isolated_success(tmp_path, proc, calls)
+    for name, value in policy.items():
+        assert f"pip-policy|{name}|{value}\n" in calls
+
+
+@pytest.mark.parametrize("offline", ["true", "1"])
+def test_isolated_aiperf_offline_cannot_bootstrap_uv(tmp_path, isolated_aiperf, offline):
+    proc, calls = isolated_aiperf(policy={"UV_OFFLINE": offline}, uv_on_path=False)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "UV_OFFLINE" in proc.stderr
+    assert "|-m|pip|install|" not in calls
+    assert not (tmp_path / "state with spaces/aiperf_installed_ref").exists()
+
+
+@pytest.mark.parametrize(
+    "uv_indexes", [{}, {"UV_DEFAULT_INDEX": "https://uv.test/simple", "UV_INDEX": "https://extra-uv.test"}]
+)
+def test_isolated_aiperf_maps_pip_network_env_without_overriding_uv(tmp_path, isolated_aiperf, uv_indexes):
+    pip_policy = {
+        "PIP_INDEX_URL": "https://pip.test/simple",
+        "PIP_EXTRA_INDEX_URL": "https://extra-pip.test/simple",
+        "PIP_FIND_LINKS": "/company/wheelhouse",
+    }
+    proc, calls = isolated_aiperf(policy={**pip_policy, **uv_indexes})
+    _assert_isolated_success(tmp_path, proc, calls)
+    assert f"uv-policy|UV_DEFAULT_INDEX|{uv_indexes.get('UV_DEFAULT_INDEX', pip_policy['PIP_INDEX_URL'])}\n" in calls
+    if uv_indexes:
+        assert f"uv-policy|UV_INDEX|{uv_indexes['UV_INDEX']}\n" in calls
+        assert "uv-policy|UV_EXTRA_INDEX_URL|\n" in calls
+    else:
+        assert f"uv-policy|UV_EXTRA_INDEX_URL|{pip_policy['PIP_EXTRA_INDEX_URL']}\n" in calls
+    assert "uv-policy|UV_FIND_LINKS|/company/wheelhouse\n" in calls
+
+
+@pytest.mark.parametrize("no_index", ["1", "true", "false", ""])
+def test_isolated_aiperf_maps_pip_no_index_to_cli_only(tmp_path, isolated_aiperf, no_index):
+    proc, calls = isolated_aiperf(policy={"PIP_NO_INDEX": no_index})
+    _assert_isolated_success(tmp_path, proc, calls)
+    installs = [line for line in calls.splitlines() if line.startswith("uv|pip|install|")]
+    assert ("--no-index" in installs[0].split("|")) is (no_index in {"1", "true"})
+    assert all("--no-index" not in line for line in calls.splitlines() if line.startswith("uv|python|"))
+
+
+@pytest.mark.parametrize("home", [None, ""])
+def test_repair_state_resolution_precedes_parent_home_fallback(tmp_path, monkeypatch, home):
+    from hyperloom.inference_optimizer.agentx import preflight
+
+    child_env = {"PATH": "/usr/bin"}
+    if home is not None:
+        child_env["HOME"] = home
+    user_home = tmp_path / "user-home"
+    monkeypatch.setenv("HOME", str(tmp_path / "parent-home"))
+    if os.name == "posix":
+        import pwd
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(user_home)))
+    else:
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    # The installer must target the state directory the preflight will re-check.
+    expected = preflight._aiperf_state_dir(child_env)
+    seen = {}
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: (seen.update(kw["env"]), subprocess.CompletedProcess(cmd, 0, "", ""))[1],
+    )
+    assert repair.ensure_aiperf_installed(env=child_env) is None
+    assert preflight._aiperf_state_dir(seen) == expected
+    assert seen.get("HYPERLOOM_STATE_DIR") == str(expected)
+    assert child_env.get("HOME") == home
+
+
+@pytest.mark.skipif(os.name != "posix" or not shutil.which("flock"), reason="requires POSIX flock")
+def test_isolated_aiperf_real_flock_serializes_shared_state(tmp_path, isolated_aiperf):
+    runner = isolated_aiperf(primary_version="3.12", failure="slow", real_flock=True, prepare_only=True)
+    processes = []
+    try:
+        for index in range(2):
+            processes.append(
+                subprocess.Popen(
+                    ["bash", runner.name],
+                    cwd=tmp_path,
+                    env={**os.environ, "FAKE_CALLS": str(tmp_path / f"calls-{index}")},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+            if index == 0:
+                deadline = time.monotonic() + 10
+                while not (tmp_path / "install-started").exists():
+                    assert processes[0].poll() is None, "first installer exited before reaching installation"
+                    assert time.monotonic() < deadline, "first installer never reached installation"
+                    time.sleep(0.01)
+        outputs = [process.communicate(timeout=20) for process in processes]
+        assert all(process.returncode == 0 for process in processes), outputs
+        calls = "".join((tmp_path / f"calls-{index}").read_text() for index in range(2))
+        _assert_isolated_success(tmp_path, processes[0], calls)
+        assert "skipping install" in outputs[1][0], outputs
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()

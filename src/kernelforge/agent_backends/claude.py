@@ -40,7 +40,6 @@ from kernelforge.llm.process_reaping import (
 )
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-FALLBACK_CLAUDE_MODEL = "claude-opus-4-8"
 log = logging.getLogger(__name__)
 
 
@@ -273,7 +272,6 @@ class ClaudeBackend:
         self.runtime = runtime or AgentRuntimeConfig(
             provider=self.name,
             model=DEFAULT_CLAUDE_MODEL,
-            fallback_model=FALLBACK_CLAUDE_MODEL,
         )
         _prepare_claude_environment()
         self._query, self._options_type = _load_claude_sdk()
@@ -370,9 +368,6 @@ class ClaudeBackend:
         }
         if spec.reasoning_effort:
             options["effort"] = spec.reasoning_effort
-        fallback_model = getattr(self.runtime, "fallback_model", "").strip()
-        if fallback_model and fallback_model != spec.model:
-            options["fallback_model"] = fallback_model
         if spec.additional_directories:
             options["add_dirs"] = list(spec.additional_directories)
         policy = spec.tool_policy
@@ -659,6 +654,5 @@ __all__ = [
     "ClaudeTimeoutError",
     "ClaudeUnavailableError",
     "DEFAULT_CLAUDE_MODEL",
-    "FALLBACK_CLAUDE_MODEL",
     "resolve_claude_cli",
 ]

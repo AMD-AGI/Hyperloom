@@ -12,7 +12,6 @@ from kernelforge.knowledge import experience_integration as integration
 from kernelforge.knowledge import experience_sink as sink
 from kernelforge.loop.scoring import passes_keep_threshold
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
     knowledge_config_from_runtime,
 )
@@ -25,6 +24,7 @@ from kernelforge.rewrite_by_flydsl.record_store import (
 )
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
+from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")
@@ -99,25 +99,6 @@ def _run_config() -> Config:
     knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=_KNOWLEDGE_ROOT)
     return Config.from_env(
         workspace=str(_KNOWLEDGE_ROOT),
-        gpu_target="gfx950",
-        gpu_type="mi355x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
-
-
-def _remote_config_with_token(tmp_path: Path, token: str) -> Config:
-    """A KB Store run configuration whose credential is a recognizable string."""
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "remote-knowledge",
-        kb_store_url="http://in-memory",
-        kb_store_token=token,
-        remote_backend=REMOTE_BACKEND_KB_STORE,
-    )
-    return Config.from_env(
-        workspace=str(tmp_path),
         gpu_target="gfx950",
         gpu_type="mi355x",
         knowledge_config=knowledge,

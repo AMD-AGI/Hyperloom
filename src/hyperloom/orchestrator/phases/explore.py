@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Configuration arm: macro-cycle strategy, specialist fan-out/retry, gap tracking, and autosubmit of specialist patches / framework configs."""
+"""Configuration arm: macro-cycle strategy, specialist fan-out/retry, gap
+tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations
 from hashlib import sha1
@@ -60,7 +61,8 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
     cfg = str(src.get("enablement_probe_config_path") or "")
     if cfg:
         dst["enablement_probe_config_path"] = cfg
-        # Bench the candidate against the original workload/eval contract rather than the shipped default config.
+        # Bench the candidate against the original workload/eval contract rather
+        # than the shipped default config.
         dst.setdefault("config_path", cfg)
 
 
@@ -77,8 +79,12 @@ def _forward_integrate_source(
     if domain:
         dst["domain"] = domain
         dst["provenance"] = f"specialist:{domain}"
-    # ``framework`` is intentionally not forwarded: integrate_patch consumes that parameter when selecting accuracy
-    # parsing/gating behavior, whereas proposal ownership only needs the gap metadata below.
+    # ``framework`` is intentionally not forwarded: integrate_patch consumes
+    # that parameter when selecting accuracy parsing/gating behavior, whereas
+    # proposal ownership only needs the gap metadata below.
+    # ``lever_kind`` travels with the proposal: the patch that lands moved the
+    # same lever the specialist was dispatched against, and re-deriving it at
+    # writeback time is how attribution drifts.
     for key in ("gap_canonical_id", "gap_layer", "lever_kind", "reauthor_attempt", "apply_retry_attempt"):
         value = src.get(key)
         if value not in (None, "", [], {}):
@@ -86,7 +92,11 @@ def _forward_integrate_source(
 
 
 class ExplorePhase(CoordinatorCollaborator):
-    """The configuration arm of the OPTIMIZE phase: server-arg / env grids, the specialist fan-out that sources them, and the macro-cycle machinery that reopens a cycle."""
+    """The configuration arm of the OPTIMIZE phase: server-arg / env grids, the
+    specialist fan-out that sources them, and the macro-cycle machinery that
+    reopens a cycle. Not a phase of its own -- it shares FRAMEWORK_AGENT with
+    the source arm, and ``exit_normal_optimize`` leaves only when both are dry.
+    """
 
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
         """Summarise recent negative explore-ledger pressure by specialist domain."""
@@ -244,7 +254,11 @@ class ExplorePhase(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _cycle_directive_fallback(self) -> str:
-        """Render a deterministic cycle focus from ``_plan_cycle_focus``."""
+        """Render a deterministic cycle focus from ``_plan_cycle_focus``.
+
+        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
+        """
         try:
             planned = self._plan_cycle_focus()
         except Exception:  # noqa: BLE001 — fallback must never raise
@@ -265,7 +279,14 @@ class ExplorePhase(CoordinatorCollaborator):
         return "; ".join(parts)
 
     def _reseed_orch_prompt_for_cycle(self) -> bool:
-        """Rebuild the orchestration system prompt for the new macro-cycle."""
+        """Rebuild the orchestration system prompt for the new macro-cycle.
+
+        Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``,
+        snapshots the installed scope, and records the directive in the
+        ``cycle_directive_history`` ring. Skips a user-supplied
+        ``--orch-prompt``. Best-effort; returns True when reseeded.
+        """
         if getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
         rebuild = getattr(self, "_rebuild_orch_prompt", None)
@@ -297,7 +318,17 @@ class ExplorePhase(CoordinatorCollaborator):
         return True
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP loopback into FRAMEWORK_AGENT."""
+        """Open a new macro-cycle on a SWEEP loopback into FRAMEWORK_AGENT.
+
+        Increments ``macro_cycle``, persists the no-gain streak + per-cycle gain
+        anchor, and resets per-cycle counters (including re-opening FRAMEWORK) for
+        a fresh budget / plateau evaluation. The explore ledger is preserved.
+
+        Args:
+            evidence: The loopback evidence dict from ``compute_next_phase``;
+                may carry ``no_gain_cycle_streak_effective`` which is persisted
+                onto the new cycle.
+        """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
         try:
@@ -324,8 +355,9 @@ class ExplorePhase(CoordinatorCollaborator):
             state.reset_per_cycle_plateau_state()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Mark a macro-cycle boundary in the preserved progress ledger so the consecutive-no-keep plateau gate ignores
-        # the prior cycle's trailing no-KEEP streak.
+        # Mark a macro-cycle boundary in the preserved progress ledger so the
+        # consecutive-no-keep plateau gate ignores the prior cycle's trailing
+        # no-KEEP streak.
         try:
             progress = getattr(state, "framework_agent_phase_progress", None)
             if not isinstance(progress, list):
@@ -366,15 +398,30 @@ class ExplorePhase(CoordinatorCollaborator):
         prior_cycle: int,
         new_cycle: int,
     ) -> dict[str, Any] | None:
-        """Medium-intensity soft restart at a macro-cycle boundary."""
+        """Medium-intensity soft restart at a macro-cycle boundary.
+
+        Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
+        caches, conversation reset) without losing accumulated optimization state;
+        ``current_best`` / ``optimization_stack`` / ``explore_search`` are
+        preserved. Idempotent and best-effort: every step is independently
+        guarded so one failure never aborts the run loop.
+
+        Args:
+            prior_cycle: The macro-cycle number that just finished.
+            new_cycle: The macro-cycle number being entered.
+
+        Returns:
+            A summary dict of the restart steps performed, or ``None`` when the
+            soft restart is disabled.
+        """
         if not getattr(self, "_cycle_soft_restart", False):
             return None
         summary: dict[str, Any] = {
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory, re-focus the orchestration prompt for the new
-        # cycle, then reset.
+        # 1) Compact the cycle's conversation into durable memory, re-focus the
+        # orchestration prompt for the new cycle, then reset.
         try:
             compacted = await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
@@ -417,13 +464,28 @@ class ExplorePhase(CoordinatorCollaborator):
         return summary
 
     def _restart_inference_servers(self) -> None:
-        """Deep-clean lingering inference-server processes (macro-cycle soft restart)."""
+        """Deep-clean lingering inference-server processes (macro-cycle soft restart).
+
+        Reuses the grid runner's ``_kill_stale_servers`` /proc sweep, which only
+        targets vLLM/SGLang/atom server processes outside our own process group
+        and is a no-op in multi-node mode.
+        """
         from ..actions.executors._grid_runner import _kill_stale_servers
 
         _kill_stale_servers()
 
     async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
-        """Force a fresh analysis at the start of a reopened macro-cycle."""
+        """Force a fresh analysis at the start of a reopened macro-cycle.
+
+        Reached on every cycle start now. It used to be attached to the config-arm
+        entry, and the reloop targeted FRAMEWORK_AGENT whenever the framework
+        phase was enabled -- so with the default configuration this never ran,
+        and each new cycle re-targeted the bottleneck the *previous* cycle
+        measured. One phase means one entry, and the reprofile happens.
+
+        Args:
+            from_phase: The phase being left; only a SWEEP origin starts a cycle.
+        """
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
             getattr(self.shared_state, "macro_cycle", 0) or 0
         ) > 0:
@@ -443,7 +505,19 @@ class ExplorePhase(CoordinatorCollaborator):
                 )
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
-        """Force-dispatch a domain specialist for a domain untouched for too many config-arm rounds that still has an open gap in the gaps[] ledger."""
+        """Force-dispatch a domain specialist for a domain untouched for too many
+        config-arm rounds that still has an open gap in the gaps[] ledger.
+
+        A real scheduling event (a domain delegate routed through PolicyGate +
+        warmup + the GPU specialist pool). Idempotent per
+        ``(anchor, round, macro_cycle)`` and self-throttling (zeroes the
+        per-anchor counter on dispatch). At most one forced dispatch per tick.
+
+        Note:
+            Side-effecting: may dispatch a domain specialist via
+            ``_handle_intent`` and mutate per-anchor throttle counters on
+            ``shared_state``. Returns nothing.
+        """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return None
@@ -560,7 +634,18 @@ class ExplorePhase(CoordinatorCollaborator):
         intent: Intent,
         params: dict[str, Any],
     ) -> None:
-        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N standard free-form specialist dispatches (scope=freeform, lane=cpu, mode=research defaults)."""
+        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
+        standard free-form specialist dispatches (scope=freeform, lane=cpu,
+        mode=research defaults). Each fanned task is re-dispatched through the
+        normal ``_handle_delegate`` path. Per-task idempotency keys derive from
+        the wave key. Each entry must pass the same structural checks as
+        :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
+
+        Args:
+            source: The agent issuing the wave delegate.
+            intent: The originating specialist DELEGATE intent.
+            params: The delegate params carrying the ``tasks`` list to fan out.
+        """
         tasks = params.get("tasks") or []
         shared = {k: v for k, v in params.items() if k != "tasks"}
         base_key = str(intent.payload.get("idempotency_key") or "").strip()
@@ -612,7 +697,16 @@ class ExplorePhase(CoordinatorCollaborator):
         cap: int,
         detail: str,
     ) -> None:
-        """Broadcast that an infra-failed specialist is being abandoned."""
+        """Broadcast that an infra-failed specialist is being abandoned.
+
+        Args:
+            task: The specialist task whose final attempt failed.
+            ftype: The classified failure type.
+            error: The failure reason carried by the attempt.
+            attempts_used: Retry attempts already spent.
+            cap: Configured retry ceiling.
+            detail: Why no further retry was scheduled.
+        """
         params = task.params or {}
         await self._record_observation(
             "coordinator",
@@ -643,7 +737,24 @@ class ExplorePhase(CoordinatorCollaborator):
         task: "Task",
         result: "SubAgentResult",
     ) -> bool:
-        """Re-enqueue a fresh specialist task on a transient infra failure."""
+        """Re-enqueue a fresh specialist task on a transient infra failure.
+
+        Returns ``True`` when a retry was scheduled (the caller must then skip
+        this attempt's delegated_result + bookkeeping). Only infra failures
+        (timeout / crash / stale-heartbeat, per ``classify_specialist_failure``)
+        are retried, capped at :data:`SPECIALIST_AUTO_RETRY_MAX`; the failure
+        reason is injected into the retry prompt. Disabled when
+        ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``.
+
+        Args:
+            task: The specialist task whose attempt just failed.
+            result: The sub-agent result classified for infra-failure
+                eligibility.
+
+        Returns:
+            ``True`` when a retry was scheduled (caller must skip this
+            attempt's bookkeeping); ``False`` otherwise.
+        """
         flag = (
             os.environ.get(
                 "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY",
@@ -669,8 +780,8 @@ class ExplorePhase(CoordinatorCollaborator):
 
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
-        # The specialist executor never raises, so the reason lives in the result envelope rather than on
-        # SubAgentResult.
+        # The specialist executor never raises, so the reason lives in the
+        # result envelope rather than on SubAgentResult.
         error = str(result.error or result_dict.get("error") or "")
         ftype, retry_eligible = classify_specialist_failure(runner_status, error)
         if not retry_eligible:
@@ -693,8 +804,8 @@ class ExplorePhase(CoordinatorCollaborator):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the same pools as the original and
-        # cannot run concurrently with serving.
+        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
+        # same pools as the original and cannot run concurrently with serving.
         lanes, ttl = self._registry_lanes_ttl("specialist")
         from ..specialists.profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
 
@@ -769,15 +880,20 @@ class ExplorePhase(CoordinatorCollaborator):
         return True
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty."""
+        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty.
+
+        Args:
+            params: The specialist task params dict mutated in place with PR
+                feed, warm-start, hardware/workload and gap/roofline context.
+        """
         state = self.shared_state
         plane = self.knowledge_plane
 
         from ..specialists.domains import normalize_dispatch_tags
         from ..specialists.profile import resolve_specialist_profile
 
-        # Bench-capable specialists run a real serving + benchmark loop, so default needs_gpu to route them through
-        # the gpu_specialist_pool.
+        # Bench-capable specialists run a real serving + benchmark loop, so
+        # default needs_gpu to route them through the gpu_specialist_pool.
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
@@ -813,11 +929,14 @@ class ExplorePhase(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_source_file_allowlist
+                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
 
-                roots = resolve_source_file_allowlist()
+                roots = resolve_kernel_search_roots()
                 if roots:
                     params["framework_source_roots"] = list(roots)
+                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
+                if tree:
+                    params["session_framework_tree"] = tree
             except Exception as exc:  # noqa: BLE001
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
@@ -850,28 +969,22 @@ class ExplorePhase(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        # Static-recon specialist extras: structured model_info + checklist-derived source-hint directories for the
-        # recon focus block.
-        if domain == "static_recon_specialist":
-            if "model_info" not in params:
-                _minfo = getattr(state, "model_info", None)
-                if isinstance(_minfo, dict) and _minfo:
-                    params["model_info"] = dict(_minfo)
-            if "source_hint_directories" not in params:
-                try:
-                    from ..knowledge import static_recon_checklist as _src_recon
+        if domain == "static_recon_specialist" and "model_info" not in params:
+            _minfo = getattr(state, "model_info", None)
+            if isinstance(_minfo, dict) and _minfo:
+                params["model_info"] = dict(_minfo)
 
-                    _dirs = _src_recon.source_hint_directories_for(
-                        model_class=str(getattr(state, "model_class", "") or ""),
-                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                        precision=str(getattr(state, "precision", "") or ""),
-                    )
-                    if _dirs:
-                        params["source_hint_directories"] = list(_dirs)
-                except Exception:  # noqa: BLE001 — advisory; never block dispatch
-                    log.exception(
-                        "static-recon: source_hint_directories lookup failed",
-                    )
+        # Checklist-derived focus directories; a caller that named its own keeps it.
+        if "source_hint_directories" not in params:
+            from ..knowledge import static_recon_checklist as _src_recon
+
+            _dirs = _src_recon.source_hint_directories_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=_src_recon.workload_precision(state),
+            )
+            if _dirs:
+                params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
             try:
@@ -943,6 +1056,8 @@ class ExplorePhase(CoordinatorCollaborator):
                 ]
 
         # Pack bottleneck signals into roofline_evidence for the specialist.
+        # Hot kernels alone are enough: a trace whose quality gate withheld
+        # analysis.md still names where device time goes.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         has_evidence = isinstance(last_ta, dict) and bool(
             last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
@@ -971,7 +1086,11 @@ class ExplorePhase(CoordinatorCollaborator):
             }
 
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort."""
+        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
+
+        Args:
+            reason: Tag describing the refresh trigger, used only in logging.
+        """
         state = self.shared_state
         try:
             for entry in self._extract_gaps_from_baseline():
@@ -1011,7 +1130,12 @@ class ExplorePhase(CoordinatorCollaborator):
         )
 
     def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the workload canonical_id (``_workload_canonical_id``, matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align."""
+        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the workload canonical_id (``_workload_canonical_id``, matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
+
+        Returns:
+            A list of gap row dicts derived from the baseline; empty when no
+            baseline throughput is recorded.
+        """
         state = self.shared_state
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
@@ -1044,7 +1168,12 @@ class ExplorePhase(CoordinatorCollaborator):
         return gaps
 
     def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
-        """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau)."""
+        """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau).
+
+        Returns:
+            A list of gap row dicts derived from recurring action failures and
+            an explore-plateau signal.
+        """
         state = self.shared_state
         anchor = self._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
@@ -1107,20 +1236,36 @@ class ExplorePhase(CoordinatorCollaborator):
         return gaps
 
     def _framework_authoring_domain(self) -> str:
-        """Return the authoring domain matching this session's framework kind."""
+        """Return the authoring domain matching this session's framework kind.
+
+        Returns:
+            str: ``"framework_rewrite_specialist"`` for a scriptable framework,
+            else ``"serving_specialist"``.
+        """
         from ..specialists.domains import authoring_domain_for_framework
 
         return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
 
     @staticmethod
     def _gap_layer_for_action(action: str, framework: str = "") -> tuple[str, str]:
-        """Map an action name → (layer, domain_hint) for gap rows."""
+        """Map an action name → (layer, domain_hint) for gap rows.
+
+        Args:
+            action: The action name to classify.
+            framework: The session's framework, which decides the authoring
+                domain for framework-layer rows. Defaults to the serving domain
+                so a caller with no framework in hand keeps the old mapping.
+
+        Returns:
+            A ``(layer, domain_hint)`` tuple for the action.
+        """
         from ..specialists.domains import authoring_domain_for_framework
 
         a = str(action or "").strip().lower()
         if a in {
-            # ``kernel_opt`` names the lane, not a request kind: it is still in KERNEL_LANE_TASK_KINDS and still what
-            # a gap row calls kernel work, so it keeps classifying to the kernel layer.
+            # ``kernel_opt`` names the lane, not a request kind: it is still in
+            # KERNEL_LANE_TASK_KINDS and still what a gap row calls kernel work,
+            # so it keeps classifying to the kernel layer.
             "kernel_opt",
             "integrate",
             "trace_analyze",
@@ -1139,7 +1284,14 @@ class ExplorePhase(CoordinatorCollaborator):
         task: "Task | None",
         result: dict[str, Any],
     ) -> None:
-        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback)."""
+        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
+
+        Args:
+            task: The explore task whose params carry the gap canonical id;
+                ``None`` is a no-op.
+            result: The explore result; its ``per_variant_outcomes`` drive the
+                appended gap attempts.
+        """
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
@@ -1183,7 +1335,15 @@ class ExplorePhase(CoordinatorCollaborator):
         task: "Task | None",
         result: dict[str, Any],
     ) -> None:
-        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``."""
+        """Record each unmeasured ``per_variant_outcomes`` row as failure evidence + ``last_action_failures``.
+
+        A crashed variant does not fail the round, so the round-level recorder
+        never sees it.
+
+        Args:
+            task: The completed explore task; ``None`` is a no-op.
+            result: The explore result dict carrying ``per_variant_outcomes``.
+        """
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
@@ -1213,7 +1373,14 @@ class ExplorePhase(CoordinatorCollaborator):
 
     @staticmethod
     def _task_id_from_specialist_source(source: str) -> str:
-        """Extract the task_id from a ``specialist:<task_id>`` source (\"\" when prefix is absent)."""
+        """Extract the task_id from a ``specialist:<task_id>`` source ("" when prefix is absent).
+
+        Args:
+            source: The from-agent string to parse.
+
+        Returns:
+            The task id when the specialist prefix is present, else ``""``.
+        """
         if not source:
             return ""
         if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
@@ -1227,7 +1394,25 @@ class ExplorePhase(CoordinatorCollaborator):
         domain: str,
         proposals: list[Any],
     ) -> None:
-        """Multi-node bridge: turn a specialist ``proposal_set`` into a benchmarked ``explore`` task automatically."""
+        """Multi-node bridge: turn a specialist ``proposal_set`` into a
+        benchmarked ``explore`` task automatically.
+
+        Single-node is a no-op (``is_multi_node()`` False): there the
+        Orchestration LLM drives ``explore`` directly. In multi-node the GPU
+        cluster lives on remote SSH pods, so the only materialisation channel is
+        a structured ``explore`` action; this helper enqueues the explore grid
+        itself. ``proposal_set`` entries reuse the explore variant schema
+        (``name`` / ``extra_args`` / ``extra_envs``) and pass straight through;
+        ``canonical_fingerprint`` dedup + the per-variant KEEP/REVERT gain gate
+        are the safety net.
+
+        Args:
+            task: The completed specialist task whose id seeds the explore
+                idempotency key.
+            domain: The specialist domain, stamped onto variant provenance.
+            proposals: The specialist ``proposal_set`` entries materialised into
+                the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
+        """
         # Framework config-generation specialists own their proposal_set; skip.
         if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
             return
@@ -1300,7 +1485,14 @@ class ExplorePhase(CoordinatorCollaborator):
         task: "Task",
         done_payload: dict[str, Any],
     ) -> None:
-        """Auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist."""
+        """Auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist.
+
+        Args:
+            task: The completed specialist task whose worktree patches are
+                surfaced.
+            done_payload: The specialist done payload carrying
+                ``patches_written`` and proposal metadata.
+        """
         patches = done_payload.get("patches_written") or []
         if not isinstance(patches, list):
             patches = []
@@ -1323,7 +1515,8 @@ class ExplorePhase(CoordinatorCollaborator):
                 cands.append(base / raw)
             if any(c.is_file() for c in cands):
                 existing_patches.append(str(p))
-        # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
+        # A non-diff tuned artifact is also a routable deliverable; route it like
+        # a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
@@ -1367,8 +1560,9 @@ class ExplorePhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
-        # FRAMEWORK authoring provenance passthrough: propagate the PR candidate/batch id onto the synthetic
-        # integrate_patch task so the authored-outcome bridge keys the progress row on the real candidate id.
+        # FRAMEWORK authoring provenance passthrough: propagate the PR
+        # candidate/batch id onto the synthetic integrate_patch task so the
+        # authored-outcome bridge keys the progress row on the real candidate id.
         try:
             if bool(spec_params.get("framework_agent_authoring")):
                 integrate_params["framework_agent_authoring"] = True
@@ -1378,8 +1572,8 @@ class ExplorePhase(CoordinatorCollaborator):
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
-            # Propagate the enablement marker (+ optional launch probe) so integrate_patch applies the
-            # runnable_decision gate.
+            # Propagate the enablement marker (+ optional launch probe) so
+            # integrate_patch applies the runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
                 _forward_enablement_carriers(spec_params, integrate_params)
@@ -1456,7 +1650,19 @@ class ExplorePhase(CoordinatorCollaborator):
         task: "Task",
         done_payload: dict[str, Any],
     ) -> None:
-        """Route a FRAMEWORK config-lever deliverable through integrate_patch."""
+        """Route a FRAMEWORK config-lever deliverable through integrate_patch.
+
+        Companion to :meth:`_maybe_autosubmit_specialist_patches`: fires when a
+        FRAMEWORK authoring specialist returns NO source patch but a config-lever
+        ``proposal_set`` (extra_args / extra_envs). The levers go into
+        integrate_patch's ``config_changes`` channel (apply + bench + accuracy
+        gate + KEEP/REVERT), which owns the terminal FRAMEWORK row. Idempotent
+        per specialist.
+
+        Args:
+            task: The completed authoring specialist task.
+            done_payload: Its ``specialist_done`` payload.
+        """
         spec_params = getattr(task, "params", None) or {}
         if not bool(spec_params.get("framework_agent_authoring")):
             return
@@ -1476,7 +1682,12 @@ class ExplorePhase(CoordinatorCollaborator):
             and not done_payload.get("artifacts_written")
         ):
             return
-        # Normally route only when there are config levers to test.
+        # Normally route only when there are config levers to test. For an
+        # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
+        # integrate_patch owns the enablement stall accounting, so an enablement
+        # round must reach it to bump ``enablement_stall_streak`` / clear
+        # ``enablement_stall_streak`` and eventually fire ``enablement_stalled``.
+        # Non-enablement config deliverables keep the strict "levers required" gate.
         if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()
@@ -1523,10 +1734,11 @@ class ExplorePhase(CoordinatorCollaborator):
             integrate_params["framework_agent_candidate_id"] = fa_cand
         if fa_batch:
             integrate_params["framework_batch_id"] = fa_batch
-        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a config-lever-only enablement
-        # deliverable MUST still flow the enablement marker + setup_commands into integrate_patch, otherwise the
-        # result never carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and the enablement stall
-        # streak is only advanced via _maybe_rearm_enablement.
+        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
+        # config-lever-only enablement deliverable MUST still flow the enablement
+        # marker + setup_commands into integrate_patch, otherwise the result never
+        # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
+        # the enablement stall streak is only advanced via _maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)
@@ -1539,8 +1751,9 @@ class ExplorePhase(CoordinatorCollaborator):
             base_patches = spec_params.get("enablement_base_patches")
             if isinstance(base_patches, list) and base_patches:
                 integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
-            # Merge the stacked base setup commands with any NEW setup_commands the specialist just proposed in this
-            # deliverable (e.g. a stack upgrade), so a config-lever-only enablement round actually replays the install
+            # Merge the stacked base setup commands with any NEW setup_commands the
+            # specialist just proposed in this deliverable (e.g. a stack upgrade),
+            # so a config-lever-only enablement round actually replays the install
             # step before booting instead of silently dropping it.
             merged_setup: list[str] = []
             for c in spec_params.get("enablement_setup_commands") or []:
@@ -1601,7 +1814,11 @@ class ExplorePhase(CoordinatorCollaborator):
             )
 
     def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
-        """True when this exact config already lost an accuracy gate."""
+        """True when this exact config already lost an accuracy gate.
+
+        Different upstream PRs often reduce to the same server args / envs, so
+        the ledger is keyed by content fingerprint rather than by PR.
+        """
         from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
         try:
@@ -1623,8 +1840,8 @@ class ExplorePhase(CoordinatorCollaborator):
                     )
                     return True
         except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
-            # Warning, not debug: swallowing this re-dispatches config levers that already lost an accuracy gate, so
-            # it must be visible.
+            # Warning, not debug: swallowing this re-dispatches config levers
+            # that already lost an accuracy gate, so it must be visible.
             log.warning("FRAMEWORK: config-lever ledger check failed", exc_info=True)
         return False
 
@@ -1636,7 +1853,19 @@ class ExplorePhase(CoordinatorCollaborator):
         source: str,
         run_error: str = "",
     ) -> dict[str, Any]:
-        """Translate a specialist done payload into a SharedState.specialist_rounds[] row; round_id defaults to task_id for idempotent overwrite."""
+        """Translate a specialist done payload into a SharedState.specialist_rounds[] row; round_id defaults to task_id for idempotent overwrite.
+
+        Args:
+            task: The completed specialist task.
+            done_payload: The specialist done payload (proposal_set, domain,
+                tags, summary, etc.).
+            source: The emitting agent string, recorded on the row.
+            run_error: Dispatch failure text when no valid payload was produced.
+
+        Returns:
+            A specialist-round row dict suitable for
+            ``SharedState.record_specialist_round``.
+        """
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []

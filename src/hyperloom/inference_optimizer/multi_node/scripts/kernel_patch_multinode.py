@@ -2,7 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node kernel patch fan-out (apply / revert), run INSIDE the RayJob pod."""
+"""Multi-node kernel patch fan-out (apply / revert), run INSIDE the RayJob pod.
+
+One actor per alive node (NodeAffinity hard-pinned): apply backs up
+``target_path``, atomically writes the decoded patch bytes, and
+``py_compile``s ``.py`` targets (auto-reverting on failure); revert copies
+the recorded backup back. Any actor raising is a hard failure (caller
+issues a follow-up revert). Emits one JSON summary on stdout.
+"""
 
 from __future__ import annotations
 
@@ -28,8 +35,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from patch_path_safety import (  # noqa: E402
     atomic_write_bytes,
     assert_backup_dir_allowed,
-    assert_revert_paths_allowed,
-    assert_target_path_allowed,
+    assert_backup_path_allowed,
     finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
@@ -37,14 +43,26 @@ from patch_path_safety import (  # noqa: E402
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a string for use as a filename component."""
+    """Sanitize a string for use as a filename component.
+
+    Args:
+        value (str): The raw string to sanitize.
+
+    Returns:
+        str: A filename-safe slug (alnum plus ``._-``), truncated to 80
+        characters; ``"patch"`` if the result would be empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
 
@@ -56,10 +74,26 @@ def _apply_remote(
     kernel_id: str,
     jit_build_dir: str = "",
 ) -> dict:
-    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``)."""
+    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``).
+
+    Args:
+        target_path: Absolute path of the file to overwrite on the pod.
+        patch_b64: Base64-encoded new file contents.
+        backup_dir: Directory where the pre-patch original is saved.
+        kernel_id: Optional id used to construct the backup filename.
+
+    Returns:
+        dict: Per-host result with the target path, backup path, byte count,
+        and compile status.
+
+    Raises:
+        ValueError: If ``backup_dir`` is outside the kernel backup root,
+            ``patch_b64`` is not valid base64, or a ``.py`` target fails to
+            compile (it is auto-reverted first).
+        FileNotFoundError: If ``target_path`` does not exist on the pod.
+    """
     host = socket.gethostname()
     target = Path(target_path)
-    assert_target_path_allowed(target, must_exist=True)
     assert_backup_dir_allowed(Path(backup_dir))
     if not target.is_file():
         raise FileNotFoundError(f"target_path does not exist on pod {host}: {target}")
@@ -104,7 +138,15 @@ def _apply_remote(
 
 
 def _revert_remote(records: list[dict]) -> dict:
-    """Restore every source and JIT backup recorded for one pod."""
+    """Restore every source and JIT backup recorded for one pod.
+
+    Args:
+        records: Apply records for all files patched on this pod.
+
+    Returns:
+        dict: Per-host result with ``status`` of ``restored`` or
+        ``noop_missing_backup``.
+    """
     host = socket.gethostname()
     restored: list[str] = []
     jit_records: list[dict] = []
@@ -113,7 +155,7 @@ def _revert_remote(records: list[dict]) -> dict:
         backup = Path(str(record.get("backup_path") or ""))
         if not backup.is_file():
             raise FileNotFoundError(f"backup missing on {host}: {backup}")
-        assert_revert_paths_allowed(target, backup)
+        assert_backup_path_allowed(backup)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(backup, target)
         restored.append(str(target))
@@ -140,7 +182,18 @@ def _finalize_remote(records: list[dict]) -> dict:
 
 
 def _alive_nodes(min_gpu: int = 0) -> list[dict]:
-    """Return the list of currently-alive Ray nodes."""
+    """Return the list of currently-alive Ray nodes.
+
+    Each entry is the full ``ray.nodes()`` row so the caller can pick
+    per-node IDs and addresses for ``NodeAffinitySchedulingStrategy``.
+
+    Args:
+        min_gpu (int): If > 0, only return nodes with at least this many
+            GPUs.
+
+    Returns:
+        list[dict]: The matching alive node rows from ``ray.nodes()``.
+    """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if min_gpu > 0:
         nodes = [n for n in nodes if int(n.get("Resources", {}).get("GPU", 0) or 0) >= min_gpu]
@@ -148,7 +201,16 @@ def _alive_nodes(min_gpu: int = 0) -> list[dict]:
 
 
 def _do_apply(args: argparse.Namespace) -> int:
-    """Fan out the patch-apply actor across every alive node and report."""
+    """Fan out the patch-apply actor across every alive node and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply`` arguments
+            (``target_path``, ``patch_b64``, ``backup_dir``, ``kernel_id``,
+            ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every node applied successfully, otherwise ``1``.
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
@@ -239,7 +301,16 @@ def _do_apply(args: argparse.Namespace) -> int:
 
 
 def _do_revert(args: argparse.Namespace) -> int:
-    """Fan out the patch-revert actor to each backed-up host and report."""
+    """Fan out the patch-revert actor to each backed-up host and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert`` arguments
+            (``target_path``, ``backup_map_json``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every reachable host reverted successfully, otherwise
+        ``1`` (including when ``backup_map_json`` is empty).
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     try:
         records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
@@ -387,7 +458,12 @@ def _do_finalize(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    """Parse CLI arguments and dispatch the ``apply`` or ``revert`` command."""
+    """Parse CLI arguments and dispatch the ``apply`` or ``revert`` command.
+
+    Returns:
+        int: Process exit code; the subcommand's result code, or ``2`` if
+        no recognized subcommand was given.
+    """
     p = argparse.ArgumentParser(
         prog="kernel_patch_multinode.py",
         description=(

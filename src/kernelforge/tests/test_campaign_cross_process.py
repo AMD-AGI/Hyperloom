@@ -21,13 +21,8 @@ from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationRes
 from kernelforge.tracker import ExperimentTracker
 
 
-class _NoopEvolver:
-    def on_experiment_complete(self, experiment):
-        return {}
-
-
-# The stand-in for "budget is not what this test is about"; it has to clear the round admission guard, which prices a
-# whole round rather than only the reserve.
+# The stand-in for "budget is not what this test is about"; it has to clear the
+# round admission guard, which prices a whole round rather than only the reserve.
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 
@@ -74,7 +69,6 @@ def _make_loop(workspace, kernel, driver, tracker, *, session_count, resume=Fals
         config,
         tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=resume,
     )
     loop._time_remaining = lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0
@@ -657,11 +651,6 @@ from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.tracker import ExperimentTracker
 
 
-class NoopEvolver:
-    def on_experiment_complete(self, experiment):
-        return {}
-
-
 class FakeUsage:
     def __init__(self):
         self.values = {
@@ -695,7 +684,6 @@ async def main():
         ),
         tracker,
         config=object(),
-        evolver=NoopEvolver(),
     )
     loop._time_remaining = lambda: 12 * 3600.0
     usage = FakeUsage()

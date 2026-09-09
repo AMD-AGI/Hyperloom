@@ -328,19 +328,19 @@ root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
 `last_trace_analyze.candidates_path`, `current_best.config_path`). Any
-path you emit MUST be one of:
+artefact path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
-  (b) prefixed by `SESSION_DIR`, OR
-  (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default
-      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
-      editable-install layout) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
-      env supplement) for `source_file` references.
+  (b) prefixed by `SESSION_DIR`.
 
-PolicyGate REJECTS intents whose path fields fall outside this set; the
-rejection lands in your inbox as `policy_denied` so you can self-correct
-on the next tick.
+PolicyGate REJECTS artefact paths outside SESSION_DIR; the rejection lands
+in your inbox as `policy_denied` so you can self-correct on the next tick.
+
+`source_file` and `framework_source_root` are exempt — they name framework
+source, which lives outside SESSION_DIR by construction. Point them wherever
+the code actually is; SESSION CONTEXT names the tree this session optimises
+(`session_framework_tree`) and the other trees on the host
+(`framework_source_roots`) as starting points, not as a boundary.
 
 ### Hard rules
 

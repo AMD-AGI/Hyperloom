@@ -592,40 +592,6 @@ async def test_second_base_within_one_repository_is_still_rejected(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_publication_outside_configured_roots_is_rejected(tmp_path: Path) -> None:
-    allowed_root = tmp_path / "allowed"
-    publication_root = tmp_path / "publication"
-    allowed_root.mkdir()
-    publication_root.mkdir()
-    allowed_repo, _allowed_base = _repo(allowed_root)
-    publication_repo, publication_base = _repo(publication_root)
-    patches = tmp_path / "cycle" / "result" / "patches"
-    _publish(
-        patches,
-        publication_repo,
-        publication_base,
-        kernel_name="outside",
-        kernel_path="first.py",
-        patch=_patch(publication_repo, "first.py", "VALUE = 2\n"),
-    )
-
-    async def _must_not_validate(_publication):
-        raise AssertionError("outside repo must not reach E2E")
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    summary = await integrate_controller_patches(
-        patches_root=patches,
-        session_dir=session_dir,
-        shared_state=_state(session_dir, allowed_repo),
-        validator=_must_not_validate,
-    )
-
-    assert summary.results[0].status == "skipped_invalid"
-    assert "outside the configured patch target roots" in summary.results[0].reason
-
-
-@pytest.mark.asyncio
 async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tmp_path: Path) -> None:
     """One bad publication must not cost the patches queued behind it."""
     repo, base = _repo(tmp_path)
@@ -745,37 +711,6 @@ async def test_a_validator_that_raises_reverts_its_patch_and_continues(tmp_path:
     # The raising patch left nothing behind; the next one still landed.
     assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 3\n"
-
-
-@pytest.mark.asyncio
-async def test_a_repo_root_outside_the_allowed_targets_is_refused(tmp_path: Path) -> None:
-    """Integration may only stage into repositories the session declared."""
-    repo, base = _repo(tmp_path)
-    other, other_base = _named_repo(tmp_path, "other", "third.py")
-    patches = tmp_path / "cycle" / "result" / "patches"
-    _publish(
-        patches,
-        other,
-        other_base,
-        kernel_name="foreign",
-        kernel_path="third.py",
-        patch=_patch(other, "third.py", "VALUE = 9\n"),
-    )
-
-    async def _validate(_publication):
-        raise AssertionError("a foreign repository must never reach validation")
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    summary = await integrate_controller_patches(
-        patches_root=patches,
-        session_dir=session_dir,
-        shared_state=_state(session_dir, repo),
-        validator=_validate,
-    )
-
-    assert summary.kept_count == 0
-    assert [r.status for r in summary.results] == ["skipped_invalid"]
 
 
 @pytest.mark.asyncio

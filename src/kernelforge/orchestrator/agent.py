@@ -130,14 +130,6 @@ def make_agent_fn(
             file=sys.stderr,
             flush=True,
         )
-    elif backend.runtime.model != runtime.model:
-        reason = getattr(backend, "model_fallback_reason", "")
-        reason_suffix = f" ({reason})" if reason else ""
-        print(
-            f"  [agent] model {runtime.model} unavailable; falling back to {backend.runtime.model}{reason_suffix}",
-            file=sys.stderr,
-            flush=True,
-        )
     backend_model = backend.runtime.model
 
     # Multi-file / repository awareness.

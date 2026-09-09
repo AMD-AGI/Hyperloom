@@ -231,13 +231,6 @@ async def integrate_controller_patches(
             session_dir=Path(session_dir),
         )
     )
-    from hyperloom.orchestrator.framework.paths import resolve_patch_target_roots
-
-    configured_roots = [Path(root).expanduser().resolve() for root in resolve_patch_target_roots() if str(root).strip()]
-    state_root = str(getattr(shared_state, "framework_repo_path", "") or "").strip()
-    if state_root:
-        configured_roots.append(Path(state_root).expanduser().resolve())
-    allowed_roots = tuple(dict.fromkeys(configured_roots))
     results: list[PatchIntegrationResult] = []
     # One base commit per repository rather than one repository per run.
     pinned_bases: dict[Path, str] = {}
@@ -256,21 +249,6 @@ async def integrate_controller_patches(
             results.append(result)
             _write_result(results_dir, index, result)
             continue
-        if not any(
-            publication.repo_root == root or publication.repo_root.is_relative_to(root) for root in allowed_roots
-        ):
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_invalid",
-                reason="publication repo_root is outside the configured patch target roots",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(publication.repo_root),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
         repo = publication.repo_root
         if repo not in pinned_bases:
             pinned_bases[repo] = publication.base_commit

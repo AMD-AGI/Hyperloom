@@ -1988,3 +1988,39 @@ def test_env_spec_refuses_an_incomplete_snapshot(session_dir, tmp_path):
 
     (snapshot,) = spec["source_snapshots"]
     assert snapshot["reproducible"] is False
+
+
+# ---------------------------------------------------------------------------
+# A promoted result can still carry a failure: "apply_failed" / "reverted" both
+# promote, so the failure log is the only record of why a patch did not land.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_promote_records_a_failure_carried_by_a_promoted_result(session_dir):
+    coord = _coord(session_dir)
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "apply_failed",
+            "error_class": "patch_target_missing",
+            "error": "target absent from /srv/vllm",
+        },
+        task=_task("integrate_patch", task_id="ip1"),
+    )
+
+    failures = coord.shared_state.last_action_failures
+    assert [f["action"] for f in failures] == ["integrate_patch"]
+    assert failures[0]["error_class"] == "patch_target_missing"
+
+
+@pytest.mark.asyncio
+async def test_promote_leaves_a_clean_result_out_of_the_failure_log(session_dir):
+    coord = _coord(session_dir)
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {"status": "kept", "delta_pct": 2.0},
+        task=_task("integrate_patch", task_id="ip2"),
+    )
+
+    assert coord.shared_state.last_action_failures == []

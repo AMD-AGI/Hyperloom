@@ -3411,6 +3411,24 @@ class KernelPhase(PhaseHandler):
                 }
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
+        # The summary rides a ``response`` message the inbox dumps raw once.
+        _integration = result.get("integration")
+        if isinstance(_integration, dict):
+            _skipped = [
+                str(r.get("reason") or "")
+                for r in (_integration.get("results") or [])
+                if isinstance(r, dict) and str(r.get("status") or "").startswith("skipped")
+            ]
+            _status = str(_integration.get("status") or "")
+            if _status in {"failed", "no_patch_admitted"} or _skipped:
+                self.shared_state.record_action_failure(
+                    action="kernel_rewrite_controller",
+                    task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
+                    result={
+                        "error_class": _status or "patches_skipped",
+                        "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
+                    },
+                )
         self.shared_state.set_pending_escalate_hint(
             _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
         )

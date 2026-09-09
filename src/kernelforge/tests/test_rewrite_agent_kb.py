@@ -10,7 +10,6 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.knowledge import experience_integration, experience_sink
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
     KnowledgeStoreMode,
 )
@@ -32,31 +31,13 @@ from kernelforge.tests.test_rewrite_by_flydsl_kb import (
     _spec,
     _use_in_memory_kb_store,
 )
+from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
 
 VLLM_VERSION = framework_version("vllm")
 SOFTMAX_IDENTITY = f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:flydsl:mi355x"
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_REASON_LENGTH = 240
-
-
-def _remote_config_with_token(tmp_path, token: str) -> Config:
-    """A KB Store run configuration whose credential is a recognizable string."""
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "remote-knowledge",
-        kb_store_url="http://in-memory",
-        kb_store_token=token,
-        remote_backend=REMOTE_BACKEND_KB_STORE,
-    )
-    return Config.from_env(
-        workspace=str(tmp_path),
-        gpu_target="gfx950",
-        gpu_type="mi355x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
 
 
 def _credentialed_store_error(token: str) -> KBStoreError:

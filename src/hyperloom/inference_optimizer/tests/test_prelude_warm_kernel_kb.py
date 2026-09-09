@@ -317,7 +317,6 @@ def test_multi_file_manifest_and_target_snapshot_both_roll_back(
             "target_file": str(target),
             "snapshot_dir": str(materialized),
             "kernel_repo": str(live),
-            "allow_unknown_target": True,
         },
         session_dir=session_dir,
         kernel_id="multi",

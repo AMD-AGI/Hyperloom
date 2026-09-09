@@ -1,7 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What protects an Implementer lane, and who is asked to guarantee it."""
+"""What protects an Implementer lane, and who is asked to guarantee it.
+
+A lane edits its own copy of the workspace, and its candidate is measured later,
+once, by the loop. The measurement surface still has to survive the session: a
+lane diff that touches the driver, the harness or the oracle is refused at the
+boundary, and the refusal takes the implementation edits in the same diff with
+it -- after the session has already been paid for in full.
+
+A hook denies that edit while the agent is still working, which is the only
+point at which the rest of the session can still be saved. The lane runs the
+in-session gate for those denials alone: the gate's Stop hook benchmarks, and
+lanes run concurrently while the device measures one thing at a time.
+
+That protection, and the private build cache a lane compiles into, are both
+things the provider does on the lane's behalf. Neither is checked by the lane
+code, so the second half of this file is about the provider being made to
+declare them before a round of lanes is allowed to start.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +28,6 @@ from pathlib import Path
 import click
 import pytest
 
-import kernelforge.agent_backends.registry as registry
 import kernelforge.loop.insession_gate as gate_module
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
@@ -26,11 +42,8 @@ from kernelforge.loop import fanout
 
 
 @pytest.fixture(autouse=True)
-def isolated_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry."""
-    registry.discover_agent_providers()
-    monkeypatch.setattr(registry, "_providers", dict(registry._providers))
-    monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 def _campaign(tmp_path: Path) -> tuple[Config, Path]:
@@ -127,7 +140,12 @@ def test_a_lane_session_is_given_the_protected_path_hooks(tmp_path, monkeypatch)
 
 
 def test_a_lane_session_is_not_given_the_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """The Stop hook runs correctness and a benchmark; lanes are concurrent."""
+    """The Stop hook runs correctness and a benchmark; lanes are concurrent.
+
+    Lanes overlap in time and the device measures one thing at a time, so a lane
+    that benchmarked at the end of its own session would time its kernel against
+    whatever its siblings were running.
+    """
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
 
     assert spec.hooks is not None
@@ -228,7 +246,8 @@ def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
         "timeout 600 sh -c 'python3 forge_driver.py'",
         "python3 -W ignore forge_driver.py",
         "python3 -X dev forge_driver.py --bench-mode",
-        # An interpreter reaches the driver by module too, and -m names it without the suffix a path carries.
+        # An interpreter reaches the driver by module too, and -m names it
+        # without the suffix a path carries.
         "python3 -m forge_driver",
         "python3 -mforge_driver --bench-mode",
         "python3 -X dev -m forge_driver",
@@ -240,7 +259,13 @@ def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
     ],
 )
 def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(tmp_path, monkeypatch, command):
-    """A prompt is a preference; the number the round is judged on is not."""
+    """A prompt is a preference; the number the round is judged on is not.
+
+    The wrapper is what holds the device lock, so a driver run that goes around
+    it times this lane against whichever sibling is benchmarking at the same
+    moment -- and corrupts that sibling's number too, which is the part no
+    lesson can attribute to anything.
+    """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
@@ -267,7 +292,11 @@ def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(tmp_path, mon
     ],
 )
 def test_a_lane_hook_allows_the_locked_run_and_every_read(tmp_path, monkeypatch, command):
-    """Only executing the driver is refused, and only outside its wrapper."""
+    """Only executing the driver is refused, and only outside its wrapper.
+
+    Reading the driver is how a lane learns what it is being scored on, and the
+    wrapper is the command it was told to measure through.
+    """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
@@ -275,14 +304,24 @@ def test_a_lane_hook_allows_the_locked_run_and_every_read(tmp_path, monkeypatch,
 
 
 def test_a_session_without_a_wrapper_still_runs_the_driver_itself(tmp_path, monkeypatch):
-    """The refusal belongs to an interposed command, not to the gate at large."""
+    """The refusal belongs to an interposed command, not to the gate at large.
+
+    Every ordinary session runs the driver directly and must keep doing so; the
+    rule exists only where a wrapper was put in front of it.
+    """
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
 
     assert _bash_decision(spec, "python3 forge_driver.py --bench-mode") == {}
 
 
 def test_a_lane_is_told_to_run_the_driver_through_its_own_lock(tmp_path, monkeypatch):
-    """The lock lives in the wrapper, so it binds only if the session runs it."""
+    """The lock lives in the wrapper, so it binds only if the session runs it.
+
+    The wrapper used to reach the lane in a per-invocation note alone, while the
+    factory argument carrying it went unused. A requirement that holds for the
+    whole session belongs in the session's own instructions, which a long run
+    keeps in view long after its first message.
+    """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
 
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
@@ -300,7 +339,11 @@ def test_a_session_without_a_wrapper_is_told_nothing_about_one(tmp_path, monkeyp
 
 
 def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(tmp_path, monkeypatch):
-    """No Stop hook means no gate to send the agent back, so it is not promised one."""
+    """No Stop hook means no gate to send the agent back, so it is not promised one.
+
+    The self-correcting prompt describes a gate that re-checks correctness and
+    speed and rejects a stop that does not converge. A lane has no such gate.
+    """
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
 
     assert "ONE self-correcting session" not in spec.system_prompt
@@ -368,7 +411,12 @@ def _register_provider(name: str, **capabilities: bool) -> None:
 
 
 def test_lanes_are_refused_on_a_provider_that_does_not_run_our_hooks():
-    """Without the hooks the lane protection is a promise nothing keeps."""
+    """Without the hooks the lane protection is a promise nothing keeps.
+
+    The gate builds them and the spec carries them, and a provider that ignores
+    ``spec.hooks`` drops them in silence -- leaving a lane exactly where it
+    started, losing whole candidates at the boundary check.
+    """
     _register_provider("hooklesscli", session_env=True)
 
     with pytest.raises(click.ClickException) as refusal:
@@ -381,7 +429,11 @@ def test_lanes_are_refused_on_a_provider_that_does_not_run_our_hooks():
 
 
 def test_lanes_are_refused_on_a_provider_that_ignores_the_session_environment():
-    """A lane's private build cache is carried by AgentRunSpec.env, or not at all."""
+    """A lane's private build cache is carried by AgentRunSpec.env, or not at all.
+
+    A provider that drops it puts every lane back into one cache, where aiter
+    imports a module by name and a lane measures a binary a sibling compiled.
+    """
     _register_provider("sharedenvcli", stop_hooks=True)
 
     with pytest.raises(click.ClickException) as refusal:
@@ -408,7 +460,11 @@ def test_a_lane_refusal_names_every_missing_guarantee():
 
 
 def test_lanes_are_refused_rather_than_quietly_reduced():
-    """The operator asked for N sessions and gets N or an explanation."""
+    """The operator asked for N sessions and gets N or an explanation.
+
+    Answering with fewer lanes would be the same silent downgrade the refusal
+    exists to prevent, only with the evidence for it thrown away.
+    """
     _register_provider("plaincli")
 
     with pytest.raises(click.ClickException):
@@ -416,7 +472,11 @@ def test_lanes_are_refused_rather_than_quietly_reduced():
 
 
 def test_one_lane_is_never_refused():
-    """A single session needs none of this: there is nothing to isolate it from."""
+    """A single session needs none of this: there is nothing to isolate it from.
+
+    It is also what a refusal offers as the way forward, so it cannot itself
+    depend on the guarantees that were missing.
+    """
     _register_provider("plaincli")
 
     assert cli._require_lane_provider_capabilities("plaincli", 1) is None
@@ -430,7 +490,12 @@ def test_lanes_run_on_a_provider_that_declares_both():
 
 
 def test_the_builtin_hook_capable_provider_passes_the_lane_check():
-    """Tie the built-in declaration to the rule that reads it."""
+    """Tie the built-in declaration to the rule that reads it.
+
+    Claude runs the hooks and applies the session environment; if either
+    declaration were dropped, concurrent lanes would stop being available at all
+    rather than quietly losing a guarantee.
+    """
     assert cli._require_lane_provider_capabilities("claude", 2) is None
 
 
@@ -443,7 +508,12 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
     ],
 )
 def test_a_pipe_inside_one_argument_is_not_a_second_command(tmp_path, monkeypatch, command):
-    """Observed in a live round: a lane's `pgrep` was refused as a driver run."""
+    """Observed in a live round: a lane's `pgrep` was refused as a driver run.
+
+    The operators that separate commands were found by a regex over the raw
+    text, so a pipe inside a quoted argument cut the string in half and the
+    tail became a command whose verb was a file the session never ran.
+    """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 

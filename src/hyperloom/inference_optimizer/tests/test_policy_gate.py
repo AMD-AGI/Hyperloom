@@ -140,17 +140,6 @@ def test_path_under_session_inside_and_escape(tmp_path: Path) -> None:
     assert g._path_under_session("/etc/passwd") is False
 
 
-def test_path_in_source_allowlist(monkeypatch) -> None:
-    g = _gate(None)
-    monkeypatch.setattr(pol, "resolve_source_file_allowlist", lambda: ("/srv/sglang/",))
-    assert g._path_in_source_allowlist("/srv/sglang/foo.py") is True
-    assert g._path_in_source_allowlist("/srv/sglang/sub/foo.py") is True
-    assert g._path_in_source_allowlist("/other/foo.py") is False
-    # Traversal and shared-prefix boundary must NOT slip past.
-    assert g._path_in_source_allowlist("/srv/sglang/../etc/passwd") is False
-    assert g._path_in_source_allowlist("/srv/sglangX/foo.py") is False
-
-
 def test_path_in_trace_allowlist(monkeypatch) -> None:
     g = _gate(None)
     monkeypatch.setattr(pol, "_trace_path_allowlist", lambda: ("/shared/profile/",))
@@ -158,40 +147,6 @@ def test_path_in_trace_allowlist(monkeypatch) -> None:
     assert g._path_in_trace_allowlist("/elsewhere/run.json.gz") is False
     assert g._path_in_trace_allowlist("/shared/profile/../secret") is False
     assert g._path_in_trace_allowlist("/shared/profileX/run.json.gz") is False
-
-
-def test_rocm_runtime_write_denied(tmp_path: Path) -> None:
-    from types import SimpleNamespace
-
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-
-    g = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-        strict_paths=True,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        g._validate_payload_paths(
-            SimpleNamespace(name="kernel"),
-            IntentType.DELEGATE,
-            {"target_file": "/opt/rocm/lib/libhip_hcc.so"},
-        )
-    assert exc.value.rule == "rocm_runtime_write_denied"
-
-
-def test_rocm_runtime_filter_does_not_apply_to_read_path_fields(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-
-    g = PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path, strict_paths=True)
-    monkeypatch.setattr(g, "_path_under_session", lambda _path: True)
-
-    g._validate_payload_paths(
-        SimpleNamespace(name="kernel"),
-        IntentType.DELEGATE,
-        {"trace_input": "/opt/rocm/lib/runtime.trace.json"},
-    )
 
 
 # -- _check_freeform_task_description -------------------------------------

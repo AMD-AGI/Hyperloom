@@ -343,7 +343,7 @@ def _backend_like_env() -> dict[str, str]:
 def _feed_stdin(monkeypatch, lines: list[str]) -> None:
     """Install a fake stdin buffer yielding the given JSON-RPC lines."""
     stream = io.BytesIO("".join(lines).encode())
-    monkeypatch.setattr(server.sys, "stdin", type("_Stdin", (), {"buffer": stream})())
+    monkeypatch.setattr(sys, "stdin", type("_Stdin", (), {"buffer": stream})())
 
 
 def test_write_message_emits_one_compact_json_line(capsys):

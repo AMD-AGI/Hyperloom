@@ -69,11 +69,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
-        "pyproject.toml",
-        r"^(kernel-agents = |# Deprecated alias kept for one release)",
-        "Deprecated console-script alias (and the comment above it), kept one release so existing scripts and shell history keep working.",
-    ),
-    (
         "CHANGELOG.md",
         r"kernel_agents|kernel-agents",
         "Historical release notes.",

@@ -47,14 +47,14 @@ def _req(log: str = "") -> EnablementRequest:
 def test_mandate_always_lists_framework_and_rocm_hip_roots() -> None:
     """Default-on: both the framework and ROCm/HIP source roots are in scope."""
     mandate = build_mandate(_req())
-    assert any("serving-framework" in h for h in mandate.allowed_root_hints)
-    assert any("ROCm" in h for h in mandate.allowed_root_hints)
+    assert any("serving-framework" in h for h in mandate.source_root_hints)
+    assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_mandate_rocm_hip_root_present_for_hip_failure() -> None:
     """A HIP failure still carries the ROCm/HIP source root family (always allowed)."""
     mandate = build_mandate(_req(log="RuntimeError: hipErrorNoBinaryForGpu"))
-    assert any("ROCm" in h for h in mandate.allowed_root_hints)
+    assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_task_description_carries_failure_context() -> None:
@@ -254,8 +254,8 @@ def _roots_sig() -> FailureSignature:
 def test_returns_real_roots_when_probe_finds_something():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
-            return_value="/sgl-workspace/vllm:/opt/rocm",
+            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            return_value=("/sgl-workspace/vllm/", "/opt/rocm/"),
         ),
         patch(
             "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
@@ -269,8 +269,8 @@ def test_returns_real_roots_when_probe_finds_something():
 
 def test_falls_back_to_generic_when_probe_empty():
     with patch(
-        "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
-        return_value="",
+        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+        return_value=(),
     ):
         hints = _resolve_actual_root_hints("vllm")
     assert _FRAMEWORK_ROOT_HINT in hints
@@ -279,7 +279,7 @@ def test_falls_back_to_generic_when_probe_empty():
 
 def test_falls_back_on_probe_exception():
     with patch(
-        "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
+        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
         side_effect=RuntimeError("no roots"),
     ):
         hints = _resolve_actual_root_hints("vllm")
@@ -289,8 +289,8 @@ def test_falls_back_on_probe_exception():
 def test_version_appended_when_package_installed():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
-            return_value="/sgl-workspace/vllm",
+            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            return_value=("/sgl-workspace/vllm/",),
         ),
         patch(
             "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
@@ -308,8 +308,8 @@ def test_version_appended_when_package_installed():
 def test_build_mandate_uses_resolved_roots_in_task_description():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
-            return_value="/sgl-workspace/vllm:/opt/rocm",
+            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            return_value=("/sgl-workspace/vllm/", "/opt/rocm/"),
         ),
         patch(
             "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
@@ -318,25 +318,25 @@ def test_build_mandate_uses_resolved_roots_in_task_description():
     ):
         mandate = build_mandate(_roots_req(), signature=_roots_sig())
     assert "/sgl-workspace/vllm" in mandate.task_description
-    assert any("/sgl-workspace/vllm" in h for h in mandate.allowed_root_hints)
+    assert any("/sgl-workspace/vllm" in h for h in mandate.source_root_hints)
 
 
 def test_build_mandate_explicit_root_hints_override_discovery():
-    """Caller-supplied root_hints bypass _resolve_actual_root_hints."""
+    """Caller-supplied source_root_hints bypass _resolve_actual_root_hints."""
     mandate = build_mandate(
         _roots_req(),
         signature=_roots_sig(),
-        root_hints=["/custom/root"],
+        source_root_hints=["/custom/root"],
     )
-    assert "/custom/root" in mandate.allowed_root_hints
+    assert "/custom/root" in mandate.source_root_hints
     assert "/custom/root" in mandate.task_description
 
 
 def test_build_mandate_falls_back_gracefully_when_no_roots():
     with patch(
-        "hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env",
-        return_value="",
+        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+        return_value=(),
     ):
         mandate = build_mandate(_roots_req(), signature=_roots_sig())
-    assert _FRAMEWORK_ROOT_HINT in mandate.allowed_root_hints
+    assert _FRAMEWORK_ROOT_HINT in mandate.source_root_hints
     assert _FRAMEWORK_ROOT_HINT in mandate.task_description

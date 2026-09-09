@@ -8,18 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.config import Config
 from kernelforge.knowledge import experience_integration as integ
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
 from kernelforge.knowledge.implementation_identity import implementation_signature
 from kernelforge.rewrite_by_flydsl import driver_contract, record_store, runner
 from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
     DriverPreflight,
 )
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
+from kernelforge.conftest import kb_store_run_config as _kb_store_config
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_READ_ERROR_LENGTH = 240
@@ -1519,23 +1515,6 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
 
 
 # --- the rewrite warm start's persisted read error --------------------------- #
-def _kb_store_config(tmp_path: Path, token: str) -> Config:
-    """A KB Store run configuration whose credential is a recognizable string."""
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "remote-knowledge",
-        kb_store_url="http://in-memory",
-        kb_store_token=token,
-        remote_backend=REMOTE_BACKEND_KB_STORE,
-    )
-    return Config.from_env(
-        workspace=str(tmp_path),
-        gpu_target="gfx950",
-        gpu_type="mi355x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
 
 
 def test_rewrite_warm_start_failure_is_persisted_without_its_credential(

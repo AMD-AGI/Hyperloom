@@ -23,8 +23,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from patch_path_safety import (  # noqa: E402
     atomic_write_bytes,
     assert_backup_dir_allowed,
-    assert_revert_paths_allowed,
-    assert_target_path_allowed,
+    assert_backup_path_allowed,
     finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
@@ -59,7 +58,6 @@ def _do_apply(a: argparse.Namespace) -> int:
     host = socket.gethostname()
     target = Path(a.target_path)
     try:
-        assert_target_path_allowed(target, must_exist=True)
         assert_backup_dir_allowed(Path(a.backup_dir))
     except ValueError as exc:
         return _emit({"status": "failed", "host": host, "error": str(exc)})
@@ -154,7 +152,7 @@ def _do_revert(a: argparse.Namespace) -> int:
             backup = Path(str(record.get("backup_path") or ""))
             if not backup.is_file():
                 raise FileNotFoundError(f"backup missing: {backup}")
-            assert_revert_paths_allowed(target, backup)
+            assert_backup_path_allowed(backup)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup, target)
             restored.append(str(target))

@@ -399,7 +399,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
 
         # Under cap: store the retry context for the dispatcher to pick up.
-        vetting_drops_raw = res.get("patches_dropped_by_grounding")
+        vetting_drops_raw = res.get("patches_ungrounded")
         retry_ctx: dict[str, Any] = {
             "cand_id": cand_id,
             "batch_id": batch_id,
