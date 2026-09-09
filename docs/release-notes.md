@@ -83,23 +83,25 @@ are marked below; the full per-change list is in
   discarding an undeclared option with a warning and proceeding on the defaults.
   That exemption existed for a consumer in a separate repository; vendoring put
   producer and consumer in one wheel, so what the tolerance still absorbed was
-  typos and renames — seven shipped examples kept passing a retired `--fellow`
-  flag and ran an inferred backend while exiting 0. Both commands now fail with
-  click's own error and exit 2 before any GPU work starts.
+  typos and renames — seven shipped examples kept passing a flag that had been
+  renamed out from under them and ran an inferred backend while exiting 0. Both
+  commands now fail with click's own error and exit 2 before any GPU work starts.
 
   Alongside it: `$FORGE_PATH` is removed and **not** honoured as an override
   (use `$KERNELFORGE_PROJECT_ROOT`, which defaults to
   `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge`);
   `forge-gemm-tune` is gone as a console script and as a distribution, invoked
-  now as `kernelforge gemm-tune`; the `fellow` vocabulary is retired in favour of
-  `kernel_backend`, and a campaign config carrying the retired key fails at load
-  rather than migrating silently; and `FORGE_MAX_ITERS` /
+  now as `kernelforge gemm-tune`; the kernel-backend vocabulary is normalized, so
+  the CLI flag is `--kernel-backend` taking a bare name (`triton`), the
+  campaign-config key is `kernel_backend`, and a config carrying the retired key
+  fails at load rather than migrating silently; and `FORGE_MAX_ITERS` /
   `FORGE_COMPILED_MAX_ITERS` are gone, having fed a cap that was never applied.
-  `FORGE_` stays on the dotenv prefix allowlist, so a stale `FORGE_PATH` or
-  `FORGE_DISABLE_COMPILED_FELLOWS` is still forwarded into the run and then
-  ignored — the latter is now detected and warned about once per run, because an
-  operator who had switched compiled kernel backends off would otherwise
-  silently get them back.
+  Because `FORGE_` stays on the dotenv prefix allowlist, a stale `FORGE_PATH` or
+  a retired spelling of `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS` is still
+  forwarded into the run and then ignored; the latter is detected and warned
+  about once per run, because an operator who had switched compiled kernel
+  backends off would otherwise silently get them back. `CHANGELOG.md` carries
+  the retired spellings verbatim for anyone migrating a script.
 
 - **An AgentX run is graded on total token throughput under an interactivity
   constraint**: the corpus an agentic replay runs averages ~114k prompt tokens
