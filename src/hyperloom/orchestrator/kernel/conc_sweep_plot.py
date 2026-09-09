@@ -25,7 +25,7 @@ def _positive(value: Any) -> float | None:
 
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """p90 interactivity against token throughput per chip."""
-    intvty = _positive(point.get("intvty_p90"))
+    intvty = _positive(point.get("e2e_norm_intvty_p90"))
     total = _positive(point.get("total_token_throughput"))
     if intvty is None or total is None:
         return None

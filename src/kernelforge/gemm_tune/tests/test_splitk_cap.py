@@ -252,3 +252,127 @@ def test_cap_header_case_insensitive_no_unsafe_passthrough(tmp_path):
     out = _read(art)
     si = [h.lower() for h in out[0]].index("splitk")
     assert all(int(r[si]) <= 2 for r in out[1:])  # no unsafe splitK>2 remains
+
+
+class TestSplitKForwardingContract:
+    """A tuned row is only honoured if production forwards every parameter.
+
+    ``gemm_a8w8_blockscale_bpreshuffle``'s ck/cktile wrappers accept no
+    ``splitK`` argument at all -- only its ``asm`` wrapper does. Shipping a
+    splitK>0 row on ck/cktile therefore deploys a config benchmarked *with*
+    split-K that runs *without* it: no crash, a kernel slower than the one that
+    won the benchmark, and every engagement gate still green. Capping it to a
+    splitK=0 candidate is the only honest option.
+    """
+
+    FORWARDS = frozenset({"asm"})
+
+    @staticmethod
+    def _rows(libtype: str, sk: int, us: float, name: str):
+        return [
+            "gfx950",
+            "256",
+            "64",
+            "5120",
+            "17408",
+            libtype,
+            "9",
+            str(sk),
+            str(us),
+            name,
+            "100",
+            "1000",
+            "0.0",
+        ]
+
+    def test_unforwarded_libtype_is_capped_to_zero(self, tmp_path):
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        # cktile won with splitK=2, but its wrapper drops splitK.
+        _write(art, [self._rows("cktile", 2, 39.0, "cktile_sk2")])
+        _write(
+            prof,
+            [
+                self._rows("cktile", 2, 39.0, "cktile_sk2"),
+                self._rows("cktile", 0, 57.0, "cktile_sk0"),
+            ],
+        )
+
+        n, has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=self.FORWARDS)
+
+        assert n == 1
+        assert has is False
+        out = _read(art)
+        si = [h.lower() for h in out[0]].index("splitk")
+        assert [r[si] for r in out[1:]] == ["0"]
+
+    def test_forwarded_libtype_keeps_its_splitk(self, tmp_path):
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        _write(art, [self._rows("asm", 2, 30.0, "asm_sk2")])
+        _write(prof, [self._rows("asm", 2, 30.0, "asm_sk2")])
+
+        n, has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=self.FORWARDS)
+
+        assert n == 0
+        assert has is True
+
+    def test_row_is_dropped_when_no_zero_splitk_candidate_exists(self, tmp_path):
+        # Dropping leaves the aiter default at serve time, which is correct and
+        # crash-free; keeping the row would ship an unreproducible measurement.
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        _write(art, [self._rows("ck", 2, 39.0, "ck_sk2")])
+        _write(prof, [self._rows("ck", 2, 39.0, "ck_sk2")])
+
+        n, has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=self.FORWARDS)
+
+        assert n == 1
+        assert has is False
+        assert len(_read(art)) == 1  # header only
+
+    def test_empty_forwarding_set_fails_closed(self, tmp_path):
+        # An op absent from the contract table must not be assumed to forward.
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        _write(art, [self._rows("ck", 2, 39.0, "ck_sk2")])
+        _write(prof, [self._rows("ck", 2, 39.0, "ck_sk2"), self._rows("ck", 0, 57.0, "ck_sk0")])
+
+        n, _has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=frozenset())
+
+        assert n == 1
+        out = _read(art)
+        si = [h.lower() for h in out[0]].index("splitk")
+        assert [r[si] for r in out[1:]] == ["0"]
+
+    def test_none_disables_the_check(self, tmp_path):
+        # Back-compat for a caller that has not established the contract.
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        _write(art, [self._rows("cktile", 2, 39.0, "cktile_sk2")])
+        _write(prof, [self._rows("cktile", 2, 39.0, "cktile_sk2")])
+
+        n, has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=None)
+
+        assert n == 0
+        assert has is True
+
+    def test_splitk_zero_rows_are_untouched_on_any_libtype(self, tmp_path):
+        art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+        _write(art, [self._rows("cktile", 0, 57.0, "cktile_sk0")])
+        _write(prof, [self._rows("cktile", 0, 57.0, "cktile_sk0")])
+
+        n, has = _cap_splitk_to_serve_safe(art, prof, 4, forwarding_libtypes=self.FORWARDS)
+
+        assert (n, has) == (0, False)
+
+
+def test_bpreshuffle_contract_excludes_ck_and_cktile():
+    """Regression guard on the table itself, not on a caller.
+
+    Adding ``--splitK`` to the bpreshuffle tuner looks like free decode gain --
+    it is worth ~1.47x at M=64 on the non-preshuffle op -- and would have
+    shipped 12 of 14 rows with a dropped splitK. The contract is what makes that
+    mistake loud instead of silent.
+    """
+    from kernelforge.gemm_tune.tuners._aiter_dense_common import _SPLITK_FORWARDING_LIBTYPES
+
+    assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale"] == {"ck", "cktile"}
+    assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale_bpreshuffle"] == {"asm"}
+    # Fail closed for anything unverified.
+    assert _SPLITK_FORWARDING_LIBTYPES.get("a4w4_blockscale") is None

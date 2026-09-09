@@ -89,6 +89,23 @@ class TargetAnalysisExecutor:
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the external-baseline comparison and persist report artefacts."""
         params = dict(ctx.task.params or {})
+
+        # Upstream agentic rows carry null isl/osl by design, so the strict
+        # isl/osl match in ``find_reference_rows`` can never hit one. Fetching
+        # them would always return empty; report that instead of a false miss.
+        # Matching agentic rows is tracked in agentX-compareGPU.issue.md.
+        from ._workload_envs import agentx_active
+
+        if agentx_active((getattr(ctx, "extra", None) or {}).get("shared_state")):
+            log.info("target_analysis_executor: AgentX has no comparable upstream row; skipping")
+            return {
+                "status": "succeeded",
+                "kind": ctx.task.kind,
+                "note": "skipped: upstream agentic rows carry null isl/osl",
+                "baseline_status": "skipped",
+                "reason": "agentx_not_supported",
+            }
+
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)

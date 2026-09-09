@@ -69,7 +69,6 @@ def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
-    monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
 
 
 def test_validate_server_args_rejects_bare_positionals():
@@ -138,7 +137,9 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
-    assert envs["SGLANG_REMOVE_ME"] == "override"
+    # Named in both extra_envs and unset_envs: the removal is the more specific
+    # intent and wins, so the bare-string unset_envs form is proven to apply.
+    assert "SGLANG_REMOVE_ME" not in envs
 
 
 def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path, monkeypatch):

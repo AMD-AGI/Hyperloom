@@ -110,6 +110,7 @@ skyseg.onnx
 .prompt-audit/
 # Scratch plan and revision files
 *.plan.md
+*.issue.md
 # Experiment and repro artefacts
 /prefix_cache_repro/
 kimi-k3-agentx-repro
@@ -121,3 +122,4 @@ kimik3-wares
 /*.csv
 /*.pptx
 /*.html
+audit.md

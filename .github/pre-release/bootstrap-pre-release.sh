@@ -117,7 +117,7 @@ SETUP_RESUME_NUDGE='Your previous turn ended before setup finished. Do NOT resta
 
 DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize behind, and nothing has been written under the workspace since, so the work is not progressing. Do NOT fabricate a result. Finish the launch in THIS turn: complete the install if it is still needed, start optimize detached with setsid nohup so it survives the end of this turn, then confirm the nested session run dir and its state.json exist and report their paths.'
 
-# Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
+# Clean terminal stop_reason values (hyperloom.inference_optimizer.breakdown.stop_reasons.SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {
   case "$1" in
     target_reached|global_converged|time_exhausted|max_ticks|sweep_done|robustness_escalated)

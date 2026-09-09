@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from hyperloom.common.env_safety import DOTENV_EXACT_ALLOWLIST
-from hyperloom.inference_optimizer.cli import _SUCCESS_STOP_REASONS
+from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
 
 _SELF_HOSTED_LABEL = "hyperloom-pre-e2e-baremetal"
 
@@ -143,7 +143,7 @@ def test_every_copy_of_the_clean_terminal_vocabulary_agrees(poll_script: str, bo
         assert m, "could not read the clean-terminal case arm"
         return set(m.group(1).split("|"))
 
-    assert _case_arm(bootstrap_script) == _case_arm(poll_script) == set(_SUCCESS_STOP_REASONS)
+    assert _case_arm(bootstrap_script) == _case_arm(poll_script) == set(SUCCESS_STOP_REASONS)
 
 
 def test_an_llm_closeout_is_a_clean_terminal(poll_script: str) -> None:

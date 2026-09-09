@@ -101,7 +101,8 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
+  `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
@@ -671,6 +672,29 @@ otherwise `score >= floor` passes.
 
 ---
 
+## Host safety: reaping, GPU claims, and the out-of-band supervisor
+
+Three mechanisms protect a host from a run that ended badly. All three default
+to the weakest, most conservative setting, because the deployment is mixed and a
+guarantee that varies silently by host is not a guarantee.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
+| `HYPERLOOM_SUPERVISOR` | `1` | Whether the optimizer starts an out-of-band supervisor process that watches for a coordinator that died or whose tick stopped advancing. |
+| `HYPERLOOM_SUPERVISOR_ENFORCE` | unset (off) | Whether the supervisor may end a process tree. A wedged coordinator is sent SIGTERM regardless — that is the channel its signal drain reads while the loop is busy. Off by default, a coordinator that does not answer that stop, and a dead one's leftovers, are left alone and the refusal is recorded in `runtime/supervisor/status.json`. Ending a tree additionally requires a reap backend whose success is proof, so enforcement with the default `process_group` unit will refuse to kill and say so. |
+| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at `3600` and floored at `1800` | How long the coordinator's tick may go without advancing before the supervisor calls it wedged. Derived from the session budget so the window always fits inside the run it watches; setting this overrides the derivation. |
+
+The supervisor never opens `coordinator.db` — it sits on a network filesystem
+where a second writer risks the message bus and the task registry — and never
+transitions round state while the coordinator is alive. Its files live under
+`<session>/runtime/supervisor/`. When it finds the coordinator's process gone it
+writes `reports/final.json` itself, marked `producer: "supervisor"`; that record
+never replaces a full report, and the coordinator's own crash-safe fallback never
+replaces it.
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.
@@ -918,48 +942,51 @@ are tasks. Supporting another gateway means adding a preset in
 Grading defaults to output throughput alone. On an agentic replay that is the
 wrong objective: the canonical corpus averages ~114k prompt tokens against ~810
 output tokens per request, so output-only grading optimises about 1% of the
-token budget and a variant can lift decode tok/s while wrecking prefill and
-still be recorded as a win.
+token budget, and a variant can lift decode tok/s while degrading user-perceived
+latency with no visible cost.
 
-Turning this on adopts the shape InferenceX ranks a submission by. Upstream
-sweeps a concurrency ladder, keeps TTFT and inter-token-latency percentiles
-separately, and compares throughput per chip *at a fixed interactivity target* —
-it never collapses the axes into one weighted number, and trading interactivity
-away for throughput is not a result it can express. So **total token throughput
-is the objective** and **interactivity p90 is a veto**, not a weighted term.
+`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
+sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
+publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
+and token throughput per chip as the y-axis. It never collapses the axes into one
+weighted number, and it has **no fixed interactivity target** — interactivity is
+a frontier coordinate, not a constraint, so a point that trades interactivity for
+throughput moves along the frontier rather than violating a rule.
 
-The objective is graded with the same `gain_pct` and the same
-`keep_threshold_pct` as run_grid and integrate_patch: a +1% total-throughput
-lift reads 1.00 and is kept, and the threshold is the only noise filter on the
-graded quantity. A candidate whose interactivity p90 falls past the band below
-the anchor is rejected before its throughput is read.
+Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
+per-concurrency arm selection maintainers apply before submitting:
 
-Interactivity is E2E Normalized Interactivity (`OSL/E2EL`) at p90, which is the
-axis upstream reports. It includes TTFT in the denominator, unlike the per-user
-`1/ITL` figure — on a ~114k-prompt replay TTFT is most of what a user waits for,
-so grading on `1/ITL` would let a candidate double TTFT with no visible cost.
+- **KEEP** — E2E normalised interactivity P90 (slow tail) gain ≥ `keep_threshold_pct`
+  **and** token throughput per chip not worse than the noise band.
+- **REVERT** — both axes worse than the anchor.
+- **RECORDED** — neither dominates; the point is stored for reporting but not
+  promoted to the optimization stack.  A point that loses at the measured
+  concurrency may still be the frontier winner at another rung.
 
-Default-on for AgentX runs, explicit opt-in via
-`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Either AgentX signal turns it
-on: the ambient `HYPERLOOM_AGENTX=1`, or the `benchmark_mode=agentx` stamped on
-the session at seed — so a round driven from a subprocess that never inherited
-the env var still grades on the agentic axis. Serving frameworks only:
-scriptable frameworks (xDiT, custom) keep output-throughput grading regardless.
+The minimum `keep_threshold_pct` floor for AgentX sessions is 2% (`AGENTX_KEEP_THRESHOLD_FLOOR_PCT`).
+The slow-tail variance is unmeasured; this floor is a conservative placeholder.
 
-Every KEEP decision — explore, the current_best lift, integrate_patch, the
-kernel stack, and the cumulative validated gain — resolves what it grades
-through one chokepoint, so the candidate and the figure it must beat are always
-read off the same axis. Total is ~140x output on this corpus, so half-applying
-the objective would not read as a small error: it would refuse every KEEP in the
-affected lane while each individual number it logged still looked plausible.
-When either side cannot supply the graded axes (no `intvty_p90`, no total),
-both degrade to output throughput together and the reason is logged — the
-degrade is never silent and never one-sided.
+**E2E normalised interactivity P90** is defined per request as
+`r_i = E2EL_i / OSL_i` (seconds per output token), then
+`interactivity_P90 = 1 / P90({r_i})` in tok/s/user.  Upstream takes the
+percentile in seconds-per-token *before* inverting to preserve the slow-tail
+interpretation (`MODELS.md:78`).  In aiperf's export `e2e_output_token_throughput`
+is the per-request rate `OSL / E2EL_s` with `LARGER_IS_BETTER`; its **P10**
+(not P90) is therefore the slow tail — `1 / P90(ratio) = P10(rate)`.
+
+TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
+is most of what a user waits for so grading on `1/ITL` would miss it.
+
+Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
+otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
+`benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
+inherited the env var still grades on the agentic axis. Serving frameworks only;
+scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `composite_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `composite_v1` grades total token throughput under the interactivity veto. An agentic replay is the case this grading exists for, so AgentX runs get it without asking; any other explicit value (including on an AgentX run) keeps output-throughput grading. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P90 (slow tail) as the primary objective, with per-chip token throughput as a secondary guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to both axes of the 2-D domination check. A candidate whose interactivity or throughput sits within this band of the anchor is not considered strictly worse on that axis. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
@@ -990,6 +1017,12 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
+  `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  evidence probe, armed by the profile leg that collects the evidence. The deep
+  tier inflates host time by design, so setting it by hand distorts any trace
+  collected alongside it.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 

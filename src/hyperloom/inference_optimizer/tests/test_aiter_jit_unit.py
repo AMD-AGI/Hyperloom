@@ -405,3 +405,199 @@ def test_sweep_dead_compiler_keeps_fresh_ownerless_lock(tmp_path, monkeypatch):
     assert stats["deleted"] == 0
     assert stats["skipped_fresh"] == 1
     assert lock.exists()
+
+
+def test_csv_kernel_names_skips_blank_rows(tmp_path):
+    csv_path = tmp_path / "tuned.csv"
+    csv_path.write_text(
+        "M,N,K,kernelName\n16,512,7168,kernel_a\n32,512,7168,\n64,512,7168,kernel_b\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_kernel_names(csv_path) == {"kernel_a", "kernel_b"}
+
+
+def test_serving_modules_cover_csv_when_names_are_in_so(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"padding kernel_a more kernel_b padding")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text("kernelName\nkernel_a\nkernel_b\n", encoding="utf-8")
+    assert aj.serving_modules_cover_csv(
+        jit_dir,
+        ("module_gemm_a8w8_blockscale_bpreshuffle",),
+        csv_path,
+    )
+
+
+def test_serving_modules_cover_csv_false_when_name_missing(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"only kernel_a")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text("kernelName\nkernel_a\nkernel_b\n", encoding="utf-8")
+    assert not aj.serving_modules_cover_csv(
+        jit_dir,
+        ("module_gemm_a8w8_blockscale_bpreshuffle",),
+        csv_path,
+    )
+
+
+def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"padding kernel_ck padding")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\nck,kernel_ck\nasm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_64x128E\n",
+        encoding="utf-8",
+    )
+    assert aj.serving_modules_cover_csv(
+        jit_dir,
+        ("module_gemm_a8w8_blockscale_bpreshuffle",),
+        csv_path,
+    )
+
+
+def test_serving_modules_cover_csv_finds_cktile_in_blockscale_cktile_so(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
+    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(
+        b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
+    )
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\n"
+        "ck,a8w8_blockscale_bpreshuffle_ck\n"
+        "cktile,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1\n",
+        encoding="utf-8",
+    )
+    assert aj.serving_modules_cover_csv(
+        jit_dir,
+        aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
+        csv_path,
+    )
+
+
+def test_serving_modules_cover_csv_false_when_cktile_only_in_tune_so(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
+    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(b"other_cktile")
+    (jit_dir / "module_gemm_a8w8_blockscale_cktile_tune.so").write_bytes(
+        b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
+    )
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\n"
+        "ck,a8w8_blockscale_bpreshuffle_ck\n"
+        "cktile,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1\n",
+        encoding="utf-8",
+    )
+    assert not aj.serving_modules_cover_csv(
+        jit_dir,
+        aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"],
+        csv_path,
+    )
+
+
+def test_serving_modules_cover_csv_when_so_absent(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text("kernelName\nkernel_a\n", encoding="utf-8")
+    assert aj.serving_modules_cover_csv(
+        jit_dir,
+        ("module_gemm_a8w8_blockscale_bpreshuffle",),
+        csv_path,
+    )
+
+
+def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, monkeypatch):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"kernel_ck")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\nck,kernel_ck\nasm,_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_64x128E\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        backup_dir=tmp_path / "backup",
+    )
+    assert result["action"] == "skip"
+    assert so_path.is_file()
+
+
+def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_path, monkeypatch):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    bp = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    cktile = jit_dir / "module_gemm_a8w8_blockscale_cktile.so"
+    bp.write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
+    cktile.write_bytes(b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text(
+        "libtype,kernelName\n"
+        "ck,a8w8_blockscale_bpreshuffle_ck\n"
+        "cktile,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        backup_dir=tmp_path / "backup",
+    )
+    assert result["action"] == "skip"
+    assert bp.is_file()
+    assert cktile.is_file()
+
+
+def test_prepare_serving_so_skips_when_registry_covers_csv(tmp_path, monkeypatch):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"kernel_keep")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text("kernelName\nkernel_keep\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        backup_dir=tmp_path / "backup",
+    )
+    assert result["action"] == "skip"
+    assert so_path.is_file()
+
+
+def test_prepare_serving_so_drops_so_when_registry_is_narrow(tmp_path, monkeypatch):
+    jit_dir = tmp_path / "jit"
+    build_dir = jit_dir / "build"
+    build_dir.mkdir(parents=True)
+    (build_dir / "stamp").write_text("x", encoding="utf-8")
+    so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
+    so_path.write_bytes(b"kernel_old")
+    csv_path = tmp_path / "merged.csv"
+    csv_path.write_text("kernelName\nkernel_old\nkernel_new\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
+    result = aj.prepare_serving_so_for_csvs(
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        backup_dir=tmp_path / "backup",
+    )
+    assert result["action"] == "invalidate"
+    assert not so_path.exists()
+    assert not build_dir.exists()
+
+
+def test_is_aiter_jit_registry_mismatch_inside_cuda_graph_blob():
+    blob = (
+        "Exception: Capture cuda graph failed: "
+        "gemm_a8w8_blockscale_bpreshuffle kernel 'k' is not present in the compiled registry."
+    )
+    assert aj.is_aiter_jit_registry_mismatch(blob)
+    assert not aj.is_aiter_jit_registry_mismatch("Capture cuda graph failed: HIP error")

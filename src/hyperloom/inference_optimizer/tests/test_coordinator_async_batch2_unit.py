@@ -636,7 +636,6 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
                     "status": "kept",
                     "specialist_task_id": "spec-half",
                     "output_throughput": 130.0,
-                    "config_changes_applied": {"BAR": "2"},
                 },
             },
         )
@@ -790,7 +789,6 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
             "output_throughput": 112.0,
             "delta_pct": 12.0,
             "accuracy_pass": True,
-            "config_changes_applied": {"X": "1"},
             "patches_applied": ["p.diff"],
             "patches_reverted": [],
             "workspace": "/tmp/integrate",

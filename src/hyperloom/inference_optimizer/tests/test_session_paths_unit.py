@@ -121,7 +121,6 @@ def test_target_analysis_paths():
 
 def test_recipe_kb_paths():
     assert sp.recipe_kb_dir(SD) == SD / "runtime" / "recipe_kb"
-    assert sp.recipe_kb_warm_json(SD).name == ".kb_warm.json"
     assert sp.recipe_kb_pitfalls_json(SD).name == ".kb_pitfalls.json"
     assert sp.recipe_kb_pending_ndjson(SD).name == ".kb_pending.ndjson"
     assert sp.recipe_kb_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
