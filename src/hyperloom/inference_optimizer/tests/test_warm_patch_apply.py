@@ -144,11 +144,7 @@ def _one_line_diff(rel_path, before, after):
 
 
 def test_overlays_from_two_trees_each_apply_into_their_own(tmp_path, output_dir):
-    """A framework patch and a data-file overlay replay against their own checkouts.
-
-    Resolving one root for the set would place one of them on a tree it was
-    never measured against, so each entry carries the root it was recorded with.
-    """
+    """A framework patch and a data-file overlay replay against their own checkouts."""
     sglang = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
     tuning = _git_repo(tmp_path / "tuning", "shapes.csv", "1,2,3\n")
     params = {
@@ -172,8 +168,7 @@ def test_overlays_from_two_trees_each_apply_into_their_own(tmp_path, output_dir)
     assert result["status"] == "prepared"
     assert (sglang / "python" / "sglang" / "layer.py").read_text() == "patched\n"
     assert (tuning / "shapes.csv").read_text() == "4,5,6\n"
-    # Each tree carries its own restore material, since one tree's snapshot
-    # cannot restore another.
+    # Each tree carries its own restore material, since one tree's snapshot cannot restore another.
     assert [tree["root"] for tree in result["trees"]] == [str(sglang), str(tuning)]
     assert all(tree["snapshot_manifest"] for tree in result["trees"])
 
@@ -209,13 +204,7 @@ def test_one_overlay_failing_restores_every_tree_already_patched(tmp_path, outpu
 
 
 def test_two_roots_in_one_checkout_collapse_to_that_checkout(tmp_path, output_dir):
-    """A recorded /sglang and /sglang/python/sglang are one tree, not two.
-
-    A git diff names paths from the work-tree root and ``git apply`` resolves
-    them there, silently ignoring any that fall outside the directory it runs
-    in. Applying the narrower root on its own would therefore report success
-    having written nothing.
-    """
+    """A recorded /sglang and /sglang/python/sglang are one tree, not two."""
     outer = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
     inner = outer / "python" / "sglang"
     (inner / "backend.py").write_text("backend\n", encoding="utf-8")
@@ -279,11 +268,7 @@ def test_an_absent_recorded_root_fails_the_whole_replay(tmp_path, output_dir):
 
 
 def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
-    """A tree found by probing is one the gain was never measured on.
-
-    The allowlist search is gone, so an overlay that records no checkout fails
-    rather than being placed on whatever tree its diff happens to fit.
-    """
+    """A tree found by probing is one the gain was never measured on."""
 
     def _fail(*_args, **_kwargs):
         raise AssertionError("warm replay must not probe for an apply root")
@@ -455,8 +440,8 @@ def test_multiple_patches_partial_success(fake_repo, output_dir):
 
 
 def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
-    # SWSPLAT-42326: KB-sourced patch_content that is not a unified diff must be
-    # skipped before git apply (never applied), leaving the tree untouched.
+    # SWSPLAT-42326: KB-sourced patch_content that is not a unified diff must be skipped before git apply (never
+    # applied), leaving the tree untouched.
     params = {
         "patches": [
             {
@@ -473,8 +458,7 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
 
 
 def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
-    # SWSPLAT-42326: a patch whose header path escapes the tree (absolute path)
-    # must be skipped, not git-applied.
+    # SWSPLAT-42326: a patch whose header path escapes the tree (absolute path) must be skipped, not git-applied.
     escaping = VALID_PATCH.replace("a/vllm/fp8.py", "/etc/evil").replace("b/vllm/fp8.py", "/etc/evil")
     params = {
         "patches": [
@@ -698,12 +682,7 @@ def test_snapshot_revert_rejects_head_mismatch(
 
 
 def test_required_timeline_refuses_a_repo_with_no_head(tmp_path, output_dir):
-    """prelude promotes this tree against a pre_sha it cannot get here.
-
-    Applying via nogit made the run look prepared and then fail downstream with
-    validated_recipe_checkout_incomplete, leaving a half-patched tree behind.
-    Refusing up front is the outcome the caller can act on.
-    """
+    """prelude promotes this tree against a pre_sha it cannot get here."""
     repo = tmp_path / "unborn"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -782,8 +761,7 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
 
 
 def test_teardown_undoes_a_nogit_apply(tmp_path):
-    """Keying the revert on pre_sha alone leaked nogit patches into later tasks
-    that reuse the same checkout."""
+    """Keying the revert on pre_sha alone leaked nogit patches into later tasks that reuse the same checkout."""
     target = tmp_path / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
@@ -1075,8 +1053,8 @@ async def test_required_failure_does_not_run_config_only_fallback(monkeypatch):
 
     result = await executor(ctx)
 
-    # No Config/Env-only salvage: the failed timeline is returned as-is so
-    # PRELUDE marks the warm replay failed and optimizes from the clean tree.
+    # No Config/Env-only salvage: the failed timeline is returned as-is so PRELUDE marks the warm replay failed and
+    # optimizes from the clean tree.
     assert len(calls) == 1
     assert result["status"] == "required_patch_failed"
     assert "warm_replay_partial" not in result
@@ -1115,17 +1093,15 @@ async def test_required_rollback_failure_is_returned_unchanged():
 
     result = await executor(ctx)
 
-    # The unverified rollback is surfaced verbatim; PRELUDE's combined rollback
-    # guard is what stops the run on a dirty tree.
+    # The unverified rollback is surfaced verbatim; PRELUDE's combined rollback guard is what stops the run on a dirty
+    # tree.
     assert calls == 1
     assert result["status"] == "required_patch_rollback_failed"
     assert result["warm_replay_rollback"]["ok"] is False
     assert "warm_replay_partial" not in result
 
 
-# ---------------------------------------------------------------------------
 # Snapshot / restore must not depend on guessing the strip level
-# ---------------------------------------------------------------------------
 
 
 # Four components, so only -p2 strips down to the real ``pkg/mod.py``.
@@ -1152,11 +1128,7 @@ def _git_repo_with(tmp_path, rel, body):
 
 
 def test_snapshot_covers_the_path_a_non_default_strip_level_touches(tmp_path, output_dir):
-    """The header needs -p2 to reach the real file; the snapshot must still cover it.
-
-    Assuming -p1 records ``x/pkg/mod.py``, which the apply never touches, so the
-    restore is a no-op and the candidate's edit survives into the next bench.
-    """
+    """The header needs -p2 to reach the real file; the snapshot must still cover it."""
     repo = _git_repo_with(tmp_path, "pkg/mod.py", "original = True\n")
     before = (repo / "pkg/mod.py").read_text(encoding="utf-8")
 

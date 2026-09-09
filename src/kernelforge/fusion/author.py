@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 3: author an env-gated fused kernel from a self-discovered recipe.
-
-Turns a :class:`~kernelforge.fusion.models.Recipe` into an authoring prompt and drives a
-registered Agent backend to write integration wiring or a fused kernel into the
-framework source. Discovery may attach a semantically retrieved existing ROCm
-operator; integration recipes must benchmark and wire that operator before
-authoring a replacement. The historical bare ``claude`` helper remains only for
-direct-call compatibility; the forge-fuse CLI always injects a registered
-backend shared with discovery.
-
-A provider-neutral transaction (:class:`_AuthorWorkspaceGuard`) wraps every run and
-restores whatever the session changed outside its writable scope: the caller's exact
-target files, plus new fused-kernel helper modules inside the directories the caller
-nominates. The SDK edit hook calls the guard's own predicate, and the system prompt
-is built from the guard's directory list and the same :mod:`emit` naming constants
-the predicate matches on, so the agent is never rejected for obeying its
-instructions.
-"""
+"""Stage 3: author an env-gated fused kernel from a self-discovered recipe."""
 
 from __future__ import annotations
 
@@ -49,17 +32,7 @@ from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 
-# Process-style author return codes. ``run_author`` has always answered with a
-# single integer, and the fusion loop has to tell a deterministic workspace-safety
-# rejection -- identical on every retry -- from a transient failure, so the class
-# travels as a dedicated code rather than as a second return value.
-#
-# ``AUTHOR_RC_SAFETY`` is reserved for verdicts about the worktree's CONTENT: an
-# ``enforce()`` violation, a target or module path that cannot be validated, a
-# moved HEAD or branch, a provider safety stop. The guard failing at its own
-# bookkeeping -- a Git query that timed out, an index lock another process held --
-# reports ``AUTHOR_RC_FAILED``, because abandoning a recipe over that costs every
-# remaining attempt for a condition the next attempt very likely will not see.
+# Process-style author return codes.
 AUTHOR_RC_OK = 0
 AUTHOR_RC_FAILED = 1
 AUTHOR_RC_SAFETY = 3
@@ -67,14 +40,7 @@ AUTHOR_RC_TIMEOUT = 124
 
 
 def proven_fusion_fewshot() -> str:
-    """Few-shot block of serving-validated decode fusions (worked examples).
-
-    Every fusion below was authored AND validated on the REAL sglang serving path
-    (CUDA graph ON, MI325X/ROCm), so the author mimics patterns that survive
-    production serving. A from-scratch kernel that passes a standalone microbench
-    but ignores these (especially CUDA-graph safety) SIGQUIT-crashes the sglang
-    decode loop — this has happened, so the rules below are mandatory.
-    """
+    """Few-shot block of serving-validated decode fusions (worked examples)."""
     return """## Proven fusion examples (few-shot — these ALL passed real sglang serving e2e)
 - ZAYA CCA QK post-processing (`ZAYA_FUSED_QK`): fold `_add_grouped_qk_means` +
   `_normalize_qk` (~15-20 tiny fp32 view/mean/add/mul/pow/sum/rsqrt ops) into ONE
@@ -105,13 +71,7 @@ def proven_fusion_fewshot() -> str:
 
 
 def _arch_phrase(gpu_arch: str) -> str:
-    """How to name the target GPU in a prompt.
-
-    Hardcoding one chip here would tell the author to tune for hardware the run
-    is not on: tile shapes, warp counts and intrinsics are all chosen per ISA,
-    which is the same reason the knowledge base treats arch as a hard filter.
-    An unknown arch says nothing rather than guessing.
-    """
+    """How to name the target GPU in a prompt."""
     arch = (gpu_arch or "").strip().lower()
     marketing = {"gfx950": "MI355X", "gfx942": "MI300X/MI325X"}.get(arch, "")
     if not arch:
@@ -120,13 +80,7 @@ def _arch_phrase(gpu_arch: str) -> str:
 
 
 def _model_dir_block(model_path: str) -> str:
-    """Name the model directory, because the alternative is that it gets searched for.
-
-    An author that needs `config.json` and has not been told where the model lives
-    reaches for `find / -name config.json`, and on a serving host `/` includes
-    multi-terabyte network mounts: one such search ran 43 minutes and consumed the
-    authoring attempt it was issued from.
-    """
+    """Name the model directory, because the alternative is that it gets searched for."""
     if not model_path:
         return ""
     return (
@@ -147,11 +101,7 @@ def build_author_prompt(
     gpu_arch: str = "",
     model_path: str = "",
 ) -> str:
-    """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``).
-
-    Everything model-specific comes from the recipe fields, so this carries no
-    per-model literals.
-    """
+    """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``)."""
     shapes = recipe.get("shapes", {})
     hints = recipe.get("source_hints", [])
     env_flag = recipe.get("env_flag", "FUSED")
@@ -242,12 +192,7 @@ def build_multi_author_prompt(
     gpu_arch: str = "",
     model_path: str = "",
 ) -> str:
-    """Prompt to author SEVERAL confirmed fusions in one pass (each env-gated).
-
-    A model often has more than one launch-bound chain worth fusing (e.g. LFM2's
-    residual+rmsnorm AND swiglu). Authoring them together lets the A/B measure the
-    combined gain, matching how the fusions were originally validated.
-    """
+    """Prompt to author SEVERAL confirmed fusions in one pass (each env-gated)."""
     if len(recipes) == 1:
         return build_author_prompt(
             recipes[0],
@@ -325,17 +270,7 @@ Do not edit the A/B harness or hard-code numbers.
 
 
 class AuthorSafetyError(RuntimeError):
-    """Report an author workspace state that cannot be safely accepted.
-
-    ``transient`` separates the two things this class carries. Almost every
-    instance is a verdict about the worktree's CONTENT -- a path outside the
-    writable scope, a moved HEAD, a restoration that could not be proved -- which
-    the same guard reaches identically on the next attempt, so the loop is right
-    to abandon the recipe. A few are the guard failing at its own bookkeeping: a
-    Git query that timed out, an index lock another process held for a
-    millisecond. Those say nothing about the author and recover on their own, so
-    they must reach the loop as retryable.
-    """
+    """Report an author workspace state that cannot be safely accepted."""
 
     def __init__(
         self,
@@ -384,9 +319,8 @@ def _git_bytes(
             timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        # Pure I/O, and ``SubprocessError`` covers ``TimeoutExpired``: a 60s
-        # ``git ls-files`` timeout against an NFS worktree under a concurrent
-        # serving campaign is weather, not a verdict on what the author did.
+        # Pure I/O, and ``SubprocessError`` covers ``TimeoutExpired``: a 60s ``git ls-files`` timeout against an NFS
+        # worktree under a concurrent serving campaign is weather, not a verdict on what the author did.
         raise AuthorSafetyError(
             f"author workspace Git command failed: git {' '.join(args[:3])}: {type(exc).__name__}",
             transient=True,
@@ -415,9 +349,8 @@ def _capture_path_state(path: Path) -> _WorkspacePathState:
     except FileNotFoundError:
         return _WorkspacePathState("absent")
     except OSError as exc:
-        # Reading the worktree is the guard's own bookkeeping, not a verdict on
-        # what the author did, and it recovers on its own -- same reason the Git
-        # command and index-lock paths are marked retryable.
+        # Reading the worktree is the guard's own bookkeeping, not a verdict on what the author did, and it recovers
+        # on its own -- same reason the Git command and index-lock paths are marked retryable.
         raise AuthorSafetyError(
             f"cannot inspect author workspace path: {path}",
             transient=True,
@@ -452,28 +385,13 @@ FUSION_SCRATCH_DIRNAME = ".forge_fusion"
 
 
 def _is_fusion_scratch_relpath(rel: str) -> bool:
-    """Whether a repo-relative path is forge-fusion's own staging directory.
-
-    The validation harness is staged inside the worktree because the author
-    sandbox is workspace-write and cannot reach outside it, so the author
-    writing there is what the directory exists for rather than an out-of-scope
-    edit. Nothing under it reaches the exported patch, and ``cli`` removes it
-    once the turn ends.
-    """
+    """Whether a repo-relative path is forge-fusion's own staging directory."""
     parts = Path(rel).parts
     return len(parts) > 1 and parts[0] == FUSION_SCRATCH_DIRNAME
 
 
 class _AuthorWorkspaceGuard:
-    """Restore every Git-visible mutation outside the author's writable scope.
-
-    The writable scope is the caller's exact target files plus, when the caller
-    nominates directories in ``new_module_dirs``, new fused-kernel helper modules
-    created directly inside them. That second part is not a convenience: a
-    source-level fusion routinely lives in its own module that the target file
-    imports, and export/teardown already expect it, so a guard that forbids it
-    rejects the very output the pipeline asked for.
-    """
+    """Restore every Git-visible mutation outside the author's writable scope."""
 
     def __init__(
         self,
@@ -520,10 +438,7 @@ class _AuthorWorkspaceGuard:
             self.target_files.append(str(resolved))
 
         self.new_module_dirs: list[str] = []
-        # Name inventory per nominated directory. Membership is what makes an
-        # existing framework module unwritable through the creation door: a file
-        # such as ``fused_moe.py`` matches the fused-module marker but shipped with
-        # the framework, and overwriting it is not creating a helper.
+        # Name inventory per nominated directory.
         self.new_module_baselines: dict[str, frozenset[str]] = {}
         for value in new_module_dirs or []:
             if not value:
@@ -546,17 +461,14 @@ class _AuthorWorkspaceGuard:
             try:
                 entries = frozenset(os.listdir(resolved))
             except FileNotFoundError as exc:
-                # An empty inventory is the most permissive scope there is -- every
-                # name in it counts as absent -- and the prompt would then advertise
-                # a directory the author cannot write into anyway.
+                # An empty inventory is the most permissive scope there is -- every name in it counts as absent -- and
+                # the prompt would then advertise a directory the author cannot write into anyway.
                 raise AuthorSafetyError(
                     f"author module directory does not exist: {lexical}",
                     paths=[str(lexical)],
                 ) from exc
             except OSError as exc:
-                # A missing directory above is a verdict: it is absent on every
-                # attempt. Any other listdir failure is the guard failing to read,
-                # which the next attempt very likely does not hit.
+                # A missing directory above is a verdict: it is absent on every attempt.
                 raise AuthorSafetyError(
                     f"cannot inventory author module directory: {lexical}",
                     paths=[str(lexical)],
@@ -567,7 +479,6 @@ class _AuthorWorkspaceGuard:
                 self.new_module_dirs.append(str(resolved))
 
         # Paths the current transaction must not clobber while restoring others.
-        # Starts as the targets and grows with the creations enforce() accepts.
         self.preserved_relpaths: set[str] = set(self.target_relpaths)
 
         self.baseline_head = self._head()
@@ -577,9 +488,8 @@ class _AuthorWorkspaceGuard:
         self.index_path = self._index_path()
         self.index_lock_path = Path(f"{self.index_path}.lock")
         if self.index_lock_path.exists():
-            # ``index.lock`` exists for milliseconds whenever anything else runs a
-            # Git command in this worktree, so the next attempt very likely finds
-            # it gone.
+            # ``index.lock`` exists for milliseconds whenever anything else runs a Git command in this worktree, so
+            # the next attempt very likely finds it gone.
             raise AuthorSafetyError(
                 "Git index is locked before authoring; workspace snapshot is unsafe",
                 paths=[str(self.index_lock_path)],
@@ -793,8 +703,8 @@ class _AuthorWorkspaceGuard:
         preserved_targets: set[str],
     ) -> None:
         if self.index_lock_path.exists():
-            # Held by another Git command, not by the author: retryable for the
-            # same reason as the pre-run check above.
+            # Held by another Git command, not by the author: retryable for the same reason as the pre-run check
+            # above.
             raise AuthorSafetyError(
                 "Git index became locked during authoring; restoration is unsafe",
                 paths=[str(self.index_lock_path)],
@@ -880,8 +790,8 @@ class _AuthorWorkspaceGuard:
 
     def _allowed_path_is_unsafe(self, rel: str) -> bool:
         path = self._path(rel)
-        # Replacing an allowlisted path or one of its parent directories with a
-        # symlink changes what that path resolves to.
+        # Replacing an allowlisted path or one of its parent directories with a symlink changes what that path
+        # resolves to.
         try:
             resolved = path.resolve(strict=False)
             resolved.relative_to(self.root)
@@ -891,14 +801,7 @@ class _AuthorWorkspaceGuard:
         return path.is_symlink() or resolved != path or state.kind not in {"absent", "file"}
 
     def _permits_new_relpath(self, rel: str) -> bool:
-        """Whether one repo-relative path is a fused module the author may add.
-
-        Deliberately narrow on four axes: the ``*_fused*``/``*_fusion*`` naming
-        convention :func:`emit._is_fused_module_name` already defines (no second
-        rule to drift from), a ``.py`` module because that is the only shape the
-        export path emits, a directory the caller nominated, and a name that was
-        absent when the run started.
-        """
+        """Whether one repo-relative path is a fused module the author may add."""
         path = Path(rel)
         entries = self.new_module_baselines.get(path.parent.as_posix())
         if entries is None or path.name in entries:
@@ -906,12 +809,7 @@ class _AuthorWorkspaceGuard:
         return path.suffix == ".py" and _is_fused_module_name(path.name)
 
     def permits_new_path(self, value: str) -> bool:
-        """Whether one filesystem path lies in the permitted new-module scope.
-
-        Lexical on purpose: this answers a tool argument before the file exists, so
-        there is nothing to resolve, and resolving would follow a symlink the agent
-        just created. ``enforce`` re-checks the materialized path.
-        """
+        """Whether one filesystem path lies in the permitted new-module scope."""
         raw = Path(str(value)).expanduser()
         lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else self.cwd / raw)))
         try:
@@ -919,8 +817,8 @@ class _AuthorWorkspaceGuard:
         except ValueError:
             return False
         rel = relative.as_posix()
-        # Checked before the nomination gate: staging is the pipeline's own and
-        # exists whether or not this run nominates a module directory.
+        # Checked before the nomination gate: staging is the pipeline's own and exists whether or not this run
+        # nominates a module directory.
         if _is_fusion_scratch_relpath(rel):
             return True
         if not self.new_module_baselines:
@@ -977,14 +875,8 @@ class _AuthorWorkspaceGuard:
                 worktree_changed.add(rel)
 
         changed = worktree_changed | index_changed | flag_changed
-        # A new fused helper module inside the nominated scope is part of the
-        # authored fusion, so it is allowed to survive. Staging it is not: the
-        # exported patch reaches an untracked new module through
-        # ``git diff --no-index``, and an indexed one would silently drop out of the
-        # handoff, so an index entry keeps the creation a rejection.
-        # Staging is the pipeline's own scratch: it must survive the transaction
-        # without being restored as a foreign write, and it must stay out of
-        # ``created`` so it is never reported or handed off as an authored module.
+        # A new fused helper module inside the nominated scope is part of the authored fusion, so it is allowed to
+        # survive.
         scratch = {rel for rel in changed if _is_fusion_scratch_relpath(rel)}
         created = {
             rel
@@ -1077,16 +969,7 @@ def _quoted_name_list(values: tuple[str, ...]) -> str:
 
 
 def _author_system_prompt(new_module_dirs: list[str]) -> str:
-    """State exactly the write scope the workspace guard is going to accept.
-
-    Generated from the guard's own scope rather than written alongside it: an
-    author told to touch nothing but the target files, and then rejected for the
-    helper module its target imports, has burned a whole attempt learning a rule
-    the prompt could have stated. Both halves of the scope come from the guard --
-    the directories from the caller's nomination, the naming rule from the same
-    :mod:`emit` constants :func:`emit._is_fused_module_name` matches on -- so
-    adding a marker cannot leave the prompt describing the previous rule.
-    """
+    """State exactly the write scope the workspace guard is going to accept."""
     if not new_module_dirs:
         return _AUTHOR_SYSTEM_PROMPT
     clause = _AUTHOR_NEW_MODULE_CLAUSE.format(
@@ -1102,12 +985,7 @@ def _target_file_hooks(
     workdir: str,
     allows_new_path: Optional[Callable[[str], bool]] = None,
 ) -> AgentHooks | None:
-    """Deny direct SDK edit tools outside the caller's writable path set.
-
-    ``allows_new_path`` is the workspace guard's own predicate for a permitted new
-    fused module, so this hook never blocks a path the transaction would keep --
-    a hook stricter than the guard makes the guard's allowance unreachable.
-    """
+    """Deny direct SDK edit tools outside the caller's writable path set."""
     if not target_files:
         return None
     root = Path(workdir).resolve()
@@ -1223,12 +1101,11 @@ def _run_registered_author(
         target_files=targets,
         allow_dirty_targets=True,
         allow_untracked=True,
-        # The author phase runs in a worktree a long campaign has already left
-        # dirty in ways it never touches, so the backend has to judge this turn
-        # against the pre-run snapshot rather than against a clean HEAD.
+        # The author phase runs in a worktree a long campaign has already left dirty in ways it never touches, so the
+        # backend has to judge this turn against the pre-run snapshot rather than against a clean HEAD.
         allow_dirty_baseline=True,
-        # Keep the backend's built-in measurement protections; the outer
-        # provider-neutral transaction enforces the exact target allowlist.
+        # Keep the backend's built-in measurement protections; the outer provider-neutral transaction enforces the
+        # exact target allowlist.
         protected_globs=[],
         hooks=_target_file_hooks(targets, workdir, allows_new_path=guard.permits_new_path),
         progress_log=progress,
@@ -1255,13 +1132,7 @@ def _run_registered_author(
             os.environ["HIP_VISIBLE_DEVICES"] = previous_gpu
 
     def _with_run_error(reason: str) -> str:
-        """Keep the session's own failure beside a verdict about the workspace.
-
-        ``enforce()`` is judged before ``run_error`` is examined, and a rejected
-        turn that also ran out of clock returns from one of the branches below --
-        so without this the operator sees the violation and no sign the session
-        never finished.
-        """
+        """Keep the session's own failure beside a verdict about the workspace."""
         if run_error is None:
             return reason
         return f"{reason}; the agent run also failed: {type(run_error).__name__}: {run_error}"
@@ -1300,8 +1171,8 @@ def _run_registered_author(
             )
         except OSError:
             log.warning("could not write registered author log %s", log_path)
-        # The agent-facing log stays content-free (a guard defect is not something
-        # the author can act on), but the operator needs the traceback to fix it.
+        # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
+        # operator needs the traceback to fix it.
         log.exception("author workspace safety restoration failed: %s", _with_run_error(detail))
         return AUTHOR_RC_SAFETY
 
@@ -1321,8 +1192,8 @@ def _run_registered_author(
         except OSError:
             log.warning("could not write registered author log %s", log_path)
         log.error("%s", reason)
-        # Deterministic: the same guard, worktree and prompt reject the next attempt
-        # the same way, and the loop is told so rather than spending one on it.
+        # Deterministic: the same guard, worktree and prompt reject the next attempt the same way, and the loop is
+        # told so rather than spending one on it.
         return AUTHOR_RC_SAFETY
 
     if enforcement.created:
@@ -1343,12 +1214,8 @@ def _run_registered_author(
             )
         except OSError:
             log.warning("could not write registered author log %s", log_path)
-        # Checked ahead of the timeout markers: a provider safety stop is final even
-        # if its message happens to mention a clock, and retrying one is exactly the
-        # anti-pattern the session-resume allowlist already refuses. Safe to keep
-        # first because the classifier now requires the provider's explicit
-        # rejection marker, so a rollback that merely failed on the way out of a
-        # timeout no longer reaches this branch at all.
+        # Checked ahead of the timeout markers: a provider safety stop is final even if its message happens to mention
+        # a clock, and retrying one is exactly the anti-pattern the session-resume allowlist already refuses.
         if is_agent_safety_error(run_error):
             log.error(
                 "%s author was stopped by a provider safety guard: %s: %s",
@@ -1411,30 +1278,7 @@ def run_author(
     target_files: Optional[list[str]] = None,
     new_module_dirs: Optional[list[str]] = None,
 ) -> int:
-    """Drive the selected Agent backend and return the legacy process-style code.
-
-    Args:
-        prompt: The authoring prompt (from :func:`build_author_prompt`).
-        workdir: Working dir (the framework repo root, e.g. the sglang checkout).
-        log_path: File to capture the agent's stdout/stderr.
-        backend: Registered backend reused from discovery, or a zero-argument
-            factory returning one.
-        target_files: Exact editable source/harness files for the workspace guard.
-        new_module_dirs: Directories in which the author may create NEW fused
-            helper modules. Pass the directories the export path scans, so a module
-            the guard keeps is a module the emitted patch carries; omitting them
-            forbids creation entirely. Each one must exist -- a nominated directory
-            that does not is rejected rather than treated as an empty (and
-            therefore maximally permissive) name inventory.
-
-    Returns:
-        One of ``AUTHOR_RC_OK``, ``AUTHOR_RC_FAILED`` (transient, including a
-        workspace guard that could not complete its own bookkeeping),
-        ``AUTHOR_RC_SAFETY`` (a verdict about the worktree's content or a provider
-        safety stop, identical on every retry), or ``AUTHOR_RC_TIMEOUT``. Callers
-        driving a retry loop must distinguish ``AUTHOR_RC_SAFETY``; anything else
-        may be attempted again.
-    """
+    """Drive the selected Agent backend and return the legacy process-style code."""
     if callable(backend) and not hasattr(backend, "run"):
         backend = backend()
     selected_model = str(model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()

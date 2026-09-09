@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured-intent transport validation (protocol layer).
-
-Claude (``emit_intent`` MCP tool_call) and Codex (JSON-in-text envelope)
-transports share one envelope shape, validated via :func:`validate_envelope`.
-Must never import ``orchestrator`` / ``shared_state`` (import cycle).
-"""
+"""Structured-intent transport validation (protocol layer)."""
 
 from __future__ import annotations
 
@@ -17,21 +12,15 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 
 
-# Mirrors the emit-time frozensets in agents/robustness/role/envelope.py and
-# agents/critic/runtime/intent_envelope.py; duplicated because ``protocol`` may
-# not import ``agents``.
+# Mirrors the emit-time frozensets in agents/robustness/role/envelope.py and agents/critic/runtime/intent_envelope.py;
+# duplicated because ``protocol`` may not import ``agents``.
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 _ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
 
 
 # ---------------------------------------------------------------------------
 class IntentType(str, Enum):
-    """Enumeration of every structured intent an agent may emit.
-
-    String-valued so the literal wire token equals the member value.
-    PolicyGate restricts which sources may emit which members; this enum
-    only defines the vocabulary shared by both transports.
-    """
+    """Enumeration of every structured intent an agent may emit."""
 
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
@@ -73,7 +62,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
     # specialist exit envelope; the runner re-stamps and defaults the payload.
-    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
+    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "summary"),
 }
 
 
@@ -85,34 +74,13 @@ class IntentValidationError(RuntimeError):
     """Envelope present but schema invalid (raw + reason captured)."""
 
     def __init__(self, reason: str, raw: str | None = None):
-        """Initialise the validation error.
-
-        Args:
-            reason (str): Human-readable description of the schema problem.
-            raw (str | None): The raw envelope text, captured for repair
-                prompts / diagnostics.
-        """
+        """Initialise the validation error."""
         super().__init__(reason)
         self.raw = raw
 
 
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
-    """Validate the top-level envelope shape + per-intent payloads.
-
-    Checks both structural constraints (required keys, correct types) and
-    value constraints (enum membership, numeric ranges, non-empty strings).
-
-    Args:
-        envelope (dict[str, Any]): The decoded envelope, expected to carry
-            an ``intents`` list of ``{intent_type, payload}`` items.
-
-    Returns:
-        list[Intent]: The validated intents in envelope order.
-
-    Raises:
-        IntentValidationError: On any structural or value issue so the caller
-            can surface a single repair-prompt path.
-    """
+    """Validate the top-level envelope shape + per-intent payloads."""
     if not isinstance(envelope, dict):
         raise IntentValidationError(f"envelope must be object, got {type(envelope).__name__}")
     if "intents" not in envelope:
@@ -150,16 +118,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
 
 
 def _validate_alert_payload(payload: dict[str, Any], *, index: int) -> None:
-    """Enforce ALERT value constraints: severity enum, non-empty summary.
-
-    Args:
-        payload: The ALERT intent payload to validate.
-        index: Position of the intent in the envelope (for error messages).
-
-    Raises:
-        IntentValidationError: If severity is not in :data:`_ALERT_SEVERITIES`
-            or summary is not a non-empty string.
-    """
+    """Enforce ALERT value constraints: severity enum, non-empty summary."""
     severity = payload.get("severity")
     if not isinstance(severity, str) or severity not in _ALERT_SEVERITIES:
         raise IntentValidationError(
@@ -171,16 +130,7 @@ def _validate_alert_payload(payload: dict[str, Any], *, index: int) -> None:
 
 
 def _validate_extend_lease_payload(payload: dict[str, Any], *, index: int) -> None:
-    """Enforce EXTEND_LEASE value constraints: non-empty task, positive seconds.
-
-    Args:
-        payload: The EXTEND_LEASE intent payload to validate.
-        index: Position of the intent in the envelope (for error messages).
-
-    Raises:
-        IntentValidationError: If task_id is not a non-empty string or
-            extra_sec is not a positive integer.
-    """
+    """Enforce EXTEND_LEASE value constraints: non-empty task, positive seconds."""
     task_id = payload.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         raise IntentValidationError(f"intents[{index}] (type=extend_lease).task_id must be a non-empty string")
@@ -197,18 +147,7 @@ def _validate_review_verdict_payload(
     *,
     index: int,
 ) -> None:
-    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or
-    ``verdict_map`` (per-variant batch), each carrying a recognised verdict.
-
-    Args:
-        payload: The REVIEW_VERDICT intent payload to validate.
-        index: Position of the intent in the envelope (for error messages).
-
-    Raises:
-        IntentValidationError: If neither or both of ``verdict`` and
-            ``verdict_map`` are present, ``verdict_map`` is malformed, or any
-            verdict is not in :data:`_ALLOWED_VERDICTS`.
-    """
+    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or ``verdict_map`` (per-variant batch), each carrying a recognised verdict."""
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload
     if not has_single and not has_map:

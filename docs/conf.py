@@ -6,8 +6,7 @@
 import os
 import sys
 
-# -- Path setup --------------------------------------------------------------
-# Add repo root and ``src`` for autodoc.
+# -- Path setup -------------------------------------------------------------- Add repo root and ``src`` for autodoc.
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 for _path in (_repo_root, os.path.join(_repo_root, "src")):
     if os.path.isdir(_path):
@@ -41,23 +40,8 @@ html_theme_options = {
     "link_main_doc": False,
 }
 
-# ``use_repository_button`` makes sphinx-book-theme call get_repo_parts(context),
-# which walks ["github", "bitbucket", "gitlab"] looking for a ``<provider>_url``
-# key and returns None -- not a tuple -- when it finds none. Its caller unpacks
-# that return value unconditionally, so a missing key is a build-time
-# ``TypeError: cannot unpack non-iterable NoneType object`` rather than a
-# skipped button.
-#
-# Nothing in the stack supplies the key on its own: pydata-sphinx-theme has the
-# provider defaults, but only inside the "edit this page" path, and
-# rocm-docs-core defaults ``use_edit_page_button`` off.
-#
-# Injected per page rather than declared as ``html_context``. Assigning that
-# config directly is enough to fix the local build, but it suppresses
-# rocm-docs-core's own defaults (it only sets them when the user has not) and it
-# overwrites the context Read the Docs injects for its version switcher -- which
-# turned a green RTD build red. Adding the keys at render time leaves both
-# untouched, and ``setdefault`` means an explicit value elsewhere still wins.
+# ``use_repository_button`` makes sphinx-book-theme call get_repo_parts(context), which walks ["github", "bitbucket",
+# "gitlab"] looking for a ``<provider>_url`` key and returns None -- not a tuple -- when it finds none.
 _SOURCE_REPO_CONTEXT = {
     "github_url": "https://github.com",
     "github_user": "AMD-AGI",
@@ -107,12 +91,7 @@ Doxygen Settings
 Ensure Doxyfile is located at docs/doxygen.
 If the component does not need doxygen, delete this section for optimal build time
 """
-# doxygen_root = "doxygen"
-# doxysphinx_enabled = True
-# doxygen_project = {
-#    "name": "doxygen",
-#    "path": "doxygen/xml",
-# }
+# doxygen_root = "doxygen" doxysphinx_enabled = True doxygen_project = { "name": "doxygen", "path": "doxygen/xml", }
 
 # Add more addtional package accordingly
 extensions = [

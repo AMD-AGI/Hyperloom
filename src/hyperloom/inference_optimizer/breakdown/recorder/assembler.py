@@ -46,17 +46,7 @@ def has_parts(session_dir: Path | str) -> bool:
 
 
 def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
-    """Read and parse one fragment file, noting problems into ``warnings``.
-
-    Args:
-        path (Path): the fragment file to read.
-        warnings (list[str]): a list that parse/validation warnings are
-            appended to.
-
-    Returns:
-        dict[str, Any] | None: the parsed fragment record, or ``None`` when it
-            cannot be read or is not a JSON object.
-    """
+    """Read and parse one fragment file, noting problems into ``warnings``."""
     rec = read_json(
         path,
         default=_UNREADABLE,
@@ -76,22 +66,7 @@ def assemble_parts(
     warnings: list[str] | None = None,
     keep_event_rows: bool = False,
 ) -> dict[str, Any]:
-    """Return ``{section: list | dict}`` assembled from the spool directory.
-
-    Empty mapping when no fragments exist (caller falls back to collectors).
-
-    Args:
-        session_dir: The session root directory.
-        warnings: Optional list to append parse/validation warnings to; a
-            fresh list is used when not provided.
-        keep_event_rows: Retain the :data:`EVENT_SECTIONS` substreams instead
-            of dropping them. Only :func:`event_parts` sets this; the breakdown
-            envelope never wants them.
-
-    Returns:
-        A ``{section: list | dict}`` mapping assembled from the spool
-        directory, or ``{}`` when no fragments exist.
-    """
+    """Return ``{section: list | dict}`` assembled from the spool directory."""
     warns = warnings if warnings is not None else []
     d = parts_dir(session_dir)
     if not d.is_dir():
@@ -120,10 +95,8 @@ def assemble_parts(
         else:
             items.setdefault(section, []).append(rec)
 
-    # A singleton fragment is named for its producer, so a section with more
-    # than one is a section two producers both claimed. Only the newest
-    # survives, and the other producer's payload does not merge into it -- it
-    # is dropped whole. Nothing downstream can see that it existed.
+    # A singleton fragment is named for its producer, so a section with more than one is a section two producers both
+    # claimed.
     for section, producers in discarded.items():
         warns.append(
             f"recorder: {section} was written as a singleton by more than one "
@@ -443,22 +416,7 @@ EVENT_SECTIONS: tuple[str, ...] = (
 
 
 def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
-    """Read back the event rows of the bound session, keyed by section.
-
-    Assembly pops these sections, so a caller that wants them -- the phase
-    closing an event, or finalize recovering one that never closed -- reads
-    them through here instead.
-
-    Args:
-        sections: The sections to read, e.g. :data:`KERNEL_EVENT_SECTIONS`.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping holding those sections, each
-        defaulting to an empty list.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Read back the event rows of the bound session, keyed by section."""
     from ...session.session_binding import bound_session  # local: avoid import cycle
 
     assembled = assemble_parts(bound_session(), warnings=[], keep_event_rows=True)
@@ -470,41 +428,17 @@ def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
 
 
 def kernel_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the KERNEL substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`KERNEL_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the KERNEL substreams of the bound session, keyed by section."""
     return event_parts(KERNEL_EVENT_SECTIONS)
 
 
 def roofline_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the roofline substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`ROOFLINE_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the roofline substreams of the bound session, keyed by section."""
     return event_parts(ROOFLINE_EVENT_SECTIONS)
 
 
 def baseline_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the baseline substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`BASELINE_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the baseline substreams of the bound session, keyed by section."""
     return event_parts(BASELINE_EVENT_SECTIONS)
 
 
@@ -600,16 +534,7 @@ def framework_event_parts() -> dict[str, list[dict[str, Any]]]:
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:
-    """Drop the v6 event substreams from the breakdown envelope.
-
-    These are recorded for the v6 timeline, which assembles them into events
-    when the phase or action that produced them ends. They carry no meaning of
-    their own in ``session_breakdown.json``, and leaving them in would publish
-    ten undocumented sections alongside the events built from them.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
+    """Drop the v6 event substreams from the breakdown envelope."""
     for section in EVENT_SECTIONS:
         out.pop(section, None)
 

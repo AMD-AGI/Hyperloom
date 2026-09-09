@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A fusion KEEP whose nomination envelope cannot be read judged nothing.
-
-The producer runs as its own installed package, so a build that predates the
-nomination contract answers a KEEP without a ``patches`` array. Landing reads
-the contract only, so such a round queues nothing -- and if it still records as
-``ok`` the idempotency gate treats fusion as done for the whole session.
-
-Exercised against ``KernelPhase`` unbound, on a stand-in ``self``, matching
-``test_fusion_retry_gate``.
-"""
+"""A fusion KEEP whose nomination envelope cannot be read judged nothing."""
 
 from __future__ import annotations
 
@@ -107,8 +98,7 @@ async def test_an_unreadable_keep_envelope_leaves_fusion_retryable(tmp_path):
 
 @pytest.mark.asyncio
 async def test_repeated_unreadable_envelopes_stop_being_retried(tmp_path):
-    """A producer too old to answer the contract does not heal mid-session, and
-    every retry re-runs LLM discovery before failing the same way."""
+    """A producer too old to answer the contract does not heal mid-session, and every retry re-runs LLM discovery before failing the same way."""
     phase = _phase(spent=MAX_FUSION_INFRA_RETRIES - 1, session_dir=tmp_path)
 
     await RECORD(phase, _kept())
@@ -131,11 +121,7 @@ async def test_the_bus_and_the_record_agree_on_the_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_clean_empty_nomination_still_latches_the_round(tmp_path):
-    """An explicit empty ``patches`` is a real answer: the round kept nothing.
-
-    Marking it retryable would re-run discovery on a model that was already
-    judged to have no fusion opportunity.
-    """
+    """An explicit empty ``patches`` is a real answer: the round kept nothing."""
     phase = _phase(session_dir=tmp_path)
 
     await RECORD(phase, _kept(patches=[]))

@@ -192,9 +192,9 @@ def test_gap_layer_for_action_mapping():
 
 
 def test_gap_layer_for_action_follows_framework_kind():
-    # A framework-layer gap on a scriptable workload must name the rewrite
-    # specialist: seeding it with serving_specialist is what steered a custom
-    # workload back onto the serving surface once EXPLORE picked the gap up.
+    # A framework-layer gap on a scriptable workload must name the rewrite specialist: seeding it with
+    # serving_specialist is what steered a custom workload back onto the serving surface once EXPLORE picked the gap
+    # up.
     assert Coordinator._gap_layer_for_action("sweep", "custom") == (
         "framework",
         "framework_rewrite_specialist",

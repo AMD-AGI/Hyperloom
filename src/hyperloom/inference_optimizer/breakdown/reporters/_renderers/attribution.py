@@ -77,8 +77,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     decisions: list[Decision] = []
     for src, pct, _share in rows:
-        # The unattributed row is a residue, not a contributor; crediting it as
-        # a decision would put "nobody" on the leaderboard.
+        # The unattributed row is a residue, not a contributor; crediting it as a decision would put "nobody" on the
+        # leaderboard.
         if pct and pct > 0 and not src.startswith("unattributed"):
             decisions.append(
                 Decision(

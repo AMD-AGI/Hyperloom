@@ -41,7 +41,7 @@ _RECORDER_PRODUCER = "orchestrator"
 
 
 class ConcSweepExecutor:
-    """ActionRunner for ``conc_sweep``. See module docstring."""
+    """Run the coordinator-owned concurrency sweep action."""
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Bind the session, run the sweep, and close its event either way.
@@ -95,9 +95,8 @@ class ConcSweepExecutor:
             }
 
         params = ctx.task.params or {}
-        # ``None`` falls back to the ladder run_conc_sweep resolves for this
-        # workload; an empty list short-circuits (respects an explicit "no
-        # concs" choice).
+        # ``None`` falls back to the ladder run_conc_sweep resolves for this workload; an empty list short-circuits
+        # (respects an explicit "no concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
             concs: list[int] | None = list(state.conc_sweep_concs) if state.conc_sweep_concs else None
@@ -105,8 +104,8 @@ class ConcSweepExecutor:
             concs = [int(c) for c in concs_raw]
 
         variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
-        # An explicit ``None`` means "no budget gate" and must survive as None:
-        # coercing it to 0 would instead read as "no time left" and skip.
+        # An explicit ``None`` means "no budget gate" and must survive as None: coercing it to 0 would instead read as
+        # "no time left" and skip.
         budget_raw = params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
         total_budget = None if budget_raw is None else int(budget_raw)
 

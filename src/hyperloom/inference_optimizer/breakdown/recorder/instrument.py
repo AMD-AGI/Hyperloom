@@ -62,19 +62,7 @@ def snapshot_state_sections(
     *,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Snapshot every state-owned breakdown section from a live ``SharedState``.
-
-    Singletons overwrite the producer's own file; event-stream items are keyed
-    by a stable id so repeated snapshots are idempotent. Best-effort per
-    section: one failing section never blocks the others.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        state (Any): the live ``SharedState`` snapshotted into each section.
-        producer (str): the breakdown producer label (defaults to the
-            Coordinator).
-    """
+    """Snapshot every state-owned breakdown section from a live ``SharedState``."""
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
@@ -98,21 +86,7 @@ def snapshot_state_sections(
 
 
 def _snapshot_session(rec, st: Any) -> None:
-    """Snapshot the ``session`` singleton from ``st`` (no-op without a session id).
-
-    A session that has stopped carries ``ended_at_utc``, taken from the state's
-    own stop timestamp: without it the exporter has no end to measure against
-    and reports the run as still going. ``start_ts`` is what the exported
-    elapsed time is measured from; a resume re-anchors it on the new leg only
-    when the previous one crashed or stopped for a recorded reason, so after a
-    clean stop it still names the original start. The manifest-derived fields
-    the live state cannot know (image, host, pid) are filled in by the
-    collector at export.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
+    """Snapshot the ``session`` singleton from ``st`` (no-op without a session id)."""
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
@@ -124,8 +98,8 @@ def _snapshot_session(rec, st: Any) -> None:
             "claw_session_id": getattr(st, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
             "start_ts": str(getattr(st, "start_ts", "") or ""),
-            # A resumed run clears its reason but not necessarily the stale
-            # timestamp, so the pair is only ever emitted together.
+            # A resumed run clears its reason but not necessarily the stale timestamp, so the pair is only ever
+            # emitted together.
             "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
             "stop_reason": stop_reason,
             "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
@@ -136,16 +110,7 @@ def _snapshot_session(rec, st: Any) -> None:
 
 
 def _to_bool(value: Any) -> bool | None:
-    """Coerce a loosely-typed truthy/falsy value to ``bool``.
-
-    Args:
-        value (Any): the value to interpret (a bool, or a string like
-            ``"true"`` / ``"failed"`` / ``"ok"``).
-
-    Returns:
-        bool | None: the interpreted boolean, or ``None`` when ``value`` is
-            None or not a recognized truthy/falsy token.
-    """
+    """Coerce a loosely-typed truthy/falsy value to ``bool``."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -338,16 +303,7 @@ def record_singleton_section(
     *,
     producer: str,
 ) -> None:
-    """Record a producer-owned singleton section (report summaries, etc.).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        section (str): the singleton section name to record.
-        payload (dict[str, Any]): the section payload; an empty/non-dict value
-            is a no-op.
-        producer (str): the breakdown producer label that owns the section.
-    """
+    """Record a producer-owned singleton section (report summaries, etc.)."""
     if not session_dir or not isinstance(payload, dict) or not payload:
         trace_skip(reason="no session_dir" if not session_dir else "empty payload", section=section)
         return

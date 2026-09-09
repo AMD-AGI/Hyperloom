@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the model-config compatibility preflight.
-
-Policy: fail fast (with a persisted stop reason) when config.json is present but
-statically known to crash vLLM/transformers at load (corrupt config, or a RoPE
-block without any max-position field). A fully absent config is NOT blocked.
-"""
+"""Tests for the model-config compatibility preflight."""
 
 from __future__ import annotations
 
@@ -24,8 +19,8 @@ from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "config.json").write_text(json.dumps(fields), encoding="utf-8")
-    # Most config-compat tests are unrelated to the tokenizer-artifact check;
-    # ship a tokenizer by default so they exercise only the field they target.
+    # Most config-compat tests are unrelated to the tokenizer-artifact check; ship a tokenizer by default so they
+    # exercise only the field they target.
     if with_tokenizer:
         (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
 
@@ -54,17 +49,9 @@ def _default_non_amd_gpu(monkeypatch):
     monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
 
 
-# ---------------------------------------------------------------------------
 # _detect_incompatible_model_config
-# ---------------------------------------------------------------------------
 def test_compat_detector_registry_order_is_pinned():
-    """The waterfall order is a behavioral contract (first match wins).
-
-    Steps 1 (diffusers) and 2 (config absent/corrupt) are the inline prologue in
-    ``_detect_incompatible_model_config``; this registry is steps 3-15. Pin the
-    exact order + the amd_only / skip_when_scriptable flags so an accidental
-    reorder (which would silently change which reason wins) is caught.
-    """
+    """The waterfall order is a behavioral contract (first match wins)."""
     specs = cli_model_gate._COMPAT_DETECTORS
     assert [s.name for s in specs] == [
         "amd_unsupported_quant",  # 3
@@ -173,8 +160,7 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
 
 
 def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
-    """xDiT (scriptable) is a server-less image workload that never loads a HF
-    tokenizer, so a missing-tokenizer config.json must NOT block it."""
+    """xDiT (scriptable) is a server-less image workload that never loads a HF tokenizer, so a missing-tokenizer config.json must NOT block it."""
     m = tmp_path / "xdit_no_tok"
     _write_config(
         m,
@@ -186,8 +172,7 @@ def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
 
 
 def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
-    """Regression guard: the skip is scoped to scriptable — an explicit serving
-    framework (sglang) must still block a missing-tokenizer checkpoint."""
+    """Regression guard: the skip is scoped to scriptable — an explicit serving framework (sglang) must still block a missing-tokenizer checkpoint."""
     m = tmp_path / "sglang_no_tok"
     _write_config(
         m,
@@ -402,9 +387,7 @@ def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
 
 
 def test_detect_pure_nested_ministral3_blocked(tmp_path):
-    # Parent model_type is NOT ministral3 (a generic wrapper); only the nested
-    # text_config carries ministral3. Verifies the nested-only gate in isolation
-    # from the parent scope.
+    # Parent model_type is NOT ministral3 (a generic wrapper); only the nested text_config carries ministral3.
     m = tmp_path / "wrapper_nested_ministral3"
     _write_config(
         m,
@@ -421,8 +404,8 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
 
 
 def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # Nested qwen3_5_moe_text is registered by the runtime and falls through to
-    # the text_coercible degraded path; not gated.
+    # Nested qwen3_5_moe_text is registered by the runtime and falls through to the text_coercible degraded path; not
+    # gated.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,
@@ -438,8 +421,8 @@ def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
 
 
 def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
-    # Bare top-level qwen3_5_moe remains in the text-coercible runtime path; only
-    # the nested text_config subtype has a confirmed registry failure.
+    # Bare top-level qwen3_5_moe remains in the text-coercible runtime path; only the nested text_config subtype has a
+    # confirmed registry failure.
     m = tmp_path / "bare_qwen3_5_moe"
     _write_config(
         m,
@@ -452,8 +435,8 @@ def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
 
 
 def test_detect_top_level_ministral3_not_blocked(tmp_path):
-    # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the
-    # framework; only the nested text_config form is a confirmed failure.
+    # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the framework; only the nested
+    # text_config form is a confirmed failure.
     m = tmp_path / "bare_ministral3"
     _write_config(
         m,
@@ -466,8 +449,8 @@ def test_detect_top_level_ministral3_not_blocked(tmp_path):
 
 
 def test_detect_glm4_moe_not_blocked(tmp_path):
-    # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked
-    # by the unrecognized-arch rule (only glm4_moe_lite is unrecognized).
+    # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked by the unrecognized-arch rule (only
+    # glm4_moe_lite is unrecognized).
     m = tmp_path / "glm4moe"
     _write_config(
         m,
@@ -518,8 +501,8 @@ def test_detect_rope_without_maxpos_blocks(tmp_path):
     assert "RoPE" in reason
 
 
-# Phi-3 su/longrope: transformers folds top-level rope_theta into rope_scaling,
-# so Phi3Config sees 4 keys and raises before any override can apply.
+# Phi-3 su/longrope: transformers folds top-level rope_theta into rope_scaling, so Phi3Config sees 4 keys and raises
+# before any override can apply.
 def test_detect_phi3_su_canonical_three_fields_blocks(tmp_path):
     m = tmp_path / "phi3_su"
     _write_config(
@@ -571,8 +554,8 @@ def test_detect_phi3_yarn_rope_not_blocked(tmp_path):
 
 
 def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
-    # Without a top-level rope_theta, transformers does not fold an extra key
-    # into rope_scaling, so the 3-key dict passes Phi3Config validation fine.
+    # Without a top-level rope_theta, transformers does not fold an extra key into rope_scaling, so the 3-key dict
+    # passes Phi3Config validation fine.
     m = tmp_path / "phi3_longrope_no_theta"
     _write_config(
         m,
@@ -588,8 +571,8 @@ def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
 
 
 def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
-    # The Phi-3 validator is Phi3Config-specific; a non-phi3 model with a
-    # su/longrope-typed rope_scaling must not be caught by this gate.
+    # The Phi-3 validator is Phi3Config-specific; a non-phi3 model with a su/longrope-typed rope_scaling must not be
+    # caught by this gate.
     m = tmp_path / "llama_su"
     _write_config(
         m,
@@ -600,8 +583,8 @@ def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
-# sglang's gemma2 runtime reads config.hidden_act unconditionally; checkpoints
-# shipping only hidden_activation crash with AttributeError. Hardware-agnostic.
+# sglang's gemma2 runtime reads config.hidden_act unconditionally; checkpoints shipping only hidden_activation crash
+# with AttributeError.
 def test_detect_gemma2_missing_hidden_act_blocks(tmp_path):
     m = tmp_path / "gemma2_bad"
     _write_config(
@@ -654,8 +637,8 @@ def test_detect_gemma2_hidden_act_in_text_config_ok(tmp_path):
 
 
 def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
-    # Only gemma2 reads config.hidden_act unconditionally in sglang; other
-    # model types that omit hidden_act must not be caught by this gate.
+    # Only gemma2 reads config.hidden_act unconditionally in sglang; other model types that omit hidden_act must not
+    # be caught by this gate.
     m = tmp_path / "llama_no_act"
     _write_config(
         m,
@@ -855,9 +838,8 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
 
 
 def test_detect_vocab_shape_padded_not_blocked(tmp_path):
-    # actual > config vocab_size -> commonly a padded embedding (rounded up to
-    # an alignment / TP boundary while config keeps the unpadded value). The
-    # framework handles padding, so preflight must NOT skip such a checkpoint.
+    # actual > config vocab_size -> commonly a padded embedding (rounded up to an alignment / TP boundary while config
+    # keeps the unpadded value).
     m = tmp_path / "qwen_vocab_padded"
     _write_config(
         m,
@@ -899,9 +881,7 @@ def test_read_safetensors_header_parses_and_rejects(tmp_path):
     assert cli._read_safetensors_header(short) is None
 
 
-# ---------------------------------------------------------------------------
 # Gemma2 detection helpers (model_config_utils)
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "name,expected",
     [
@@ -926,8 +906,8 @@ def test_path_looks_like_gemma2(name, expected):
 
 
 def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
-    # config.json present but empty (no model_type/architectures) -> the path
-    # heuristic decides; a gemma-2 path is still detected.
+    # config.json present but empty (no model_type/architectures) -> the path heuristic decides; a gemma-2 path is
+    # still detected.
     from hyperloom.inference_optimizer import model_config_utils as mcu
 
     m = tmp_path / "google-gemma-2-9b-it"
@@ -995,9 +975,7 @@ def test_detect_custom_automap_known_type_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
-# ---------------------------------------------------------------------------
 # _preflight_model_config_compat — persistence + return contract
-# ---------------------------------------------------------------------------
 def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     model = tmp_path / "bad"
     _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
@@ -1071,9 +1049,7 @@ def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
     assert state["stop_reason"] == "model_config_incompatible"
 
 
-# ---------------------------------------------------------------------------
 # Private / third-party quantization formats (paroquant, MLX, mxtq, GGUF)
-# ---------------------------------------------------------------------------
 def test_private_quant_paroquant_blocks(tmp_path):
     m = tmp_path / "paro"
     _write_config(
@@ -1100,8 +1076,8 @@ def test_private_quant_mlx_affine_blocks(tmp_path):
 
 
 def test_private_quant_no_method_blocks(tmp_path):
-    # quantization_config carries bits/group_size but no quant_method/mode;
-    # sglang raises "Unknown quantization method: ''" in engine init.
+    # quantization_config carries bits/group_size but no quant_method/mode; sglang raises "Unknown quantization
+    # method: ''" in engine init.
     m = tmp_path / "no_method"
     _write_config(
         m,
@@ -1295,10 +1271,8 @@ def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
-# ---------------------------------------------------------------------------
-# Langfuse parity on fail-fast — pre-flight gates exit before the normal
-# Langfuse flush point, so each must push the breakdown to Langfuse itself.
-# ---------------------------------------------------------------------------
+# Langfuse parity on fail-fast — pre-flight gates exit before the normal Langfuse flush point, so each must push the
+# breakdown to Langfuse itself.
 def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
     calls: dict[str, list] = {"flush": [], "patch": [], "record": []}
     from hyperloom.inference_optimizer import breakdown as bd
@@ -1358,8 +1332,7 @@ def test_context_window_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
 
 
 def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
-    # A Langfuse outage must never turn a clean fail-fast into a crash, nor
-    # mask the persisted stop reason.
+    # A Langfuse outage must never turn a clean fail-fast into a crash, nor mask the persisted stop reason.
     model = tmp_path / "bad_raise"
     _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
     sd = tmp_path / "session_raise"
@@ -1378,8 +1351,8 @@ def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
 
 
 def test_healthy_model_does_not_emit_to_langfuse(tmp_path, monkeypatch):
-    # A passing pre-flight must not touch Langfuse — the normal end-of-session
-    # path owns that for runs that actually start.
+    # A passing pre-flight must not touch Langfuse — the normal end-of-session path owns that for runs that actually
+    # start.
     model = tmp_path / "good_lf"
     _write_config(model, model_type="llama", max_position_embeddings=8192)
     sd = tmp_path / "session_good_lf"
@@ -1391,9 +1364,8 @@ def test_healthy_model_does_not_emit_to_langfuse(tmp_path, monkeypatch):
 
 
 def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
-    # AWQ/GPTQ/compressed-tensors legitimately ship '.scales'/'.biases' tensors;
-    # a declared supported quant_method must NOT be misread as MLX (the weight-
-    # index tell only applies to checkpoints with NO quant_method declared).
+    # AWQ/GPTQ/compressed-tensors legitimately ship '.scales'/'.biases' tensors; a declared supported quant_method
+    # must NOT be misread as MLX (the weight- index tell only applies to checkpoints with NO quant_method declared).
     for method in ("awq", "gptq", "compressed-tensors"):
         m = tmp_path / f"std_scales_{method.replace('-', '_')}"
         _write_config(
@@ -1418,9 +1390,7 @@ def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
 
 
 def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypatch):
-    """A repo-id must be resolved to its local cache dir before the waterfall so
-    disk-reading detectors receive a real directory instead of the bare repo-id
-    (which Path().is_dir() would reject, silently skipping the check)."""
+    """A repo-id must be resolved to its local cache dir before the waterfall so disk-reading detectors receive a real directory instead of the bare repo-id (which Path().is_dir() would reject, silently skipping the check)."""
     local_dir = tmp_path / "cache" / "models--org--repo"
     local_dir.mkdir(parents=True)
     monkeypatch.setattr(
@@ -1440,8 +1410,7 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
 
 
 def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
-    """An unresolvable model path (e.g. an uncached repo-id) falls back to the
-    raw string so behaviour is unchanged from before the resolver."""
+    """An unresolvable model path (e.g. an uncached repo-id) falls back to the raw string so behaviour is unchanged from before the resolver."""
     monkeypatch.setattr(cli_model_gate, "resolve_local_model_dir", lambda mp: None)
     seen: dict[str, str] = {}
 

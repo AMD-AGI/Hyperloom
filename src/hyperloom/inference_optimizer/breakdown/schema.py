@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Schema (TypedDict shape) for ``session_breakdown.json``.
-
-The single contract between ``inference_optimizer`` and downstream
-consumers. All fields are optional-by-convention (consumers treat missing
-data as "not available", never fabricate); the wire shape is plain JSON;
-``schema_version`` bumps only on breaking changes, not additive fields.
-"""
+"""Schema (TypedDict shape) for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -25,9 +19,7 @@ SCHEMA_VERSION = SCHEMA_VERSION_V6
 ExecutorClass = Literal["llm_agent", "llm_tool", "deterministic"]
 IntegrityStatus = Literal["exact", "derived", "partial", "unavailable"]
 
-# Which agent owns a unit of work. Recorded by the producer at author time;
-# ``unattributed`` means the producer genuinely could not name an owner, never
-# that the exporter failed to guess one.
+# Which agent owns a unit of work.
 AgentBucket = Literal[
     "kernel_agent",
     "framework_agent",
@@ -262,17 +254,7 @@ class V6Outcome(TypedDict, total=False):
 
 
 class V6TimelineEvent(TypedDict, total=False):
-    """One ordered V6 business-stage event; CLOSE is intentionally excluded.
-
-    Every field whose meaning is the same for all event types belongs here
-    rather than being redeclared inside each ``ext``: one semantic stored per
-    type is one semantic that drifts per type.
-
-    ``id`` is the event id, ``{phase}:{macro_cycle}:{component}``. The rows the
-    event was assembled from name the same value ``event_id``, and the
-    asymmetry is deliberate -- here it is this object's own identity, on a row
-    it is a reference to the event the row belongs to.
-    """
+    """One ordered V6 business-stage event; CLOSE is intentionally excluded."""
 
     type: str
     kind: str
@@ -398,23 +380,7 @@ class V6WarmStartExt(TypedDict, total=False):
 
 
 class V6WarmReplayApplied(TypedDict, total=False):
-    """What was running when a warm replay reproduced its gain.
-
-    Recorded only on ``reproduced``. The columns are applied together and
-    measured together, so one merged configuration is reported rather than a
-    per-column split that would have to guess which column earned the gain. A
-    replay that did not reproduce records its reason instead — its material has
-    already been rolled back, so there is no running configuration to describe.
-
-    Attributes:
-        config (dict[str, Any]): The effective ``extra_server_args`` and
-            ``extra_envs``, recipe and kernel columns already merged.
-        patch (list[str]): Overlay refs that applied successfully. The
-            lexicographic order of a ref is its replay order; the separate
-            ``patch_timeline`` column is retired.
-        kernel (dict[str, Any]): ``{status, total, kept, reverted, columns}``
-            for the kernel column.
-    """
+    """What was running when a warm replay reproduced its gain."""
 
     config: dict[str, Any]
     patch: list[str]
@@ -422,37 +388,7 @@ class V6WarmReplayApplied(TypedDict, total=False):
 
 
 class V6WarmReplayExt(TypedDict, total=False):
-    """``timeline[type=warm_replay].ext`` — did the record reproduce, and why not.
-
-    Attributes:
-        raw_status (str): The runtime status before it was collapsed onto the
-            five published outcomes (it also spells ``rollback_failed``,
-            ``enqueue_failed``, ``quality_failed``, ``accuracy_failed``,
-            ``promotion_failed``, ``kernel_preparation_failed`` and
-            ``reproduced_but_no_params``).
-        result_type (str): Stable reason code; omitted on a clean reproduce.
-        raw_reason (str | None): The unmapped reason, so normalization cannot
-            silently drop detail.
-        tier (str | None): Ladder rung of the replayed record.
-        confidence (float | None): Transfer confidence of that rung.
-        config_source (str | None): Identity that owned the replayed config.
-        config_donor_tier (str | None): ``self`` when the identity owned it.
-        donor (dict[str, Any]): Borrowed donor's identity, session and gain.
-        before_tput (float | None): Baseline the replay was judged against.
-        after_tput (float | None): Measured HOT-round throughput.
-        gain_pct (float | None): Measured gain against ``before_tput``.
-        expected_gain_pct (float | None): Gain the record claimed.
-        keep_threshold_pct (float | None): Threshold this replay had to clear.
-        historical_reproduce_bar_pct (float | None): ``expected_gain`` scaled by
-            the minimum reproduce ratio.
-        below_historical_reproduce (bool | None): Positive gain that still fell
-            short of that bar — reproduced, but materially degraded.
-        accuracy (dict[str, Any]): ``{eval_ran, baseline, replay, passed}``.
-        applied (V6WarmReplayApplied): Present only on ``reproduced``.
-        active_framework_root (str): Checkout promoted after a reproduce.
-        rollback (dict[str, Any]): ``{ok, errors}`` when material was reverted.
-        failure (dict[str, Any]): ``{error_class, error}``.
-    """
+    """``timeline[type=warm_replay].ext`` — did the record reproduce, and why not."""
 
     raw_status: str
     result_type: str
@@ -2080,35 +2016,8 @@ class V6Close(TypedDict, total=False):
 
 
 # V6 KERNEL timeline event
-#
-# The ``kernel`` timeline event's ``ext`` shape, plus the recorder fragment
-# shapes it is assembled from. Two rules govern the split between the two:
-#
-#   * A row that is updated incrementally owns an item section of its own, one
-#     fragment per row keyed by its real id. It must not be recorded as a
-#     nested list inside another fragment unless it carries one of
-#     ``recorder._ENTITY_ID_FIELDS``, because the upsert list merge only merges
-#     in place by those fields and otherwise appends.
-#   * A value the assembler can compute is not recorded. Counts, ``delta_pct``
-#     and the per-source counters are derived at assembly from the row
-#     fragments, so an aggregate can never drift from its own detail.
 class V6KernelEntry(TypedDict, total=False):
-    """What the KERNEL entry hook decided and what it inherited.
-
-    Attributes:
-        route (str): The dispatch route the entry hook selected.
-        route_reason (str): Why that route was selected.
-        resumed (bool): Whether the phase was entered by a resume.
-        code_revision (str | None): Orchestration commit the entry ran.
-        stack_depth_in (int | None): Optimization-stack depth on entry.
-        budget_remaining_sec (float | None): Session budget left on entry.
-        roofline_snapshot_id (int | None): Analysis snapshot the entry read.
-        roofline_snapshot_ts (str | None): When that snapshot was taken.
-        roofline_baseline_gain_at_snapshot (float | None): Validated gain the
-            snapshot was taken against.
-        snapshot_staleness (float | None): Gain drift since the snapshot, which
-            is what the re-profile trigger tests.
-    """
+    """What the KERNEL entry hook decided and what it inherited."""
 
     route: str
     route_reason: str
@@ -2123,21 +2032,7 @@ class V6KernelEntry(TypedDict, total=False):
 
 
 class V6KernelReprofile(TypedDict, total=False):
-    """The entry re-profile that decides whether cached analysis is stale.
-
-    Attributes:
-        ran (bool): Whether a re-profile was actually dispatched.
-        task_kind (str | None): ``roofline`` (carries its own analysis and
-            refreshes the cache) or ``profile`` (invalidates it, forcing the
-            phase to request analysis of its own).
-        trigger (str | None): ``gain`` / ``config_changed`` /
-            ``workload_changed``.
-        skipped_reason (str | None): Why it was skipped, when it was.
-        idempotency_reason (str | None): The dispatch reason tag.
-        snapshot_landed (bool): Whether a new snapshot actually landed.
-        snapshot_id_before (int | None): Snapshot counter before the attempt.
-        snapshot_id_after (int | None): Snapshot counter after the attempt.
-    """
+    """The entry re-profile that decides whether cached analysis is stale."""
 
     ran: bool
     task_kind: str | None
@@ -2150,38 +2045,7 @@ class V6KernelReprofile(TypedDict, total=False):
 
 
 class V6RowScope(TypedDict, total=False):
-    """Recording-side bookkeeping every V6 row fragment carries.
-
-    Shared by every event type, not just KERNEL: any type assembled from row
-    fragments needs both fields for the same reasons.
-
-    The spool directory is per session, not per event, so a row has to name its
-    event twice over. The fragment key is prefixed with the event id, so two
-    events holding a row with the same natural id cannot upsert into one file
-    and lose the first event's row. And the payload repeats it as a field, so
-    assembly can select the rows of the event it is closing. Omitting either
-    half breaks something, but different things: the first loses data, the
-    second mixes events together.
-
-    ``ordinal`` orders rows that carry no timestamp of their own. The GEAK rows
-    are replayed from ``kernel_journey.json``, which records no per-kernel
-    time, so their only ordering information is their position in that file and
-    it has to be captured explicitly. The fragment envelope cannot supply it:
-    every upsert redraws the envelope ``seq`` and refreshes its ``ts``, so both
-    name the last update rather than the first write, and ``seq`` is a
-    per-recorder in-memory counter that restarts at 1 in a resumed process.
-
-    Neither field reaches the timeline event -- ``event_id`` has done its job
-    once the rows are filtered, and ``ordinal`` is superseded by the row's
-    position once the array is sorted -- so assembly filters on the first,
-    sorts on the second, and drops both.
-
-    Attributes:
-        event_id (str): The event this row belongs to,
-            ``{phase}:{macro_cycle}:{component}``.
-        ordinal (int): Position in the source that produced the row, for rows
-            with no timestamp to sort by.
-    """
+    """Recording-side bookkeeping every V6 row fragment carries."""
 
     event_id: str
     ordinal: int
@@ -2199,27 +2063,7 @@ class V6KernelAnalysisArtifacts(TypedDict, total=False):
 
 
 class V6KernelAnalysisDetail(TypedDict, total=False):
-    """Trace-analysis metadata shared by the roofline and kernel events.
-
-    ``route`` records the routing policy and ``tool`` records the implementation
-    that served it. Oversized sub-blocks are replaced by an omission marker
-    rather than dropped, so a consumer can tell a bounded block from a missing
-    one.
-
-    Attributes:
-        route (str): ``agent`` / ``bypass``.
-        tool (str): ``tracelens`` / ``bypass``.
-        tool_run_id (str): The analysis tool's own run id.
-        steady_state (dict[str, Any]): Steady-state window selection.
-        preflight (dict[str, Any]): Preflight checks.
-        split (dict[str, Any]): Trace splitting.
-        selection (dict[str, Any]): Hot-kernel selection.
-        steps (Any): Per-step trace of the run.
-        route_ext (dict[str, Any]): Route-specific extras.
-        hot_kernels (dict[str, Any]): Bounded hot-kernel ranking summary.
-        warnings (list[dict[str, Any]]): Trace-health warnings.
-        artifacts (V6KernelAnalysisArtifacts): Paths the run produced.
-    """
+    """Trace-analysis metadata shared by the roofline and kernel events."""
 
     route: str
     tool: str
@@ -2236,37 +2080,7 @@ class V6KernelAnalysisDetail(TypedDict, total=False):
 
 
 class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
-    """One analysis the KERNEL phase requested for itself.
-
-    Normally absent: the entry re-profile dispatches a ``roofline`` task by
-    default, which analyses the trace it just captured, so the phase's own
-    request is served from cache. A present run therefore marks the case where
-    the analysis behind a rewrite has no roofline event of its own.
-
-    ``reusable_native_kernel_ids`` is recorded because it is the only legal
-    source of a ``kernel_id``: the hot-kernel ranking includes vendor binaries
-    that dispatch rejects as ``non_reusable_kernel``, so without the admitted
-    set there is no way to check afterwards whether the kernel the phase went
-    on to rewrite was ever a legitimate target.
-
-    Attributes:
-        run_id (str): Entry-stable identifier for this analysis.
-        trigger (str | None): ``pre_run_optimization`` or ``llm_explicit``.
-        requested_by (str | None): The role that requested it.
-        request_msg_id (str | None): The bus request message id.
-        ts (str): ISO UTC timestamp of the run.
-        status (str): ``ok`` or ``failed``.
-        cache_hit (bool): Whether a cached result served the request.
-        trace_input (str | None): The trace the run analysed.
-        top_k (int | None): The requested ranking depth.
-        roofline_snapshot_id (int | None): Snapshot counter the run produced.
-        roofline_baseline_gain_at_snapshot (float | None): Validated gain the
-            produced snapshot was taken against.
-        steady_state_trace (str | None): The steady-state trace selected.
-        analysis_md_path (str | None): The human-readable analysis.
-        reusable_native_kernel_ids (list[str]): Kernels dispatch would admit.
-        trace_validate_ref (str | None): The trace validation that gated it.
-    """
+    """One analysis the KERNEL phase requested for itself."""
 
     run_id: str
     trigger: str | None
@@ -2286,29 +2100,7 @@ class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
 
 
 class V6KernelLaneRun(V6RowScope, total=False):
-    """Fields every forge candidate row carries, whichever lane produced it.
-
-    The two verdict fields are deliberately separate. ``micro_decision`` is the
-    candidate layer's verdict on its own output; ``outcome`` is end-to-end
-    adoption and is derived at assembly, never accepted from a caller. A row
-    with no ``rebench_ref`` has nothing that re-measured it end to end, so it
-    can only be ``needs_review`` however confident its own ``micro_decision``
-    was.
-
-    Attributes:
-        lane (str): Which lane the row belongs to, discriminating the shared
-            ``kernel_lane_run`` section.
-        source_kind (str): The producer this candidate came from.
-        run_id (str): The candidate's real attempt id.
-        status (str): How the candidate's own run ended.
-        started_at (str | None): ISO timestamp the candidate started.
-        ended_at (str | None): ISO timestamp the candidate ended.
-        duration_sec (float | None): Wall-clock seconds the candidate took.
-        micro_decision (str | None): The candidate layer's own verdict.
-        rebench_ref (str | None): The rebench attempt id that re-measured it.
-        outcome (str): End-to-end adoption verdict, derived at assembly.
-        failure_reason (str | None): Normalized failure reason.
-    """
+    """Fields every forge candidate row carries, whichever lane produced it."""
 
     lane: str
     source_kind: str
@@ -2342,30 +2134,7 @@ class V6KernelRewriteE2E(TypedDict, total=False):
 
 
 class V6KernelRewriteRun(V6KernelLaneRun, total=False):
-    """One forge source-level kernel rewrite.
-
-    ``adopted_backend`` and ``run_id`` are stated rather than derived: the
-    superseded projection had to guess the backend from a speedup plus an
-    artifact path, and to synthesize an identifier from
-    ``kernel_id:backend:sequence`` whenever the real attempt id had been lost.
-
-    Attributes:
-        kernel_id (str): The kernel the rewrite targeted.
-        kernel_name (str | None): Human-readable kernel name.
-        dispatched (bool): Whether a backend was actually dispatched.
-        backends_tried (list[str]): The backends attempted.
-        adopted_backend (str | None): The backend whose output was taken.
-        skip_reason (str | None): Why dispatch was skipped, when it was.
-        task_group (str | None): The dispatch task group.
-        speedup (float | None): Micro-benchmark speedup.
-        baseline_us (float | None): Micro-benchmark baseline microseconds.
-        candidate_us (float | None): Micro-benchmark candidate microseconds.
-        compile_status (str | None): Compilation outcome.
-        correctness (bool | None): Correctness verdict.
-        artifact_path (str | None): The produced artifact.
-        trace_analyze_ref (str | None): The analysis that nominated the kernel.
-        e2e (V6KernelRewriteE2E | None): Integration sub-result.
-    """
+    """One forge source-level kernel rewrite."""
 
     kernel_id: str
     kernel_name: str | None
@@ -2385,15 +2154,7 @@ class V6KernelRewriteRun(V6KernelLaneRun, total=False):
 
 
 class V6KernelFusionRun(V6KernelLaneRun, total=False):
-    """One forge-fusion run.
-
-    Attributes:
-        pattern (str | None): The fusion pattern attempted.
-        target_module (str | None): The module the fusion targeted.
-        applied (bool): Whether the fusion was applied.
-        gain_pct (float | None): The gain the run claimed.
-        patch_path (str | None): The produced patch.
-    """
+    """One forge-fusion run."""
 
     pattern: str | None
     target_module: str | None
@@ -2403,15 +2164,7 @@ class V6KernelFusionRun(V6KernelLaneRun, total=False):
 
 
 class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
-    """One GEMM shape-table tuning run.
-
-    Attributes:
-        shapes_total (int | None): Shapes the run considered.
-        shapes_tuned (int | None): Shapes the run tuned.
-        config_path (str | None): The produced shape-table.
-        gain_pct (float | None): The gain the run claimed.
-        tuner (str | None): The tuner that ran.
-    """
+    """One GEMM shape-table tuning run."""
 
     shapes_total: int | None
     shapes_tuned: int | None
@@ -2421,17 +2174,7 @@ class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
 
 
 class V6KernelCollectiveRun(V6KernelLaneRun, total=False):
-    """One collective-tuning run.
-
-    Attributes:
-        op (str | None): The collective operation tuned.
-        algo (str | None): The algorithm selected.
-        size_bytes (int | None): The message size tuned for.
-        world_size (int | None): The participating rank count.
-        gain_pct (float | None): The gain the run claimed.
-        withheld (bool): Whether the candidate was withheld from adoption.
-        withhold_reason (str | None): Why it was withheld.
-    """
+    """One collective-tuning run."""
 
     op: str | None
     algo: str | None
@@ -2452,24 +2195,7 @@ class V6KernelForgeLanes(TypedDict, total=False):
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
-    """Whether the configuration under test actually took effect.
-
-    This is the part the orchestrator already computed but never persisted: the
-    GEAK verdict path compares the config fingerprint and the overlay digest to
-    decide ``validated`` versus ``fallback``, then dropped both booleans once
-    the decision was made. Without them a ``fallback`` cannot be told from a
-    genuine regression, because a rebench whose config never engaged measured
-    the baseline rather than the candidate.
-
-    Attributes:
-        config_matched (bool | None): Whether the observed config fingerprint
-            matched the expected one.
-        overlay_loaded (bool | None): Whether the expected overlay was loaded.
-        expected_cfg_hash (str | None): The fingerprint the attempt asked for.
-        observed_cfg_hash (str | None): The fingerprint the server reported.
-        expected_overlay_digest (str | None): The overlay digest asked for.
-        observed_overlay_digest (str | None): The overlay digest reported.
-    """
+    """Whether the configuration under test actually took effect."""
 
     config_matched: bool | None
     overlay_loaded: bool | None
@@ -2480,29 +2206,7 @@ class V6KernelRebenchEngagement(TypedDict, total=False):
 
 
 class V6KernelRebenchAttempt(V6RowScope, total=False):
-    """One end-to-end re-measurement of a candidate.
-
-    One section holds both the forge and the GEAK attempts, discriminated by
-    ``source_kind``, because adoption is settled by looking them up together:
-    an attempt id resolves to a verdict regardless of which producer's
-    candidate it re-measured. Assembly routes them back to their two wire
-    locations.
-
-    Attributes:
-        attempt_id (str): Ledger-stable identifier for this attempt.
-        source_kind (str): The producer whose candidate this re-measured.
-        source_ref (str | None): The candidate's ``run_id``.
-        idempotency_key (str | None): The dispatch idempotency key.
-        task_id (str | None): The dispatched task id.
-        dispatched_at (str | None): ISO timestamp the attempt was dispatched.
-        settled_at (str | None): ISO timestamp the verdict landed.
-        base_tput (float | None): The throughput the attempt measured against.
-        measured_tput (float | None): The throughput the attempt measured.
-        decision (str | None): The verdict, absent while unsettled.
-        decision_reason (str | None): Why the verdict landed that way.
-        status (str | None): The attempt's own lifecycle status.
-        engagement (V6KernelRebenchEngagement): Config / overlay verification.
-    """
+    """One end-to-end re-measurement of a candidate."""
 
     attempt_id: str
     source_kind: str
@@ -2595,40 +2299,7 @@ class V6KernelForge(TypedDict, total=False):
 
 
 class V6KernelGeakHandoff(TypedDict, total=False):
-    """The conditions GEAK was asked to work under.
-
-    ``baseline_flags`` and ``baseline_envs`` are the orchestrator's current
-    best, meaning GEAK's *starting* point, while the accepted flags GEAK later
-    reports in :class:`V6KernelGeakProduct` are what it *produced*. The two are
-    named apart because one ``config`` block holding both would be read
-    backwards, and their difference is the configuration surface this
-    delegation actually moved.
-
-    Attributes:
-        schema_version (int | None): Handoff schema version.
-        model_path (str | None): The served model.
-        framework (str | None): The serving framework.
-        gpu_type (str | None): The GPU the run targeted.
-        tp (int | None): Tensor-parallel width.
-        workload (dict[str, Any]): The workload GEAK optimized against.
-        baseline_flags (str | None): Server flags GEAK started from.
-        baseline_envs (str | dict[str, Any] | None): Environment GEAK started
-            from.
-        baseline_env_spec_present (bool): Whether a structured env spec was
-            handed over.
-        launch_recipe (str | None): The launch recipe handed over.
-        raw_baseline_tput (float | None): Unadjusted baseline throughput.
-        orchestrator_best_tput_same_config (float | None): The orchestrator's
-            own best throughput at the same configuration.
-        max_model_len (int | None): Context length handed over.
-        mem_fraction (float | None): Memory fraction handed over.
-        bench_client (str | None): The benchmark client to use.
-        e2e_metric (str | None): The metric to optimize.
-        bench_protocol_present (bool): Whether a bench protocol was handed over.
-        gpu_ids (str | None): The GPUs made available.
-        exp_root (str | None): The runner's experiment root.
-        eval_dir (str | None): The macro-cycle-scoped eval dir.
-    """
+    """The conditions GEAK was asked to work under."""
 
     schema_version: int | None
     model_path: str | None
@@ -2653,30 +2324,7 @@ class V6KernelGeakHandoff(TypedDict, total=False):
 
 
 class V6KernelGeakDelegation(TypedDict, total=False):
-    """How the delegated GEAK runner process itself ended.
-
-    Separate from what GEAK claimed and from what the rebench measured: a
-    runner can exit non-zero having still produced an adoptable candidate, and
-    a clean exit is not evidence of a gain.
-
-    Attributes:
-        runner_status (str): The runner's own status.
-        started_at (str | None): ISO timestamp the runner started.
-        ended_at (str | None): ISO timestamp the runner ended.
-        duration_sec (float | None): Wall-clock seconds the runner took.
-        error_class (str | None): The failure class, on a miss.
-        error (str | None): The failure message, on a miss.
-        returncode (int | None): The runner's exit code.
-        runner_timeout_sec (int | None): The runner's budget.
-        kill_timeout_sec (int | None): The runner's hard-kill budget.
-        exp_root (str | None): The runner's experiment root.
-        eval_dir (str | None): The macro-cycle-scoped eval dir.
-        report_path (str | None): The human report the runner wrote.
-        versions (dict[str, Any]): Tool version provenance.
-        recovered_from_disk (bool): Whether the result was reconstructed from
-            disk after the runner died without reporting.
-        stages_reached (list[str]): Stages a crashed run got through.
-    """
+    """How the delegated GEAK runner process itself ended."""
 
     runner_status: str
     started_at: str | None
@@ -2696,14 +2344,7 @@ class V6KernelGeakDelegation(TypedDict, total=False):
 
 
 class V6KernelGeakDiscoveryRun(V6RowScope, total=False):
-    """One hot-kernel discovery run GEAK performed for itself.
-
-    Attributes:
-        source (str | None): Discovery source.
-        status (str | None): Run status.
-        hot_kernel_count (int): Hot kernels surfaced.
-        scan (dict[str, Any]): Scan inputs and outputs.
-    """
+    """One hot-kernel discovery run GEAK performed for itself."""
 
     source: str | None
     status: str | None
@@ -2878,24 +2519,7 @@ class V6KernelGeakClaim(TypedDict, total=False):
 
 
 class V6KernelGeakProduct(TypedDict, total=False):
-    """The reproducible configuration GEAK handed back.
-
-    ``cfg_hash`` and ``final_overlay_digest`` are the expected side of the
-    engagement check in :class:`V6KernelRebenchEngagement`: without them a
-    rebench cannot prove the configuration it measured was the one GEAK
-    produced.
-
-    Attributes:
-        accepted_flags (str | list[str] | None): Server flags GEAK accepted.
-        accepted_envs (dict[str, Any]): Environment GEAK accepted.
-        accepted_config (dict[str, Any]): The runner's accepted-config block.
-        cfg_hash (str | None): Canonical fingerprint of flags and envs.
-        final_overlay (str | None): The overlay PYTHONPATH produced.
-        final_overlay_digest (str | None): Digest of that overlay.
-        final_launch_script (str | None): The optimized launch script.
-        bench_script (str | None): The benchmark script GEAK measured with.
-        final_patch (str | None): The aggregate source patch.
-    """
+    """The reproducible configuration GEAK handed back."""
 
     accepted_flags: str | list[str] | None
     accepted_envs: dict[str, Any]
@@ -2909,25 +2533,7 @@ class V6KernelGeakProduct(TypedDict, total=False):
 
 
 class V6KernelGeakRebench(TypedDict, total=False):
-    """The orchestrator's own re-measurement campaign for GEAK's candidate.
-
-    GEAK may rebench the same candidate up to its per-cycle ceiling, so unlike
-    a forge lane it can end a visit holding several settled verdicts. Two that
-    disagree is a fact worth seeing rather than one to resolve by recency:
-    ``conflicting_decisions`` is populated and neither verdict is honoured.
-
-    Attributes:
-        required (bool): Whether a rebench was required at all.
-        max_attempts (int | None): The per-cycle attempt ceiling.
-        attempts_used (int): Assembly-derived count of attempts made.
-        attempts (list[V6KernelRebenchAttempt]): The attempts.
-        final_status (str | None): The revalidation status stamped on the
-            result.
-        final_error_class (str | None): The revalidation failure class.
-        final_error (str | None): The revalidation failure message.
-        conflicting_decisions (list[str]): The disagreeing verdicts, when
-            settled attempts did not agree.
-    """
+    """The orchestrator's own re-measurement campaign for GEAK's candidate."""
 
     required: bool
     max_attempts: int | None
@@ -2940,12 +2546,7 @@ class V6KernelGeakRebench(TypedDict, total=False):
 
 
 class V6KernelGeak(TypedDict, total=False):
-    """The GEAK route's work for one visit, in causal order.
-
-    The five blocks are the five distinct things a consumer conflates at its
-    peril: what GEAK was asked to do, how its process ended, what it tried,
-    what it claimed, what it produced, and what the orchestrator measured.
-    """
+    """The GEAK route's work for one visit, in causal order."""
 
     engaged: bool
     handoff: V6KernelGeakHandoff | None
@@ -2966,14 +2567,7 @@ class V6KernelAdoptedRow(TypedDict, total=False):
 
 
 class V6KernelPendingRow(TypedDict, total=False):
-    """One candidate no settled rebench concluded on.
-
-    ``why`` separates the reasons that are routinely conflated: ``no_rebench``
-    means nothing re-measured it, ``rebench_inconclusive`` means something did
-    and concluded nothing (a rebench whose configuration never engaged measured
-    the baseline, not the candidate), and ``rebench_conflict`` means two
-    settled verdicts disagreed.
-    """
+    """One candidate no settled rebench concluded on."""
 
     source_kind: str
     ref: str
@@ -3019,31 +2613,7 @@ class V6KernelStackDelta(TypedDict, total=False):
 
 
 class V6KernelOutcome(TypedDict, total=False):
-    """What the visit concluded, settled against the rebench evidence.
-
-    ``verdict`` is left absent when nothing was adopted, so a visit that
-    adopted nothing cannot read as having concluded something about a
-    candidate. ``net_gain_pct`` is computed against ``tput_before`` rather than
-    the session baseline, because a visit is answerable for the change it made,
-    not for the gains that preceded it.
-
-    Attributes:
-        route (str): The route the visit ran.
-        verdict (str | None): The entry's conclusion, absent when nothing was
-            adopted.
-        exit_reason (str | None): The phase's own exit reason.
-        tput_before (float | None): Throughput the visit started from.
-        tput_after (float | None): Throughput the visit exited on.
-        net_gain_pct (float | None): Change across the visit.
-        session_baseline_tput (float | None): The session's baseline.
-        cumulative_gain_validated_out (float | None): Validated cumulative gain
-            on exit.
-        stack_depth_out (int | None): Optimization-stack depth on exit.
-        adopted (list[V6KernelAdoptedRow]): Candidates a rebench validated.
-        pending_review (list[V6KernelPendingRow]): Candidates nothing settled.
-        by_source (dict[str, V6KernelSourceCounters]): Per-source tally.
-        stack_delta (V6KernelStackDelta): Stack entries added and removed.
-    """
+    """What the visit concluded, settled against the rebench evidence."""
 
     route: str
     verdict: str | None
@@ -3171,42 +2741,7 @@ class V6KernelExt(TypedDict, total=False):
 
 
 class V6KernelEvent(TypedDict, total=False):
-    """Recorder fragment for one KERNEL event (section ``kernel_event``).
-
-    Created when the phase is entered and upserted as the run proceeds; the
-    row-shaped facts live in their own sections and are folded in at assembly.
-    Everything here is a mapping, so the upsert's recursive merge applies and
-    a partial update never drops a field an earlier one set.
-
-    ``timeline_sequence`` is the storage sequence the opening timeline write
-    returned. It lives here because the fragment is the event's only durable
-    identity: the closing write reuses it to update that same event in place,
-    and its absence is what tells finalize this run never got an event of its
-    own, as opposed to getting one it never closed.
-
-    Attributes:
-        event_id (str): The event id this fragment is keyed by.
-        macro_cycle (int): The macro cycle this run belongs to.
-        timeline_sequence (int | None): Storage sequence of the event.
-        in_flight_stage (str | None): The stage in progress.
-        start_time (str): ISO UTC timestamp the phase was entered.
-        end_time (str | None): ISO UTC timestamp the run closed.
-        status (str | None): The closing status, absent while running.
-        entry (V6KernelEntry): What the entry hook decided.
-        route (str): The route the run took.
-        forge_engaged (bool): Whether the forge route ran.
-        reprofile (V6KernelReprofile | None): The entry re-profile.
-        geak_engaged (bool): Whether the GEAK route ran.
-        geak_handoff (V6KernelGeakHandoff | None): Conditions GEAK got.
-        geak_delegation (V6KernelGeakDelegation | None): How the runner ended.
-        geak_claim (V6KernelGeakClaim | None): What GEAK claimed.
-        geak_product (V6KernelGeakProduct | None): What GEAK produced.
-        geak_rebench (V6KernelGeakRebench | None): Campaign-level rebench
-            facts; the attempts themselves are their own section.
-        outcome (V6KernelOutcome): The recorded part of the conclusion; the
-            settled rows and counters are derived at assembly.
-        failure (V6KernelFailure | None): The stage that failed, on a miss.
-    """
+    """Recorder fragment for one KERNEL event (section ``kernel_event``)."""
 
     event_id: str
     macro_cycle: int

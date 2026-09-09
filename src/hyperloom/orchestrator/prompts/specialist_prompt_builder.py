@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.common.prompt_safety import defang_prompt_structure
@@ -62,7 +63,7 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
     ),
     "framework_local_explore": (
         "No upstream PR was found. Author the best throughput win directly from"
-        " the live source + profiling evidence. Read ``framework_source_roots``"
+        " the live source + profiling evidence. Read the source trees in Section 7"
         " and the roofline (Section 4a) to locate the hot path."
         " You MAY use WebSearch / WebFetch to compare the local checkout against"
         " the latest upstream code and port a newer optimisation when behind."
@@ -884,8 +885,11 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint
+    # Local source navigation hint. ``worktree_base`` is empty when the
+    # framework is pip-installed rather than a checkout.
+    session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
+    worktree_base: str = ""
     source_hint_directories: tuple[str, ...] = ()
 
     # Structured model architecture features mirrored from SharedState.model_info;
@@ -992,14 +996,16 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         f"Description: {inp.domain.description or '(generic)'}",
         "",
         "You operate **autonomously** inside your domain — no per-step approval",
-        "is needed. You have full authority to read any code under the framework",
-        "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
+        "is needed. You have full authority to read any code on this host — the",
+        "trees in Section 7 are where to start, not where to stop — search any",
+        "public GitHub repo or NVIDIA PR,",
         capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table — but stop once",
         "rounds stop yielding new findings; the wall clock is not the only stop",
         "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
-        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
+        "cap**. One real beats two padded; an empty ``proposal_set`` with a",
+        "clear ``summary`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1485,7 +1491,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "(Section 3); flag each ``provenance: "
                     + "domain_focus_default`` and call it an unvalidated "
                     + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
                     + "which you considered and why each was rejected — a "
                     + "bare empty exit with no rationale reads as a tool "
                     + "failure. Do NOT add a ``confidence`` field: "
@@ -1925,11 +1931,57 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 7 — Local source navigation hint
+def _source_root_row(root: str, *, worktree_base: str) -> str:
+    """Render one source root, annotated with what a patch against it can do.
+
+    Args:
+        root (str): The source root to render.
+        worktree_base (str): The checkout the specialist's worktree was cut
+            from, when there is one.
+
+    Returns:
+        str: A markdown list row for the root.
+    """
+    base = (worktree_base or "").rstrip("/")
+    if base and root.rstrip("/") == base:
+        return f"- {root} — git checkout; your worktree was cut from it"
+    if (Path(root) / ".git").is_dir():
+        return f"- {root} — git checkout"
+    return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"
+
+
+def _resolve_focus_dir(hint: str, session_tree: str) -> str:
+    """Return ``hint`` as an absolute path under the session tree.
+
+    Checklist directories are repo-relative (``vllm/model_executor/...``), and
+    what that is relative to depends on the tree's shape: a pip-installed tree is
+    the package directory itself (``.../dist-packages/vllm/``) and joins onto its
+    parent, while a checkout (``/sgl-workspace/vllm/``) holds the package one
+    level down and joins directly. The tree decides, not the hint -- matching on
+    the hint's leading segment reads a checkout as a package tree whenever the
+    two share a name, which is every entry in :data:`_DEFAULT_SOURCE_ROOTS`.
+
+    Args:
+        hint (str): The focus directory, repo-relative or absolute.
+        session_tree (str): The tree this session is optimising, or ``""``.
+
+    Returns:
+        str: The hint unchanged when absolute or without a tree, else the
+            resolved absolute form.
+    """
+    if not session_tree or Path(hint).is_absolute():
+        return hint
+    tree = Path(session_tree.rstrip("/"))
+    base = tree.parent if (tree / "__init__.py").is_file() else tree
+    joined = base / hint.lstrip("/")
+    return f"{joined}/" if hint.endswith("/") else str(joined)
+
+
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the installed source roots and per-domain focus
-    directories, or a ``(none)`` placeholder when neither is supplied.
+    Leads with the tree this session optimises: the root list cannot express it,
+    since its order records only how roots were discovered.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
@@ -1938,22 +1990,29 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: Markdown lines for the source-hint section.
     """
     rows = ["## 7. LOCAL SOURCE NAVIGATION HINT", ""]
-    if not inp.framework_source_roots and not inp.source_hint_directories:
+    session_tree = (inp.session_framework_tree or "").strip()
+    others = tuple(r for r in inp.framework_source_roots if r.rstrip("/") != session_tree.rstrip("/"))
+    if not session_tree and not others and not inp.source_hint_directories:
         rows.append(_NONE_PLACEHOLDER)
         return rows
-    if inp.framework_source_roots:
-        rows.append("Installed source roots (read-only):")
-        for p in inp.framework_source_roots:
-            rows.append(f"- {p}")
+    if session_tree:
+        rows.append("The tree this session is optimising — start here:")
+        rows.append(_source_root_row(session_tree, worktree_base=inp.worktree_base))
+        rows.append("")
+    if others:
+        rows.append("Other source trees on this host:" if session_tree else "Source trees on this host:")
+        for root in others:
+            rows.append(_source_root_row(root, worktree_base=inp.worktree_base))
     if inp.source_hint_directories:
         rows.append("")
-        rows.append("Focus directories for this domain:")
-        for p in inp.source_hint_directories:
-            rows.append(f"- {p}")
+        rows.append("Where the evidence points — read these first, then widen:")
+        for hint in inp.source_hint_directories:
+            rows.append(f"- {_resolve_focus_dir(hint, session_tree)}")
     rows.append("")
     rows.append(
-        "These trees are read-only. Use Read / Grep / Glob to navigate. "
-        "Do NOT attempt Edit / Write / git apply on these trees."
+        "These are starting points, not a boundary — read anything on the host "
+        "that answers the question. Patches still go through ``integrate_patch`` "
+        "(Section 9), whichever tree they name."
     )
     rows.append("")
     rows.append(
@@ -2005,17 +2064,17 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  path is accepted only if it resolves inside an allowlisted framework",
             "  root. ``integrate_patch`` backs up the target, installs the artifact,",
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
-            "  tuned artifact is a FULL result — set ``empty=false`` when",
-            "  ``artifacts_written`` is non-empty.",
+            "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
+            "  list the artifact in ``artifacts_written``.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
         patch_fields = []
         no_output = "  and no findings; in that case"
-    empty_rule = [
-        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+    no_proposal_rule = [
+        "- An empty ``proposal_set`` is legitimate ONLY when you have no actionable proposals",
         no_output,
-        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+        "  and you must put the reason in ``summary``.",
     ]
 
     return [
@@ -2072,7 +2131,6 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                         }
                     ],
                     **({"patches_written": []} if authors_patches else {}),
-                    "empty": False,
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2116,7 +2174,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "of the first two. Padding is a failure, not thoroughness: each "
             "weak entry costs a Critic reject and a slot on the serial "
             "benchmark queue. One real proposal is a better round than two "
-            "padded ones, and ``empty=true`` is better than one."
+            "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
+            "is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -2125,7 +2184,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             + "off the same dead-end)."
         ),
         *patch_fields,
-        *empty_rule,
+        *no_proposal_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
@@ -2178,14 +2237,14 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
             "     under the worktree and list in ``artifacts_written`` as",
             "     ``{source, target, kind, description}``.",
-            "   **NEVER** ``git apply`` / ``git commit`` against the shared",
-            "   ``framework_source_roots`` directly — ``integrate_patch`` is",
-            "   the single integration point.",
+            "   **NEVER** ``git apply`` / ``git commit`` against the shared source",
+            "   trees in Section 7 directly — ``integrate_patch`` is the single",
+            "   integration point, whichever tree the patch names.",
         ]
     else:
         integration_rule = [
             "2. **Read-only dispatch:** you have no worktree and MUST NOT author",
-            "   patches or edit ``framework_source_roots``. Report what you found",
+            "   patches or edit the source trees. Report what you found",
             "   through ``specialist_done``; a patch-capable specialist authors any",
             "   source change you recommend.",
         ]
@@ -2199,11 +2258,11 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
         "   exactly one ``specialist_done`` exit signal. Silence past the cap",
         "   synthesizes an empty done.",
-        f"5. Use ``{workspace}/`` for ALL writes. The dispatcher exposes only",
-        "   this directory + read-only access to ``framework_source_roots``",
-        "   and ``SESSION_DIR``.",
+        f"5. Use ``{workspace}/`` for ALL writes. It and ``SESSION_DIR`` are the",
+        "   only directories the dispatcher hands you to write; the source trees",
+        "   are yours to read.",
         "6. On tool error or no useful action left, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        "   ``specialist_done{proposal_set=[], summary='<why>'}``.",
         f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 

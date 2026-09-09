@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The whole third-tier attempt, from gate to verdict.
-
-Five checkpoints, and failing any of them ends the attempt without affecting
-the tuning run that hosts it. In order, because each is cheaper than the next
-and rules out a different kind of wrong:
-
-    gate      -- is this even our problem, and did an operator allow it
-    generate  -- can a script be authored at all
-    contract  -- does its output have the agreed shape
-    sandbox   -- does it run here without taking the box down
-    referee   -- are its candidates actually faster, on our clock
-
-The referee is last and decisive. Everything before it can be gamed by a script
-that reports what it was asked to report; nothing before it establishes that a
-single kernel got faster. That is why a generated tuner's own numbers are read
-only to be discarded.
-
-One retry, with the rejection reason handed back. More would be a search over
-authorings, which is a different and much more expensive activity than writing
-one tuner for one gap.
-"""
+"""The whole third-tier attempt, from gate to verdict."""
 
 from __future__ import annotations
 
@@ -96,14 +76,7 @@ def attempt_generated_tuner(
     sync: Callable[[], Any] | None = None,
     decision: GateDecision | None = None,
 ) -> Tier3Outcome:
-    """Try to produce a verified generated tuner for the strongest gap.
-
-    The three ``make_*`` callables are how a caller supplies the only things
-    that cannot be written generically: what the unmodified path is, how to
-    dispatch a proposed candidate, and how to check its numerics. Without them
-    the attempt stops before the referee, because an unverified candidate is
-    exactly what this tier must never emit.
-    """
+    """Try to produce a verified generated tuner for the strongest gap."""
     decision = decision or should_generate(gaps)
     outcome = Tier3Outcome(stage="gate", reason="; ".join(decision.reasons))
     if not decision.allowed or decision.gap is None:

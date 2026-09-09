@@ -225,8 +225,8 @@ def test_geak_not_attempted_never_emits_kept_decision() -> None:
 
 
 def test_attribution_unattributed_when_no_validated_split_path_len_1() -> None:
-    # With no validated source_breakdown, a single action_path entry must NOT
-    # be stamped "100% via 1 KEEP" (it may be a seeded/warm-replayed entry).
+    # With no validated source_breakdown, a single action_path entry must NOT be stamped "100% via 1 KEEP" (it may be
+    # a seeded/warm-replayed entry).
     r = render_session_report(_fixture_breakdown())
     g = r.global_facts
     assert g.attribution_method.startswith("unattributed")
@@ -378,11 +378,7 @@ def test_a_capability_that_never_ran_emits_no_decision() -> None:
 
 
 def test_gain_that_belongs_to_nobody_gets_its_own_row() -> None:
-    """Shares are taken against what the session moved, so the rest must show.
-
-    Without a row for it, the sources' shares quietly fail to reach 100% and
-    the reader is left to work out what the missing slice was.
-    """
+    """Shares are taken against what the session moved, so the rest must show."""
     bd = _fixture_breakdown()
     bd["outcome"]["validation"].update(
         {

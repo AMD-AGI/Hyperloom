@@ -31,7 +31,7 @@ from hyperloom.orchestrator.actions.executors.targeted_build_executor import Tar
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
 from hyperloom.orchestrator.roles import ClaudeBackend
-from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -100,8 +100,7 @@ def _build_specialist_executor(
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
-    # Root the specialist worktree at the set the prompt + PolicyGate trust.
-    framework_source_roots = tuple(resolve_source_file_allowlist())
+    framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
     agent_backend = resolve_specialist_agent_backend()

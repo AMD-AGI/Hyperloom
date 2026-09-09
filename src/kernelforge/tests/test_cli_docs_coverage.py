@@ -1,25 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Every declared CLI option must appear in the CLI reference, under its own command.
-
-The reference is the only place a caller can learn what an option is called,
-and since an undeclared option now costs an exit code rather than a warning
-(see ``test_cli_option_wiring``), a flag missing from the doc is a flag nobody
-outside this file can discover. A doc written once drifts the moment the next
-option lands, so this pins the two together instead of trusting a review to
-notice.
-
-The check is per-section, not per-file. Names repeat across commands -- four
-declare a ``--model``, four a ``--verbose``, two a ``--version`` -- so a
-whole-file search would let one command's table vouch for another command's
-missing row, which is exactly the drift worth catching. Groups are checked too:
-``kernelforge --version`` hangs off the root group and belongs to no
-subcommand, so walking only the leaves would leave a hole precisely where a
-reader is least able to guess.
-
-It stays one-directional: it demands every declared option be documented, but
-lets the doc name flags this CLI does not own in examples and explanatory text.
-"""
+"""Every declared CLI option must appear in the CLI reference, under its own command."""
 
 from __future__ import annotations
 
@@ -53,12 +34,7 @@ def _every_command(group: click.Group, prefix: str = ""):
 
 
 def _sections(text: str) -> dict[str, str]:
-    """Map each markdown heading to its body, a subheading's body included.
-
-    The intro -- everything above the first heading that starts a command's own
-    section -- is filed under ``ROOT_NAME``, since that is where the root
-    group's own options are documented rather than under any one subcommand.
-    """
+    """Map each markdown heading to its body, a subheading's body included."""
     lines = text.splitlines()
     heads: list[tuple[int, int, str]] = []  # (line index, level, title)
     for index, line in enumerate(lines):

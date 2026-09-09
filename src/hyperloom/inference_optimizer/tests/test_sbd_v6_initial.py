@@ -153,9 +153,7 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
-    # Only the durable events. ``state.baseline_tput`` is a real measurement,
-    # but baseline is recorded by the action that runs it rather than projected
-    # from the section, and this session recorded none.
+    # Only the durable events.
     assert [event["type"] for event in after["timeline"]] == ["install", "model_gate"]
     # No CLOSE step was ever recorded, so the close-out has no evidence.
     assert after["close"]["status"] == "failed"

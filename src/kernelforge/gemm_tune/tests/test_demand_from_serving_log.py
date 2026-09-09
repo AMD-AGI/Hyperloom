@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Demand has to come from somewhere, and nothing upstream produces it.
-
-The evidence parser, the demand schema and ``--demand`` all existed, but no
-caller ever passed one: Hyperloom forwards the serving log and never a demand
-file, so shapes kept coming from config.json -- measured at 0.4% coverage of the
-keys the runtime actually looks up. The serving log it does forward is the same
-log the parser reads, so the demand is derived from it here.
-
-Lines below are transcribed from a real vLLM run on MI355X.
-"""
+"""Demand has to come from somewhere, and nothing upstream produces it."""
 
 from __future__ import annotations
 
@@ -67,8 +58,8 @@ class TestDerivingDemand:
         assert entry["keys"][0]["requests"] == 2
 
     def test_a_log_with_no_misses_leaves_the_shape_source_alone(self, tmp_path):
-        # An all-hit run has nothing to tune; falling back to config-derived
-        # shapes is right, and inventing an empty demand would not be.
+        # An all-hit run has nothing to tune; falling back to config-derived shapes is right, and inventing an empty
+        # demand would not be.
         src = _log(tmp_path, [_HIT, _HIT])
         out = tmp_path / "out"
         out.mkdir()
@@ -77,11 +68,9 @@ class TestDerivingDemand:
         assert not (out / "demand.json").exists()
 
     def test_a_moe_only_log_still_produces_a_demand_file(self, tmp_path):
-        # The MoE dispatch key does not live in report["demands"], so gating on
-        # dense misses threw it away: a pure-MoE model, or one whose dense
-        # tables all hit, got no demand file at all and fmoe_ck then skipped
-        # itself for "no runtime-observed MoE dispatch key" -- with the key
-        # sitting in the log it had just been handed.
+        # The MoE dispatch key does not live in report["demands"], so gating on dense misses threw it away: a pure-MoE
+        # model, or one whose dense tables all hit, got no demand file at all and fmoe_ck then skipped itself for "no
+        # runtime-observed MoE dispatch key" -- with the key sitting in the log it had just been handed.
         from kernelforge.gemm_tune.evidence import moe_dispatch_keys
 
         src = _log(tmp_path, [_MOE_MISS.format(tok=16), _HIT])
@@ -120,8 +109,7 @@ class TestDerivingDemand:
         assert cli._demand_from_serving_log(src, tmp_path) == ""
 
     def test_the_derived_file_is_what_load_demand_expects(self, tmp_path):
-        # It is handed on as if an operator had passed --demand, so it has to
-        # round-trip through the same reader.
+        # It is handed on as if an operator had passed --demand, so it has to round-trip through the same reader.
         from kernelforge.gemm_tune.evidence import demand_for_tuner, demand_shapes, load_demand
 
         src = _log(tmp_path, [_MISS.format(m=512), _MISS.format(m=1024)])

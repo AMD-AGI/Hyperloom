@@ -28,28 +28,7 @@ class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
-        """Dispatch an enablement_specialist when a baseline cannot launch or its
-        accuracy eval fails.
-
-        Retries until the combo runs correctly or the run wall-clock deadline
-        passes (no attempt-count cap). Guards:
-
-        * ``enablement_mode`` — the lane matching the trigger origin must be
-          admitted by ``--enablement``; otherwise no round is ever opened.
-        * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
-        * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
-          genuine-baseline revalidation; authoring is paused until it resolves.
-        * ``inflight_task_id`` — a round is still resolving (specialist task or
-          the integrate that consumes its deliverable); derived, never stored.
-        * run deadline passed — stop dispatching new work near the close.
-
-        A non-blank log is always dispatched (the specialist repairs from the raw
-        log even when it classifies to ``UNKNOWN``); only a blank log is a no-op,
-        recorded once as ``needs_human_review``. No-op on multi-node.
-
-        Returns:
-            str: The dispatched specialist ``task_id`` (empty when skipped).
-        """
+        """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
 
         state = self.shared_state
@@ -60,8 +39,8 @@ class EnablementLane(CoordinatorCollaborator):
         if bool(state.enablement.succeeded):
             return ""
         if bool(state.enablement.validation_pending):
-            # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation;
-            # do not dispatch another authoring round until that resolves.
+            # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation; do not dispatch another authoring
+            # round until that resolves.
             return ""
         if state.enablement.inflight_task_id:
             if await self._enablement_in_flight():
@@ -87,12 +66,9 @@ class EnablementLane(CoordinatorCollaborator):
             # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
-        # Enqueue any build the *previous* round's specialist explicitly requested
-        # (``needs_targeted_build`` in its specialist_done), then auto-escalate to
-        # a targeted build when the residual gap is a compiled miss or a vLLM
-        # arch/weight deep-failure that source patches keep hitting. Both enqueues
-        # are no-ops when a matching build is already queued/running (idempotent by
-        # novelty key).
+        # Enqueue any build the *previous* round's specialist explicitly requested (``needs_targeted_build`` in its
+        # specialist_done), then auto-escalate to a targeted build when the residual gap is a compiled miss or a vLLM
+        # arch/weight deep-failure that source patches keep hitting.
         try:
             await self._maybe_enqueue_specialist_requested_build()
         except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
@@ -148,12 +124,7 @@ class EnablementLane(CoordinatorCollaborator):
         return spec_tid
 
     async def _enablement_in_flight(self) -> bool:
-        """True while the current enablement round has not settled.
-
-        A round spans the authoring specialist AND the ``integrate_patch`` that
-        consumes its deliverable; the specialist goes terminal a tick before the
-        Critic sees the integrate proposal, so its task state alone is not enough.
-        """
+        """True while the current enablement round has not settled."""
         from ..state.task_registry import TaskNotFound
 
         tid = self.shared_state.enablement.inflight_task_id
@@ -165,8 +136,8 @@ class EnablementLane(CoordinatorCollaborator):
             spec = None
         if spec is not None and spec.state in ("queued", "running"):
             return True
-        # Undecided proposal keeps the round open; once ruled, approve lands the
-        # task matched below and reject rearms directly, so it cannot defer forever.
+        # Undecided proposal keeps the round open; once ruled, approve lands the task matched below and reject rearms
+        # directly, so it cannot defer forever.
         for p in self.state.pending_proposals.values():
             if p.action_name != "integrate_patch" or p.decided:
                 continue
@@ -178,18 +149,7 @@ class EnablementLane(CoordinatorCollaborator):
         return False
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
-        """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
-
-        The enablement path only dispatches authoring for *actionable* failure
-        signatures; a non-blank log that classifies to ``UNKNOWN`` used to be
-        silently dropped. Instead, emit a single observation
-        (deduped per distinct log via a stored hash) carrying the classified
-        signature (``raw_excerpt`` + ``offending_file``) so an operator can pick
-        it up. No sub-agent is dispatched.
-
-        Args:
-            launch_log: The captured launch / traceback text.
-        """
+        """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure."""
         text = (launch_log or "").strip()
         if not text:
             return
@@ -248,38 +208,14 @@ class EnablementLane(CoordinatorCollaborator):
         )
 
     def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
-        """Re-arm, advance, or terminate the enablement retry loop.
-
-        Called on every ``integrate_patch`` completion. For an enablement patch
-        there are three outcomes:
-
-        * ``kept`` — the combo is now fully runnable: terminal success
-          (``enablement_succeeded=True``).
-        * ``advanced`` — the patch cleared the prior crash and the boot now
-          stops at a *new, deeper* gap (serial enablement). **Stack** the patch
-          (append to ``enablement_kept_patches``), replace
-          ``enablement_launch_log`` with the new failure so the next round
-          classifies and targets gap #(n+1), reset the stall streak, and clear
-          the in-flight guard to dispatch the next round.
-        * anything else (``reverted`` / apply / bench failure) — no progress:
-          bump ``enablement_stall_streak``; once it reaches
-          :data:`_ENABLEMENT_MAX_STALL`, stop the run with
-          ``stop_reason='enablement_stalled'`` instead of looping on the same
-          gap; otherwise clear the guard so the next round retries a different
-          approach.
-
-        Args:
-            res: The integrate_patch result dict (may be ``None`` / non-dict).
-        """
+        """Re-arm, advance, or terminate the enablement retry loop."""
         if not isinstance(res, dict) or not res.get("enablement"):
             return
         state = self.shared_state
         status = str(res.get("status") or "")
         stop_set = ""
-        # Capture the finished round's specialist task id so the async dispatch
-        # chokepoint can read its specialist_done.json for a needs_targeted_build
-        # request (a build enqueue needs await; rearm is sync). Only overwrite on
-        # a real specialist round (targeted_build rearm rows carry no such id).
+        # Capture the finished round's specialist task id so the async dispatch chokepoint can read its
+        # specialist_done.json for a needs_targeted_build request (a build enqueue needs await; rearm is sync).
         _spec_tid = str(res.get("specialist_task_id") or "").strip()
         if _spec_tid:
             state.enablement.last_specialist_task_id = _spec_tid
@@ -294,11 +230,7 @@ class EnablementLane(CoordinatorCollaborator):
             state.enablement.setup_commands = cur
 
         def _push_kept_round(patches_this_round: list[str]) -> None:
-            """Append this round to kept_rounds and re-derive the flat projections.
-
-            Artifacts dedupe last-wins per target so a later round supersedes an
-            earlier fix to the same file.
-            """
+            """Append this round to kept_rounds and re-derive the flat projections."""
             rounds = list(state.enablement.kept_rounds or [])
             rounds.append(
                 {
@@ -322,21 +254,13 @@ class EnablementLane(CoordinatorCollaborator):
             state.enablement.kept_artifacts = list(artifact_by_target.values())
 
         def _reset_baseline_failure_backstop() -> None:
-            """Clear the baseline-failure counters on enablement forward progress.
-
-            A serial enablement makes the baseline re-fail on purpose (each round
-            clears gap #n and the next boot stops at a deeper gap), so those
-            crashes are progress, not a stuck baseline. Reset the backstop
-            counters so ``enablement_stalled`` is the sole enablement-phase
-            fast-fail.
-            """
+            """Clear the baseline-failure counters on enablement forward progress."""
             state.baseline_failure_streak = 0
             state.baseline_arg_error_streak = 0
             state.baseline_total_failures = 0
 
         def _stack_kept_runtime() -> None:
-            """Persist the KEEP'd attempt runtime + localization manifest so they
-            survive rearm."""
+            """Persist the KEEP'd attempt runtime + localization manifest so they survive rearm."""
             action = res.get("enablement_kept_stack_action")
             if isinstance(action, dict) and action:
                 state.enablement.kept_stack_action = action
@@ -347,8 +271,7 @@ class EnablementLane(CoordinatorCollaborator):
                 records = list(state.enablement.attempt_runtimes or [])
                 records.append(runtime)
                 state.enablement.attempt_runtimes = records[-5:]
-            # Record the localized closure manifest so it is not re-fetched on
-            # the next round.
+            # Record the localized closure manifest so it is not re-fetched on the next round.
             manifest = res.get("enablement_localization_manifest")
             if isinstance(manifest, dict) and manifest:
                 existing = list(state.enablement.localization_manifest or [])
@@ -365,26 +288,23 @@ class EnablementLane(CoordinatorCollaborator):
                 state.enablement.accepted_config_path = accepted_cfg
             effective = res.get("enablement_effective_config")
             if isinstance(effective, dict) and effective:
-                # Replaced, not merged: what the KEEP bench launched already
-                # supersedes every advanced round that fed into it.
+                # Replaced, not merged: what the KEEP bench launched already supersedes every advanced round that fed
+                # into it.
                 state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
-                # eval-origin: the patch boots and re-passed accuracy in the gate,
-                # but tput/accuracy only become official once a GENUINE baseline
-                # promotes. Hold succeeded; open the revalidation window. Keep the
-                # stall streak so repeated KEEP->revalidation-fail cycles still
-                # reach the stall cap.
+                # eval-origin: the patch boots and re-passed accuracy in the gate, but tput/accuracy only become
+                # official once a GENUINE baseline promotes.
                 state.enablement.validation_pending = True
-                # Increment generation so the new window gets a fresh idempotency
-                # key and cannot reuse a prior terminal TaskRegistry row.
+                # Increment generation so the new window gets a fresh idempotency key and cannot reuse a prior
+                # terminal TaskRegistry row.
                 state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
                 state.enablement.revalidation_task_id = ""
             else:
                 state.enablement.succeeded = True
                 state.enablement.stall_streak = 0
         elif status == "advanced" or bool(res.get("advanced")):
-            # Forward progress on a serial enablement: stack the progressing
-            # patches + setup commands and pivot to the newly-revealed gap.
+            # Forward progress on a serial enablement: stack the progressing patches + setup commands and pivot to the
+            # newly-revealed gap.
             _push_kept_round([str(p) for p in (res.get("patches_applied") or []) if str(p)])
             _stack_setup_commands()
             _stack_kept_runtime()
@@ -414,9 +334,7 @@ class EnablementLane(CoordinatorCollaborator):
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
         # Set on every round so neither outlives the round it describes.
-        state.enablement.last_grounding_drop_reason = [
-            str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
-        ]
+        state.enablement.last_grounding_drop_reason = [str(d) for d in (res.get("patches_ungrounded") or [])[:8]]
         state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
@@ -469,26 +387,7 @@ class EnablementLane(CoordinatorCollaborator):
         )
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
-        """Phase-independent enablement pump — runs every tick.
-
-        A baseline that cannot even *launch* traps the run in PRELUDE forever:
-        the only PRELUDE exit gate is ``baseline_tput > 0``, which a
-        non-runnable (model, backend) combo never reaches. The enablement
-        authoring dispatch used to live only inside
-        :meth:`_pump_framework_agent_phase` (guarded on
-        ``phase == FRAMEWORK_AGENT``), so it could never fire for the exact
-        "can't boot at all" scenario it exists to repair — the run instead hit
-        the 3-failure ``baseline_failed`` stop.
-
-        This wrapper drives :meth:`_maybe_enqueue_enablement_specialist` from
-        every coordinator tick, independent of phase. All dispatch guards
-        (dispatched-in-flight, already-succeeded, ``baseline_tput > 0``,
-        failure-streak, run deadline, single-node) live inside that method, so
-        calling it unconditionally here is safe and idempotent.
-
-        Args:
-            caller: Label identifying the caller ("tick" / "run"), for logs.
-        """
+        """Phase-independent enablement pump — runs every tick."""
         try:
             await self._maybe_route_build_outcomes()
         except Exception:  # noqa: BLE001 — never wedge the tick

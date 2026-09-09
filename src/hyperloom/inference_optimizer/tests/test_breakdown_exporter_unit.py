@@ -178,8 +178,8 @@ def test_write_minimal_final_json_idempotent(tmp_path):
 
 
 def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
-    # A prior crash-safe fallback is stale after a resume and must be
-    # overwritten with the current state, NOT preserved.
+    # A prior crash-safe fallback is stale after a resume and must be overwritten with the current state, NOT
+    # preserved.
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     reports = tmp_path / "reports"
@@ -201,8 +201,8 @@ def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
 
 
 def test_write_minimal_final_json_recovers_corrupt(tmp_path):
-    # A non-empty but invalid final.json must be backed up and replaced with a
-    # consumable fallback, not left as garbled JSON downstream can't read.
+    # A non-empty but invalid final.json must be backed up and replaced with a consumable fallback, not left as
+    # garbled JSON downstream can't read.
     reports = tmp_path / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "final.json").write_text('{"baseline_tput": 35.83, "trunc', encoding="utf-8")
@@ -306,39 +306,6 @@ def test_final_is_projected_from_the_recipe_the_close_out_settled(tmp_path):
     assert invocation["framework_args_source"] == "unrecorded"
 
 
-# ---- telemetry.orchestration_context ----
-
-
-def _write_checkpoint_events(session_dir: Path, levels: list[int], *, degenerate: int = 0) -> None:
-    """Seed a coordinator DB with orchestration checkpoint events."""
-    import sqlite3
-
-    db_dir = session_dir / "storage"
-    db_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_dir / "coordinator.db")
-    try:
-        conn.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY, topic TEXT, payload TEXT)")
-        for i, level in enumerate(levels):
-            payload = {"kind": "orchestration_checkpoint", "tick": i + 1, "context_tokens": level}
-            conn.execute(
-                "INSERT INTO events (topic, payload) VALUES (?, ?)",
-                ("observation", json.dumps(payload)),
-            )
-        for _ in range(degenerate):
-            conn.execute(
-                "INSERT INTO events (topic, payload) VALUES (?, ?)",
-                ("observation", json.dumps({"kind": "orchestration_checkpoint_degraded"})),
-            )
-            # The repeat-degeneracy advisory duplicates the kind with a severity.
-            conn.execute(
-                "INSERT INTO events (topic, payload) VALUES (?, ?)",
-                ("observation", json.dumps({"kind": "orchestration_checkpoint_degraded", "severity": "medium"})),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
     """An unset knob must stay unset; a recorder snapshot used to coerce it to 0."""
     from types import SimpleNamespace
@@ -369,12 +336,7 @@ def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
 
 
 def _freeze_now(monkeypatch, instant: datetime) -> None:
-    """Pin the session collector's clock to *instant*.
-
-    Args:
-        monkeypatch: The pytest monkeypatch fixture.
-        instant (datetime): The UTC instant every ``datetime.now`` call returns.
-    """
+    """Pin the session collector's clock to *instant*."""
 
     class _FrozenDatetime(datetime):
         @classmethod
@@ -405,17 +367,7 @@ def test_a_stopped_session_measures_the_same_however_late_it_is_exported(tmp_pat
 
 
 def _stopped_session(session_dir: Path, *, ran_for: timedelta, stopped_ago: timedelta = timedelta(0)):
-    """Write a stopped session's state so the recorder fragment is spooled.
-
-    Args:
-        session_dir (Path): The session directory to write into.
-        ran_for (timedelta): How long the session ran before it stopped.
-        stopped_ago (timedelta): How long before now it stopped, so an export
-            measured to the recorded end can be told from one measured to now.
-
-    Returns:
-        SharedState: The saved state.
-    """
+    """Write a stopped session's state so the recorder fragment is spooled."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     # Whole seconds: the exported end is canonicalised to second precision.

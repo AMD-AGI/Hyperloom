@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -28,23 +22,7 @@ log = logging.getLogger(__name__)
 
 
 def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
-    """Resolve the container image for ``collect_session``.
-
-    Prefers the manifest field (the spawn-time image), then falls back to the
-    env / mount-point chain the manifest helper uses. Kept separate from
-    :func:`manifest._detect_image` to avoid an import cycle.
-
-    Resolution order: manifest ``image`` field → ``HYPERLOOM_IMAGE`` /
-    ``CONTAINER_IMAGE`` / ``IMAGE`` env vars → known image marker files →
-    a ``unknown@<short-cgroup-id>`` derived from ``/proc/1/cgroup``.
-
-    Args:
-        manifest (dict[str, Any]): The parsed ``manifest.json`` dict.
-
-    Returns:
-        str | None: The resolved container image reference, or ``None`` when
-        no source yields a value.
-    """
+    """Resolve the container image for ``collect_session``."""
     manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
     if isinstance(manifest_image, str) and manifest_image.strip():
         return manifest_image.strip()
@@ -77,22 +55,7 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
 
 
 def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
-    """When the session's current run leg began.
-
-    ``start_ts`` alone does not answer this. A resume re-anchors it only after
-    a crash or a stop with a reason; a resume after a clean stop deliberately
-    keeps it, so that ``--max-hours`` still counts from the original start.
-    ``state.resumed_ts`` is stamped by every resume, so the later of the two is
-    the boundary on both paths.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        start_ts (str): The session's resolved start (see
-            :func:`collect_session`).
-
-    Returns:
-        str: The later of the two timestamps, or whichever one is parseable.
-    """
+    """When the session's current run leg began."""
     resumed_ts = str(state.get("resumed_ts") or "")
     dated = [(to_unix(ts), ts) for ts in (start_ts, resumed_ts)]
     parseable = [(at, ts) for at, ts in dated if at is not None]
@@ -102,30 +65,7 @@ def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
 
 
 def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tuple[str, str]:
-    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored).
-
-    A resume clears ``state.stop_reason`` and ``stop_ts`` but cannot clear the
-    previous leg's CLOSE row, and that row is not evidence about the leg
-    running now: honouring it reports a live session as having stopped, for
-    the reason it stopped last time. A row from before the leg boundary is
-    skipped whole -- reason and timestamp -- because the timestamp is stamped
-    as the session's end even when the reason itself is not adopted, and the
-    scan carries on so a history written out of order can still be answered
-    from a row that does belong to this leg.
-
-    A row is only disqualified on comparable evidence. When either timestamp
-    is missing or unparseable the row stands, since the whole point of the
-    fallback is a session whose reason never reached the state file.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        leg_start_ts (str): Start of the current leg (see
-            :func:`_leg_start_ts`); ``""`` when the session recorded none.
-
-    Returns:
-        tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
-        transition of the current leg, or ``("", "")`` when there is none.
-    """
+    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored)."""
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
@@ -145,19 +85,7 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
 
 
 def _first_recorded_end(*candidates: Any) -> str:
-    """The first candidate that reads as a timestamp, canonicalised to ``...Z``.
-
-    A value that does not parse is no more an end time than a missing one:
-    passed through it lands in ``ended_at_utc`` verbatim and collapses the
-    measured duration to zero, where the next candidate (or the export clock)
-    still answers.
-
-    Args:
-        *candidates (Any): Recorded end timestamps, best evidence first.
-
-    Returns:
-        str: The first parseable candidate, or ``""`` when none is.
-    """
+    """The first candidate that reads as a timestamp, canonicalised to ``...Z``."""
     for value in candidates:
         if to_unix(value) is not None:
             return iso_z(value)
@@ -165,35 +93,12 @@ def _first_recorded_end(*candidates: Any) -> str:
 
 
 def _session_has_ended(stop_reason: Any) -> bool:
-    """Whether a stop reason marks the session as no longer running.
-
-    Args:
-        stop_reason (Any): Raw ``stop_reason`` from a state or session section.
-
-    Returns:
-        bool: ``True`` once a non-blank stop reason has been recorded.
-    """
+    """Whether a stop reason marks the session as no longer running."""
     return bool(str(stop_reason or "").strip())
 
 
 def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: Any) -> int | None:
-    """Seconds the session ran, or ``None`` when no window can be established.
-
-    A finished session is measured to its recorded end; only one still running
-    may be measured up to now, since extrapolating a finished session grows its
-    duration on every re-export and reads as a plausible number rather than as
-    missing evidence.
-
-    Args:
-        start_ts (Any): Start of the window (see :func:`collect_session` for
-            which start that is across a resume).
-        ended_at_utc (Any): Recorded end of the window, if any.
-        stop_reason (Any): Terminal reason; a non-blank one means the session
-            is no longer running.
-
-    Returns:
-        int | None: Whole seconds between start and end, or ``None``.
-    """
+    """Seconds the session ran, or ``None`` when no window can be established."""
     start = to_unix(start_ts)
     if start is None:
         return None
@@ -206,20 +111,7 @@ def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: An
 
 
 def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
-    """Wall-clock minutes of the leg described by a resolved ``session`` section.
-
-    Derived from the section's own timestamps rather than stored, so a section
-    assembled from the live recorder's snapshot reports the same elapsed time
-    as one built by :func:`collect_session`. ``session_meta`` measures the same
-    window from the same fields; the two agree because both producers of the
-    section carry those timestamps, not because either reads the other.
-
-    Args:
-        session_section (dict[str, Any]): A ``session`` section.
-
-    Returns:
-        float: Minutes elapsed, or ``0.0`` when no window can be established.
-    """
+    """Wall-clock minutes of the leg described by a resolved ``session`` section."""
     duration_s = _measured_duration_seconds(
         session_section.get("start_ts") or session_section.get("created_at_utc"),
         session_section.get("ended_at_utc"),
@@ -229,17 +121,7 @@ def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
 
 
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
-    """Decide whether the CLOSE-phase stop reason should override the session's.
-
-    Args:
-        stop_reason: The session-level stop reason.
-        close_stop_reason: The CLOSE-phase stop reason.
-
-    Returns:
-        ``True`` when the close reason is more specific — i.e. it is set and the
-        session reason is empty, or the session merely timed out while the close
-        reason did not.
-    """
+    """Decide whether the CLOSE-phase stop reason should override the session's."""
     if not close_stop_reason:
         return False
     if not stop_reason:
@@ -249,18 +131,7 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 
 # Session metadata
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
-    """Project SharedState's crash / interruption / resume signals.
-
-    Folds crash / degraded-mode / pending-revalidation signals into the
-    ``session.recovery`` block so a resumed run is not read as a clean monotonic
-    one. Pure / best-effort: unparseable fields are skipped, never raised.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
-
-    Returns:
-        dict[str, Any]: The ``recovery`` block (see schema ``Recovery``).
-    """
+    """Project SharedState's crash / interruption / resume signals."""
     crash_count = _to_int(state.get("crash_count")) or 0
     crash_ts_iso: list[str] = []
     raw_ts = state.get("crash_timestamps")
@@ -303,35 +174,7 @@ def collect_session(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the session-identification + lifecycle section.
-
-    Merges identifiers and timing from ``state`` and ``manifest`` (state
-    taking precedence on overlapping fields), resolves the container image,
-    and stamps ``ended_at_utc`` from the recorded stop timestamp only once a
-    ``stop_reason`` is present -- one the state file carries, or one recovered
-    from a CLOSE transition belonging to the current leg (see
-    :func:`_close_phase_stop_reason`). When no image can be detected a warning
-    is appended.
-
-    ``elapsed_minutes`` runs from ``state.start_ts``, the same anchor
-    ``--max-hours`` is counted against, to the recorded end (or to now while
-    the run is still going), so the two stay comparable. A resume re-anchors
-    ``start_ts`` only when the previous leg crashed or stopped for a recorded
-    reason; after a clean stop it keeps the original start, and the elapsed
-    time then spans the gap between the legs -- as the budget does. The
-    manifest's ``created_at_utc`` names the first launch either way, and is
-    the fallback start only for a session that never recorded one.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The session section (ids, timestamps, stop reason,
-        elapsed minutes, host, image, code revision, pid, tick count, etc.).
-    """
+    """Collect the session-identification + lifecycle section."""
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
@@ -339,9 +182,8 @@ def collect_session(
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if _session_has_ended(stop_reason):
-        # ``stop_ts`` is stamped once, when the reason is written, so a re-export
-        # of a finished session keeps reporting the same end. The CLOSE
-        # transition and the export clock are only next-best guesses.
+        # ``stop_ts`` is stamped once, when the reason is written, so a re-export of a finished session keeps
+        # reporting the same end.
         ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
     image = _detect_image_for_session(manifest)
     if image is None:
@@ -361,8 +203,7 @@ def collect_session(
         "code_revision": str(manifest.get("code_revision") or ""),
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
-        # USER_DATA_PATH root (the operator-chosen workspace base). Manifest is
-        # snapshotted at session start; env is the in-process fallback.
+        # USER_DATA_PATH root (the operator-chosen workspace base).
         "user_data_path": str(
             manifest.get("user_data_path") or state.get("user_data_path") or os.environ.get("USER_DATA_PATH") or ""
         ),
@@ -380,23 +221,7 @@ def collect_workload(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the workload-description section.
-
-    Merges framework name / model / GPU / parallelism fields from ``state`` and
-    ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
-    / ``osl`` / ``max_model_len`` / ``precision``) nested under
-    ``manifest.workload``, and the optimization objective.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (unused here but kept for a
-            uniform collector signature).
-
-    Returns:
-        dict[str, Any]: The workload section with coerced numeric knobs and a
-        defaulted ``objective`` mapping.
-    """
+    """Collect the workload-description section."""
     wl = manifest.get("workload") or {}
     return {
         "framework_name": str(state.get("framework") or manifest.get("framework") or ""),
@@ -420,22 +245,6 @@ def collect_model_info(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the ``model_info`` section (state.model_info passthrough).
-
-    The summary is computed once at launch (``cli_bootstrap`` →
-    ``summarize_model_config``) and persisted on ``state.model_info``, so the
-    breakdown just mirrors it verbatim. Returns ``{}`` when the field is absent
-    (sessions whose state predates it) or empty (non-transformers models such
-    as diffusion checkpoints, where the config.json could not be parsed); the
-    frontend treats an empty object as "model info unavailable".
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (unused here but kept for a
-            uniform collector signature).
-
-    Returns:
-        dict[str, Any]: The model_info object, or ``{}`` when unavailable.
-    """
+    """Collect the ``model_info`` section (state.model_info passthrough)."""
     info = state.get("model_info")
     return dict(info) if isinstance(info, dict) else {}

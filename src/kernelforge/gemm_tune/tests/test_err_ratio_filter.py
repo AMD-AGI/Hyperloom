@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for refusing to deploy a kernel the tuner measured as wrong.
-
-aiter's bf16 tuner records the fraction of output elements its accuracy check
-found wrong, and then names the kernel that libtype's winner regardless. On
-MI355X every split-K row it selected across four shapes carried a nonzero
-figure -- flydsl split_k=7 at 0.0202, asm split_k=7 at 0.0203, asm split_k=4 at
-0.0137 -- while every splitK=0 row was 0.0. Re-running those kernels confirms
-the recorded number: 1.25-3.98% of elements are wrong, and which ones changes
-between identical calls, so the split-K reduction races rather than merely
-rounding differently.
-
-The tuned CSV is deployed verbatim (``env_value`` is that file), so without this
-filter the fastest wrong answer wins. It also inverts the backend comparison:
-flydsl's 37% lead over hipblaslt at M=16 is the time saved by not computing 2%
-of the output.
-"""
+"""Tests for refusing to deploy a kernel the tuner measured as wrong."""
 
 from __future__ import annotations
 
@@ -71,8 +56,8 @@ def _shapes(path: Path) -> set[tuple[str, str, str]]:
 
 class TestDropInaccurateRows:
     def test_drops_the_row_aiter_measured_as_wrong(self, tmp_path):
-        # The real pair from the MI355X run: the split-K kernel is faster and
-        # wrong, the hipblaslt one is slower and right.
+        # The real pair from the MI355X run: the split-K kernel is faster and wrong, the hipblaslt one is slower and
+        # right.
         csv_path = _csv(
             tmp_path,
             [
@@ -101,9 +86,8 @@ class TestDropInaccurateRows:
         assert csv_path.read_text(encoding="utf-8") == before
 
     def test_boundary_is_kept(self, tmp_path):
-        # Exactly at the limit is not above it; the fp8 split-K cap draws the
-        # same line, and disagreeing would make one path deploy what the other
-        # rejects.
+        # Exactly at the limit is not above it; the fp8 split-K cap draws the same line, and disagreeing would make
+        # one path deploy what the other rejects.
         csv_path = _csv(tmp_path, [_row(16, 1536, 7168, "asm", 4, 12.0, 0.01)])
 
         assert sd.drop_inaccurate_rows(csv_path) == []
@@ -117,9 +101,8 @@ class TestDropInaccurateRows:
         assert _shapes(csv_path) == set()
 
     def test_missing_accuracy_column_does_not_silently_pass_or_crash(self, tmp_path):
-        # No column means no evidence of a problem, so nothing is dropped -- but
-        # the operator has to be told the filter did not run, or a schema rename
-        # upstream would disable it invisibly.
+        # No column means no evidence of a problem, so nothing is dropped -- but the operator has to be told the
+        # filter did not run, or a schema rename upstream would disable it invisibly.
         hdr = ",".join(c for c in _HDR.split(",") if c != "err_ratio")
         row = ",".join(
             v
@@ -144,9 +127,8 @@ class TestDropInaccurateRows:
         assert sd.drop_inaccurate_rows(empty) == []
 
     def test_a_shape_losing_its_only_row_falls_back_to_aiter_default(self, tmp_path):
-        # Dropping the row leaves the shape untuned, which is the intended
-        # outcome: at serve time aiter picks its own kernel, and no tuned entry
-        # beats a tuned entry that computes the wrong answer.
+        # Dropping the row leaves the shape untuned, which is the intended outcome: at serve time aiter picks its own
+        # kernel, and no tuned entry beats a tuned entry that computes the wrong answer.
         csv_path = _csv(tmp_path, [_row(16, 4096, 7168, "flydsl", 4, 13.472, 0.0139)])
 
         dropped = sd.drop_inaccurate_rows(csv_path)
@@ -175,9 +157,8 @@ class TestDropInaccurateRows:
         assert result.total_shapes == 1
 
     def test_a_failed_write_leaves_the_artifact_alone(self, tmp_path, monkeypatch):
-        # Truncating the real file first would leave a half-written table that
-        # the caller is told nothing was filtered from -- worse than not
-        # filtering, because the artifact is then neither original nor clean.
+        # Truncating the real file first would leave a half-written table that the caller is told nothing was filtered
+        # from -- worse than not filtering, because the artifact is then neither original nor clean.
         rows = [
             _row(16, 1536, 7168, "flydsl", 7, 8.116, 0.0202),
             _row(1024, 1536, 7168, "hipblaslt", 0, 35.739, 0.0),
@@ -197,8 +178,8 @@ class TestDropInaccurateRows:
 
 class TestReportingFollowsTheArtifact:
     def test_a_shape_whose_row_was_dropped_is_not_reported_as_a_win(self):
-        # Reporting "1.24x on M=16" while the artifact holds nothing for M=16
-        # is the exact failure this path exists to prevent.
+        # Reporting "1.24x on M=16" while the artifact holds nothing for M=16 is the exact failure this path exists to
+        # prevent.
         from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
 
         shape_results = [

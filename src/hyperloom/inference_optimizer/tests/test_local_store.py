@@ -37,11 +37,7 @@ class _ToDictItem:
 
 
 def test_cid_lock_mutex_is_shared_per_path(tmp_path):
-    """Every lock instance on one path must contend on the same mutex.
-
-    Each store operation builds a fresh ``_CidLock``, so an instance-owned mutex
-    would be uncontended and give two threads no mutual exclusion at all.
-    """
+    """Every lock instance on one path must contend on the same mutex."""
     path = tmp_path / ".lock"
     assert ls._cid_mutex(path) is ls._cid_mutex(tmp_path / "." / ".lock")
     assert ls._cid_mutex(path) is not ls._cid_mutex(tmp_path / "other.lock")

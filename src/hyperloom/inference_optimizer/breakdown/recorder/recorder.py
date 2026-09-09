@@ -1,35 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Write-side of the breakdown recorder.
-
-A :class:`Recorder` lets the code that *produces* a fact record it at author
-time, into a per-session spool directory, instead of having the exporter
-re-walk heterogeneous artifacts later. Each producer owns its own files:
-
-* :meth:`Recorder.record_singleton` — one final dict per section; the owner
-  overwrites its own stable file (safe: single writer of that file).
-* :meth:`Recorder.record_item` — one fragment per event; uniquely named so
-  concurrent producers never collide. Pass ``key`` for an idempotent
-  (overwrite-on-rewrite) item that survives resume without duplicating.
-* :meth:`Recorder.record_upsert_singleton` / :meth:`Recorder.record_upsert_item`
-  — the same, but merged into the prior fragment payload instead of replacing
-  it, for producers that emit a fact in several partial updates.
-
-Every write lands atomically (tmp + ``os.replace``) and filenames are unique
-per (section, producer), so :meth:`Recorder.record_item` and
-:meth:`Recorder.record_singleton` are safe across processes and on network
-filesystems (no shared-append dependency). The ``record_upsert_*`` methods are
-NOT: they read the current fragment, merge, and rewrite it under an in-process
-lock only, so two processes upserting the same (section, producer, key) can
-lose one side of the merge. Keep every upsert for a given fragment in one
-process -- today the coordinator is the only writer, and
-``test_breakdown_recorder_no_subprocess_writers`` keeps it that way.
-
-Every write funnels through :meth:`Recorder._write`, which is where the write
-trace is emitted; ``HYPERLOOM_BREAKDOWN_TRACE=1`` turns it on (see
-:mod:`.trace`).
-"""
+"""Write-side of the breakdown recorder."""
 
 from __future__ import annotations
 
@@ -289,14 +261,7 @@ class Recorder:
     """Per-(session, producer) writer of breakdown record fragments."""
 
     def __init__(self, parts_dir: Path | str, *, producer: str) -> None:
-        """Initialize a recorder writing into ``parts_dir`` for ``producer``.
-
-        Args:
-            parts_dir (Path | str): the spool directory fragments are written
-                into.
-            producer (str): the producer label owning the written fragments
-                (sanitized into a filesystem-safe slug).
-        """
+        """Initialize a recorder writing into ``parts_dir`` for ``producer``."""
         self._dir = Path(parts_dir)
         self._producer = _slug(producer)
         self._seq = 0
@@ -389,9 +354,8 @@ class Recorder:
         if key:
             filename = self._stable_item_filename(section, key)
         else:
-            # One number serves both the filename and the envelope: someone
-            # reading ``seq=N`` in a trace line must be able to find the file
-            # that write produced.
+            # One number serves both the filename and the envelope: someone reading ``seq=N`` in a trace line must be
+            # able to find the file that write produced.
             seq = self._next_seq()
             filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
         return self._write(section, "item", payload, filename=filename, seq=seq)
@@ -438,12 +402,7 @@ class Recorder:
         *,
         key: str,
     ) -> Path:
-        """Merge and atomically rewrite one stable item fragment.
-
-        This is the write-side primitive used by v4 entity helpers. Repeated
-        updates from the same producer preserve fields omitted by later partial
-        updates while retaining one stable fragment file.
-        """
+        """Merge and atomically rewrite one stable item fragment."""
         self._check_shape(section, "item")
         if not key:
             raise ValueError("upsert key must be non-empty")
@@ -488,15 +447,7 @@ class Recorder:
 
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:
-        """Validate that ``section`` is used with its declared shape.
-
-        Args:
-            section: The breakdown section name being written.
-            kind: The shape being used (``"singleton"`` or ``"item"``).
-
-        Raises:
-            ValueError: If ``section`` is declared with a different shape.
-        """
+        """Validate that ``section`` is used with its declared shape."""
         declared = SECTION_SHAPES.get(section)
         if declared is not None and declared != kind:
             raise ValueError(f"section {section!r} is declared {declared!r}, not {kind!r}")
@@ -550,9 +501,8 @@ class Recorder:
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         target = self._dir / filename
-        # Whether the fragment already existed is only knowable before the
-        # write, and it is the difference between recording a new fact and
-        # replacing one, so it is resolved here rather than after.
+        # Whether the fragment already existed is only knowable before the write, and it is the difference between
+        # recording a new fact and replacing one, so it is resolved here rather than after.
         traced = trace_enabled()
         existed = target.exists() if traced else False
         try:
@@ -619,22 +569,7 @@ def get_recorder(*, producer: str) -> Recorder:
 
 
 def recorder_for(session_dir: Path | str, *, producer: str) -> Recorder:
-    """Return a process-cached :class:`Recorder` for an explicit session.
-
-    Exists only for the v4 ``instrument`` helpers, whose whole API already
-    takes ``session_dir`` as its first parameter. It goes away with them: no
-    new caller should appear here, and every v6 entry point uses
-    :func:`get_recorder` instead so the session path stays in one place.
-
-    Args:
-        session_dir: The session directory whose breakdown parts dir backs the
-            recorder.
-        producer: The producer name owning the written fragments.
-
-    Returns:
-        The process-cached :class:`Recorder` for the
-        ``(session_dir, producer)`` pair.
-    """
+    """Return a process-cached :class:`Recorder` for an explicit session."""
     from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     pd = breakdown_parts_dir(Path(session_dir))

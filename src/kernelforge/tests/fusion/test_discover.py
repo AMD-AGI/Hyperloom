@@ -143,10 +143,7 @@ class TestOrderedFusionBoundaries:
         )
 
     def test_marks_terminal_attention_outside_the_fusable_span(self, tmp_path):
-        """The chain really does run into attention, so the boundary keeps it as
-        adjacency evidence. But the fusable part is the prologue before it: the
-        native operator fuses norm + RoPE + cache write, never the attention
-        kernel itself. The boundary must say so explicitly."""
+        """The chain really does run into attention, so the boundary keeps it as adjacency evidence."""
         p = tmp_path / "d.trace.json"
         names = [
             "Cijk_qkv_gemm",
@@ -208,13 +205,7 @@ class TestExistingOperatorHints:
         assert "gemm_a16w16_gated" in operators
 
     def test_does_not_recall_on_substring_or_prefix_collisions(self, tmp_path):
-        """Terms must match whole words, not substrings or prefixes.
-
-        ``add`` is a substring of ``padding`` and ``norm`` is a prefix of
-        ``normalization``; neither implies the documented operator performs the
-        observed operation. A false recall is worse than no recall, because the
-        author is then told to integrate an unrelated operator.
-        """
+        """Terms must match whole words, not substrings or prefixes."""
         knowledge = tmp_path / "knowledge"
         knowledge.mkdir()
         (knowledge / "padding.md").write_text(
@@ -268,9 +259,7 @@ class TestExistingOperatorHints:
         assert hints[0]["operator"] == "fused_qk_norm_rope_cache"
 
     def test_falls_back_to_hot_kernels_when_boundaries_are_absent(self, tmp_path):
-        """Boundaries need min_repeats=2 to materialize. A short trace can leave
-        them empty while the hot-kernel table still proves a launch-bound chain,
-        so retrieval must not silently go dark."""
+        """Boundaries need min_repeats=2 to materialize."""
         knowledge = tmp_path / "knowledge"
         knowledge.mkdir()
         (knowledge / "gemm.md").write_text(
@@ -454,12 +443,7 @@ class TestParse:
         assert recipe.to_dict()["candidate_kind"] == "integration"
 
     def test_integration_without_operator_is_downgraded(self):
-        """``integration`` only means something when an operator is named.
-
-        The authoring prompt injects its "benchmark the existing operator first"
-        block only when both fields are set, so an operator-less integration
-        recipe would claim the kind while silently skipping the constraint.
-        """
+        """``integration`` only means something when an operator is named."""
         text = json.dumps(
             [
                 {
@@ -506,8 +490,8 @@ class TestParse:
         assert recipe.existing_operator == "gemm_a16w16_gated"
 
     def test_salvages_objects_from_truncated_array(self):
-        # Response cut off at max_tokens mid-3rd-object: array never closes, but
-        # the 2 complete objects before the cut must still be recovered.
+        # Response cut off at max_tokens mid-3rd-object: array never closes, but the 2 complete objects before the cut
+        # must still be recovered.
         text = (
             "```json\n[\n"
             '  {"name": "a", "env_flag": "ZAYA_FUSED_A", "priority": 0.9},\n'
@@ -572,9 +556,7 @@ class TestDiscoverRecipes:
         assert "_normalize_qk" in captured["prompt"]  # real source reached the LLM
 
     def test_recalls_via_hot_kernels_when_trace_has_no_repeats(self, tmp_path):
-        """A single-decode trace yields no ordered boundary (min_repeats=2), but
-        the hot-kernel table still names the chain, so retrieval must still run
-        and the recalled operator must reach the prompt and the Recipe."""
+        """A single-decode trace yields no ordered boundary (min_repeats=2), but the hot-kernel table still names the chain, so retrieval must still run and the recalled operator must reach the prompt and the Recipe."""
         src = tmp_path / "toy.py"
         src.write_text("def mlp(x): return act(gate_up(x))\n", encoding="utf-8")
         trace = tmp_path / "d.trace.json"

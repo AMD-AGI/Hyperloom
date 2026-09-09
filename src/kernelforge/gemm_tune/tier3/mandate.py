@@ -1,36 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The brief handed to whoever writes a generated tuner.
-
-Four things, because a tuner cannot be written without any of them: the output
-contract, the demand it must cover, why the existing tiers did not, and a
-skeleton that already runs on this hardware.
-
-Three of the clauses below are not style preferences. They come from the first
-real trial of this on MI355X, where both an LLM-written tuner and aiter's own
-official tuner produced confident, wrong answers in the same two ways:
-
-* **Correctness has to be re-checked, on fresh inputs, several times.** Four
-  split-K winners -- two chosen by the generated tuner, two by aiter's -- were
-  wrong on 1.25-3.98% of output elements, and *which* elements changed between
-  identical calls on identical inputs. A single check passes such a kernel
-  roughly at random; the generated tuner's own report claimed a worst-case
-  relative error of 7.65e-3 for candidates that a repeated audit measured at 17
-  to 50.
-* **A Python-loop timer cannot rank these kernels.** One dispatch costs ~12us on
-  this box against kernels of 5-13us, so every candidate collapses to about the
-  same number and the fastest one is invisible. Capturing N calls into a graph
-  and replaying it removes the host cost from the measurement; without that step
-  the honest conclusion from the same data was "there is nothing to tune here".
-* **Its own timings decide nothing.** :mod:`.referee` re-times the proposed
-  candidates with forge's clock, and only those numbers reach a KEEP. This is
-  what makes the rest survivable: a script that mistimes itself, or benchmarks
-  an empty kernel, costs machine time and nothing else.
-
-The mandate is data. Rendering it as text is a convenience for a human or an
-agent; the fields are what downstream code checks against.
-"""
+"""The brief handed to whoever writes a generated tuner."""
 
 from __future__ import annotations
 
@@ -38,29 +9,19 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-# Columns every generated tuner must produce, whatever it searches. The three
-# timing columns are what makes a result auditable at all: without default_us
-# the improvement cannot be checked, and without both times the referee cannot
-# tell a real win from a mis-scaled one.
+# Columns every generated tuner must produce, whatever it searches.
 REQUIRED_OUTPUT_COLUMNS = ("default_us", "tuned_us", "improved")
 
-# Repeats of the correctness check, on fresh inputs each time, worst result
-# counted. Eight was enough to catch every intermittently-wrong kernel observed;
-# one was not enough to catch any of them.
+# Repeats of the correctness check, on fresh inputs each time, worst result counted.
 CORRECTNESS_TRIALS = 8
 
-# Relative error above which a candidate is discarded, measured against the
-# magnitude of the reference as a whole -- see MAX_RELATIVE_ERROR_DEFINITION.
-# On MI355X the unmodified torch.matmul scores 0.015 by this measure, so the
-# limit leaves roughly 3x headroom over correct-but-rounded while staying far
-# below the 17-50 seen from broken kernels.
+# Relative error above which a candidate is discarded, measured against the magnitude of the reference as a whole --
+# see MAX_RELATIVE_ERROR_DEFINITION.
 MAX_RELATIVE_ERROR = 5e-2
 
-# How to compute it, stated because the obvious reading is unusable: dividing
-# element by element and flooring the denominator makes any element where the
-# reference lands near zero dominate, and a K=7168 random GEMM produces plenty
-# of those. Measured that way the unmodified torch.matmul scores 1.375 -- a
-# gate at any sane threshold would reject the default path itself.
+# How to compute it, stated because the obvious reading is unusable: dividing element by element and flooring the
+# denominator makes any element where the reference lands near zero dominate, and a K=7168 random GEMM produces plenty
+# of those.
 MAX_RELATIVE_ERROR_DEFINITION = "max|got - ref| / mean|ref|, over the whole output tensor, with ref computed in fp32"
 
 

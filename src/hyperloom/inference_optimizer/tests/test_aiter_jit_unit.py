@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the shared aiter JIT lock-sweep helpers.
-
-Exercises directory resolution (arg / env / dynamic / fallbacks), the stale
-lock sweep (fresh vs stale, unreadable, delete errors), compiler-liveness
-detection (psutil missing / process match / cmdline match / enumeration
-error), and the liveness-gated sweep dispatch.
-"""
+"""Unit tests for the shared aiter JIT lock-sweep helpers."""
 
 from __future__ import annotations
 
@@ -18,9 +12,7 @@ from pathlib import Path
 from hyperloom.orchestrator.actions.executors import _aiter_jit as aj
 
 
-# ---------------------------------------------------------------------------
 # _resolve_lock_sweep_dir
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_dir_trusts_explicit_arg(tmp_path):
@@ -48,9 +40,7 @@ def test_resolve_dir_none_when_nothing_exists(monkeypatch):
     assert resolved is None or resolved.is_dir()
 
 
-# ---------------------------------------------------------------------------
 # _resolve_aiter_jit_dir_dynamic
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_dynamic_returns_empty_when_missing(monkeypatch):
@@ -82,9 +72,7 @@ def test_resolve_dynamic_returns_paths(monkeypatch, tmp_path):
     ]
 
 
-# ---------------------------------------------------------------------------
 # clean_stale_aiter_locks
-# ---------------------------------------------------------------------------
 
 
 def test_clean_no_dir_returns_zero_stats():
@@ -198,11 +186,7 @@ def test_auto_resolution_sweeps_cpp_and_jit_build_trees(tmp_path, monkeypatch):
 
 
 def test_home_build_tree_outranks_the_root_fallback(tmp_path, monkeypatch):
-    """``/root/.aiter/build`` must stay a last resort behind $HOME.
-
-    The fallback tuple still names it, so the ordering is what keeps a non-root
-    run off a directory it cannot read. Nothing else pins that order.
-    """
+    """``/root/.aiter/build`` must stay a last resort behind $HOME."""
     home = tmp_path / "home"
     (home / ".aiter" / "build").mkdir(parents=True)
     monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
@@ -218,16 +202,7 @@ def test_home_build_tree_outranks_the_root_fallback(tmp_path, monkeypatch):
 
 
 def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
-    """The sweep documents "never raises", and resolution runs before it.
-
-    ``Path.is_dir()`` re-raises EACCES because pathlib ignores only
-    ENOENT/ENOTDIR/EBADF/ELOOP, so an unreadable fallback such as root's aborted
-    resolution before any of the guarded sweep I/O could count an error.
-
-    The refusal is injected rather than built from a 0o000 directory: root
-    ignores permission bits, and root in a container is the standard deployment,
-    so a real chmod would make this assert nothing exactly where it matters.
-    """
+    """The sweep documents \"never raises\", and resolution runs before it."""
     denied = tmp_path / "locked" / "build"
     real_is_dir = Path.is_dir
 
@@ -246,8 +221,8 @@ def test_unreadable_fallback_tree_does_not_raise(tmp_path, monkeypatch):
     stats = aj.clean_stale_aiter_locks(stale_minutes=0)
 
     assert stats["deleted"] == 0
-    # "errors counted" is the documented contract; an all-zero stats dict would
-    # read as a clean sweep of a tree that was never looked at.
+    # "errors counted" is the documented contract; an all-zero stats dict would read as a clean sweep of a tree that
+    # was never looked at.
     assert stats["errors"] >= 1
     assert any(str(denied) in entry for entry in stats["unreadable"])
 
@@ -267,9 +242,7 @@ def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):
     assert "waiting for baton release" in evidence["excerpt"]
 
 
-# ---------------------------------------------------------------------------
 # _any_live_compiler
-# ---------------------------------------------------------------------------
 
 
 class _FakeProc:
@@ -407,9 +380,7 @@ def test_any_live_compiler_skips_dead_process(monkeypatch):
     assert aj._any_live_compiler() is True
 
 
-# ---------------------------------------------------------------------------
 # sweep_stale_aiter_locks_if_dead
-# ---------------------------------------------------------------------------
 
 
 def test_sweep_skips_when_compiler_alive(monkeypatch):

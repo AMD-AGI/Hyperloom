@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Covers the LLM-transport stability env helper and the process-group kill in
-``_run_subprocess`` that reaps a hung grandchild instead of orphaning it.
-"""
+"""Covers the LLM-transport stability env helper and the process-group kill in ``_run_subprocess`` that reaps a hung grandchild instead of orphaning it."""
 
 from __future__ import annotations
 
@@ -27,8 +25,8 @@ from .conftest import chatty_child, suppression_window_s
 def test_apply_llm_stability_env_sets_defaults():
     env: dict[str, str] = {}
     apply_llm_stability_env(env)
-    # API_TIMEOUT_MS is opt-in: some clients treat it as a total request timeout
-    # that can kill a legitimate long streaming response.
+    # API_TIMEOUT_MS is opt-in: some clients treat it as a total request timeout that can kill a legitimate long
+    # streaming response.
     assert "API_TIMEOUT_MS" not in env
     assert DEFAULT_API_TIMEOUT_MS == "300000"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
@@ -108,14 +106,7 @@ async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
 
 
 async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, progress_cadence):
-    """A trace analysis blocks for the better part of an hour behind one ``await``.
-
-    Bounding the gap between notes is what a dropped liveness callback fails;
-    asserting that a callback was passed is not. The child is faked rather than
-    spawned so the timeline is the simulated one — that a real child's lines
-    reach ``on_output`` is covered by
-    ``test_run_subprocess_counts_the_lines_its_child_emits``.
-    """
+    """A trace analysis blocks for the better part of an hour behind one ``await``."""
     from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
     def _done(cmd, **_kwargs) -> subprocess.CompletedProcess:
@@ -143,11 +134,9 @@ def test_a_tool_is_named_after_the_script_it_runs():
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group kill is POSIX-only")
 async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
-    """A timed-out child that spawned a long-lived grandchild must have the
-    grandchild reaped too (process-group kill), not orphaned."""
+    """A timed-out child that spawned a long-lived grandchild must have the grandchild reaped too (process-group kill), not orphaned."""
     pidfile = tmp_path / "grandchild.pid"
-    # Parent spawns a grandchild `sleep 300`, records its pid, then blocks. The
-    # grandchild shares the parent's process group and must die with it on reap.
+    # Parent spawns a grandchild `sleep 300`, records its pid, then blocks.
     script = (
         "import subprocess, sys, time\n"
         "gc = subprocess.Popen(['sleep', '300'])\n"

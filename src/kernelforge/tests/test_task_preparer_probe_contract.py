@@ -1,13 +1,4 @@
-"""Tests for the graph-replay probe and profile-contract subprocess helpers.
-
-These two async helpers (`_count_graph_replays` / `_check_profile_contract`)
-shell out to a child driver with ``start_new_session=True`` and a wall-clock
-timeout, reaping the whole process group via ``_kill_process_group`` when the
-child overruns. None of the normal unit tests spawn a real driver, so the
-success, timeout, and cancellation branches were entirely uncovered. We drive
-them here with a fake subprocess and a patched ``wait_for`` so no real process
-is launched and the timeout path is exercised deterministically.
-"""
+"""Tests for the graph-replay probe and profile-contract subprocess helpers."""
 
 from __future__ import annotations
 
@@ -65,9 +56,7 @@ def _patch_probe_shards(monkeypatch, tmp_path, payloads):
     monkeypatch.setattr(task_preparer.tempfile, "mkstemp", _fake_mkstemp)
 
 
-# ---------------------------------------------------------------------------
 # _count_graph_replays
-# ---------------------------------------------------------------------------
 
 
 def test_graph_probe_sitecustomize_records_rank_identity():
@@ -107,10 +96,7 @@ def test_count_graph_replays_uses_minimum_complete_rank_count(
     monkeypatch,
     tmp_path,
 ):
-    """A complete rank set is scored by its least replayed worker.
-
-    The launcher parent is unranked and must not lower the worker minimum.
-    """
+    """A complete rank set is scored by its least replayed worker."""
     proc = _FakeProc(out=b"", err=b"")
     _patch_spawn(monkeypatch, proc)
     _patch_probe_shards(
@@ -233,9 +219,7 @@ def test_count_graph_replays_spawn_error_returns_minus_one(monkeypatch):
     assert "OSError" in tail
 
 
-# ---------------------------------------------------------------------------
 # _check_profile_contract
-# ---------------------------------------------------------------------------
 
 
 def test_profile_contract_success(monkeypatch):

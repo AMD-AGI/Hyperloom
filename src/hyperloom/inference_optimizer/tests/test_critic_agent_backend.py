@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :class:`CriticAgentBackend`.
-
-The backend drives a 3-step loop (prepare-review → Codex → commit-review);
-subprocesses and Codex are bypassed via the *_factory injection points.
-"""
+"""Unit tests for :class:`CriticAgentBackend`."""
 
 from __future__ import annotations
 
@@ -64,8 +60,8 @@ class FakeChatCompletions:
     async def create(self, *, model, messages, **kwargs):
         self.calls.append({"model": model, "messages": messages, "kwargs": kwargs})
         reply = self._replies.pop(0) if self._replies else ""
-        # A reply may carry its own finish reason as ``(text, finish_reason)``;
-        # a bare string keeps the default so existing callers read unchanged.
+        # A reply may carry its own finish reason as ``(text, finish_reason)``; a bare string keeps the default so
+        # existing callers read unchanged.
         text, finish_reason = reply if isinstance(reply, tuple) else (reply, "stop")
         return FakeResp(choices=[FakeChoice(message=FakeMessage(content=text), finish_reason=finish_reason)])
 
@@ -644,12 +640,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    """Proposals were reviewed and no verdict came back — that is a failure.
-
-    Emitting a heartbeat instead would make it indistinguishable from a critic
-    that ran fine and had nothing to say, leaving the proposals pending while
-    the loop reads the turn as successful.
-    """
+    """Proposals were reviewed and no verdict came back — that is a failure."""
     judge_bundle = {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
@@ -701,8 +692,8 @@ def _single_proposal_judge_bundle() -> dict[str, Any]:
     }
 
 
-# Case 4b: the same truncation handling over the OpenAI transport, which spells
-# the cut-off reason "length" and carries the cap as max_completion_tokens.
+# Case 4b: the same truncation handling over the OpenAI transport, which spells the cut-off reason "length" and
+# carries the cap as max_completion_tokens.
 @pytest.mark.asyncio
 async def test_openai_truncated_review_is_retried_with_a_bigger_cap(
     fake_critic_root: Path,
@@ -1016,10 +1007,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
 
 
 def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
-    """The Critic is told to reply with *exactly* this schema, and the
-    Coordinator holds a reject to the verdict its cited rule declared by reading
-    `failure_reason_code`. Documenting the field only in a reference file
-    nothing loads is why prose-scanning became the only signal in production."""
+    """The Critic is told to reply with *exactly* this schema, and the Coordinator holds a reject to the verdict its cited rule declared by reading `failure_reason_code`."""
     schema, _, rules = _REVIEW_OUTPUT_INSTRUCTIONS.partition("Rules (mirror")
 
     assert '"failure_reason_code"' in schema
@@ -1077,9 +1065,7 @@ async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    """Delivered as data so the Critic's field list stays identical to the one
-    the runner strips, and so a format slip is advisory rather than a reject
-    that costs the round every proposal in the set."""
+    """Delivered as data so the Critic's field list stays identical to the one the runner strips, and so a format slip is advisory rather than a reject that costs the round every proposal in the set."""
     constraints = await _review_constraints_sent_for("specialist", fake_critic_root, fake_session_dir)
 
     rule = constraints["quantitative_claim_rule"]
@@ -1092,9 +1078,7 @@ async def test_a_review_the_rule_cannot_apply_to_is_not_handed_the_rule(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has
-    no room for. Sending it anyway invites a citation the verdict path then has
-    to read, so it goes only where it can be violated."""
+    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has no room for."""
     constraints = await _review_constraints_sent_for("baseline", fake_critic_root, fake_session_dir)
 
     assert "quantitative_claim_rule" not in constraints
@@ -1760,11 +1744,7 @@ def _make_anthropic_backend(
     judge_bundle: dict[str, Any],
     claude_model: str = "claude-opus-4-8",
 ) -> tuple[CriticAgentBackend, FakeAnthropicCompletion]:
-    """Wire a protocol=anthropic critic onto a recorded single-shot entry point.
-
-    The credential probe is stubbed too: which transport llm_config would pick
-    is its own concern, and the critic must not depend on the host's env.
-    """
+    """Wire a protocol=anthropic critic onto a recorded single-shot entry point."""
     fake_completion = FakeAnthropicCompletion(results)
     monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport_ready", lambda *_a, **_kw: True)
     monkeypatch.setattr(f"{_CRITIC_MOD}.aanthropic_completion", fake_completion)
@@ -1875,8 +1855,7 @@ async def test_truncated_review_is_retried_with_a_bigger_cap(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Re-asking under the same cap would truncate at the same byte, so the
-    retry only earns its keep by raising the ceiling."""
+    """Re-asking under the same cap would truncate at the same byte, so the retry only earns its keep by raising the ceiling."""
     complete = _anthropic_review_result(
         '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
         '"verdict": "approve", "source": "critic", "reasoning": "ok"}]}'
@@ -1907,9 +1886,7 @@ async def test_review_truncated_twice_fails_the_turn(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Verdicts that never arrive must not be reported as verdicts that say
-    nothing: the loop would keep re-asking the question it already can't
-    answer, and nothing on the record would say why."""
+    """Verdicts that never arrive must not be reported as verdicts that say nothing: the loop would keep re-asking the question it already can't answer, and nothing on the record would say why."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1921,8 +1898,8 @@ async def test_review_truncated_twice_fails_the_turn(
     with pytest.raises(BackendError, match="no parseable review_verdicts") as excinfo:
         await backend.run("prompt", system_prompt="critic system")
 
-    # The message has to name the cap, or an operator cannot tell a truncated
-    # review from a model that answered in prose.
+    # The message has to name the cap, or an operator cannot tell a truncated review from a model that answered in
+    # prose.
     assert "max_tokens" in str(excinfo.value)
     assert len(fake_completion.calls) == 2
 
@@ -1933,9 +1910,7 @@ async def test_rejected_retry_still_reports_the_truncation(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A model whose own output limit sits below the doubled cap rejects the
-    retry. Surfacing only that rejection would send the reader after the retry
-    instead of the truncation that forced it."""
+    """A model whose own output limit sits below the doubled cap rejects the retry."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1964,8 +1939,7 @@ async def test_unparseable_review_is_not_retried(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A reply that ended on its own terms is a formatting failure, not a
-    budget one, so a second call at a bigger cap buys nothing."""
+    """A reply that ended on its own terms is a formatting failure, not a budget one, so a second call at a bigger cap buys nothing."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1986,8 +1960,7 @@ async def test_max_completion_tokens_env_override_raises_the_cap(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A deployment can move the cap to fit its model without a code change —
-    the knob this incident had no way to turn."""
+    """A deployment can move the cap to fit its model without a code change — the knob this incident had no way to turn."""
     monkeypatch.setenv("CRITIC_AGENT_MAX_COMPLETION_TOKENS", "64000")
     review_json = (
         '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
@@ -2032,8 +2005,7 @@ async def test_anthropic_protocol_traces_a_failed_completion(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A transport failure reaches the caller as LLMCallFailed, keeping its
-    detail, and costs exactly one trace row."""
+    """A transport failure reaches the caller as LLMCallFailed, keeping its detail, and costs exactly one trace row."""
     backend, _ = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -2082,12 +2054,7 @@ def test_anthropic_protocol_refuses_a_host_without_a_usable_transport(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Constructing the backend must fail loudly rather than at the first review.
-
-    The probe covers the transport, not just the credential: a subscription
-    token with no claude CLI is exactly the case that used to pass here and
-    fail later.
-    """
+    """Constructing the backend must fail loudly rather than at the first review."""
     monkeypatch.setattr(f"{_CRITIC_MOD}.anthropic_transport_ready", lambda *_a, **_kw: False)
     with pytest.raises(BackendError, match="requires a usable Anthropic transport"):
         CriticAgentBackend(
@@ -2118,9 +2085,7 @@ def test_anthropic_protocol_builds_no_review_client(
 
 @pytest.mark.asyncio
 async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypatch):
-    """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code
-    counts the model's own message as a turn, so 1 trips before any output.
-    Pin the real value a raw-completion caller actually runs with."""
+    """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code counts the model's own message as a turn, so 1 trips before any output."""
     from hyperloom.orchestrator.roles import claude as claude_mod
 
     seen: dict[str, int] = {}
@@ -2130,7 +2095,7 @@ async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypat
         raise RuntimeError("stop after options")
 
     monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
-    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True, conversational=False)
+    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True)
     with pytest.raises(Exception):
         await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
 
@@ -2148,9 +2113,7 @@ def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
 
 
 def test_accumulate_anthropic_usage_keeps_cache_counters_in_their_own_columns():
-    """The judge bundle repeats across turns, so most of the input side arrives
-    as cache reads. They stay split so a critic row can be compared with — and
-    summed alongside — the orchestration rows ClaudeBackend writes."""
+    """The judge bundle repeats across turns, so most of the input side arrives as cache reads."""
     acc = {"input_tokens": 0, "output_tokens": 0}
     CriticAgentBackend._accumulate_anthropic_usage(
         acc,
@@ -2175,9 +2138,9 @@ async def test_anthropic_protocol_traces_cache_counters_separately(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A real subscription run reads most of its input from the prompt cache;
-    folding it into input_tokens would make critic rows incomparable with the
-    orchestration ones."""
+    """A real subscription run reads most of its input from the prompt cache; folding it into input_tokens would make
+    critic rows incomparable with the orchestration ones.
+    """
     result = _anthropic_review_result(
         '{"review_verdicts": []}',
         usage={

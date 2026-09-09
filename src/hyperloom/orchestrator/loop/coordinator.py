@@ -30,9 +30,8 @@ _SEVERITY_REGRESS: str = "regress"
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
-# Periodic in-process maintenance/reaper cadence (lease reaping + DB retention),
-# in coordinator ticks.
-MAINTENANCE_EVERY_TICKS: int = 50
+# Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
+MAINTENANCE_INTERVAL_SEC: int = 1800
 
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
@@ -40,16 +39,15 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement stall cap: consecutive enablement rounds that neither made the combo
-# runnable nor advanced to a NEW failure signature; reaching it stops the loop
-# with ``enablement_stalled``. A progressing round resets the streak.
+# Enablement stall cap: consecutive enablement rounds that neither made the combo runnable nor advanced to a NEW
+# failure signature; reaching it stops the loop with ``enablement_stalled``.
 _ENABLEMENT_MAX_STALL: int = 5
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
-# Default resume-drift floor (%): a re-measured current_best below this fraction
-# of its recorded tput is flagged as drift.
+# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
+# drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
@@ -98,19 +96,7 @@ log = logging.getLogger(__name__)
 
 
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload.
-
-    Feeds ``framework_agent.enablement.classify_failure``. Concatenates the
-    most likely error-bearing fields (``error`` / ``stderr`` / ``log_tail`` /
-    ``traceback`` / ``reason``) so a "can't even boot" baseline failure becomes
-    classifiable text. Returns ``""`` when nothing usable is present.
-
-    Args:
-        result_payload: The failed task's result dict (``None`` treated empty).
-
-    Returns:
-        str: Concatenated, trimmed launch-log text (may be ``""``).
-    """
+    """Extract launch/traceback text from a failed baseline result payload."""
     if not isinstance(result_payload, dict):
         return ""
     parts: list[str] = []
@@ -129,26 +115,7 @@ def _resolvable_artifacts_from_done(
     done_payload: dict[str, Any] | None,
     resolve_bases: list[Path],
 ) -> list[dict[str, Any]]:
-    """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
-
-    A FRAMEWORK_AGENT specialist may deliver a non-diff tuned artifact via
-    ``artifacts_written`` instead of a source patch; it flows through the
-    ``integrate_patch`` artifact-install channel. This is the shared routable
-    signal used by both the autosubmit and empty-outcome bridges: an artifact is
-    routable only when its ``source`` resolves to a real file inside one of
-    ``resolve_bases`` (matching integrate_patch's sandbox, rejecting ``..``
-    escapes). Only the ``source`` is validated; a bad ``target`` is rejected
-    downstream by integrate_patch rather than skip-stamped here.
-
-    Args:
-        done_payload: The specialist ``specialist_done`` payload (unwrapped).
-        resolve_bases: Dirs to resolve a relative ``source`` against (typically
-            ``[<spec>/worktree, <spec>]``).
-
-    Returns:
-        list[dict]: ``artifacts_written`` entries with a valid ``source``/
-            ``target`` and an existing source file (possibly empty).
-    """
+    """Return ``artifacts_written`` entries whose ``source`` file exists on disk."""
     if not isinstance(done_payload, dict):
         return []
     arts = done_payload.get("artifacts_written")
@@ -165,10 +132,7 @@ def _resolvable_artifacts_from_done(
         if not src or not tgt:
             continue
         raw = Path(src)
-        # An absolute ``source`` is checked as-is; a relative one is resolved
-        # under each base. In both cases the resolved path must be a real file
-        # inside a base (rejecting ``..`` escapes). Scan all bases and take the
-        # first that yields a contained real file.
+        # An absolute ``source`` is checked as-is; a relative one is resolved under each base.
         cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
         for cand in cands:
             resolved = cand.resolve()
@@ -191,21 +155,7 @@ def _resolvable_artifacts_from_done(
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
-
-    A specialist may translate an upstream PR into a config win (serving flags /
-    env vars) instead of a source patch. Levers are read from the first
-    ``proposal_set`` entry carrying ``extra_args`` and/or ``extra_envs`` while
-    preserving the separate server-argument and environment channels.
-
-    Args:
-        done_payload: The specialist ``specialist_done`` payload (already
-            unwrapped of any envelope).
-
-    Returns:
-        dict[str, Any]: The server arguments and environment overrides, or
-            ``{}``.
-    """
+    """Extract a config-lever set from a FRAMEWORK specialist deliverable."""
     if not isinstance(done_payload, dict):
         return {}
     # A patch deliverable takes precedence.
@@ -270,8 +220,8 @@ def _framework_config_levers_from_done(
     return {}
 
 
-# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist
-# dispatch / a KEEP before the Coordinator force-dispatches one.
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
+# Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
 
@@ -295,16 +245,7 @@ _OUTCOME_NOTES_MAX: int = 3
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
-    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None.
-
-    Args:
-        d: Mapping to look up; a non-dict argument yields ``None``.
-        keys: Candidate keys checked in order; the first whose value is
-            non-None wins.
-
-    Returns:
-        The first present, non-None value, or ``None`` if none match.
-    """
+    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
     if not isinstance(d, dict):
         return None
     for k in keys:
@@ -315,11 +256,7 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
 
 
 def _defang_alert_payload(value: Any) -> Any:
-    """Recursively defang string leaves of an alert payload (keys untouched).
-
-    Only string *values* are neutralised so dict structure / keys that
-    downstream rendering relies on are preserved; numbers/bools pass through.
-    """
+    """Recursively defang string leaves of an alert payload (keys untouched)."""
     if isinstance(value, str):
         return _defang_prompt_structure(value)
     if isinstance(value, dict):
@@ -330,19 +267,7 @@ def _defang_alert_payload(value: Any) -> Any:
 
 
 def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line.
-
-    Args:
-        m: The inbox message to render; its topic selects a per-topic
-            formatting branch (delegated_result, policy_denial, review_verdict,
-            observation) with a generic fallback.
-        max_variant_rows: Cap on the indented per-variant failure lines
-            appended to a ``delegated_result``; 0 suppresses them.
-
-    Returns:
-        The header line, plus one indented continuation line per rendered
-        variant failure.
-    """
+    """Render one inbox ``Message`` as a compact, high-signal line."""
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
     # Canonical inbox header ordering that downstream parsers anchor on.
@@ -371,13 +296,27 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
                 parts.append(f"gain={gain}")
             if tput is not None:
                 parts.append(f"tput={tput}")
-            # Executors that never raise report the failure inside the result
-            # envelope, leaving the top-level error None.
+            # Executors that never raise report the failure inside the result envelope, leaving the top-level error
+            # None.
             if not error:
                 error = result.get("error")
             raw_notes = result.get("notes")
             if isinstance(raw_notes, list):
-                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
+                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
+                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
+                    :_OUTCOME_NOTES_MAX
+                ]
+            done = result.get("specialist_done") if kind == "specialist" else None
+            if isinstance(done, dict):
+                summary = str(done.get("summary") or "").strip()
+                if summary:
+                    parts.append(f"summary={summary[:400]!r}")
+                if done.get("confidence") is not None:
+                    parts.append(f"confidence={done['confidence']}")
+                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
+                    items = done.get(key)
+                    if isinstance(items, list) and items:
+                        parts.append(f"{label}={len(items)}")
         if error:
             parts.append(f"error={str(error)[:200]!r}")
         if notes:
@@ -436,10 +375,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
             return f"{head} kind={kind!r} payload={payload}"
 
     if topic == "alert":
-        # Alert payloads can embed attacker-influenceable server.log excerpts;
-        # defang string leaves so a log line can't inject prompt structure.
-        # Only the alert topic is treated this way — proposal/other topics keep
-        # their exact payload so the Critic inbox parser still literal_evals it.
+        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
+        # can't inject prompt structure.
         return f"{head} payload={_defang_alert_payload(payload)}"
 
     return f"{head} payload={payload}"
@@ -458,8 +395,7 @@ class PendingProposal:
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
 
 
-# Path-like keys surfaced from a kernel handler payload/result so operators can
-# see where a step's artifacts went.
+# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "trace_input",
     "trace_dir",
@@ -488,16 +424,7 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
 
 
 def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler
-    payload or result dict. A non-dict argument yields an empty mapping.
-
-    Args:
-        payload: A kernel handler payload or result; non-dict inputs are
-            tolerated and produce an empty mapping.
-
-    Returns:
-        Mapping of recognised path-like key to its non-empty string value.
-    """
+    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
     if not isinstance(payload, dict):
         return {}
     out: dict[str, str] = {}
@@ -516,12 +443,7 @@ class CoordinatorState:
 
 
 class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods.
-
-    Instance access is handled by ``Coordinator.__getattr__``; class access
-    resolves here to the owning collaborator class's function. Collaborator
-    modules are imported lazily to avoid an import cycle.
-    """
+    """Class-level delegation for extracted collaborator methods."""
 
     def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
         prop = cls._DELEGATED.get(name)
@@ -538,10 +460,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
     """The single Coordinator instance per session."""
 
     # property name -> (module, collaborator class) for class-level delegation.
-    # Kept in sync with the lazy collaborator properties + ``_DELEGATED``.
     _COLLAB_MODULES = {
-        # Phase handlers in call-chain order. Module paths are relative to
-        # ``hyperloom.orchestrator``.
+        # Phase handlers in call-chain order.
         "phase_machine": ("phases.machine", "MachinePhase"),
         "phase_prelude": ("phases.prelude", "PreludePhase"),
         "phase_sweep": ("phases.sweep", "SweepPhase"),
@@ -584,16 +504,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
-        # Bind the session for the SBD V6 recorders once, here, so no recorder
-        # entry point below has to be handed a path. It is bound on the
-        # Coordinator's own context, which is deliberately not inherited by the
-        # Ray actors the phases dispatch into: a subprocess that tried to write
-        # a fragment would find no session and decline, and two processes
-        # upserting one fragment lose a side of the merge.
+        # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
+        # path.
         bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # KnowledgePlane owns RecipeKB. Keep the explicit parameter as a
-        # compatibility injection path for library callers during Phase 1.
+        # KnowledgePlane owns RecipeKB.
         plane_recipe_kb = getattr(knowledge_plane, "recipe_kb", None)
         self.recipe_kb: RecipeKB | None = plane_recipe_kb if plane_recipe_kb is not None else recipe_kb
         # Per-session optimization journal; lazy-instantiated on first use.
@@ -632,17 +547,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        # Lifecycle save debounce: terminal events flush immediately; bursty
-        # non-terminal markers coalesce within a short window.
-        # ``_lifecycle_last_save`` is a monotonic timestamp.
+        # Lifecycle save debounce: terminal events flush immediately; bursty non-terminal markers coalesce within a
+        # short window.
         self._lifecycle_last_save: float = 0.0
         self._lifecycle_save_min_interval_s: float = 2.0
-        # Thread live SharedState into the runner so executors get it via
-        # ctx.extra.
+        # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
-        # Serving-disjoint invariant: the live serving process holds the first
-        # ``serving_tp`` cards, carved off the specialist pool. ``shared_state.tp``
-        # is restored on resume; the ``TP`` env is the fresh-start fallback.
+        # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
+        # specialist pool.
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
@@ -650,14 +562,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 serving_tp=self._resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node. Serialized against
-        # ``gpu_specialist_pool`` via the cap-1 ``gpu_research_lane`` mutex.
+        # Framework-authoring pool over the whole node.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting
-        # in-flight tasks so a queued GPU task starts the moment its lane frees.
+        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting in-flight tasks so a queued GPU task
+        # starts the moment its lane frees.
         self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
@@ -668,9 +579,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
         except Exception:  # noqa: BLE001 — non-fatal; default seed wins
             log.exception("failed to sync research_lane_capacity to leases DB")
-        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
-        # the GPU pool partitions physical cards within that one lease.
-        # `strict_paths` defers to the env flag.
+        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists); the GPU pool partitions physical cards
+        # within that one lease.
         self.policy = PolicyGate(
             role_registry=self.role_registry,
             session_dir=self.session_dir,
@@ -681,12 +591,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self._resumed_from = self._detect_resume_state()
-        # Reap serving processes orphaned by a prior monitor-process crash
-        # (e.g. a raylet death that took the optimizer down mid-benchmark),
-        # scoped strictly to this session's own pidfiles. No-op on a fresh
-        # session; on resume it clears a leftover SGLang/vLLM server so it
-        # cannot pollute the shared benchmark port. Best-effort; never fatal.
-        self._reap_orphaned_servers_best_effort()
+        # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
+        # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
+        self._reap_orphaned_servers_best_effort(phase="boot")
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
             self.shared_state.model_class = self._model_class_override or _infer_model_class_from_config(
@@ -695,104 +602,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        # Orchestration prompt mode: first turn full SEED, later turns DELTA.
-        self._orchestration_seeded: bool = False
-        # Orchestration working-memory checkpoint policy + tracker.
-        from ..state import orchestration_memory as _orch_mem
 
-        # Context-token guardrail: derive soft/hard budgets from the
-        # orchestration model's window × fraction (env-overridable). 0 budgets
-        # disable token triggers (char/tick/time cadence still applies).
-        def _ckpt_fraction(env_key: str, default: float) -> float:
-            try:
-                v = float(os.environ.get(env_key, "").strip() or default)
-            except (TypeError, ValueError):
-                v = default
-            return v if 0.0 < v <= 1.0 else default
+        # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
+        self._last_maintenance_ts: float = time.monotonic()
 
-        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
-        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
-        _soft_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
-        )
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
-            context_token_soft=int(_ctx_window * _soft_frac),
-        )
-        # Kept so a provider that reports its own window per turn can replace the
-        # table's guess without re-deriving the operator's fraction.
-        self._checkpoint_soft_fraction = _soft_frac
-        self._checkpoint_tracker = _orch_mem.CheckpointTracker(
-            last_phase=str(getattr(self.shared_state, "phase", "") or ""),
-        )
-        # Consecutive degenerate checkpoint replies; resets on a good one.
-        self._consec_degenerate_ckpt: int = 0
-        # Disable checkpointing entirely via env.
-        self._checkpoint_enabled: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-        # Seed memory rendered into the next full SEED push (resume recovery).
-        # INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n> re-seeds from the
-        # n-th-from-newest history snapshot instead of the live memory.
-        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
-        if _rollback_raw:
-            try:
-                _n = int(_rollback_raw)
-                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
-                if _n >= 1 and len(_hist) >= _n:
-                    _seed_memory = dict(_hist[-_n])
-                    self.shared_state.orchestration_memory = _seed_memory
-                    log.warning(
-                        "Coordinator: orchestration memory rolled back to history[-%d] (of %d snapshots)",
-                        _n,
-                        len(_hist),
-                    )
-                else:
-                    log.warning(
-                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); using live memory",
-                        _rollback_raw,
-                        len(_hist),
-                    )
-            except (TypeError, ValueError):
-                log.warning(
-                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
-                    _rollback_raw,
-                )
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
-        # No-progress circuit-breaker telemetry; threshold = high-severity cutoff.
-        self._progress_marker: dict[str, Any] = {}
-        try:
-            self._no_progress_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS",
-                        "15",
-                    )
-                ),
-            )
-        except ValueError:
-            self._no_progress_threshold = 15
-
-        # Periodic maintenance/reaper cadence (lease reaping + DB retention). 0 disables.
-        try:
-            self._maintenance_every_ticks: int = max(
-                0,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
-                        str(MAINTENANCE_EVERY_TICKS),
-                    )
-                ),
-            )
-        except ValueError:
-            self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
-
-        # Pin a per-macro-cycle budget window so per-phase budget fractions
-        # apply per cycle. Only takes effect for long/unbounded runs; short
-        # bounded runs stay anchored on the whole session.
+        # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
         if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             try:
                 _cycle_hours = float(
@@ -805,14 +619,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _cycle_hours = DEFAULT_CYCLE_HOURS
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # Medium-intensity soft restart at each macro-cycle boundary. On by
-        # default in cyclic mode; opt out via the env flag.
+        # Medium-intensity soft restart at each macro-cycle boundary.
         self._cycle_soft_restart: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
-        # The soft restart's inference-server deep-clean kills lingering server
-        # processes; separately gated, defaults ON within the soft restart.
+        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
+        # ON within the soft restart.
         self._cycle_restart_servers: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
             "",
@@ -860,8 +673,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
         self._run_started_monotonic: float | None = None
-        # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
-        # work is not skipped just because the session deadline has passed.
+        # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE work is not skipped just because the
+        # session deadline has passed.
         self._closing_deadline: float | None = None
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
@@ -873,24 +686,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     @property
     def router(self) -> IntentRouter:
-        """Intent routing collaborator (extracted from this class).
-
-        The ``_handle_*`` intent handlers live on :class:`IntentRouter`; the
-        methods remaining here are thin forwarding shims. Built lazily and
-        cached.
-        """
+        """Intent routing collaborator (extracted from this class)."""
         r = self.__dict__.get("_router")
         if r is None:
             r = IntentRouter(self)
             self.__dict__["_router"] = r
         return r
 
-    # Methods extracted into collaborator objects are delegated back by name here
-    # (symmetric to each collaborator's
-    # ``__getattr__`` back to this coordinator). ``coord.foo`` / ``self.foo`` /
-    # ``self._coord.foo`` all keep resolving, and instance-attr monkeypatches
-    # still shadow them (normal lookup wins over __getattr__). Each value is the
-    # name of the property returning the owning collaborator.
+    # Methods extracted into collaborator objects are delegated back by name here (symmetric to each collaborator's
+    # ``__getattr__`` back to this coordinator).
     _DELEGATED = {
         # router
         "_handle_intent": "router",
@@ -909,13 +713,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_update_state": "router",
         # recorder (folded into writeback)
         "_aggregate_research_evidence": "writeback",
-        "_harvest_research_scout": "writeback",
+        "_harvest_specialist_findings": "writeback",
         "_record_specialist_result": "writeback",
         "_drain_queued_baselines": "writeback",
-        # Phase handlers, grouped in the same call-chain order as
-        # _COLLAB_MODULES/the @property block above:
-        # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
-        # kernel -> explore -> framework (framework last: largest cluster).
+        # Phase handlers, grouped in the same call-chain order as _COLLAB_MODULES/the @property block above: machine
+        # -> prelude -> sweep -> close -> internal -> kernel_stack -> kernel -> explore -> framework (framework last:
+        # largest cluster).
         "_ensure_phase_initialised": "phase_machine",
         "_ensure_recipe_kb_t0_anchored": "phase_machine",
         "_kernel_enabled": "phase_machine",
@@ -1001,7 +804,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_negative_ledger_domain_counts": "phase_explore",
         "_plan_cycle_focus": "phase_explore",
         "_record_cycle_strategy_for_current_cycle": "phase_explore",
-        "_cycle_strategy_seed_block": "phase_explore",
+        "_cycle_strategy_block": "phase_explore",
         "_cycle_directive_fallback": "phase_explore",
         "_reseed_orch_prompt_for_cycle": "phase_explore",
         "_apply_macro_cycle_reloop": "phase_explore",
@@ -1085,11 +888,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_candidate_discovery_inflight": "phase_framework",
         "_ingest_candidate_discovery": "phase_framework",
         "_candidates_from_discovery_proposals": "phase_framework",
-        "_orchestration_conversational": "conversation",
-        "_orchestration_context_tools_mounted": "conversation",
-        "_orchestration_needs_seed": "conversation",
-        "_reset_orchestration_conversation": "conversation",
-        "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -1110,6 +908,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_current_primary_gap": "conversation",
         "_recent_proposed_variants": "conversation",
         "_priors_match_advisory_block": "conversation",
+        "_discarded_escalate_hint_advisory_block": "conversation",
         "_workload_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
@@ -1178,23 +977,19 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
         "_replay_resume_if_needed": "writeback",
-        "_maybe_run_maintenance_tick": "maintenance",
+        "_run_maintenance": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
-        "_maybe_checkpoint_orchestration": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
     }
 
     def __getattr__(self, name: str):
-        # Only fires for genuinely-missing attributes (not shadowed instance
-        # attrs / real methods). Delegate extracted collaborator methods to their
-        # owner; everything else is a real AttributeError.
+        # Only fires for genuinely-missing attributes (not shadowed instance attrs / real methods).
         owner = Coordinator._DELEGATED.get(name)
         if owner is not None:
             target = getattr(self, owner)
             try:
-                # Do not invoke the collaborator's fallback ``__getattr__`` here:
-                # a stale _DELEGATED entry would otherwise bounce back to this
-                # Coordinator and recurse until RecursionError.
+                # Do not invoke the collaborator's fallback ``__getattr__`` here: a stale _DELEGATED entry would
+                # otherwise bounce back to this Coordinator and recurse until RecursionError.
                 return object.__getattribute__(target, name)
             except AttributeError as exc:
                 raise AttributeError(
@@ -1212,8 +1007,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return await self.dispatcher._run_action_now(action_name, params)
 
     def _collaborator(self, attr: str, factory):
-        """Lazily build + cache a collaborator object (like ``router``/``writeback``);
-        works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
+        """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
+        ``Coordinator.__new__`` test doubles too (uses ``__dict__``).
+        """
         obj = self.__dict__.get(attr)
         if obj is None:
             obj = factory(self)
@@ -1347,30 +1143,21 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
 
     def _kb_hardware_slug(self) -> str:
-        """Topology-aware hardware dimension for the recipe ``canonical_id``.
-
-        Single-node: bare ``gpu_type`` (existing keys/data unchanged).
-        Multi-node: ``gpu_type`` + ``_ws{world_size}`` so multi-node runs never
-        share a recipe key with — and overwrite the ``best_config`` of — the
-        single-node recipe. MUST match ``recipe_kb_t0.run_t0_anchor``'s derivation
-        so warm-start reads and KEEP/REVERT/CLOSE writes target the same row.
-
-        Returns:
-            The topology-aware hardware slug for the current run.
-        """
+        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
         from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
         from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
         ss = self.shared_state
         return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
-    def _reap_orphaned_servers_best_effort(self) -> None:
-        """Reap leftover single-node serving processes from a prior crash.
+    def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
+        """Reap leftover single-node serving processes via this session's pidfiles.
 
-        Scoped to this session's own pidfiles and gated on a cmdline match, so a
-        co-located session's server and a recycled pid are never touched. A
-        no-op on multi-node (servers live on pods) and on a fresh session.
-        Best-effort: any failure is logged and swallowed so boot never fails.
+        Runs at boot and again at shutdown. Every other teardown here is in-band -- a benchmark wrapper's own signal
+        trap, or a ``killpg`` on a handle we still hold -- so none of it runs when the owner dies without getting to
+        execute. This is the backstop for that case, and with no cgroup or pid-namespace available it is the only one:
+        the pidfile outlives whatever wrote it. Scoped to this session's own pidfiles and gated on a cmdline match, so
+        a co-located session's server and a recycled pid are never touched.
         """
         try:
             from ..actions.executors._multi_node_env import is_multi_node
@@ -1382,22 +1169,22 @@ class Coordinator(metaclass=_CoordinatorMeta):
             reaped = reap_orphaned_servers(self.session_dir)
             if reaped:
                 log.warning(
-                    "coordinator: reaped %d orphaned serving process(es) at boot: %s",
+                    "coordinator: reaped %d orphaned serving process(es) at %s: %s",
                     len(reaped),
+                    phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - boot-time cleanup must never be fatal
-            log.exception("coordinator: orphan server reaper failed (ignored)")
+        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+            log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
-    # Advisory disk guard: when the session partition runs low, LRU-trim the
-    # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
+    # Advisory disk guard: when the session partition runs low, LRU-trim the bulkiest churn (per-task runs/
+    # workspaces); durable state is never touched.
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
 
-    # Action catalogue mapping action_name -> metadata. Class-level so a
-    # partially-built Coordinator still resolves it.
+    # Action catalogue mapping action_name -> metadata.
     action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
 
     # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
@@ -1410,19 +1197,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Lifecycle
     async def stop(self) -> None:
-        """Signal shutdown, cancel in-flight work, finalize, and close the DB.
-
-        Sets the stop event, cancels and awaits the dispatched actions still
-        running plus every running reactor task, runs the Recipe KB T4
-        safety-net finalize hook when CLOSE never reached a terminal
-        publication status or its earlier attempt failed, then closes the
-        SQLite connection. Exceptions raised by reactor tasks during teardown
-        are logged, not propagated.
-
-        Dispatched actions are cancelled first and awaited: the stop event alone
-        only asks the loop to stop between ticks, so a teardown that skipped
-        them would close the database out from under work still using it.
-        """
+        """Signal shutdown, cancel in-flight work, finalize, and close the DB."""
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
@@ -1449,27 +1224,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         max_minutes: float | None,
         closing_grace_sec: float | None,
     ) -> tuple[float, float, float]:
-        """Stamp the persisted deadline once and size this process's loop clock.
-
-        Bounded sessions persist ``deadline_unix`` from ``start_ts + budget`` on
-        the first ``run()`` and keep it on resume, so this process cannot
-        reissue a full ``max_minutes``. Unbounded sessions keep the container
-        cap as a local monotonic deadline and do not persist one.
-
-        Args:
-            max_minutes: Operator wall-clock budget, or ``None``/0 for unbounded.
-            closing_grace_sec: Operator CLOSE window; ``None`` derives a default.
-
-        Returns:
-            ``(grace_sec, monotonic_deadline, max_minutes_value)``.
-        """
+        """Stamp the persisted deadline once and size this process's loop clock."""
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
         self.shared_state.closing_grace_sec = closing_grace_sec
         max_minutes_value = max_minutes if max_minutes is not None else 0
         if max_minutes:
             # Stamp from the float budget before persisting ``int(max_minutes)``.
-            # ``int(0.0001)`` is 0, and stamping after that truncation used to
-            # leave ``deadline_unix`` unset so remaining-time checks read unbounded.
             self.shared_state.stamp_deadline_unix(budget_minutes=float(max_minutes))
             self.shared_state.max_minutes = int(max_minutes)
             self.shared_state.save(self.session_dir)
@@ -1487,15 +1247,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return grace_sec, deadline, float(max_minutes_value)
 
     async def _recipe_kb_t4_hook(self) -> None:
-        """Finalize or retry on graceful teardown/Ctrl-C.
-
-        Terminal publication statuses are idempotent no-ops. An unfinished
-        CLOSE sequence, a missing status, or a prior retryable failure receives
-        one more in-process attempt before the database closes.
-
-        This in-process hook cannot run after SIGKILL, container force-delete,
-        host loss, or interpreter failure.
-        """
+        """Finalize or retry on graceful teardown/Ctrl-C."""
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
         finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
@@ -1521,8 +1273,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Statuses that mean the candidate was ADOPTED; everything else is a negative
-    # signal for the ranker.
+    # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
     _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
     # Max tried-candidate rows fed into the ranker/discovery working memory.
@@ -1532,38 +1283,31 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
     _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-    # Relative-change floor for the pre-GEAK reprofile: any change above this
-    # re-runs profile+TraceLens (effectively "any change", absorbing float noise).
+    # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
+    # "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
     # Max re-author rounds per candidate on a needs_review verdict.
     _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
 
-    # Backstop: max Critic-review submissions for a single candidate before
-    # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
+    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
+    # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
-    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot
-    # is skipped so report/breakdown always run.
+    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
+    # run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
-    # optimization_stack actions warranting a post-opt roofline; pure
-    # param-search (explore) is excluded.
+    # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
-
-        Args:
-            n: Number of full reactor+dispatcher passes to run (default 1).
-        """
+        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1."""
         await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
-            # A phase-entry hook may have finished by setting a pending phase
-            # hint (for example current GEAK returning no_gain -> skip_to_sweep).
-            # Consume that before prompting agents again so stale phase prompts
-            # cannot enqueue legacy work.
+            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK returning
+            # no_gain -> skip_to_sweep).
             await self._await_within_session_bound(
                 self._advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
@@ -1597,15 +1341,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         tick: int | None = None,
         agent: str = "",
     ) -> None:
-        """Record a Coordinator-side exception without killing the session.
-
-        Args:
-            stage: The pipeline stage where the exception occurred.
-            exc: The caught exception, recorded with type/message/traceback.
-            tick: Optional tick number; defaults to the current SharedState
-                tick when ``None``.
-            agent: Optional agent role associated with the failure.
-        """
+        """Record a Coordinator-side exception without killing the session."""
         try:
             self.shared_state.record_tick_exception(
                 tick=int(tick if tick is not None else self.shared_state.tick or 0),
@@ -1621,14 +1357,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             log.exception("failed to persist Coordinator exception metadata")
 
     def _seconds_until_session_bound(self) -> float | None:
-        """Seconds left on the active run or closing bound; ``None`` if unbounded.
-
-        During CLOSE the session deadline has already passed, so the bound
-        switches to ``_closing_deadline`` and CLOSE work is not skipped.
-
-        Returns:
-            Remaining seconds, or ``None`` when no bound is armed.
-        """
+        """Seconds left on the active run or closing bound; ``None`` if unbounded."""
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
         else:
@@ -1643,16 +1372,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         *,
         stage: str,
     ) -> None:
-        """Run one tick step, cancelling it when the session/closing bound elapses.
-
-        The wall-clock stop lives at the end of each tick. A conversational
-        reactor turn or a long phase-enter await that never returns would skip
-        that stop. Cancelling the step lets the tick finish and enter CLOSE.
-
-        Args:
-            factory: Builds the awaitable so a skipped step is never started.
-            stage: Label for the warning log.
-        """
+        """Run one tick step, cancelling it when the session/closing bound elapses."""
         remaining = self._seconds_until_session_bound()
         if remaining is not None and remaining <= 0.0:
             log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
@@ -1680,27 +1400,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
-
-        Args:
-            objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
-            max_minutes: Wall-clock budget in minutes; ``None``/falsy runs
-                unbounded (capped at the container lifetime).
-            tick_interval_sec: Sleep between ticks; ``0.0`` keeps tests fast.
-            max_ticks: Optional hard cap on the number of ticks.
-            stop_when: Optional custom predicate (sync or async) evaluated each
-                tick; a truthy result stops the run.
-            install_signal_handlers: Whether to install SIGINT/SIGTERM handlers
-                that set the stop event.
-            crash_emergency_threshold: Recent-crash count within the emergency
-                window that triggers an emergency stop.
-            closing_grace_sec: Grace window for the closing report phase;
-                ``None`` derives a default from ``max_minutes``.
-
-        Returns:
-            The persisted ``shared_state.stop_reason`` describing why the run
-            stopped.
-        """
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
@@ -1767,14 +1467,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 lambda n=name: self._reactor_pass(n),
                                 stage=f"reactor:{name}",
                             )
-                        # Orchestration checkpoint/compaction; cadence-based.
-                        if not self._stop.is_set():
-                            try:
-                                await self._maybe_checkpoint_orchestration(
-                                    tick=tick_n,
-                                )
-                            except Exception:  # noqa: BLE001
-                                log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
@@ -1795,9 +1487,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             exc=exc,
                             tick=tick_n,
                         )
-                    # Periodic reaper + DB retention; cadence-gated.
+                    # Periodic reaper + DB retention; time-gated.
                     try:
-                        await self._maybe_run_maintenance_tick(tick=tick_n)
+                        now = time.monotonic()
+                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+                            await self._run_maintenance(tick=tick_n)
+                            self._last_maintenance_ts = now
                     except Exception:  # noqa: BLE001
                         log.exception("maintenance tick raised")
                 except (asyncio.CancelledError, KeyboardInterrupt):
@@ -1819,8 +1514,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state) and not self.shared_state.target_reached_at:
-                    # The phase machine reads the marker; the transition it makes
-                    # next persists it.
+                    # The phase machine reads the marker; the transition it makes next persists it.
                     self.shared_state.target_reached_at = now_iso()
                 if deadline is not None and time.monotonic() >= deadline and not in_closing:
                     if grace_sec <= 0:
@@ -1881,8 +1575,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 or ("coordinator_exception" if last_tick_exc is not None else "unknown")
             )
             self.shared_state.save(self.session_dir)
-            # Every graceful terminal path gets one idempotent Recipe finalize
-            # attempt, including stop-check exits that never enter PHASE_CLOSE.
+            # Every graceful terminal path gets one idempotent Recipe finalize attempt, including stop-check exits
+            # that never enter PHASE_CLOSE.
             await self._recipe_kb_t4_hook()
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
@@ -1904,17 +1598,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     pass
             with timed_teardown_step(self.shared_state, "close_backends"):
                 await self._close_backends()
+            # A server outliving the run holds every GPU it was given, so the
+            # session's last act is to reap its own pidfiles.
+            with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
+                await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
             self.shared_state.save(self.session_dir)
         return self.shared_state.stop_reason
 
     async def _close_backends(self) -> None:
-        """Release every backend holding a live agent session.
-
-        A session-scoped backend (Codex) keeps a child process and a private
-        state directory open for the whole run, and the loop is the only place
-        that knows the run is over. Failing to close one must not change the
-        stop reason, so each failure is logged and the rest still close.
-        """
+        """Release every backend holding a live agent session."""
         for name, backend in list(self.backends.items()):
             closer = getattr(backend, "aclose", None)
             if not callable(closer):
@@ -1926,31 +1618,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents.
-
-        Composes the prompt + system prompt, invokes the agent's backend, and
-        dispatches every emitted intent through :meth:`_handle_intent`. Backend
-        errors, missing intents, and unexpected exceptions are recorded as
-        structured observations so a single bad turn never stops the run;
-        repeated crashes still bump ``crash_count`` toward the emergency stop.
-
-        Args:
-            agent_name (str): The agent role to run this pass for.
-        """
+        """Run one reactor turn for ``agent_name`` and route its intents."""
         backend = self.backends[agent_name]
-        # The system prompt is loaded first because the SEED/DELTA gate inside
-        # _compose_prompt has to know whether THIS prompt replaces the backend's
-        # conversation. A re-scoped prompt opens a new thread inside the turn, so
-        # a gate that only sees the thread as it stands would compose a delta for
-        # a conversation that is about to be emptied.
         sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name, system_prompt=sys_prompt)
+        prompt = await self._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        # No-op for backends without the hook. Presence of the hook is also what
-        # tells the failure path below to stay out of the way: such a backend
-        # records its own row, with the review model and its own latency, and a
-        # second row from here would count one provider failure twice.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         backend_self_traces = callable(_set_trace_ctx)
         if backend_self_traces:
@@ -2019,34 +1692,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        # Context-token water level. Only a per-request figure is comparable to
-        # the window; a backend reporting none leaves the level at 0 and the
-        # char ledger carries the growth signal alone.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
-                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Kept out of the ledger's try above: that one exists so a missing token
-        # figure still leaves the char ledger updating, and a throw from here
-        # would stop it too.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_policy.adopt_context_window(
-                    int(md.get("model_context_window") or 0),
-                    self._checkpoint_soft_fraction,
-                )
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Completed orchestration turn means SEED delivered; later turns send DELTA.
-        if agent_name == "orchestration":
-            self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
+        self.shared_state.agent_last_active[agent_name] = time.time()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""
@@ -2068,18 +1717,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         *,
         latency_ms: int | None = None,
     ) -> None:
-        """Append one ``llm_calls.jsonl`` row for a reactor turn.
-
-        The reactor role name doubles as both the trace ``component`` and
-        ``role``. Only rows carrying real token counters are written. Any error
-        in trace assembly degrades to a logged warning rather than breaking the
-        tick loop.
-
-        Args:
-            agent_name: The reactor role; doubles as trace component and role.
-            result: The backend turn result whose metadata carries token
-                counters.
-        """
+        """Append one ``llm_calls.jsonl`` row for a reactor turn."""
         try:
             metadata = result.metadata or {}
             has_tokens = any(
@@ -2117,26 +1755,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         *,
         latency_ms: int | None = None,
     ) -> None:
-        """Append one ``status="error"`` ``llm_calls.jsonl`` row for a failed turn.
-
-        The success path (:meth:`_trace_reactor_llm_call`) can only run once a
-        ``BackendTurnResult`` exists, so without this the ledger — and therefore
-        Langfuse — has no trace of a turn whose model call never returned. The
-        row carries no token counters; it exists to make the failure countable.
-
-        Only :class:`LLMCallFailed` reaches here, and only from a backend that
-        does not trace itself. A plain ``BackendError`` can come from a
-        deterministic local fault (unreadable ``emit.json``, missing
-        ``--review`` path, absent SDK) that never touched the provider, and
-        recording those would make the Langfuse error rate meaningless; a
-        self-tracing backend (the critic) has already written a richer row of
-        its own, so writing here too would double-count one failure.
-
-        Args:
-            agent_name: The reactor role; doubles as trace component and role.
-            error: The model-call failure that ended the turn.
-            latency_ms: Time spent before failing, when measured.
-        """
+        """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
             record = LLMCallRecord.for_failure(
                 session_id=self.session_dir.name,
@@ -2160,12 +1779,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         agent_name: str,
         exc: BackendError,
     ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn).
-
-        Args:
-            agent_name: The agent role whose error streak is incremented.
-            exc: The backend error; its repr is included in the emitted event.
-        """
+        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
         threshold = self._backend_error_streak_threshold
@@ -2190,12 +1804,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 },
             )
 
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised
-    # into a single explore grid per round.
+    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
     _MN_AUTO_EXPLORE_GRID_CAP = 6
 
-    # Phases whose long, serially-drained GPU grids must not starve the
-    # per-phase cyclic budget exit. PRELUDE/SWEEP/CLOSE/RECOVER drain normally.
+    # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.

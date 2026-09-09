@@ -1,33 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The SBD V6 ``roofline`` action: recorded the same way wherever it belongs.
-
-Roofline is the executor two callers reach for. A phase with no timeline event
-of its own dispatches it and it leaves an event behind; the KERNEL entry calls
-it inline as its re-profile, and that run belongs to the kernel event, because
-a sibling event would claim an autonomy the inline run does not have.
-
-The difference between those two modes is one string. The recorder writes the
-same three sections either way, tagged with whichever event id its sink was
-built for, and assembly decides where the rows land: under ``actions[]`` of a
-roofline event, or under ``forge.reprofile.run`` of the kernel event that
-called it. Teaching the executor to ask "am I inline right now" would put every
-caller in its signature; lifting the event id out of it costs one parameter.
-
-The action id is a second axis the recorder needs and the kernel event does
-not. One event id is ``{phase}:{macro_cycle}:roofline``, and a phase can
-dispatch roofline more than once in a cycle -- so the event holds an array of
-actions and the task id is what separates them. That is also why it is a
-fragment key rather than a segment of the event id: it names a row within an
-event, not an event.
-
-Multiplicity inside one action stays inside it. Every retry the executor
-performs -- the profile attempt loop, the N26 steady-state re-analysis, the
-multi-node compute-bound re-profile -- is a row, and the row the action
-actually carried forward is flagged ``effective``. An action that re-profiled
-three times is one action with three profile runs, not three actions.
-"""
+"""The SBD V6 ``roofline`` action: recorded the same way wherever it belongs."""
 
 from __future__ import annotations
 
@@ -89,14 +63,12 @@ ROW_PROFILE_RUN = "profile_run"
 ROW_ANALYSIS_RUN = "analysis_run"
 ROW_KERNEL = "kernel"
 
-# ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2),
-# which would be ~85 KiB of paths per profile run. The rank histogram plus a few
-# samples answers the same questions (is the file count plausible, did every rank
-# report) at a bounded cost.
+# ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2), which would be ~85 KiB of paths per
+# profile run.
 _MAX_SAMPLE_TRACE_FILES = 4
 
-# Trace-structure issues are prose written for an operator; a handful is enough
-# to characterize a degraded trace and the count carries the rest.
+# Trace-structure issues are prose written for an operator; a handful is enough to characterize a degraded trace and
+# the count carries the rest.
 _MAX_TRACE_ISSUES = 8
 
 # The roofline table names every kernel the trace attributed, which on a large
@@ -127,13 +99,12 @@ ANALYSIS_ATTEMPT_INITIAL = "initial"
 ANALYSIS_ATTEMPT_N26_RETRY = "n26_steady_state_retry"
 ANALYSIS_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
 
-# The two halves of a roofline action, named because ``failed_substep`` reports
-# which one failed and the crash path has only the in-flight half to go on.
+# The two halves of a roofline action, named because ``failed_substep`` reports which one failed and the crash path
+# has only the in-flight half to go on.
 SUBSTEP_PROFILE = "profile"
 SUBSTEP_ANALYSIS = "analysis"
-# The executor names its failure exits after the step that produced them
-# (``profile_no_trace``, ``trace_analyze``, ...), which is finer than the two
-# halves above; these are the spellings that mean the analysis half.
+# The executor names its failure exits after the step that produced them (``profile_no_trace``, ``trace_analyze``,
+# ...), which is finer than the two halves above; these are the spellings that mean the analysis half.
 _ANALYSIS_PHASES = frozenset({SUBSTEP_ANALYSIS, "trace_analyze"})
 
 __all__ = [
@@ -409,10 +380,7 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     verdict = _as_dict(validate.get("verdict"))
     usable_by = [str(name) for name in _as_list(verdict.get("usable_by"))]
     return {
-        # Carried as two independent axes. A trace can be routable and still
-        # yield a false decode conclusion, so a single grade cannot say which of
-        # the two a given attempt failed -- and the silently-wrong case is
-        # exactly the one where the analysis reports no trouble at all.
+        # Carried as two independent axes.
         "usable_by": usable_by,
         "decode_conclusions_valid": verdict.get("decode_conclusions_valid"),
         "silently_wrong": verdict.get("silently_wrong"),
@@ -432,13 +400,7 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
 
 
 class RooflineEventRecorder:
-    """Records one roofline action's facts into whichever event owns it.
-
-    The recorder holds a sink and a task id and nothing else. It never learns
-    whether it is writing into its own event or into an enclosing one, which is
-    the point: :meth:`close` writes a timeline entry only when the action owns
-    the event, and that is a property of how the recorder was built.
-    """
+    """Records one roofline action's facts into whichever event owns it."""
 
     def __init__(
         self,
@@ -451,27 +413,7 @@ class RooflineEventRecorder:
         params: dict[str, Any] | None = None,
         owns_event: bool = True,
     ):
-        """Bind a recorder to one action inside one event.
-
-        Args:
-            sink (RecordSink): Where the rows go, which decides the event they
-                belong to.
-            task_id (str): The dispatched task id, which separates this action
-                from the others in the same event.
-            task_kind (str): The dispatched task's kind. The executor is also
-                reused by the GEMM shape-capture path, which is not a roofline
-                dispatch, so the action states which one it was rather than
-                leaving a consumer to infer it from an absent reason.
-            reason (str): Dispatch reason (``prelude_initial`` /
-                ``close_post_opt`` / an LLM-proposed reason), which also selects
-                the profiled arm.
-            framework (str): Resolved serving framework.
-            params (dict[str, Any] | None): The task params, read for workspace
-                and arm context.
-            owns_event (bool): Whether this action is the event. An action
-                called inline by a phase that owns a timeline event is not, so
-                it records rows and writes no entry of its own.
-        """
+        """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
         self._start_time = _now_iso()
@@ -480,11 +422,7 @@ class RooflineEventRecorder:
         self._closed = False
         self._substep = SUBSTEP_PROFILE
         params = _as_dict(params)
-        # ``arm`` names the configuration the run measured, which only a roofline
-        # dispatch does. A roofline task may legitimately carry no reason, so the
-        # claim is withheld by kind rather than by an empty reason -- otherwise
-        # shape capture, which reuses this executor with no reason of its own,
-        # would be recorded as having measured current_best.
+        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
         kind = str(task_kind or "")
         arm = (
             ""
@@ -529,13 +467,7 @@ class RooflineEventRecorder:
     # ---- lifecycle -------------------------------------------------------
 
     def begin(self, *, max_profile_attempts: int) -> None:
-        """Record the retry budget and, when this action owns the event, open it.
-
-        Args:
-            max_profile_attempts (int): The profile retry budget, recorded so a
-                run that exhausted it is distinguishable from one that stopped
-                early.
-        """
+        """Record the retry budget and, when this action owns the event, open it."""
         self._record_action({"max_profile_attempts": int(max_profile_attempts)})
         if not self._owns_event:
             return
@@ -561,20 +493,7 @@ class RooflineEventRecorder:
         profile_result: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
     ) -> None:
-        """Record one profile attempt.
-
-        Args:
-            run_index (int): 1-based attempt index within this action.
-            attempt_reason (str): Why this attempt ran (a ``PROFILE_ATTEMPT_*``
-                value).
-            status (str): ``succeeded`` / ``recovered`` / ``failed``.
-            started_at (str): ISO start of the attempt.
-            duration_sec (float | None): Wall-clock seconds the attempt took.
-            disable_cuda_graph (bool): Whether the attempt booted eager.
-            profile_result (dict[str, Any] | None): The attempt's result dict,
-                when it returned one.
-            failure (dict[str, Any] | None): Failure row for a failed attempt.
-        """
+        """Record one profile attempt."""
         result = _as_dict(profile_result)
         self._sink.record(
             SECTION_PROFILE_RUN,
@@ -605,21 +524,7 @@ class RooflineEventRecorder:
         recovered: bool = False,
         params: dict[str, Any] | None = None,
     ) -> None:
-        """Mark one profile attempt as the one the action carried forward.
-
-        Which attempt was adopted is recorded on the action rather than stamped
-        onto the runs, so the flag cannot end up on two of them; assembly reads
-        it back onto the row it names.
-
-        Args:
-            run_index (int): The adopted attempt's index.
-            profile_result (dict[str, Any] | None): The adopted attempt's result
-                dict.
-            recovered (bool): True when the attempt reported a non-success status
-                but still produced a usable trace.
-            params (dict[str, Any] | None): The profile params that produced the
-                adopted trace.
-        """
+        """Mark one profile attempt as the one the action carried forward."""
         result = _as_dict(profile_result)
         self._substep = SUBSTEP_ANALYSIS
         self._record_action(
@@ -659,22 +564,7 @@ class RooflineEventRecorder:
         ta_result: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
     ) -> None:
-        """Record one trace-analysis attempt.
-
-        Args:
-            run_index (int): 1-based attempt index within this action.
-            attempt_reason (str): Why this attempt ran (an ``ANALYSIS_ATTEMPT_*``
-                value).
-            status (str): ``succeeded`` / ``failed``.
-            started_at (str): ISO start of the attempt.
-            duration_sec (float | None): Wall-clock seconds the attempt took.
-            trace_input (str): The trace the attempt analyzed.
-            requested_steady_state_mode (str): Steady-state mode asked of the
-                splitter.
-            ta_result (dict[str, Any] | None): The attempt's result dict, when it
-                returned one.
-            failure (dict[str, Any] | None): Failure row for a failed attempt.
-        """
+        """Record one trace-analysis attempt."""
         result = _as_dict(ta_result)
         meta = _as_dict(result.get("analysis_meta"))
         self._sink.record(
@@ -800,21 +690,10 @@ class RooflineEventRecorder:
         )
 
     def finish_failed(self, *, phase: str, error_class: str = "", message: Any = "") -> None:
-        """Close the action as failed, naming the sub-step that failed.
-
-        Args:
-            phase (str): The failed step, either one of the executor's own exit
-                names (``profile`` / ``profile_no_trace`` /
-                ``profile_capture_only`` / ``profile_zero_ops`` /
-                ``trace_analyze``) or, from the crash path, the in-flight
-                substep (:data:`SUBSTEP_PROFILE` / :data:`SUBSTEP_ANALYSIS`).
-            error_class (str): The failure class the action reported.
-            message (Any): The failure message.
-        """
-        # Matched against the analysis spellings rather than prefixed, because
-        # the crash path passes the in-flight substep itself: ``"analysis"``
-        # does not start with ``"trace_analyze"``, so a crash after the profile
-        # had already been adopted was reported as a profile failure.
+        """Close the action as failed, naming the sub-step that failed."""
+        # Matched against the analysis spellings rather than prefixed, because the crash path passes the in-flight
+        # substep itself: ``"analysis"`` does not start with ``"trace_analyze"``, so a crash after the profile had
+        # already been adopted was reported as a profile failure.
         named = str(phase or "")
         analysis = named in _ANALYSIS_PHASES or named.startswith("trace_analyze")
         self._close(
@@ -882,22 +761,7 @@ def assemble_roofline_action(
     event: str,
     task_id: str,
 ) -> dict[str, Any] | None:
-    """Assemble one roofline action out of its recorded rows.
-
-    Exists as its own entry point because the kernel event needs exactly this:
-    one action, the one its re-profile dispatched, to place under
-    ``forge.reprofile.run``.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The roofline sections as
-            read back from the spool.
-        event (str): The event id whose rows to select.
-        task_id (str): The action to assemble.
-
-    Returns:
-        dict[str, Any] | None: The assembled action, or ``None`` when the event
-            holds no action with that task id.
-    """
+    """Assemble one roofline action out of its recorded rows."""
     actions = assemble_roofline_actions(parts, event=event)
     wanted = str(task_id or "")
     for action in actions:
@@ -911,16 +775,7 @@ def assemble_roofline_actions(
     *,
     event: str,
 ) -> list[dict[str, Any]]:
-    """Assemble every roofline action belonging to one event.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The roofline sections as
-            read back from the spool.
-        event (str): The event id whose rows to select.
-
-    Returns:
-        list[dict[str, Any]]: The actions, ordered by when they started.
-    """
+    """Assemble every roofline action belonging to one event."""
     action_rows = sort_rows(
         rows_for_event(parts.get(SECTION_ACTION) or [], event),
         keys=("start_time", "task_id"),
@@ -1020,16 +875,7 @@ def assemble_roofline_ext(
 
 
 def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> list[dict[str, Any]]:
-    """Stamp ``effective`` onto the one run the action adopted.
-
-    Args:
-        runs (list[dict[str, Any]]): The action's run rows, ordered.
-        effective_index (int | None): The adopted run's index, or ``None`` when
-            the action adopted none.
-
-    Returns:
-        list[dict[str, Any]]: The rows, each with ``effective`` set.
-    """
+    """Stamp ``effective`` onto the one run the action adopted."""
     for run in runs:
         run["effective"] = effective_index is not None and _int_or_none(run.get("run_index")) == effective_index
     return runs
@@ -1045,25 +891,7 @@ def make_roofline_recorder(
     params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
-
-    Roofline behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating -- as does an absent
-    sink, which is what a caller with no session bound has.
-
-    Args:
-        sink (RecordSink | None): Where the rows go, or ``None`` to decline.
-        task_id (str): Dispatched roofline task id.
-        task_kind (str): The dispatched task's kind.
-        reason (str): Dispatch reason.
-        framework (str): Resolved serving framework.
-        params (dict[str, Any] | None): The roofline task params.
-        owns_event (bool): Whether this action owns the event it writes into.
-
-    Returns:
-        RooflineEventRecorder | None: The recorder, or ``None`` when it could
-            not be built.
-    """
+    """Build a recorder, or ``None`` when one cannot be constructed."""
     if sink is None:
         return None
     try:

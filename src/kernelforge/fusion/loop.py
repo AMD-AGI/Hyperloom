@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The recipe loop for forge-fuse: one forge-loop campaign per ranked recipe.
-
-A model often exposes several launch-bound chains, so the ranked recipes from
-``locate.build_recipes`` are tried highest-headroom first, bounded by
-``max_recipes``. The loop early-exits the instant a campaign returns ``kept``.
-
-Repeated authoring belongs to the campaign, not here. What this level owns is
-the memory a single campaign cannot have: on every failed recipe the ledger
-distils a one-line LESSON plus an error SIGNATURE and injects them into the next
-recipe's campaign, rendering a compact "## Known constraints (do NOT repeat)"
-block rather than re-feeding transcripts. It is persisted to
-``<output_dir>/fusion_experience.md``.
-
-The campaign lives behind one injectable callable, so the loop is unit-testable
-without a GPU or the LLM.
-"""
+"""The recipe loop for forge-fuse: one forge-loop campaign per ranked recipe."""
 
 from __future__ import annotations
 
@@ -40,22 +25,14 @@ log = logging.getLogger("forge_fusion")
 
 
 class FusionAbort(Exception):
-    """Abort the whole run from inside a campaign, recording no verdict.
-
-    For a failure the recipe did not cause. Every other exception is charged to
-    the recipe being attempted, which is the right default and the wrong answer
-    when the harness or the workspace is what broke.
-    """
+    """Abort the whole run from inside a campaign, recording no verdict."""
 
 
-# ─────────────────────────── experience ledger ──────────────────────────────
-# Mirrors kernelforge.loop.experience.ExperienceLedger, but with fusion /
-# ROCm-specific constraint rules instead of the forge-loop's FlyDSL rules. Two
-# authors kept separate: OBJECTIVE facts written by the loop (outcome + error
-# signature distilled from the ValidationResult) and a one-line LESSON.
+# ─────────────────────────── experience ledger ────────────────────────────── Mirrors
+# kernelforge.loop.experience.ExperienceLedger, but with fusion / ROCm-specific constraint rules instead of the
+# forge-loop's FlyDSL rules.
 
-# Known error-signature -> crisp, reusable constraint. Extend as new recurring
-# ROCm fusion failure modes are observed.
+# Known error-signature -> crisp, reusable constraint.
 _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
     (
         re.compile(
@@ -139,15 +116,7 @@ class ExperienceEntry:
 
 
 class FusionExperienceLedger:
-    """Per-run experience store injected into each next author attempt's prompt.
-
-    Rendered as::
-
-        ## Known constraints (do NOT repeat these mistakes)   <- distilled, deduped
-        ## Recent attempts                                    <- last K compact entries
-
-    and flushed to ``<output_dir>/fusion_experience.md`` (best-effort).
-    """
+    """Per-run experience store injected into each next author attempt's prompt."""
 
     def __init__(
         self,
@@ -253,8 +222,7 @@ class LoopIteration:
     max_abs_err: Optional[float]
     note: str
     lesson: str = ""
-    # The forge-loop run behind this attempt. Its session log, evidence bundle
-    # and KB record are all addressed by it.
+    # The forge-loop run behind this attempt.
     experiment_id: str = ""
 
     def to_dict(self) -> dict:
@@ -275,33 +243,7 @@ class LoopIteration:
 
 @dataclass(frozen=True)
 class RecipePatch:
-    """One kept recipe's independently-emitted patch (a nomination sibling).
-
-    The fusion lane used to collapse every kept recipe into a single combined
-    patch and stop at the first keeper. Under the nomination contract each kept
-    recipe instead becomes its OWN patch: siblings share nothing but the round
-    they came from, so they can be applied / re-benched / KEPT-or-REVERTED
-    independently. Two siblings that overwrite the *same* ``source_file`` cannot
-    both land -- that collapse is the landing queue's job, not this loop's -- so
-    every field here is per-recipe and carries no cross-sibling state.
-
-    Attributes:
-        kernel_name: The kept recipe's ``pattern_id``; the nomination key, unique
-            within a round.
-        patch_path: Path to this recipe's exported patch file.
-        source_file: The model source file this patch overwrites; the same-source
-            dedup key read by the landing queue.
-        micro_speedup: The recipe's measured kernel speedup, used as the
-            strongest-first tiebreak when siblings collide on ``source_file``.
-        snapshot_dir: Where the recipe's authored tree was snapshotted, if any.
-        base_commit: The pristine base the patch applies onto, if recorded.
-        env_flag: The space-joined env flag(s) that gate this fused path. An
-            authored fusion is env-gated -- with the flag UNSET the patched code
-            stays bit-for-bit the original eager path -- so the flag MUST travel
-            with the patch to the e2e re-baseline, or integrate measures the
-            un-fused path and REVERTs a real win. A self-activating compile-pass
-            sibling carries "" (it flips a default in source, no runtime flag).
-    """
+    """One kept recipe's independently-emitted patch (a nomination sibling)."""
 
     kernel_name: str
     patch_path: str
@@ -322,9 +264,7 @@ class LoopResult:
     history: list[LoopIteration] = field(default_factory=list)
     experience_path: Optional[str] = None
     termination_reason: str = ""
-    # One patch per kept recipe, strongest first. Empty on the combine path (a
-    # single combined patch is reported through ``best``/``best_recipe``) and on a
-    # run that kept nothing.
+    # One patch per kept recipe, strongest first.
     patches: list["RecipePatch"] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -347,14 +287,13 @@ class LoopResult:
         }
 
 
-# Injectable callable signature (documented for callers / tests).
-# (recipe, experience) -> the campaign's verdict for that recipe.
+# Injectable callable signature (documented for callers / tests). (recipe, experience) -> the campaign's verdict for
+# that recipe.
 CampaignFn = Callable[[Recipe, str], ValidationResult]
 
-# Per-keeper export hook (documented for callers / tests).
-# (kept recipe, its verdict) -> the sibling patch that recipe emitted, or None
-# when the caller could not export one (which drops that keeper from patches[]
-# without aborting the loop).
+# Per-keeper export hook (documented for callers / tests). (kept recipe, its verdict) -> the sibling patch that recipe
+# emitted, or None when the caller could not export one (which drops that keeper from patches[] without aborting the
+# loop).
 OnKeepFn = Callable[[Recipe, ValidationResult], Optional[RecipePatch]]
 
 
@@ -371,11 +310,7 @@ def _outcome_label(vr: ValidationResult) -> str:
 
 
 def _default_lesson(vr: ValidationResult) -> str:
-    """Synthesize a one-line LESSON from a failed/weak validation result.
-
-    Used when the author does not hand back its own lesson; the ledger's
-    ``_distill`` also derives reusable constraints from the same note text.
-    """
+    """Synthesize a one-line LESSON from a failed/weak validation result."""
     note = vr.note or ""
     marker = note.split("LESSON:", 1)
     if len(marker) == 2:
@@ -391,10 +326,7 @@ def _default_lesson(vr: ValidationResult) -> str:
 
 
 def _is_better_fallback(cand: ValidationResult, best: Optional[ValidationResult]) -> bool:
-    """Rank non-kept results so the loop can still report its best near-miss.
-
-    Prefer correctness, then a higher measured speedup, then any measured speedup.
-    """
+    """Rank non-kept results so the loop can still report its best near-miss."""
     if best is None:
         return True
     if cand.correctness_passed != best.correctness_passed:
@@ -413,42 +345,7 @@ def run_fusion_loop(
     ledger: Optional[FusionExperienceLedger] = None,
     on_keep: Optional[OnKeepFn] = None,
 ) -> LoopResult:
-    """Try each ranked recipe as one forge-loop campaign, best first.
-
-    The repeated author-validate work happens inside the campaign: the forge-loop
-    iterates, scores against the pristine anchor, and commits or reverts. What
-    remains here is the choice of which chain to attempt and the memory of what
-    the earlier chains taught, which no single campaign can see.
-
-    Under the nomination contract the loop no longer stops at the first keeper:
-    every kept recipe is a separate sibling patch, so the loop runs the full
-    ``max_recipes`` budget and, for each keeper, asks ``on_keep`` to export that
-    recipe's own patch. The keepers are collected into :attr:`LoopResult.patches`
-    strongest-first. Whether two same-file siblings can both land is decided
-    downstream by the landing queue, not here. When ``on_keep`` is omitted the
-    loop still runs to exhaustion and reports keepers through ``best`` /
-    ``best_recipe`` -- the single-combined-patch (combine) callers rely on that.
-
-    Args:
-        recipes: Ranked recipes from ``locate.build_recipes`` (highest headroom
-            first). Only the first ``config.max_recipes`` are attempted.
-        framework: Target framework (``sglang`` / ``vllm`` / ...), recorded for
-            symmetry with the CLI wiring.
-        campaign_fn: ``(recipe, experience) -> ValidationResult``. Runs one
-            campaign and returns its verdict; injectable so tests need no GPU.
-        config: Loop tunables (recipe bound, target speedup).
-        ledger: Experience ledger; created from ``config.output_dir`` if omitted.
-        on_keep: Optional per-keeper export hook. Called once for each kept recipe
-            with ``(recipe, verdict)``; its returned :class:`RecipePatch` is
-            appended to :attr:`LoopResult.patches`. Returning ``None`` drops that
-            keeper from ``patches`` without aborting the loop.
-
-    Returns:
-        A :class:`LoopResult` whose ``kept`` is True if ANY recipe was kept, whose
-        ``best``/``best_recipe`` is the strongest keeper (or best near-miss when
-        none kept), whose ``patches`` holds one sibling per keeper strongest-first,
-        plus the per-recipe ``history`` and the on-disk experience ledger path.
-    """
+    """Try each ranked recipe as one forge-loop campaign, best first."""
     cfg = config or LoopConfig()
     ledger = ledger or FusionExperienceLedger(cfg.output_dir)
 
@@ -457,8 +354,7 @@ def run_fusion_loop(
     best_recipe: Optional[Recipe] = None
     global_best_speedup: Optional[float] = None
     kept_any = False
-    # Keepers accumulate as (speedup-key, patch) so they can be ordered
-    # strongest-first once the whole budget has run.
+    # Keepers accumulate as (speedup-key, patch) so they can be ordered strongest-first once the whole budget has run.
     kept_patches: list[tuple[float, RecipePatch]] = []
 
     considered = [r for r in recipes if not getattr(r, "already_satisfied", False)]
@@ -493,11 +389,9 @@ def run_fusion_loop(
                 note=f"CAMPAIGN FAILED: {type(e).__name__}: {e}",
             )
 
-        # Export + gate the keeper BEFORE recording it, so a hook that demotes the
-        # sibling (e.g. a serving-smoke crash) is reflected in ``history`` and in
-        # the ``best``/``kept_any`` decisions below rather than leaving stale KEEP
-        # state. ``on_keep`` may mutate ``vr`` (flip ``kept`` off, clear speedup)
-        # and returns the exported patch, or None when the sibling is dropped.
+        # Export + gate the keeper BEFORE recording it, so a hook that demotes the sibling (e.g. a serving-smoke
+        # crash) is reflected in ``history`` and in the ``best``/``kept_any`` decisions below rather than leaving
+        # stale KEEP state.
         patch: Optional[RecipePatch] = None
         if vr.kept and on_keep is not None:
             patch = on_keep(recipe, vr)
@@ -526,20 +420,19 @@ def run_fusion_loop(
         if vr.kept:
             kept_any = True
             log.info("fusion loop KEPT at %s: speedup=%s", label, vr.kernel_speedup)
-            # The strongest keeper is also the loop's reported best, so
-            # combine-path callers (which ignore patches[]) still see it.
+            # The strongest keeper is also the loop's reported best, so combine-path callers (which ignore patches[])
+            # still see it.
             if _is_better_fallback(vr, best_result):
                 best_result, best_recipe = vr, recipe
             if patch is not None:
-                # None speedup sorts weakest so a measured keeper always
-                # outranks an unmeasured one.
+                # None speedup sorts weakest so a measured keeper always outranks an unmeasured one.
                 sort_key = vr.kernel_speedup if vr.kernel_speedup is not None else -1.0
                 kept_patches.append((sort_key, patch))
             # Do NOT early-exit: the remaining recipes are independent siblings.
             continue
 
-        # A near-miss only becomes the reported best while nothing has been kept;
-        # once any keeper exists it owns ``best``/``best_recipe``.
+        # A near-miss only becomes the reported best while nothing has been kept; once any keeper exists it owns
+        # ``best``/``best_recipe``.
         if not kept_any and _is_better_fallback(vr, best_result):
             best_result, best_recipe = vr, recipe
 

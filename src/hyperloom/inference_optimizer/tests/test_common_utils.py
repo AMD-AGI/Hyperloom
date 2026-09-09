@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Consolidated sole-cover unit tests for common/utility modules.
-
-Tests here cover: common.env, common.io, common.gain_math, common.llm_config,
-inference_optimizer credentials, breakdown reporters, orchestrator kb_writeback,
-orchestrator retry/backoff, orchestrator actions, orchestrator dispatcher,
-orchestrator state/objective, multi-node state paths, framework agent helpers,
-gpu_types, and CLI multi-node utilities.
-
-Nearly every case here is still duplicated in the coverage-padding files this
-one was consolidated from, all of which remain on disk:
-  test_coverage_boost_unit.py, test_coverage_boost2_unit.py,
-  test_coverage_gap_units.py, test_coverage_margin3_unit.py,
-  test_coverage_margin_unit.py.
-"""
+"""Consolidated sole-cover unit tests for common/utility modules."""
 
 from __future__ import annotations
 
@@ -29,9 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 
-# ---------------------------------------------------------------------------
 # Shared test helpers
-# ---------------------------------------------------------------------------
 
 
 class _Completed:
@@ -80,9 +65,7 @@ class _JsonResponse:
         return self._raw
 
 
-# ---------------------------------------------------------------------------
 # common.env
-# ---------------------------------------------------------------------------
 
 
 def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,9 +96,7 @@ def test_env_float_invalid_returns_default(monkeypatch: pytest.MonkeyPatch) -> N
     assert env_float("HL_BAD_FLOAT", 3.5) == 3.5
 
 
-# ---------------------------------------------------------------------------
 # common.io
-# ---------------------------------------------------------------------------
 
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,9 +138,7 @@ def test_common_io_bytes_and_safe_mtime_edges(monkeypatch: pytest.MonkeyPatch, t
     assert not list(tmp_path.glob(".will_fail.bin.*.tmp"))
 
 
-# ---------------------------------------------------------------------------
 # common.gain_math
-# ---------------------------------------------------------------------------
 
 
 def test_gain_math_branches() -> None:
@@ -176,9 +155,7 @@ def test_gain_math_branches() -> None:
     assert gain_math.incremental_gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
 
-# ---------------------------------------------------------------------------
 # common.llm_config
-# ---------------------------------------------------------------------------
 
 
 def test_llm_config_parse_and_derive_edges() -> None:
@@ -216,9 +193,7 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert claude_sdk_env_options(env={}) == {}
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.cli.credentials
-# ---------------------------------------------------------------------------
 
 
 def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,20 +221,13 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
 
 
 def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """primaryApiKey is API-credits billing; with only a subscription token there
-    is no key to write, so the installers' no-op behaviour applies here too.
-
-    Path.home() is patched rather than HOME: the function returns before ever
-    resolving a home directory here, so an assertion that the file is absent
-    would hold even if the environment override had done nothing at all.
-    """
+    """primaryApiKey is API-credits billing; with only a subscription token there is no key to write, so the installers' no-op behaviour applies here too."""
     from hyperloom.inference_optimizer.cli import credentials
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
-    # Pre-seeded so "left alone" is observable rather than indistinguishable
-    # from "was never going to be written".
+    # Pre-seeded so "left alone" is observable rather than indistinguishable from "was never going to be written".
     cfg_path = tmp_path / ".claude" / "config.json"
     cfg_path.parent.mkdir(parents=True)
     cfg_path.write_text('{"customApiUrl": "https://operator.example"}\n', encoding="utf-8")
@@ -272,15 +240,7 @@ def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, mo
 def test_reset_claude_config_refuses_a_token_that_also_sits_in_the_key_var(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one shape where this guard is the only thing standing in the way.
-
-    An operator who exports the same subscription token into both variables
-    makes anthropic_synthesizable_key() return it, so preflight hands it in as
-    the primary key and the subscription-mode check below sees a synthesizable
-    key and declines to fire. Without this guard the token is persisted into
-    ~/.claude/config.json, which both leaks it to disk and moves the run onto
-    API billing.
-    """
+    """The one shape where this guard is the only thing standing in the way."""
     from hyperloom.inference_optimizer.cli import credentials
 
     token = "sk-ant-oat01-same"
@@ -315,9 +275,7 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
     assert payload == {"theme": "light", "oauthAccount": {"emailAddress": "a@b.c"}}
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.cli.recover
-# ---------------------------------------------------------------------------
 
 
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,9 +406,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     assert rebuilt == [session]
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.cli.multi_node / multi_node commands
-# ---------------------------------------------------------------------------
 
 
 def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -551,12 +507,7 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The RayJob launch must ship per-round env to every rank via runtime_env.
-
-    A shell export in the entrypoint reaches no rank (each rank is a Ray actor
-    inheriting the pod env), so an omitted runtime_env silently drops knobs like
-    SGLANG_USE_AITER=0 that the prompt asked for.
-    """
+    """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
@@ -1074,9 +1025,7 @@ def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypa
     mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
 
 
-# ---------------------------------------------------------------------------
 # agents.framework helpers
-# ---------------------------------------------------------------------------
 
 
 def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1218,9 +1167,7 @@ def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(gbrain.build_gbrain_page_client_from_env(), gbrain.GbrainPageClient)
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.knowledge.kb_writeback
-# ---------------------------------------------------------------------------
 
 
 def test_kb_writeback_default_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1253,9 +1200,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.roles.base — retry / backoff
-# ---------------------------------------------------------------------------
 
 
 def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1308,9 +1253,7 @@ async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
     assert slept == [0.0]
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.roles._runtime_bridge
-# ---------------------------------------------------------------------------
 
 
 def test_runtime_bridge_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1359,9 +1302,7 @@ def test_runtime_bridge_not_found_and_nonzero(monkeypatch: pytest.MonkeyPatch, t
         rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.state.objective
-# ---------------------------------------------------------------------------
 
 
 def test_tput_objective_progress_zero() -> None:
@@ -1386,9 +1327,7 @@ def test_baseline_objective_progress_zero_ref(tmp_path: Path) -> None:
     assert obj.progress(state) == 0.0
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.phases.quantization_schemes — quantization prompt
-# ---------------------------------------------------------------------------
 
 
 def test_quantization_join_and_prompt() -> None:
@@ -1404,9 +1343,7 @@ def test_quantization_join_and_prompt() -> None:
     assert "Quantization strategy" in prompt
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.actions.executors._file_lock
-# ---------------------------------------------------------------------------
 
 
 def test_file_lock_no_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1427,9 +1364,7 @@ def test_file_lock_no_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert ran
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.actions.executors._framework_gap_composer
-# ---------------------------------------------------------------------------
 
 
 def test_framework_gap_bottleneck(tmp_path: Path) -> None:
@@ -1447,9 +1382,7 @@ def test_framework_gap_bottleneck(tmp_path: Path) -> None:
     assert gc._extract_bottleneck_from_breakdown(str(tmp_path / "missing.json")) == ""
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.protocol.intent
-# ---------------------------------------------------------------------------
 
 
 def test_validate_envelope_structural_errors() -> None:
@@ -1486,9 +1419,7 @@ def test_validate_envelope_review_verdict_map_keys() -> None:
         validate_envelope(bad)
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.session.paths
-# ---------------------------------------------------------------------------
 
 
 def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1503,9 +1434,7 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.workspace_root() == tmp_path / "does_not_exist"
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.loop.dispatcher
-# ---------------------------------------------------------------------------
 
 
 def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
@@ -1571,9 +1500,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyP
     assert "could not schedule" in disp._run_action_now_sync("probe", {})
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.multi_node.state_paths
-# ---------------------------------------------------------------------------
 
 
 def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1631,9 +1558,7 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch: pytest.
     assert "could not chmod runtime dir" in messages[-1]
 
 
-# ---------------------------------------------------------------------------
 # inference_optimizer.gpu_types
-# ---------------------------------------------------------------------------
 
 
 def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1666,9 +1591,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
-# ---------------------------------------------------------------------------
 # breakdown.recorder.section_shape / breakdown.reporters
-# ---------------------------------------------------------------------------
 
 
 def test_section_shape_unknown_is_none() -> None:
@@ -1716,9 +1639,7 @@ def test_llm_prompt_parse_response_edges() -> None:
     assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.specialists.profile
-# ---------------------------------------------------------------------------
 
 
 def test_coerce_bool_and_infer_scope() -> None:
@@ -1733,9 +1654,7 @@ def test_coerce_bool_and_infer_scope() -> None:
     assert profile.scope == sp.SCOPE_FREEFORM
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.actions.executors._accuracy_gate
-# ---------------------------------------------------------------------------
 
 
 def test_parse_quality_gate_paths(tmp_path: Path) -> None:
@@ -1757,9 +1676,7 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.trace.trace_env
-# ---------------------------------------------------------------------------
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1775,9 +1692,7 @@ def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
-# ---------------------------------------------------------------------------
 # orchestrator.bus.gpu_pool._parse_gpu_list
-# ---------------------------------------------------------------------------
 
 
 def test_parse_gpu_list() -> None:

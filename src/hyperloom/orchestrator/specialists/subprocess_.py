@@ -51,6 +51,7 @@ from hyperloom.common.env_safety import (
     scrub_child_process_env,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
@@ -194,15 +195,17 @@ _CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
     {
         *_SPECIALIST_ENV_ALLOWLIST,
         *_SPECIALIST_SECRET_ENV_ALLOWLIST,
+        # Every mask spelling, not the three canonical ones: the reason a mask
+        # is reserved is that setting it re-pins the specialist's cards, and a
+        # guard that names only the modern spellings is bypassed by the legacy
+        # ones it honours just as well.
+        *GPU_MASK_ENV_NAMES,
         "API_TIMEOUT_MS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "CODEX_HOME",
-        "CUDA_VISIBLE_DEVICES",
         "DISABLE_AUTOUPDATER",
-        "HIP_VISIBLE_DEVICES",
         "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS",
         "IS_SANDBOX",
-        "ROCR_VISIBLE_DEVICES",
     }
 )
 
@@ -660,14 +663,11 @@ def _pick_worktree_base(
     """Return the checkout to branch the specialist's worktree off.
 
     ``preferred`` wins whenever it is a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: that is the
-    source-file *allowlist*, a permission set whose order says nothing about the
-    session. Selecting by position worked only while exactly one trusted root
-    happened to be a git checkout. When a pod started shipping aiter as one it
-    sorted first, so WorldPlay specialists were handed an aiter worktree; the
-    patches they wrote against ``hyvideo/`` paths could not be grounded against
-    it and patch-safety dropped every one as ``missing_target``, leaving the
-    session to bench switches with no code behind them.
+    session is actually optimising, which ``roots`` cannot express: their order
+    records only how they were discovered. Selecting by position worked while
+    exactly one root happened to be a git checkout; when a pod started shipping
+    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
+    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
 
     Falls back to None when nothing qualifies — the runner then runs the
     specialist without an isolated worktree.
@@ -970,7 +970,7 @@ class SpecialistSubprocessDispatcher:
             # override Ray's card assignment). ``gpu_ids`` here is the logical
             # 0..N-1 view the specialist sees under Ray's mask — kept only as the
             # informational count env for specialist tooling.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
             if gpu_ids:
                 env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in gpu_ids)
@@ -982,7 +982,7 @@ class SpecialistSubprocessDispatcher:
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
             # CPU specialists must not inherit serving GPU visibility.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
 
         log_fh: Any = None
@@ -1205,7 +1205,8 @@ class SpecialistSubprocessDispatcher:
         """Return the dirs an agent CLI may write, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands), then each distinct framework source root.
+        ``specialist_done.json`` lands). The framework source trees are absent:
+        ``integrate_patch`` is their only writer. Reads are unaffected.
 
         Args:
             workspace (Path): Task workspace.
@@ -1218,9 +1219,6 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
-        for root in self.config.framework_source_roots:
-            if root and Path(root).is_dir() and root not in dirs:
-                dirs.append(root)
         return dirs
 
     def _build_codex_launch(
@@ -1720,10 +1718,9 @@ class SpecialistSubprocessDispatcher:
             for k, v in inner.items():
                 merged[k] = v
             log.info(
-                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d, empty=%s)",
+                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d)",
                 done_file,
                 len(inner.get("proposal_set") or []) if isinstance(inner.get("proposal_set"), list) else 0,
-                inner.get("empty"),
             )
             return merged
         return data

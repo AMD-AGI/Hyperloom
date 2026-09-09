@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session wall-clock budget defences that live in the orchestrator loop.
-
-Three of the defences are here, the ones outside the executors:
-
-* Admission -- an action whose expected cost cannot fit the budget that is left
-  never starts. Covers the pure fit decision, the SharedState accessor both it
-  and the grid deadline read, the dispatcher gate, the three intent paths that
-  share it, and the pre-dispatch backstop for a task that sat queued until its
-  budget drained.
-* In-flight cancellation -- the backstop for work already running when the
-  budget goes or the process is asked to stop. Covers the handles the dispatcher
-  keeps, the cancellation itself, the closing-action carve-out, the task row
-  landing terminal instead of stranding at ``running``, which of those handles
-  the pump owns on its way out, and the pump and ``Coordinator.stop`` paths that
-  trigger it.
-* Tick bound -- a reactor turn or phase-enter await that never returns is
-  cancelled when the session (or closing) bound elapses, so the tick can still
-  reach the wall-clock stop.
-
-The remaining two layers are enforced inside the executors and tested next to
-them: the timeout clamp in ``test_explore_executor``, and the subprocess session
-reaper in ``test_kill_spawned_server``.
-"""
+"""The session wall-clock budget defences that live in the orchestrator loop."""
 
 from __future__ import annotations
 
@@ -73,8 +51,8 @@ _EXPENSIVE_ACTION = "conc_sweep"
 _EXPENSIVE_COST_MIN = 30.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
-# An action the catalogue prices at five minutes, and what one of the two
-# sessions that motivated the wall-clock work actually measured for it.
+# An action the catalogue prices at five minutes, and what one of the two sessions that motivated the wall-clock work
+# actually measured for it.
 _BASELINE_ACTION = "baseline"
 _MEASURED_BASELINE_SEC = 51 * 60.0
 
@@ -124,22 +102,13 @@ class TestTheCostTheGateJudgesOn:
         assert expected_action_cost_minutes(None) == 0.0
 
     def test_no_catalogued_action_reads_as_free(self):
-        """A zero cost admits an action on any budget, so a whole catalogue of
-        them is an admission gate that is not there — which is what reading a
-        renamed field through a ``getattr`` default silently produced."""
+        """A zero cost admits an action on any budget, so a whole catalogue of them is an admission gate that is not there — which is what reading a renamed field through a ``getattr`` default silently produced."""
         free = sorted(name for name, meta in ACTION_CATALOGUE.items() if expected_action_cost_minutes(meta) <= 0.0)
         assert free == []
 
 
 class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
-    """The catalogue prices a baseline at five minutes; the field runs it in 51.
-
-    Those estimates are calibrated on small models, so a gate anchored on them
-    admits arms a real model cannot pay for -- it would not have stopped either
-    of the two sessions that motivated the wall-clock work. PRELUDE's
-    affordability gate already anchors on the session's own baseline round;
-    admission now reads the same number through the same helper.
-    """
+    """The catalogue prices a baseline at five minutes; the field runs it in 51."""
 
     def test_a_measured_round_outprices_the_catalogue_for_an_action_that_benches(self):
         cost = expected_action_cost_minutes(
@@ -149,8 +118,7 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         assert cost == pytest.approx(51.0)
 
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
-        """The measurement is a floor, not a replacement: only the catalogue
-        knows an action benches a whole grid rather than a single variant."""
+        """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
             ACTION_CATALOGUE[_EXPENSIVE_ACTION],
             measured_baseline_sec=10 * 60.0,
@@ -169,16 +137,7 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         assert expected_action_cost_minutes(ACTION_CATALOGUE["baseline"]) == pytest.approx(5.0)
 
     def test_a_warm_replay_is_priced_as_the_baseline_round_it_is(self):
-        """Warm replay is not a cheap re-attach to a server that is already hot.
-
-        ``replay_warm_recipe`` is dispatched to ``BaselineExecutor`` with the
-        recipe's ``extra_server_args``/``extra_envs``/``patches``, so it boots
-        its own server and runs the same benchmark the baseline ran; the recipe
-        changes what is measured, not how long measuring takes. Being refused
-        near the tail on a 51-minute price is therefore the gate working, not
-        the gate being timid — and if warm replay ever does learn to re-attach,
-        this is where the price stops being right.
-        """
+        """Warm replay is not a cheap re-attach to a server that is already hot."""
         cost = expected_action_cost_minutes(
             ACTION_CATALOGUE["replay_warm_recipe"],
             measured_baseline_sec=_MEASURED_BASELINE_SEC,
@@ -212,11 +171,7 @@ class TestFitDecision:
         assert not action_fits_time_budget(usable_sec=30 * 60.0 - 1, expected_cost_minutes=30.0)
 
     def test_the_expected_cost_is_the_anchor_not_the_p75_backstop(self):
-        """A 90-minute budget admits a 60/120 action: the tail is not the bar.
-
-        Judging fit on p75 would refuse work that finishes in the budget half the
-        time, abandoning usable minutes. The session reaper handles the overruns.
-        """
+        """A 90-minute budget admits a 60/120 action: the tail is not the bar."""
         assert action_fits_time_budget(usable_sec=90 * 60.0, expected_cost_minutes=60.0)
         assert not action_fits_time_budget(usable_sec=90 * 60.0, expected_cost_minutes=120.0)
 
@@ -246,13 +201,7 @@ class TestUsableBudgetAccessor:
 
 
 class TestTheReserveIsTheClosingGraceWindow:
-    """The budget held back must be the budget the CLOSE phase actually gets.
-
-    A fixed 120s reserve was only ever right for sessions of at least 100
-    minutes: a shorter one was charged more than its closing phase can spend,
-    and an operator who passed ``--closing-grace-sec 0`` to disable that phase
-    paid 120 seconds for work that never runs.
-    """
+    """The budget held back must be the budget the CLOSE phase actually gets."""
 
     @pytest.mark.parametrize(
         ("minutes", "closing_grace_sec", "expected"),
@@ -345,8 +294,7 @@ class TestTimeBudgetGate:
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_this_session_s_own_baseline_changes_the_answer(self, coord: Coordinator):
-        """Half an hour left admits a baseline the catalogue prices at five
-        minutes -- until this session has measured one and knows better."""
+        """Half an hour left admits a baseline the catalogue prices at five minutes -- until this session has measured one and knows better."""
         _set_budget(coord, minutes=30)
         assert coord._time_budget_denial_for_action(_BASELINE_ACTION) is None
 
@@ -529,11 +477,7 @@ class TestPreDispatchBackstop:
         self,
         coord: Coordinator,
     ):
-        """The kind the pump does not join is still subject to the budget gate.
-
-        It is exempt from being *joined*, not from admission: a compile started
-        against a spent budget runs on past the session it was charged to.
-        """
+        """The kind the pump does not join is still subject to the budget gate."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
             kind="targeted_build",
@@ -625,8 +569,7 @@ class TestPreDispatchBackstop:
         assert coord.shared_state.last_conc_sweep["status"] == "succeeded"
 
 
-# One of the closing actions, exempt from the budget because the closing reserve
-# is held back so it can run.
+# One of the closing actions, exempt from the budget because the closing reserve is held back so it can run.
 _CLOSING_ACTION = "report"
 # The lane ``_CHEAP_ACTION`` holds while it runs, so a leak is observable.
 _CHEAP_ACTION_LANE = "profile_lane"
@@ -685,11 +628,7 @@ async def _start_action_under_pump(
     kind: str,
     key: str,
 ) -> tuple[Task, asyncio.Task, asyncio.Task]:
-    """Let a running pump dispatch the action, the way a tick does.
-
-    Returns ``(task, action task, pump task)``. The pump owns what it spawned,
-    so the triggers can only be tested against a pump that spawned the work.
-    """
+    """Let a running pump dispatch the action, the way a tick does."""
     task, started = await _queue_action(coord, kind=kind, key=key)
     pump = asyncio.create_task(coord._pump_dispatcher_once())
     await asyncio.wait_for(started.wait(), timeout=5.0)
@@ -780,19 +719,13 @@ class TestCancellingInflightActions:
         assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 0
 
 
-# Long enough that a round which ran to completion is unmistakable in the
-# elapsed time, short enough that an abandoned thread cannot outlive the suite.
+# Long enough that a round which ran to completion is unmistakable in the elapsed time, short enough that an abandoned
+# thread cannot outlive the suite.
 _BLOCKING_SEC = 30
 
 
 def _blocks_in_a_thread(started: asyncio.Event, *, outcome: dict[str, Any]):
-    """Build an executor shaped like every benchmark one: a subprocess in a thread.
-
-    ``asyncio.to_thread`` is where all of them spend their time, and a thread
-    that has started cannot be cancelled, so this is the shape the last defence
-    actually has to stop. ``outcome`` is written after the thread returns, which
-    is what makes "the work is over" observable rather than inferred.
-    """
+    """Build an executor shaped like every benchmark one: a subprocess in a thread."""
 
     async def _run(_ctx) -> dict:
         started.set()
@@ -819,24 +752,11 @@ def _sleeps_in_a_thread(started: asyncio.Event, *, seconds: float = 2.0):
 
 
 class TestTheCooperativeStopWindowsCompose:
-    """Three waits on the same stop, which only mean anything together.
-
-    Each was picked to look reasonable beside the others -- ten seconds at the
-    dispatcher, eight for a round in a Ray actor, five for the SIGTERM grace --
-    and composed they said the dispatcher gives up before the work it is waiting
-    for can finish. A window a hair short of what stopping costs does not expire
-    occasionally: it expires every time, and what it discards is the attributed
-    sentinel the round was about to return.
-
-    The components are spelled out here rather than re-derived from the constants
-    under test, so a change to one of them has to be argued for -- and the sum is
-    spelled out too, so a serial step the unwind takes and no term covers has to
-    be argued for as well, rather than quietly making the window short again.
-    """
+    """Three waits on the same stop, which only mean anything together."""
 
     def test_the_reap_budget_is_what_stopping_a_round_costs(self):
-        # Notice at the 0.5s poll, SIGTERM and wait out the 5s grace, collect the
-        # SIGKILL'd child for 1s, drain its pipes for 2s.
+        # Notice at the 0.5s poll, SIGTERM and wait out the 5s grace, collect the SIGKILL'd child for 1s, drain its
+        # pipes for 2s.
         assert COOPERATIVE_REAP_BUDGET_SEC == 0.5 + 5.0 + 1.0 + 2.0
 
     def test_the_ray_grace_outlasts_a_round_stopping_itself(self):
@@ -844,37 +764,20 @@ class TestTheCooperativeStopWindowsCompose:
         assert CANCEL_ROUND_GRACE_SEC >= COOPERATIVE_REAP_BUDGET_SEC
 
     def test_the_dispatcher_outlasts_the_slowest_honest_stop(self):
-        # The Ray path is the long one: 8.5s for the round to stop itself, 0.25s
-        # for the answer to be seen, then up to 10s to release the lease it held.
+        # The Ray path is the long one: 8.5s for the round to stop itself, 0.25s for the answer to be seen, then up to
+        # 10s to release the lease it held.
         assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 10.0
 
     def test_reaping_a_server_and_dropping_its_lease_are_both_paid(self):
-        """The two release waits are a sequence, so the window has to cover both.
-
-        A Ray round's unwind reaps the server it left behind and only then closes
-        the lease it ran in -- that order is a requirement, not an accident, so no
-        GPU process outlives the lease. Taking the longer of the two leaves the
-        window five seconds short of what that unwind costs, which is the same
-        shortfall these windows were derived to remove.
-        """
+        """The two release waits are a sequence, so the window has to cover both."""
         assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
 
     def test_the_window_is_exactly_the_terms_it_names(self):
-        """An upper bound, so a term the unwind pays and the sum omits is a bug.
-
-        Spelled as a total and not only as a floor: a fifth serial step was found
-        in the unwind that no term covered, and a floor would have gone on passing
-        while the sum stayed short of what stopping costs.
-        """
+        """An upper bound, so a term the unwind pays and the sum omits is a bug."""
         assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
 
     def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
-        """The unwind's steps read the scope, not a returncode.
-
-        A cooperative stop returns its sentinel rather than raising, so a step
-        can be reached on the ordinary path with the cancel already outstanding
-        and has to ask.
-        """
+        """The unwind's steps read the scope, not a returncode."""
         scope = CancelScope()
         with use_cancel_scope(scope):
             assert not stop_was_asked_for()
@@ -924,13 +827,7 @@ class TestTheCancelChannel:
 
 
 class TestCancellingWorkThatBlocksInAThread:
-    """Cancelling the coroutine does not stop the thread it is waiting on.
-
-    The canceller gets a clean ``CancelledError`` off the ``await`` while the
-    subprocess runs on to its own hard timeout, so the lanes and the GPU lease
-    are released, and the database closed, with the benchmark still holding the
-    card. Stopping it takes a channel the thread itself checks.
-    """
+    """Cancelling the coroutine does not stop the thread it is waiting on."""
 
     @pytest.mark.asyncio
     async def test_the_work_is_over_before_the_cancel_returns(self, coord: Coordinator):
@@ -966,11 +863,7 @@ class TestCancellingWorkThatBlocksInAThread:
 
     @pytest.mark.asyncio
     async def test_a_thread_with_nothing_listening_is_still_not_waited_for(self, coord: Coordinator):
-        """The channel is cooperative, so work that cannot hear it is left behind.
-
-        Waiting on it anyway would trade a leaked thread for a shutdown that
-        hangs on one, which is the worse of the two.
-        """
+        """The channel is cooperative, so work that cannot hear it is left behind."""
         _task, atask = await _start_action(
             coord,
             kind=_CHEAP_ACTION,
@@ -986,11 +879,7 @@ class TestCancellingWorkThatBlocksInAThread:
 
 
 def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any], lease: Any):
-    """An executor shaped like the production default: a round inside a Ray lease.
-
-    ``_should_use_ray_backend`` is off under pytest and on by default on a single
-    node, so this is the branch every real run takes and no test did.
-    """
+    """An executor shaped like the production default: a round inside a Ray lease."""
 
     async def _run(_ctx) -> dict:
         started.set()
@@ -1006,12 +895,7 @@ def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any],
 
 
 class TestCancellingARoundInsideARayLease:
-    """The production default routes rounds through a Ray actor, not a local child.
-
-    The scope is a ContextVar, so it does not exist in the actor's process: the
-    lease has to notice the cancel on this side and forward it, or the four-layer
-    defence has no reach at all on the path every real single-node run takes.
-    """
+    """The production default routes rounds through a Ray actor, not a local child."""
 
     @pytest.fixture
     def lease(self, serving_lease_on_a_ray_double: Any) -> Any:
@@ -1244,13 +1128,7 @@ class TestInlineActionsAreReachableToo:
 
 
 class TestThePumpOnlyCancelsWhatItSpawned:
-    """The registry is dispatcher-wide; the pump's exit sweep is not.
-
-    An inline action is registered by whoever ran it, not by the pump, and is
-    designed to keep going after that caller stops waiting. A tick with nothing
-    queued returns immediately, so an exit sweep over the whole registry would
-    make the emptiest possible pump the thing that kills it.
-    """
+    """The registry is dispatcher-wide; the pump's exit sweep is not."""
 
     @pytest.mark.asyncio
     async def test_a_tick_with_nothing_queued_leaves_an_inline_action_running(
@@ -1404,13 +1282,7 @@ class TestATickCannotOutliveTheSessionBound:
 
 
 class TestThePersistedDeadlineIsTheLoopDeadline:
-    """Coordinator.run must not reissue a full max_minutes on a spent session.
-
-    The GPU CI e2e run is a smoke check, not a wall-clock assertion. This is
-    the in-process stand-in for #1146 item 5: a session whose deadline is
-    already in the past must stop as ``time_exhausted`` instead of running out
-    the remaining ticks against a freshly computed budget.
-    """
+    """Coordinator.run must not reissue a full max_minutes on a spent session."""
 
     @pytest.mark.asyncio
     async def test_run_stamps_deadline_unix_from_start_ts(self, coord: Coordinator):
@@ -1471,3 +1343,61 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert time.monotonic() - started < 15.0
         assert "close_backends" in coord.shared_state.teardown_timings_sec
         assert coord.shared_state.teardown_timings_sec["total"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_a_server_still_up_at_exit_is_reaped_by_teardown(self, coord: Coordinator):
+        """The run reaps its own serving pidfiles on the way out.
+
+        Every in-band kill path (a live ``Popen`` handle, ``PR_SET_PDEATHSIG``
+        on a Ray actor's direct child) dies with the process that owns it, so a
+        session that ended while a benchmark server was up left it holding its
+        GPUs until some later session booted in the same directory.
+        """
+        import subprocess
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+
+        marker = "vllm serve"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", f"import time; _={marker!r}; time.sleep(120)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # /proc/<pid>/cmdline stays empty until the child execs, and the reaper
+        # matches on it.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                if marker.encode() in Path(f"/proc/{proc.pid}/cmdline").read_bytes():
+                    break
+            except OSError:
+                pass
+            time.sleep(0.02)
+        else:
+            proc.kill()
+            pytest.skip("child never exposed a matching cmdline")
+
+        run_dir = coord.session_dir / "runs" / "roofline" / "post_opt"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        pidfile = run_dir / "vllm_8000.pid"
+        pidfile.write_text(str(proc.pid), encoding="utf-8")
+
+        start = datetime.now(timezone.utc) - timedelta(hours=3)
+        coord.shared_state.start_ts = start.isoformat()
+        coord.shared_state.max_minutes = 180
+        coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
+        try:
+            await coord.run(max_minutes=180, closing_grace_sec=0.0, max_ticks=8)
+            # Read liveness before the safety kill below, or the assertion is
+            # satisfied by this test rather than by the teardown.
+            reaped = proc.poll() is not None or proc.wait(timeout=10) is not None
+        finally:
+            await coord.stop()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+        assert "reap_orphaned_servers" in coord.shared_state.teardown_timings_sec
+        assert reaped, "teardown left the serving process alive"
+        assert not pidfile.exists()

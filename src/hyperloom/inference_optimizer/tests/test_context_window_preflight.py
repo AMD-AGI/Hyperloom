@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the context-window preflight.
-
-Policy: do NOT stretch a small model context; when ISL+OSL+headroom exceeds
-max_position_embeddings, fail fast with a persisted stop reason.
-"""
+"""Tests for the context-window preflight."""
 
 from __future__ import annotations
 

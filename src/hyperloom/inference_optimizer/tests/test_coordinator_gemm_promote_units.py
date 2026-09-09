@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the unified GEMM-tuning result handling on Coordinator.
-
-Exercises ``_gemm_e2e_candidates`` guard rails for both the forge and GEAK
-result shapes, and the ``_handle_gemm_tuning_result`` routing that puts every
-backend on the per-tuner E2E path so a promoted gain is always a measurement.
-"""
+"""Unit coverage for the unified GEMM-tuning result handling on Coordinator."""
 
 from __future__ import annotations
 
@@ -151,24 +146,13 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
     coord_session_dir,
     monkeypatch,
 ):
-    """The terminal state save must not clobber the inline Roofline refresh.
-
-    ``run_gemm_tuning`` is now a Coordinator-owned lane that the model can no
-    longer REQUEST (the intent path denies it), so the merge is exercised on the
-    live entrypoint: ``_handle_gemm_tuning_result`` calls
-    ``_sync_profile_state_after_gemm_roofline`` before it records the result and
-    persists the live state. A block-FP8 handler runs its inline Roofline
-    against a throwaway ``SharedState`` on disk; those refreshed fields have to
-    be merged into the live state before any save, or the next run loses the
-    steady-state trace.
-    """
+    """The terminal state save must not clobber the inline Roofline refresh."""
     coord = Coordinator(coord_session_dir, backends=_silent_backends())
     try:
         selected_trace = str(coord_session_dir / "mixed_steady_state.trace.json.gz")
 
-        # Mirror the handler-owned inline Roofline: a throwaway SharedState
-        # loaded from disk, mutated, and persisted there -- exactly what the
-        # block-FP8 GEMM handler leaves behind before returning.
+        # Mirror the handler-owned inline Roofline: a throwaway SharedState loaded from disk, mutated, and persisted
+        # there -- exactly what the block-FP8 GEMM handler leaves behind before returning.
         state = SharedState.load_or_init(coord_session_dir)
         state.last_profile_trace = str(coord_session_dir / "profile.trace.json.gz")
         state.last_profile_status = "succeeded"
@@ -196,8 +180,7 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
             },
         }
 
-        # The live entrypoint both KERNEL-entry and any resume converge on. It
-        # syncs the Roofline refresh, then records + persists the live state.
+        # The live entrypoint both KERNEL-entry and any resume converge on.
         await coord.phase_kernel._handle_gemm_tuning_result(result)
 
         assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
@@ -346,12 +329,7 @@ class TestGemmE2eCandidates:
         assert coord._gemm_e2e_candidates({}) == []
 
     def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
-        """split-K benefit is e2e-only, so micro reports ``no_improvement``.
-
-        The producer promotes it on the forced ``candidate`` flag. Rebuilding
-        from the raw tuner rows gates on status first, so that flag can never
-        rescue the row and the only artifact worth an e2e run is discarded.
-        """
+        """split-K benefit is e2e-only, so micro reports ``no_improvement``."""
         coord = _coord(tmp_path, baseline_tput=100.0)
         cands = coord._gemm_e2e_candidates(
             {
@@ -402,13 +380,7 @@ class TestGemmE2eCandidates:
         assert [c["micro_speedup"] for c in cands] == [1.4, 1.2]
 
     def test_the_producer_verdict_is_not_re_derived_from_the_tuner_rows(self, tmp_path):
-        """The producer's list is authoritative once it names any candidate.
-
-        ``no_artifact`` below would sail through the rebuild's gate -- ``ok``
-        with improved shapes -- yet the producer excluded it, because a tuner
-        with nothing to apply is not landable. Re-deriving from the raw rows
-        would put it back and hand the integrate lane a patchless candidate.
-        """
+        """The producer's list is authoritative once it names any candidate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
         cands = coord._gemm_e2e_candidates(
             {
@@ -522,15 +494,7 @@ class TestGemmE2eCandidates:
 
 
 class TestQueueFusionSiblings:
-    """A KEPT fusion nomination is queued as sibling records, not integrated inline.
-
-    Under the nomination contract ``_integrate_fusion`` no longer cold-boots a
-    re-baseline itself: it writes one ``status="pending"`` record per nominated
-    sibling and the SWEEP-entry drain runs them through the shared integrate lane.
-    The fusion-specific facts the generic drain cannot infer -- the env flag that
-    activates the fused path, the fusion keep bar, and the ``fusion`` promotion
-    label -- must ride on each record.
-    """
+    """A KEPT fusion nomination is queued as sibling records, not integrated inline."""
 
     @pytest.mark.asyncio
     async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
@@ -576,8 +540,8 @@ class TestQueueFusionSiblings:
         assert rec_a["action_label"] == "fusion"
         assert rec_a["artifact_path"] == "/out/fuse_a.patch"
         assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
-        # The fusion-specific keep bar (default 3.0%) rides on the record so the
-        # generic drain grades against it rather than the integrate default.
+        # The fusion-specific keep bar (default 3.0%) rides on the record so the generic drain grades against it
+        # rather than the integrate default.
         assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
         assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
@@ -587,8 +551,8 @@ class TestQueueFusionSiblings:
         coord.bus = _Bus()
         phase = KernelPhase(coord)
 
-        # A run that kept nothing: patches present but empty, plus the legacy
-        # singular shape with no patches[] at all -- both queue nothing.
+        # A run that kept nothing: patches present but empty, plus the legacy singular shape with no patches[] at all
+        # -- both queue nothing.
         await phase._integrate_fusion({"patches": [], "nomination": {"selected": 0}})
         await phase._integrate_fusion({"kept": True})
 
@@ -737,8 +701,7 @@ class TestCollectiveIntegratePromotion:
         }
 
         phase._promote_collective_integrate_keep(collective, integrate)
-        # current_best is a pure config record; the engine that produced the
-        # winner is stack-entry provenance.
+        # current_best is a pure config record; the engine that produced the winner is stack-entry provenance.
         assert coord.shared_state.current_best["action"] == "collective"
         assert coord.shared_state.current_best["variant_name"] == "forge_collective"
         assert coord.shared_state.optimization_stack[0]["engine"] == "forge_collective"
@@ -980,13 +943,7 @@ class TestCollectiveIntegratePromotion:
 
     @pytest.mark.asyncio
     async def test_revert_recovery_does_not_repeat_e2e(self, tmp_path, monkeypatch):
-        """An explicit recovery verdict must revert without remeasurement.
-
-        The revert here comes back ``partial``, which under the converged
-        lifecycle contract is owed work, not done work: a partial revert can
-        leave the patch live on a remote pod, so the row keeps
-        ``recovery_required`` and names ``revert`` as the action still owed.
-        """
+        """An explicit recovery verdict must revert without remeasurement."""
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -1046,8 +1003,8 @@ class TestCollectiveIntegratePromotion:
         assert coord.shared_state.last_collective["patch_cleanup_status"] == "recovery_required"
         assert coord.shared_state.last_collective["patch_cleanup_action"] == "revert"
         assert coord.shared_state.last_collective["integration_decision"] == "REVERT"
-        # The checkpoint is what a later pass reverts from, so an incomplete
-        # revert has to keep it; only a complete cleanup may drop it.
+        # The checkpoint is what a later pass reverts from, so an incomplete revert has to keep it; only a complete
+        # cleanup may drop it.
         assert checkpoint.exists()
 
     @pytest.mark.asyncio
@@ -1895,10 +1852,7 @@ class TestForgeGemmRuntimeConfigMerge:
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         monkeypatch.setattr("importlib.util.find_spec", lambda _name: None)
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
-        # The merge also probes the baked-in container config dir, which really
-        # exists on an aiter image. Without redirecting it the candidate merges
-        # against those configs and the "no base configs" premise never holds --
-        # so this test passed only where /sgl-workspace/aiter was absent.
+        # The merge also probes the baked-in container config dir, which really exists on an aiter image.
         monkeypatch.setattr(
             kernel_phase_mod,
             "_CONTAINER_AITER_CONFIG_DIR",
@@ -1908,9 +1862,8 @@ class TestForgeGemmRuntimeConfigMerge:
             "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
             str(tmp_path / "missing-runtime-cache"),
         )
-        # Point the last-resort container config dir at a non-existent path so the
-        # "no complete aiter config anywhere" branch is exercised even on a dev
-        # box that has the real /sgl-workspace/aiter checkout mounted.
+        # Point the last-resort container config dir at a non-existent path so the "no complete aiter config anywhere"
+        # branch is exercised even on a dev box that has the real /sgl-workspace/aiter checkout mounted.
         monkeypatch.setattr(
             "hyperloom.orchestrator.phases.kernel._CONTAINER_AITER_CONFIG_DIR",
             tmp_path / "missing-container-aiter-configs",
@@ -2283,16 +2236,7 @@ class TestForgeGemmRuntimeConfigMerge:
 
 
 class TestBf16DenseFallbackIsInternalToForge:
-    """Change 3: the fp8->bf16 dense retry moved down into forge's tuner router.
-
-    Hyperloom used to launch a *second* gemm subprocess
-    (``kernel_entry_gemm_tuning_bf16_fallback``) when an fp8 dense tuning came
-    back empty. That whole machinery is gone: forge now selects
-    ``sglang_dense_bf16`` as a conditional ``fallback`` tuner inside the single
-    KERNEL-entry call and runs it in-process only when the fp8 tuner produced no
-    candidate. From Hyperloom's side KERNEL entry makes exactly one gemm call,
-    regardless of whether that call ended up trying bf16 internally.
-    """
+    """Change 3: the fp8->bf16 dense retry moved down into forge's tuner router."""
 
     @pytest.mark.asyncio
     async def test_kernel_entry_makes_exactly_one_gemm_call(self, tmp_path, monkeypatch):
@@ -2312,8 +2256,7 @@ class TestBf16DenseFallbackIsInternalToForge:
             return None
 
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
-        # KERNEL entry ends by handing rewrite control to a controller
-        # subprocess. This test counts gemm calls, so it stops at that handoff.
+        # KERNEL entry ends by handing rewrite control to a controller subprocess.
         coord.phase_kernel._run_kernel_rewrite_controller = _noop
 
         calls: list[dict] = []
@@ -2321,9 +2264,7 @@ class TestBf16DenseFallbackIsInternalToForge:
         async def _fake_run_gemm(payload, *, session_dir):
             assert session_dir == tmp_path
             calls.append(payload)
-            # An fp8 dense tuning that came back empty. Under the old design this
-            # return value would have triggered a second bf16 subprocess; now the
-            # bf16 retry, if any, already happened inside this one call.
+            # An fp8 dense tuning that came back empty.
             return {
                 "status": "ok",
                 "decision": "REVERT",
@@ -2347,10 +2288,7 @@ class TestBf16DenseFallbackIsInternalToForge:
         assert "bf16_fallback" not in coord.shared_state.last_gemm_tuning.get("task_id", "")
 
     def test_deleted_fallback_machinery_is_gone(self, tmp_path):
-        """The dedicated bf16-fallback methods no longer exist on the coordinator.
-
-        Guards against reintroducing the second-subprocess path by accident.
-        """
+        """The dedicated bf16-fallback methods no longer exist on the coordinator."""
         coord = _coord(tmp_path, framework="sglang")
         for name in (
             "_run_bf16_dense_gemm_fallback",
@@ -2363,11 +2301,7 @@ class TestBf16DenseFallbackIsInternalToForge:
 
 
 def _eligible_coord(tmp_path, monkeypatch, **overrides):
-    """Coordinator wired for a CK-switch-eligible forge workload.
-
-    forge + sglang + fp8 + gfx942 (mi300x) + block-scale fp8. The block-scale
-    probe is forced to ``True`` unless overridden.
-    """
+    """Coordinator wired for a CK-switch-eligible forge workload."""
     kwargs = dict(
         baseline_tput=100.0,
         framework="sglang",
@@ -2382,8 +2316,7 @@ def _eligible_coord(tmp_path, monkeypatch, **overrides):
 
 
 class TestCkBlockscaleSwitchEligible:
-    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to
-    forge + sglang + fp8 + gfx942 + block-scale checkpoints."""
+    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to forge + sglang + fp8 + gfx942 + block-scale checkpoints."""
 
     def test_eligible_for_forge_sglang_fp8_mi300x_blockscale(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -2573,13 +2506,7 @@ class TestHandleGemmTuningResult:
 
     @pytest.mark.asyncio
     async def test_forge_e2e_keep_names_the_artifact_the_stack_recorded(self, tmp_path, monkeypatch):
-        """The history row and the stack entry must name the same artifact.
-
-        The breakdown decides ``adopted`` by matching those two strings. Forge
-        reports per-tuner envs and never set ``tuned_file``, so the history row
-        carried "" and no KEEP could ever match -- measured across 419 real
-        attempts, none was reported adopted.
-        """
+        """The history row and the stack entry must name the same artifact."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -2616,18 +2543,10 @@ class TestHandleGemmTuningResult:
 
     @pytest.mark.asyncio
     async def test_a_second_round_claims_its_own_artifact(self, tmp_path, monkeypatch):
-        """Re-tuning the same tuner must not inherit the earlier round's path.
-
-        ``_lift_to_current_best`` skips the stack append when
-        ``(action, variant_name)`` already matches, and a GEMM variant is named
-        ``<backend>_<tuner>`` -- so after a second macro cycle re-tunes the same
-        tuner, the newest stack entry still describes round one. Taking the
-        artifact from there would make the second attempt claim the first one's
-        file, and with it the first one's gain.
-        """
+        """Re-tuning the same tuner must not inherit the earlier round's path."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-        # Keep the candidate env value verbatim so each round's path is distinct
-        # and the assertion is about provenance, not about merging.
+        # Keep the candidate env value verbatim so each round's path is distinct and the assertion is about
+        # provenance, not about merging.
         monkeypatch.setattr(
             KernelPhase,
             "_merge_gemm_candidate_with_runtime",
@@ -2711,8 +2630,8 @@ class TestHandleGemmTuningResult:
 
     @pytest.mark.asyncio
     async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(self, tmp_path, monkeypatch):
-        # a8w8 tuner reported no_improvement but the CK block-scale switch is
-        # eligible → route to the E2E validator, not inline promote.
+        # a8w8 tuner reported no_improvement but the CK block-scale switch is eligible → route to the E2E validator,
+        # not inline promote.
         coord = _eligible_coord(tmp_path, monkeypatch)
         called: dict[str, object] = {}
 
@@ -2816,9 +2735,7 @@ class TestValidateForgeGemmTuningE2E:
 
         assert fake.calls == []
         assert coord.shared_state.optimization_stack == []
-        # No sweep ran, but the books still get closed. Leaving
-        # requires_e2e_validation=True on a result nothing will ever validate
-        # made the history row and result.json claim a pending verdict forever.
+        # No sweep ran, but the books still get closed.
         assert result["requires_e2e_validation"] is False
         assert result["e2e_validated"] is False
         assert result["decision"] == "REVERT"
@@ -2826,12 +2743,7 @@ class TestValidateForgeGemmTuningE2E:
 
     @pytest.mark.asyncio
     async def test_closing_the_books_does_not_overwrite_a_tuner_verdict(self, tmp_path, monkeypatch):
-        """``micro_decision`` is a routing key, not a label.
-
-        ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16 retry on
-        ``no_improvement``. Stamping ``no_e2e_candidates`` over it cancelled the
-        fallback for exactly the fp8 runs that need it.
-        """
+        """``micro_decision`` is a routing key, not a label."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         fake = _make_integrate([])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -3046,8 +2958,8 @@ class TestValidateForgeGemmTuningE2E:
 
     @pytest.mark.asyncio
     async def test_injects_synthetic_ck_candidate_when_eligible_no_table_candidates(self, tmp_path, monkeypatch):
-        # No table candidates, but CK switch is eligible: the synthetic CK
-        # candidate is injected, E2E-validated, and stacked under gemm_tuning.
+        # No table candidates, but CK switch is eligible: the synthetic CK candidate is injected, E2E-validated, and
+        # stacked under gemm_tuning.
         coord = _eligible_coord(tmp_path, monkeypatch)
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 209.0, "gain_pct": 109.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -3241,14 +3153,7 @@ class TestValidateForgeGemmTuningE2E:
 
 
 class TestForgeGemmE2EApplyGate:
-    """A measured gain is only creditable if the artifact was actually used.
-
-    Both checks answer a question throughput cannot: the shape keys never
-    resolved (coverage), or the table never reached the server (apply verdict).
-    Each is a positive finding, so each blocks the KEEP -- while "cannot tell"
-    deliberately does not, because hit lines require AITER_LOG_TUNED_CONFIG=1
-    and a scan of 60 production logs found it set in none of them.
-    """
+    """A measured gain is only creditable if the artifact was actually used."""
 
     @staticmethod
     def _result():
@@ -3293,8 +3198,8 @@ class TestForgeGemmE2EApplyGate:
 
         await coord._validate_gemm_tuning_e2e(result)
 
-        # +30% was measured, and is still refused: the server was running its
-        # bundled default table, so the delta is drift, not tuning.
+        # +30% was measured, and is still refused: the server was running its bundled default table, so the delta is
+        # drift, not tuning.
         assert coord.shared_state.optimization_stack == []
         assert coord.shared_state.cumulative_gain_validated == 0.0
         assert result["decision"] == "REVERT"

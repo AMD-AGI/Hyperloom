@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
-the Coordinator as a real Critic Backend.
-
-Runs the two-phase loop from ``src/hyperloom/agents/critic/README.md``
-(prepare-review → Codex review.json → commit-review), giving KB priors,
-per-session memory, review_constraints injection, and emergency fallbacks.
-The returned envelope is re-validated locally so malformed replies surface as
-backend-tagged errors. ``codex_client_factory`` / ``runtime_caller_factory``
-are test seams.
-"""
+"""CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into the Coordinator as a real Critic Backend."""
 
 from __future__ import annotations
 
@@ -58,26 +49,15 @@ log = logging.getLogger(__name__)
 
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
-# Output-token cap for both review paths. The Anthropic side spends it as a
-# request field or through the CLI environment, depending on the transport.
-#
-# The cap is a ceiling, not a budget: headroom left unused is never billed,
-# while a reply cut off at the cap bills the whole call and yields nothing. It
-# is therefore sized for the largest review a batch could ever need rather than
-# the typical one. The number is measured, not guessed: the three-proposal
-# batch that deadlocked session 100162 needed roughly 2.4k output tokens to
-# write out in full, so this leaves about 13x that — a batch would have to grow
-# by an order of magnitude before the cap is what binds. Use the env var of the
-# same name to lower it for a model whose own output limit is smaller, or to
-# raise it further.
+# Output-token cap for both review paths.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 32000
 # One retry at this multiple of the cap when a reply stops at the limit.
 CRITIC_AGENT_TRUNCATION_RETRY_FACTOR = 2
-# Finish/stop reasons that mean "cut off at the output cap": OpenAI reports
-# ``length``, the Anthropic Messages API reports ``max_tokens``.
+# Finish/stop reasons that mean "cut off at the output cap": OpenAI reports ``length``, the Anthropic Messages API
+# reports ``max_tokens``.
 _TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
-# Anthropic usage counters carried through to the trace row, each in its own
-# column so critic rows stay comparable with the orchestration ones.
+# Anthropic usage counters carried through to the trace row, each in its own column so critic rows stay comparable
+# with the orchestration ones.
 _ANTHROPIC_USAGE_KEYS = (
     "input_tokens",
     "output_tokens",
@@ -87,36 +67,14 @@ _ANTHROPIC_USAGE_KEYS = (
 
 
 def _accumulate_reasoning_tokens(acc: dict[str, int], usage: Any) -> None:
-    """Fold a reply's reasoning-output tokens into the accumulator, when reported.
-
-    The key is only created when the provider reported a count, so a model
-    without a reasoning split still writes ``None`` (not ``0``) to the ledger —
-    the documented difference between "no reasoning concept" and "no reasoning
-    tokens spent".
-
-    Args:
-        acc: The running accumulator, updated in place.
-        usage: A provider usage payload (mapping or SDK object).
-    """
+    """Fold a reply's reasoning-output tokens into the accumulator, when reported."""
     count = reasoning_output_tokens(usage)
     if count is None:
         return
     acc["reasoning_output_tokens"] = acc.get("reasoning_output_tokens", 0) + count
 
 
-# HTTP client timeout defaults for critic review calls. A completion is not
-# streamed, so the read half is what bounds generation: the server holds the
-# connection open until the whole reply exists.
-#
-# It is therefore coupled to the output cap above and has to move with it. The
-# 120s this used to sit at is the budget a completion is elsewhere given, and it
-# was the right one while the cap was 2000 tokens: a reply that short always
-# came back inside it, so the cap doubled as a latency bound. Raising the
-# ceiling removed that guarantee, and a batch large enough to need the new room
-# would now hit the timeout instead of finishing — a timeout that then repeats
-# on identical input, which is the failure shape this whole fix exists to end.
-# 300s is what the orchestration paths floor a multi-turn budget at, and it
-# covers any review that could plausibly be worth waiting for.
+# HTTP client timeout defaults for critic review calls.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
 CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 300.0
 
@@ -186,40 +144,17 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the Critic's own ``{"review_verdicts": ...}`` object out of a reply.
-
-    Uses ``last=True`` so the model's final answer wins over any earlier
-    fenced block echoed from the (attacker-influenceable) proposal payload:
-    the genuine verdict is the last block the Critic emits, an echoed block
-    can only appear before it.
-    """
+    """Pull the Critic's own ``{\"review_verdicts\": ...}`` object out of a reply."""
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
 
 
 def _is_truncated_finish(finish: str | None) -> bool:
-    """Report whether a finish/stop reason means the reply hit the output cap.
-
-    Args:
-        finish: The finish/stop reason a transport reported, or ``None`` when
-            it supplied none.
-
-    Returns:
-        ``True`` when the reason names the output cap, ``False`` otherwise.
-    """
+    """Report whether a finish/stop reason means the reply hit the output cap."""
     return isinstance(finish, str) and finish.strip().lower() in _TRUNCATED_FINISH_REASONS
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m hyperloom.agents.critic.runtime.cli <phase> ...``.
-
-    Args:
-        call (RuntimeCall): The invocation descriptor with phase, request /
-            review / output paths, working directory, and subprocess env.
-
-    Raises:
-        BackendError: If a ``commit-review`` call is missing its review path,
-            the subprocess times out, cannot start, or exits non-zero.
-    """
+    """Real implementation — runs ``python -m hyperloom.agents.critic.runtime.cli <phase> ...``."""
     extra_args: list[str] = []
     if call.phase == "commit-review":
         if call.review_path is None:
@@ -236,13 +171,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
 
 def _reviewed_msg_ids_from_bundle(judge_bundle: dict[str, Any]) -> list[str] | None:
-    """Pull the proposal ``msg_id``s out of a judge bundle, or ``None``.
-
-    The bundle's ``proposals`` is a list of proposal dicts each carrying a
-    ``msg_id`` (see critic-agent ``inbox_parser.Proposal``). Returns the
-    de-duplicated, order-preserving list of non-empty ids, or ``None`` when the
-    bundle carries none — so a non-review turn leaves the trace field unset.
-    """
+    """Pull the proposal ``msg_id``s out of a judge bundle, or ``None``."""
     proposals = judge_bundle.get("proposals") if isinstance(judge_bundle, dict) else None
     if not isinstance(proposals, list):
         return None
@@ -259,16 +188,7 @@ def _reviewed_msg_ids_from_bundle(judge_bundle: dict[str, Any]) -> list[str] | N
 
 
 def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``scope`` dial off a proposal (top-level or nested ``params``).
-
-    Args:
-        proposal: A proposal dict that may carry ``scope`` at the top level or
-            under ``params``.
-
-    Returns:
-        The stripped scope string, or an empty string when absent or the
-        proposal is not a dict.
-    """
+    """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
     if not isinstance(proposal, dict):
         return ""
     top = proposal.get("scope")
@@ -313,17 +233,7 @@ def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
 
 
 def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
-    """Whether any final review verdict cites KB evidence.
-
-    Scans ``review_verdicts[].kb_evidence`` for a truthy reference. Used by the
-    KB trace to record whether the decision actually leaned on KB data.
-
-    Args:
-        review (dict[str, Any] | None): The parsed review object.
-
-    Returns:
-        bool: ``True`` if at least one verdict references KB evidence.
-    """
+    """Whether any final review verdict cites KB evidence."""
     if not isinstance(review, dict):
         return False
     for v in review.get("review_verdicts") or []:
@@ -392,12 +302,7 @@ _LEVER_ORIENTATION: dict[str, str] = {
 
 
 def _inject_lever_orientation(judge_bundle: dict[str, Any], payload: dict[str, Any] | None) -> None:
-    """Stamp the orientation for the lever this proposal moves, when known.
-
-    Args:
-        judge_bundle: The judge bundle to enrich in place.
-        payload: The proposal payload, read for a lever stamp or its markers.
-    """
+    """Stamp the orientation for the lever this proposal moves, when known."""
     lever = patch_lever_kind(payload if isinstance(payload, dict) else None)
     if not lever:
         params = (payload or {}).get("params") if isinstance(payload, dict) else None
@@ -411,13 +316,7 @@ def _inject_lever_orientation(judge_bundle: dict[str, Any], payload: dict[str, A
 
 
 def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
-    """Stamp the live phase and its review orientation onto the judge bundle.
-
-    Args:
-        judge_bundle: The judge bundle to enrich in place.
-        phase: Coordinator pipeline phase; an unrecognised one leaves the bundle
-            untouched so nothing asserts a phase that was never delivered.
-    """
+    """Stamp the live phase and its review orientation onto the judge bundle."""
     normalized = (phase or "").strip().upper()
     if normalized not in _PHASE_ORIENTATION:
         return
@@ -428,14 +327,7 @@ def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
 
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.cross_domain`` + rule descriptors when any
-    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent.
-
-    Args:
-        judge_bundle: The judge bundle to enrich in place; its
-            ``review_constraints`` are updated when a cross-domain proposal is
-            present.
-    """
+    """Set ``review_constraints.cross_domain`` + rule descriptors when any proposal is cross-domain (unified ``scope == 'domains'`` dial)."""
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -456,19 +348,7 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
 
 
 def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.quantitative_claim_rule`` from the enforced list.
-
-    Delivering the rule as data keeps the Critic's field list identical to the
-    one the runner strips, instead of a hand-copied prose list that drifts. It
-    is sent only when the bundle holds a proposal the rule is about, on the same
-    principle as the cross-domain rules above: a Critic handed a rule that
-    cannot apply to anything under review can still cite it, and a citation is
-    what the verdict path reads.
-
-    Args:
-        judge_bundle: The judge bundle to enrich in place; unchanged when no
-            proposal is one of the kinds the rule governs.
-    """
+    """Set ``review_constraints.quantitative_claim_rule`` from the enforced list."""
     from ..specialists.patch_safety import (
         advisory_rules_govern,
         quantitative_claim_rule_descriptor,
@@ -489,37 +369,7 @@ def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) ->
 
 @dataclass
 class CriticAgentBackend:
-    """Real Critic backend that drives the critic-agent runtime.
-
-    Parameters
-    ----------
-    critic_agent_root:
-        Directory containing ``runtime/cli.py``. The CLI is invoked as
-        ``python -m hyperloom.agents.critic.runtime.cli`` with
-        ``cwd=critic_agent_root`` so relative asset reads resolve.
-    session_dir:
-        Coordinator session directory. Scopes per-turn workdirs and the
-        per-session critic memory store.
-    codex_model:
-        OpenAI / Codex chat-completion model id (e.g. ``gpt-5.6-sol``).
-    codex_client_factory:
-        Optional callable returning an ``AsyncOpenAI``-compatible client
-        (test seam).
-    kb_mode:
-        ``inmemory`` (default) keeps KB writes / reads off the wire.
-        ``live`` requires ``kb_env`` (or process env) to provide ``KB_BASE_URL``.
-    kb_env:
-        Extra env vars merged into the runtime.cli subprocess env when
-        ``kb_mode == "live"``.
-    runtime_caller_factory:
-        Test seam returning a :data:`RuntimeCaller`.
-    static_context:
-        Optional explicit per-session context injected as ``request.context``.
-        When ``None``, derived from ``manifest.json``; ``{}`` is a valid
-        "no context" override.
-    name:
-        Backend instance name surfaced in the Coordinator startup banner.
-    """
+    """Real Critic backend that drives the critic-agent runtime."""
 
     critic_agent_root: Path
     session_dir: Path
@@ -530,29 +380,24 @@ class CriticAgentBackend:
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
-    # Per-action verdict policy enriched onto
-    # ``review_constraints.action_verdict_policy`` post prepare-review.
+    # Per-action verdict policy enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
-    # Review inference protocol. ``openai`` drives Codex chat.completions;
-    # ``anthropic`` drives llm_config's single-shot Anthropic entry point.
+    # Review inference protocol.
     protocol: Literal["openai", "anthropic"] = "openai"
-    # Claude model id used when ``protocol == "anthropic"`` (falls back to
-    # ``codex_model`` when unset).
+    # Claude model id used when ``protocol == "anthropic"`` (falls back to ``codex_model`` when unset).
     claude_model: str | None = None
 
-    # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a
-    # dataclass field) to avoid descriptor binding as a method.
+    # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a dataclass field) to avoid descriptor
+    # binding as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
-    # Trace context the Coordinator stamps before each reactor
-    # ``run()`` so the critic's self-written llm_calls row carries the timeline
-    # keys.
+    # Trace context the Coordinator stamps before each reactor ``run()`` so the critic's self-written llm_calls row
+    # carries the timeline keys.
     _trace_tick: int | None = field(default=None, init=False, repr=False)
     _trace_phase: str | None = field(default=None, init=False, repr=False)
     _trace_macro_cycle: int | None = field(default=None, init=False, repr=False)
-    # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls
-    # attribution.
+    # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls attribution.
     _trace_reviewed_msg_ids: list[str] | None = field(
         default=None,
         init=False,
@@ -569,20 +414,7 @@ class CriticAgentBackend:
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Validate config, wire transports, and resolve static context.
-
-        Normalises paths, verifies ``runtime/cli.py`` exists under
-        ``critic_agent_root``, validates ``kb_mode``, selects the real or test
-        runtime caller, constructs the Codex/OpenAI review client (or checks the
-        Anthropic credential when ``protocol == "anthropic"``, where llm_config
-        owns the transport), and resolves the per-session static context
-        (explicit or from ``manifest.json``).
-
-        Raises:
-            BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
-                invalid, the review SDK/transport is unavailable, or no API key
-                is set.
-        """
+        """Validate config, wire transports, and resolve static context."""
         self.critic_agent_root = Path(self.critic_agent_root)
         self.session_dir = Path(self.session_dir)
         if not (self.critic_agent_root / "runtime" / "cli.py").is_file():
@@ -641,12 +473,7 @@ class CriticAgentBackend:
 
     @staticmethod
     def _resolve_llm_timeouts() -> tuple[float, float]:
-        """Return the ``(connect, read/write/pool)`` review-call timeouts in seconds.
-
-        The OpenAI-compatible transport spends both halves as HTTP timeouts, as
-        does the Anthropic Messages API; the Claude CLI transport reuses only
-        the read/write value as its wall-clock call budget.
-        """
+        """Return the ``(connect, read/write/pool)`` review-call timeouts in seconds."""
         return (
             parse_call_timeout_env(
                 "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
@@ -660,15 +487,7 @@ class CriticAgentBackend:
 
     @staticmethod
     def _resolve_max_completion_tokens() -> int:
-        """Return the output-token cap one review call may spend.
-
-        The env override exists so a deployment that hits the cap can raise it
-        without a code change; a malformed value falls back to the default
-        rather than failing the turn.
-
-        Returns:
-            The positive cap in tokens.
-        """
+        """Return the output-token cap one review call may spend."""
         raw = os.environ.get("CRITIC_AGENT_MAX_COMPLETION_TOKENS")
         if raw is None or not raw.strip():
             return CRITIC_AGENT_MAX_COMPLETION_TOKENS
@@ -686,19 +505,7 @@ class CriticAgentBackend:
         return value
 
     def _require_anthropic_transport(self) -> None:
-        """Fail fast when the Anthropic side cannot serve a review call.
-
-        No client is built here: :func:`aanthropic_completion` owns transport
-        selection. The check covers the transport and not just the credential,
-        because a subscription token resolves to the Claude CLI — a host with
-        the token but without the CLI would pass a credential-only check and
-        then fail at the first review, which is what this backend promises not
-        to do.
-
-        Raises:
-            BackendError: If no Anthropic-side credential is configured, or the
-                transport it implies is unavailable.
-        """
+        """Fail fast when the Anthropic side cannot serve a review call."""
         if anthropic_transport_ready():
             return
         raise BackendError(
@@ -717,33 +524,7 @@ class CriticAgentBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """One Critic turn — run the prepare → reason → commit pipeline.
-
-        Writes the ``coordinator_inbox`` request, runs ``prepare-review`` to get
-        a judge bundle, enriches its ``review_constraints`` (action policy and
-        cross-domain rules), drives the review inference call when proposals
-        exist (Codex chat-completions, or llm_config's single-shot Anthropic
-        entry point when ``protocol == 'anthropic'``), runs
-        ``commit-review`` to produce the intent envelope, validates it, and
-        records per-turn telemetry.
-
-        Args:
-            prompt (str): The Coordinator-rendered inbox prompt for this turn.
-            system_prompt (str | None): Optional system prompt forwarded into
-                the review reasoning call.
-            tools (list[str] | None): Unused; the Critic exposes no tool palette
-                to the Coordinator.
-            max_turns (int): Unused; the Critic is single-turn.
-
-        Returns:
-            BackendTurnResult: The validated review intents plus model, KB, and
-            session metadata.
-
-        Raises:
-            BackendError: If the judge bundle or emit file cannot be read, or
-                ``emit.json`` is missing a dict ``intent_envelope``.
-            NoIntentEmitted: If the committed envelope fails intent validation.
-        """
+        """One Critic turn — run the prepare → reason → commit pipeline."""
         del tools, max_turns  # Critic is single-turn / no tool palette.
 
         turn_idx = self._turn_idx
@@ -810,8 +591,7 @@ class CriticAgentBackend:
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
-        # The lever says what a KEEP has to clear; the phase no longer can,
-        # now that one phase carries every lever.
+        # The lever says what a KEEP has to clear; the phase no longer can, now that one phase carries every lever.
         _proposals = judge_bundle.get("proposals") or []
         _first = _proposals[0] if isinstance(_proposals, list) and _proposals else None
         _inject_lever_orientation(judge_bundle, _first if isinstance(_first, dict) else None)
@@ -947,15 +727,7 @@ class CriticAgentBackend:
     # Helpers
 
     def _load_static_context_from_manifest(self) -> dict[str, Any]:
-        """Derive per-session context for ``request.context`` from
-        manifest.json (model / framework / gpu_type / model_path / tp /
-        workload / precision); empty values dropped. Any read error logs a
-        WARNING and returns ``{}``.
-
-        Returns:
-            A context dict built from the manifest's non-empty fields, or an
-            empty dict when the manifest is missing or unreadable.
-        """
+        """Derive per-session context for ``request.context`` from manifest.json (model / framework / gpu_type / model_path / tp / workload / precision); empty values dropped."""
         path = manifest_path(self.session_dir)
         try:
             raw = path.read_text(encoding="utf-8")
@@ -1000,19 +772,7 @@ class CriticAgentBackend:
         return ctx
 
     def _build_runtime_env(self) -> dict[str, str]:
-        """Build the subprocess environment for ``runtime.cli`` invocations.
-
-        Co-locates session memory and the KB dead-letter dir under the session,
-        sets the KB client mode and the robustness session-dir hint, and in
-        ``live`` KB mode merges ``kb_env`` and requires ``KB_BASE_URL``.
-
-        Returns:
-            dict[str, str]: A copy of the current environment with the
-            critic-agent runtime variables applied.
-
-        Raises:
-            BackendError: If ``kb_mode == "live"`` but ``KB_BASE_URL`` is unset.
-        """
+        """Build the subprocess environment for ``runtime.cli`` invocations."""
         env = dict(os.environ)
         # Co-locate session memory inside the Coordinator session.
         memory_dir = self.session_dir / "critic-session-memory"
@@ -1045,17 +805,7 @@ class CriticAgentBackend:
         turn_idx: int,
         kb_priors: dict[str, Any],
     ) -> None:
-        """Mirror the per-iteration KB trace into Langfuse (best-effort).
-
-        Emits one span per non-empty trace under the ``critic`` agent so the
-        "was KB used / request / response / influenced decision" evidence is
-        visible alongside the critic generations. No-op when Langfuse is
-        disabled; never raises into the review path.
-
-        Args:
-            turn_idx (int): The critic iteration index.
-            kb_priors (dict[str, Any]): The priors trace (may be empty).
-        """
+        """Mirror the per-iteration KB trace into Langfuse (best-effort)."""
         try:
             from ..trace.langfuse_emitter import get_emitter
 
@@ -1162,20 +912,7 @@ class CriticAgentBackend:
         judge_bundle: dict[str, Any],
         review: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Assemble the historical-priors KB trace for one critic iteration.
-
-        Folds the runtime-captured ``kb_priors_trace`` (scope/limit/per-request
-        cache+count) with the total prior count, the skip reason (if any), and
-        whether the final verdict referenced KB evidence. Priors are always
-        injected, so ``referenced_in_verdict`` is unconditional here.
-
-        Args:
-            judge_bundle (dict[str, Any]): The prepared judge bundle.
-            review (dict[str, Any] | None): The parsed review object.
-
-        Returns:
-            dict[str, Any]: The priors trace (empty when nothing was captured).
-        """
+        """Assemble the historical-priors KB trace for one critic iteration."""
         trace = dict(judge_bundle.get("kb_priors_trace") or {})
         by_proposal = judge_bundle.get("kb_priors_by_proposal") or {}
         for_decision = judge_bundle.get("kb_priors_for_decision") or []
@@ -1201,31 +938,7 @@ class CriticAgentBackend:
         judge_bundle: dict[str, Any],
         system_prompt: str | None,
     ) -> tuple[dict[str, Any], str, str | None]:
-        """Drive Codex with the judge bundle and parse a review object.
-
-        Builds the skill-preamble + judge-bundle + output-format user prompt,
-        runs the single-shot reasoning call, and extracts the review JSON. A
-        reply cut off at the output cap is retried once with more room; a reply
-        that still carries no review JSON fails the turn.
-
-        Args:
-            judge_bundle (dict[str, Any]): The prepared judge bundle to reason
-                over.
-            system_prompt (str | None): Optional system prompt sent as the
-                leading system message.
-
-        Returns:
-            tuple[dict[str, Any], str, str | None]: The parsed review dict, the
-            raw model text, and the final finish reason.
-
-        Raises:
-            BackendError: If no reply yields parseable ``review_verdicts``
-                JSON. The turn ends here, so ``commit-review``, the breakdown
-                record and the Langfuse mirror are all skipped — there is no
-                half-built envelope to hand on. The prompt and the unusable
-                reply are already on ``conversations.jsonl``, which is where a
-                post-mortem finds them.
-        """
+        """Drive Codex with the judge bundle and parse a review object."""
         preamble = self._load_skill_preamble()
         bundle_view: dict[str, Any] = {
             "kind": judge_bundle.get("kind"),
@@ -1249,8 +962,8 @@ class CriticAgentBackend:
             f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
         max_tokens = self._resolve_max_completion_tokens()
-        # One id per review call, shared by its token row and its conversation
-        # row so the two halves pair on the call rather than on a ts second.
+        # One id per review call, shared by its token row and its conversation row so the two halves pair on the call
+        # rather than on a ts second.
         call_id = new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
@@ -1259,8 +972,7 @@ class CriticAgentBackend:
             call_id=call_id,
         )
 
-        # Mirror the full prompt + reply onto conversations.jsonl so the critic
-        # turn is replayable. Best-effort; never raised into the review path.
+        # Mirror the full prompt + reply onto conversations.jsonl so the critic turn is replayable.
         self._record_critic_conversation(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1270,16 +982,8 @@ class CriticAgentBackend:
         review = _extract_review_json(text)
 
         if review is None and _is_truncated_finish(finish):
-            # Retrying a cap-truncated reply under the same cap would truncate
-            # again at the same byte, so the retry only makes sense with more
-            # room. One is enough: a bundle that overflows twice this much is a
-            # sizing problem, not a flaky call.
-            #
-            # Only the HTTP transports always name the reason. The Claude CLI
-            # reports a stop reason only when the model supplies one, so a
-            # truncated reply can arrive as finish=None and fall through to the
-            # raise below. That path loses the retry but still fails loudly,
-            # which is the half of this fix that matters.
+            # Retrying a cap-truncated reply under the same cap would truncate again at the same byte, so the retry
+            # only makes sense with more room.
             retry_tokens = max_tokens * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
             log.warning(
                 "critic_agent_backend: review reply stopped at the %d-token cap "
@@ -1298,11 +1002,7 @@ class CriticAgentBackend:
                     call_id=retry_call_id,
                 )
             except BackendError as exc:
-                # A provider whose own output limit sits below the doubled cap
-                # rejects the retry outright. Letting that transport error
-                # surface on its own would name the retry as the problem and
-                # bury the truncation that caused it, pointing the reader at
-                # the wrong thing.
+                # A provider whose own output limit sits below the doubled cap rejects the retry outright.
                 raise BackendError(
                     f"CriticAgentBackend: review reply was truncated at {max_tokens} tokens "
                     f"and the retry at {retry_tokens} was rejected: {exc}"
@@ -1317,12 +1017,7 @@ class CriticAgentBackend:
             max_tokens = retry_tokens
 
         if review is None:
-            # A reply carrying no verdicts is a review that failed to arrive,
-            # not a review that found nothing to say. Reporting it as an empty
-            # verdict list makes the two indistinguishable downstream: the turn
-            # looks successful, the proposals it was asked about stay pending,
-            # and the loop re-asks the same question forever. Raising instead
-            # puts a backend_error on the record and lets the streak guard trip.
+            # A reply carrying no verdicts is a review that failed to arrive, not a review that found nothing to say.
             raise BackendError(
                 "CriticAgentBackend: review reply carried no parseable review_verdicts JSON "
                 f"(chars={len(text)}, finish={finish!r}, max_tokens={max_tokens})"
@@ -1337,24 +1032,7 @@ class CriticAgentBackend:
         max_tokens: int,
         call_id: str | None = None,
     ) -> tuple[str, str | None]:
-        """Issue one review inference call and return ``(text, finish_reason)``.
-
-        The critic reasons single-shot over the judge bundle (no tool use).
-        Both prompt segments are passed through unmerged so each transport can
-        map them onto its own request shape.
-
-        Args:
-            system_prompt: The system instruction, or ``None``.
-            user_prompt: The judge bundle plus output instructions.
-            max_tokens: Output-token cap for this call.
-            call_id: Per-call id stamped on the token row this call writes.
-
-        Returns:
-            A tuple of the reply text and the finish/stop reason.
-
-        Raises:
-            BackendError: If the review API call fails.
-        """
+        """Issue one review inference call and return ``(text, finish_reason)``."""
         if self.protocol == "anthropic":
             return await self._run_anthropic_reasoning(
                 system_prompt=system_prompt,
@@ -1377,19 +1055,7 @@ class CriticAgentBackend:
         max_tokens: int,
         call_id: str | None = None,
     ) -> tuple[str, str | None]:
-        """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
-
-        Args:
-            system_prompt: The system instruction, or ``None``.
-            user_prompt: The judge bundle plus output instructions.
-            max_tokens: Output-token cap for this call.
-
-        Returns:
-            A tuple of the reply text and the finish reason.
-
-        Raises:
-            BackendError: If the Codex chat-completions API call fails.
-        """
+        """Issue one Codex chat-completions call and return ``(text, finish_reason)``."""
         kwargs: dict[str, Any] = {
             "model": self._review_model,
             "messages": build_chat_messages(system_prompt, user_prompt),
@@ -1423,26 +1089,7 @@ class CriticAgentBackend:
         max_tokens: int,
         call_id: str | None = None,
     ) -> tuple[str, str | None]:
-        """Issue one single-shot Anthropic completion for the review.
-
-        ``llm_config`` picks the transport from the configured credential, so
-        this path accepts an API key, a gateway bearer token, or a Max/Pro
-        subscription token alike. Token counts fold into the same trace row as
-        the OpenAI path, and both paths carry the same output-token cap.
-
-        Args:
-            system_prompt: The system instruction, or ``None``.
-            user_prompt: The judge bundle plus output instructions.
-            max_tokens: Output-token cap for this call.
-
-        Returns:
-            A tuple of the reply text and the stop reason. The CLI transport
-            reports one only when the model supplies it, so unlike the OpenAI
-            path it is not guaranteed.
-
-        Raises:
-            LLMCallFailed: If the completion fails.
-        """
+        """Issue one single-shot Anthropic completion for the review."""
         connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
@@ -1473,22 +1120,7 @@ class CriticAgentBackend:
         acc: dict[str, int],
         usage: Any,
     ) -> None:
-        """Fold one Anthropic ``usage`` block into the running accumulator.
-
-        Cache counters keep their own keys instead of being folded into
-        ``input_tokens``. That matches the rows ``ClaudeBackend`` writes for
-        orchestration, so a reader can compare or sum the two components
-        without knowing which one produced a row. The judge bundle repeats
-        across turns and reliably hits the prompt cache, so the split is most
-        of the input side, not a rounding detail.
-
-        Missing / bad values contribute 0 so a malformed reply never corrupts
-        the token sum.
-
-        Args:
-            acc: The running accumulator, updated in place.
-            usage: An Anthropic usage dict (or ``None``) to fold into ``acc``.
-        """
+        """Fold one Anthropic ``usage`` block into the running accumulator."""
         if not isinstance(usage, dict):
             return
         for key in _ANTHROPIC_USAGE_KEYS:
@@ -1503,17 +1135,7 @@ class CriticAgentBackend:
         acc: dict[str, int],
         usage: Any,
     ) -> None:
-        """Fold one OpenAI ``resp.usage`` into the running token accumulator.
-
-        OpenAI reports ``prompt_tokens`` / ``completion_tokens``; map them
-        onto the canonical in/out counters. Missing / bad values contribute
-        0 so a single malformed response never corrupts the running sum.
-
-        Args:
-            acc: The running accumulator with ``input_tokens`` /
-                ``output_tokens`` keys, updated in place.
-            usage: An OpenAI usage object (or ``None``) to fold into ``acc``.
-        """
+        """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
         if usage is None:
             return
         try:
@@ -1533,14 +1155,7 @@ class CriticAgentBackend:
         phase: str | None = None,
         macro_cycle: int | None = None,
     ) -> None:
-        """Stamp the timeline keys for the next reactor turn and request.
-
-        The Coordinator calls this before ``run()`` (it owns ``shared_state``)
-        so the critic request carries the current phase/macro-cycle and its
-        self-written ``llm_calls`` row carries the same tick/phase as the
-        in-process reactor trace. Best-effort: a
-        bad value degrades to ``None`` rather than raising.
-        """
+        """Stamp the timeline keys for the next reactor turn and request."""
         try:
             self._trace_tick = int(tick) if tick is not None else None
         except (TypeError, ValueError):
@@ -1558,24 +1173,7 @@ class CriticAgentBackend:
         latency_ms: int | None = None,
         call_id: str | None = None,
     ) -> None:
-        """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
-
-        Records the accumulated review-model token spend (and summed wall-clock
-        ``latency_ms``) under ``component=critic`` for whichever transport
-        :attr:`protocol` selected, using the tick/phase from
-        :meth:`set_trace_context`. The stamped ``model`` is
-        :attr:`_review_model`. Best-effort: never raises into the review path.
-
-        Cache counters are absent on the OpenAI path, which has no prompt-cache
-        split, so they stay ``None`` there — the documented meaning of the
-        column — rather than being reported as zero.
-
-        Args:
-            usage_acc: Accumulated token counts for this reasoning loop.
-            latency_ms: Summed wall-clock latency of the reasoning loop, when
-                measured.
-            call_id: Per-call id shared with this call's conversation row.
-        """
+        """Append one ``llm_calls.jsonl`` row for a critic reasoning loop."""
         try:
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
@@ -1606,21 +1204,7 @@ class CriticAgentBackend:
         *,
         latency_ms: int | None = None,
     ) -> LLMCallFailed:
-        """Record a failed review-model call and return the error to raise.
-
-        The critic self-writes its trace rows, so a review call that never
-        returned has to be recorded here — the Coordinator only sees the raised
-        error, and by then the token accounting the success path relies on does
-        not exist. Returning the exception (rather than raising) keeps each call
-        site a single ``raise ... from exc``.
-
-        Args:
-            message: The failure description carried by the raised error.
-            latency_ms: Time spent before failing, when measured.
-
-        Returns:
-            The :class:`LLMCallFailed` for the caller to raise.
-        """
+        """Record a failed review-model call and return the error to raise."""
         error = LLMCallFailed(message)
         self._trace_llm_failure(error, latency_ms=latency_ms)
         return error
@@ -1631,12 +1215,7 @@ class CriticAgentBackend:
         *,
         latency_ms: int | None = None,
     ) -> None:
-        """Append one ``llm_calls.jsonl`` row for a call that never returned.
-
-        Args:
-            error: The exception describing the failure.
-            latency_ms: Time spent before failing, when measured.
-        """
+        """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
             record = LLMCallRecord.for_failure(
                 session_id=self.session_dir.name,
@@ -1663,19 +1242,7 @@ class CriticAgentBackend:
         response: str,
         call_id: str | None = None,
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a critic reasoning loop.
-
-        Persists the full (redacted) prompt + reply under ``component=critic``.
-        Best-effort: never raises into the review path. No-op when both prompt
-        and reply are empty.
-
-        Args:
-            system_prompt: Optional system prompt prepended to the recorded
-                prompt.
-            user_prompt: The judge-bundle user prompt the critic reasoned over.
-            response: The model's externally-visible reply text.
-            call_id: Per-call id shared with this call's token row.
-        """
+        """Append one ``conversations.jsonl`` row for a critic reasoning loop."""
         try:
             prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
             if not prompt and not response:
@@ -1697,16 +1264,7 @@ class CriticAgentBackend:
             )
 
     def _load_skill_preamble(self) -> str:
-        """Load and cache the critic-agent skill/action markdown preamble.
-
-        Reads ``SKILL.md`` and ``actions/review_coordinator_inbox.md`` from the
-        critic-agent root, concatenating whatever is readable. Missing files are
-        skipped (the prompt just gets thinner). The result is memoised.
-
-        Returns:
-            str: The combined preamble text, or an empty string when no source
-            files could be read.
-        """
+        """Load and cache the critic-agent skill/action markdown preamble."""
         if self._skill_preamble is not None:
             return self._skill_preamble
         parts: list[str] = []

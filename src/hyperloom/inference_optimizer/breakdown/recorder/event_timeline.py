@@ -1,33 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two timeline writes every event makes, and what a killed session leaves.
-
-An event is written to the timeline exactly twice, however many facts it
-collects in between. The opening write puts the shell there with
-``status="running"``; the closing write assembles the rows and updates that
-same entry in place. Facts recorded in between touch fragments only.
-
-The opening write is not optional. Without it a live session shows no event at
-all until the phase ends, and "a killed session can say which sub-step it
-stopped on" is the capability the timeline was built for.
-
-The sequence that write returns is stored on the event-level fragment, because
-that fragment is the event's only durable identity. The closing write reuses it
-to update one file instead of appending a second event, and its absence is what
-separates the two residual states a killed session can leave:
-
-* the shell was written and the closing write never ran -- the event is on disk
-  as ``running`` and its sequence is recoverable from the fragment;
-* the shell write itself failed, or rows were recorded before the event was
-  opened -- there is no event and no sequence, so finalize has to allocate one.
-
-Neither is guessed into a terminal status. The closing status is derived at
-assembly from the evidence, so an event whose closing write never ran has
-nothing that judged it; calling it ``succeeded`` because its fragments look
-complete is exactly the inference this design exists to remove. Both become
-:data:`EVENT_STATUS_INTERRUPTED`.
-"""
+"""The two timeline writes every event makes, and what a killed session leaves."""
 
 from __future__ import annotations
 
@@ -88,14 +62,7 @@ RESIDUAL_NO_EVENT = "no_event"
 
 
 class ResidualEvent(NamedTuple):
-    """One event a killed session left behind.
-
-    Attributes:
-        event_id (str): The event id the fragments are tagged with.
-        sequence (int | None): The storage sequence to update in place, or
-            ``None`` when no event was ever written and one must be allocated.
-        state (str): :data:`RESIDUAL_RUNNING` or :data:`RESIDUAL_NO_EVENT`.
-    """
+    """One event a killed session left behind."""
 
     event_id: str
     sequence: int | None
@@ -112,30 +79,7 @@ def build_envelope(
     end_time: str = "",
     ext: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the envelope every event type shares.
-
-    Fields that mean the same thing for every type live here rather than being
-    redeclared inside each ``ext``, because one semantic stored N times drifts.
-
-    Args:
-        event_type (str): The timeline event type, e.g. ``kernel``.
-        event (str): The event id, which becomes the envelope's ``id``. Note
-            the deliberate asymmetry with the rows: the envelope calls it
-            ``id`` because it is this object's own identity, while a row calls
-            it ``event_id`` because it is a reference to the event the row
-            belongs to.
-        status (str): The event status.
-        kind (str): The type-specific sub-kind, when the type has one.
-        start_time (str): ISO UTC timestamp the event opened.
-        end_time (str): ISO UTC timestamp the event closed.
-        ext (Mapping[str, Any] | None): The type-specific payload.
-
-    Returns:
-        dict[str, Any]: The envelope, carrying only the fields that were given.
-
-    Raises:
-        ValueError: If ``event`` is not a well-formed event id.
-    """
+    """Build the envelope every event type shares."""
     parse_event_id(event)
     envelope: dict[str, Any] = {
         "type": str(event_type),
@@ -162,39 +106,7 @@ def open_event(
     start_time: str = "",
     ext: Mapping[str, Any] | None = None,
 ) -> int | None:
-    """Write the event shell and store its sequence on the event-level fragment.
-
-    Both halves happen here so they cannot come apart: an event whose shell was
-    written but whose sequence was not recorded would be updated by appending a
-    second event at close, and one whose fragment was written but whose shell
-    was not would be invisible until the phase ended.
-
-    Opening an event twice returns the sequence the first call took rather than
-    writing a second shell, so an event several actions share -- the rooflines
-    one phase dispatched in one cycle, each of which opens the event it belongs
-    to -- stays one entry on the timeline.
-
-    Args:
-        event_type (str): The timeline event type.
-        event (str): The event id.
-        event_section (str): The event-level section for this type, e.g.
-            ``kernel_event``.
-        producer (str): The producer label owning the fragment.
-        kind (str): The type-specific sub-kind, when the type has one.
-        start_time (str): ISO UTC timestamp the event opened.
-        ext (Mapping[str, Any] | None): Whatever of ``ext`` is known already;
-            the closing write replaces it with the assembled form.
-
-    Returns:
-        int | None: The storage sequence to close the event with, or ``None``
-            when the write failed. A caller that gets ``None`` should carry on
-            recording facts: the fragments still land, and finalize recovers
-            the event from them.
-
-    Raises:
-        ValueError: If ``event`` is not a well-formed event id, or
-            ``event_section`` is declared with a shape other than ``item``.
-    """
+    """Write the event shell and store its sequence on the event-level fragment."""
     from ...session.sbd_v6 import record_write_warning, timeline_sequence, write_timeline_event
 
     already = _opened_sequence(event, event_section=event_section)
@@ -236,27 +148,7 @@ def finish_event(
     start_time: str = "",
     end_time: str = "",
 ) -> Path | None:
-    """Update the event in place with its assembled ``ext`` and final status.
-
-    Args:
-        event_type (str): The timeline event type.
-        event (str): The event id.
-        sequence (int | None): The sequence :func:`open_event` returned.
-            ``None`` allocates a new event, which is what finalize does for
-            fragments whose shell write never landed.
-        status (str): The status assembly derived.
-        ext (Mapping[str, Any]): The assembled type-specific payload.
-        kind (str): The type-specific sub-kind, when the type has one.
-        start_time (str): ISO UTC timestamp the event opened.
-        end_time (str): ISO UTC timestamp the event closed.
-
-    Returns:
-        Path | None: The event file written, or ``None`` when the write failed
-            and was parked for the next export.
-
-    Raises:
-        ValueError: If ``event`` is not a well-formed event id.
-    """
+    """Update the event in place with its assembled ``ext`` and final status."""
     from ...session.sbd_v6 import record_write_warning, set_timeline_sequence, write_timeline_event
 
     envelope = build_envelope(
@@ -308,18 +200,7 @@ def residual_events(
     *,
     event_type: str,
 ) -> list[ResidualEvent]:
-    """Classify the events that fragments describe but the timeline does not.
-
-    Args:
-        event_rows (Iterable[Mapping[str, Any]]): The event-level fragments of
-            one type, as read back from the spool.
-        event_type (str): The timeline event type those fragments belong to.
-
-    Returns:
-        list[ResidualEvent]: One entry per event id that still needs closing,
-            in the order the rows were given. An event already on disk with a
-            terminal status is not listed.
-    """
+    """Classify the events that fragments describe but the timeline does not."""
     from ...session.sbd_v6 import read_timeline_events, timeline_sequence
 
     from ...session.session_binding import bound_session_or_none
@@ -357,13 +238,7 @@ def residual_events(
 
 
 def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
-    """Persist a writer failure for the next export, best-effort.
-
-    Args:
-        record_warning (Any): The ``record_write_warning`` callable.
-        component (str): Dotted component name for the sidecar entry.
-        exc (BaseException): The failure to record.
-    """
+    """Persist a writer failure for the next export, best-effort."""
     from ...session.session_binding import bound_session_or_none
 
     session = bound_session_or_none()
@@ -373,9 +248,8 @@ def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
     try:
         record_warning(session, component=component, exc=exc)
     except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
-        # The sidecar is what makes the parked failures above visible in the
-        # export, so losing it is the point at which the original failure would
-        # otherwise go unreported entirely.
+        # The sidecar is what makes the parked failures above visible in the export, so losing it is the point at
+        # which the original failure would otherwise go unreported entirely.
         log.warning(
             "timeline: cannot park the %s failure %r; it will not reach the export", component, exc, exc_info=True
         )

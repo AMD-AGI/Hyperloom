@@ -30,10 +30,8 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import (
-    is_rocm_hip_writable_path,
+    resolve_kernel_search_roots,
     resolve_session_framework_root,
-    resolve_source_file_allowlist,
-    resolved_within,
 )
 from ...specialists.patch_safety import (
     is_unified_diff,
@@ -450,25 +448,14 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def allowlisted_explicit_root(
-    explicit: str,
-    allowlist: tuple[str, ...] | None = None,
-) -> Path | None:
-    """Resolve a declared framework root, or ``None`` when it is not allowlisted.
-
-    A root outside the allowlisted source scope is refused whatever its tree
-    holds, so callers must ask this before blaming the patches for not
-    matching it.
+def resolved_explicit_root(explicit: str) -> Path | None:
+    """Resolve a declared framework root, or ``None`` when it is not a directory.
 
     Args:
         explicit: The declared ``framework_source_root``.
-        allowlist: Pre-resolved allowlist, computed once by the caller when
-            available, to avoid a redundant ``resolve_source_file_allowlist()``
-            call.
 
     Returns:
-        The resolved directory, or ``None`` when it is unreadable, absent, or
-        outside the allowlisted source scope.
+        The resolved directory, or ``None`` when it is unreadable or absent.
     """
     try:
         resolved = Path(explicit).resolve()
@@ -484,14 +471,7 @@ def allowlisted_explicit_root(
             explicit,
         )
         return None
-    effective_allowlist = allowlist if allowlist is not None else resolve_source_file_allowlist()
-    if any(resolved_within(explicit, root) for root in effective_allowlist):
-        return resolved
-    log.warning(
-        "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
-        explicit,
-    )
-    return None
+    return resolved
 
 
 def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
@@ -542,16 +522,14 @@ def _resolve_framework_root(
 
     A ``recorded_root`` — carried from the authoring stage through
     ``done_payload["patch_roots"]`` — is authoritative and skips probing
-    entirely. It is rejected outright when it falls outside the allowlist,
-    exactly as a declared ``explicit`` root is.
+    entirely.
 
     Without a recorded root, the decision falls through to
     :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
     patches to place, the session's declared root wins.
 
     Args:
-        explicit: Declared framework root. Rejected when it resolves outside
-            the trusted source scope.
+        explicit: Declared framework root.
         patch_paths: Patch files to place; unreadable ones are skipped.
         patch_texts: Patch diffs already in memory, placed alongside
             ``patch_paths``.
@@ -560,15 +538,14 @@ def _resolve_framework_root(
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
-    allowlist = resolve_source_file_allowlist()
-    roots = [Path(root) for root in allowlist]
+    roots = [Path(root) for root in resolve_kernel_search_roots()]
 
     if recorded_root:
-        return allowlisted_explicit_root(recorded_root, allowlist=allowlist)
+        return resolved_explicit_root(recorded_root)
 
     explicit_path: Path | None = None
     if explicit:
-        explicit_path = allowlisted_explicit_root(explicit, allowlist=allowlist)
+        explicit_path = resolved_explicit_root(explicit)
         if explicit_path is None:
             return None
 
@@ -577,11 +554,12 @@ def _resolve_framework_root(
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
-        # The allowlist does not necessarily hold it: it discovers the unprefixed
-        # env var, while the session root also answers to <FRAMEWORK>_REPO_PATH
-        # and <FRAMEWORK>_DIR. Leaving it out turns the tree under optimisation
-        # into a non-candidate, and default_root cannot stand in -- that is
-        # consulted only for a create-only set, which has no pre-image to match.
+        # The search roots do not necessarily hold it: they discover the
+        # unprefixed env var, while the session root also answers to
+        # <FRAMEWORK>_REPO_PATH and <FRAMEWORK>_DIR. Leaving it out turns the
+        # tree under optimisation into a non-candidate, and default_root cannot
+        # stand in -- that is consulted only for a create-only set, which has no
+        # pre-image to match.
         candidates = [Path(session_root), *roots] if session_root else list(roots)
         resolution = resolve_patch_apply_root(
             texts,
@@ -709,36 +687,6 @@ def _preflight_missing_targets(
         if missing:
             records.append({"patch": str(patch), "missing_targets": missing})
     return records
-
-
-def _localization_paths_outside_allowlist(
-    touched_paths: list[str],
-    framework_root: Path | None,
-    allow_roots: list[str],
-) -> list[str]:
-    """Return the touched paths that resolve outside the allowed source roots.
-
-    A localization diff may only write under the source-file allowlist or the
-    attempt-local root. Paths are resolved against ``framework_root`` when
-    relative. Returns the offending paths (empty when all are in-bounds).
-    Fail closed: with no trusted write root, every non-empty touched path is
-    treated as out of bounds.
-    """
-    roots = [Path(r).resolve() for r in allow_roots if str(r).strip()]
-    if framework_root is not None:
-        roots.append(Path(framework_root).resolve())
-    if not roots:
-        return [str(rel or "").strip() for rel in touched_paths if str(rel or "").strip()]
-    outside: list[str] = []
-    for rel in touched_paths:
-        rel_s = str(rel or "").strip()
-        if not rel_s:
-            continue
-        base = framework_root if framework_root is not None else Path("/")
-        cand = (base / rel_s).resolve() if not Path(rel_s).is_absolute() else Path(rel_s).resolve()
-        if not any(_is_within(cand, root) for root in roots) or not is_rocm_hip_writable_path(str(cand)):
-            outside.append(rel_s)
-    return outside
 
 
 def _detect_p_level(
@@ -1337,14 +1285,12 @@ class _ArtifactSpec:
     Attributes:
         source: Absolute path to the artifact file inside the specialist
             workspace / worktree (sandbox-validated).
-        target: Absolute install path inside an allowlisted framework root
-            (sandbox-validated; no escape).
+        target: Absolute install path inside a framework root (no escape).
         rel_target: The framework-relative target, normalized to the matched
-            allowlisted root via ``_resolve_artifact_target`` (an author's
-            absolute target is converted to this relative form). Used for
-            reporting AND as the framework-relative key for the durable KEEP
-            source snapshot.
-        root: The allowlisted root ``rel_target`` is relative to. The KEEP
+            root via ``_resolve_artifact_target`` (an author's absolute target
+            is converted to this relative form). Used for reporting AND as the
+            framework-relative key for the durable KEEP source snapshot.
+        root: The root ``rel_target`` is relative to. The KEEP
             source snapshot is keyed on one root, so an artifact installed into
             a different tree than the patches must be recognisable as such.
         kind: Free-form artifact kind label (e.g. ``config_json``).
@@ -1359,18 +1305,41 @@ class _ArtifactSpec:
     description: str = ""
 
 
+def _artifact_candidates(root: Path, rel: str) -> list[Path]:
+    """The joins a root admits for a framework-relative artifact target.
+
+    A pip-installed root is the package directory itself, so a target that
+    repeats the package name (``vllm/model_executor/...``) belongs under the
+    root's parent; a checkout holds the package one level down and joins
+    directly. Both are offered and the caller picks by which parent exists,
+    the same rule ``_resolve_focus_dir`` applies to prompt focus directories.
+
+    Args:
+        root: A framework search root.
+        rel: The framework-relative target.
+
+    Returns:
+        Candidate absolute paths, direct join first.
+    """
+    candidates = [(root / rel).resolve()]
+    if (root / "__init__.py").is_file():
+        candidates.append((root.parent / rel).resolve())
+    return candidates
+
+
 def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
-    A relative target picks the allowlisted framework root whose tree already
-    contains the target's parent directory (so a ``vllm/...`` config lands under
-    the vllm root); else the first existing root. An absolute target is accepted
-    ONLY when it resolves strictly inside an allowlisted root. Either way the
-    resolved path must stay within the chosen root (no ``..`` escape).
+    A relative target picks the framework root whose tree already contains the
+    target's parent directory; else the first existing root. On a pip-installed
+    root both joins in :func:`_artifact_candidates` are tried, so a ``vllm/...``
+    config lands beside the package rather than under a doubled ``vllm/vllm/``.
+    Either way the resolved path must stay within the chosen root, so a ``..``
+    cannot walk out of the tree it names.
 
     Args:
         rel_target: The install path authored by the specialist (framework-
-            relative, or an absolute path inside an allowlisted root).
+            relative, or absolute).
 
     Returns:
         A ``(absolute_target, framework_relative_target, root)`` tuple, or
@@ -1381,30 +1350,25 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     rel = (rel_target or "").strip()
     if not rel or ".." in Path(rel).parts:
         return None
-    roots = [Path(r).resolve() for r in resolve_source_file_allowlist()]
+    roots = [Path(r).resolve() for r in resolve_kernel_search_roots()]
     roots = [r for r in roots if r.is_dir()]
     if not roots:
         return None
-    # An absolute target is accepted only when it resolves strictly inside an
-    # allowlisted framework root.
     if Path(rel).is_absolute():
         cand = Path(rel).resolve()
         for root in roots:
-            if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
+            if _is_within(cand, root):
                 return cand, cand.relative_to(root).as_posix(), root
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
-        cand = (root / rel).resolve()
-        if not _is_within(cand, root) or not is_rocm_hip_writable_path(str(cand)):
-            continue
-        if cand.parent.is_dir():
-            return cand, cand.relative_to(root).as_posix(), root
-    # Fall back to the first root that keeps the path contained.
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root) and cand.parent.is_dir():
+                return cand, cand.relative_to(root).as_posix(), root
     for root in roots:
-        cand = (root / rel).resolve()
-        if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
-            return cand, cand.relative_to(root).as_posix(), root
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root):
+                return cand, cand.relative_to(root).as_posix(), root
     return None
 
 
@@ -1419,8 +1383,8 @@ def _resolve_artifact_specs(
     Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
-    resolved inside an allowlisted framework root. Malformed / out-of-sandbox
-    entries are dropped and reported.
+    resolved inside a framework root. Malformed / out-of-sandbox entries are
+    dropped and reported.
 
     Args:
         specialist_workspace: The specialist task workspace.
@@ -2127,10 +2091,9 @@ class IntegratePatchExecutor:
 
         No-op when no ``localization_candidate`` is present or in multi-node
         mode. Fetches the merged-PR / vendored diff (post-Critic), rejects a
-        compiled / build-backend closure to a clean revert, enforces the
-        source-file allowlist (+ the attempt-local root only), and
-        writes the diff to a patch file recorded on ``ctx._ip_localization_patches``
-        which ``_stage_apply`` prepends to the patch set. Returns an early-exit
+        compiled / build-backend closure to a clean revert, and writes the diff
+        to a patch file recorded on ``ctx._ip_localization_patches`` which
+        ``_stage_apply`` prepends to the patch set. Returns an early-exit
         ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
         ``None`` to continue.
         """
@@ -2182,22 +2145,6 @@ class IntegratePatchExecutor:
             return _base_reverted(error_class, f"localization not applicable: {verdict.reason}")
         if not diff_text.strip():
             return _base_reverted("localization_fetch_failed", "localization produced an empty diff")
-
-        # Allowlist gate: touched paths must resolve under the source-file
-        # allowlist or the attempt-local root only (no global env mutation).
-        framework_root: Path | None = _resolve_framework_root(
-            params.get("framework_source_root") or None, patch_paths=[]
-        )
-        allow_roots = list(resolve_source_file_allowlist())
-        attempt_root = str(getattr(ctx, "_ip_attempt_venv_root", "") or "")
-        if attempt_root:
-            allow_roots.append(str(Path(attempt_root).parent))
-        outside = _localization_paths_outside_allowlist(touched_paths, framework_root, allow_roots)
-        if outside:
-            return _base_reverted(
-                "localization_outside_allowlist",
-                f"localization touches path(s) outside the allowlist: {outside[:8]}",
-            )
 
         loc_dir = runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id)
         loc_dir = loc_dir / "localization"
@@ -2478,13 +2425,14 @@ class IntegratePatchExecutor:
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
-            # Forward grounding-drop details so framework.py can surface them in
-            # the next round's mandate.  The field lives on done_payload (written
-            # by runner.py) and must be forwarded here because _no_patches is the
-            # concrete dict framework.py reads via _maybe_rearm_enablement.
-            grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
-            if isinstance(grounding_drops, list) and grounding_drops:
-                _no_patches["patches_dropped_by_grounding"] = grounding_drops
+            # Forward the ungrounded-patch details so framework.py can surface
+            # them in the next round's mandate.  The field lives on done_payload
+            # (written by runner.py) and must be forwarded here because
+            # _no_patches is the concrete dict framework.py reads via
+            # _maybe_rearm_enablement.
+            ungrounded = (done_payload or {}).get("patches_ungrounded")
+            if isinstance(ungrounded, list) and ungrounded:
+                _no_patches["patches_ungrounded"] = ungrounded
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
@@ -2496,30 +2444,24 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                # A non-allowlisted root is refused on that ground alone; only
-                # an allowlisted one that simply lacks the files is the patches' fault.
-                allowed_root = allowlisted_explicit_root(explicit_framework_root)
-                if allowed_root is not None:
-                    if not _read_patch_texts(patch_paths):
-                        _error_class = "patch_unreadable"
-                        _error = "no patch file could be read; verify paths and permissions"
-                    else:
-                        missing_records = _preflight_missing_targets(allowed_root, patch_paths)
-                        if missing_records:
-                            _error_class = "patch_target_missing"
-                            _error = missing_records
-                        else:
-                            _error_class = "framework_source_root_rejected"
-                            _error = (
-                                f"framework_source_root {explicit_framework_root!r} could not "
-                                "be unambiguously matched to the patch targets"
-                            )
+                declared_root = resolved_explicit_root(explicit_framework_root)
+                if declared_root is None:
+                    _error_class = "framework_root_unresolved"
+                    _error = f"framework_source_root {explicit_framework_root!r} is not a readable directory"
+                elif not _read_patch_texts(patch_paths):
+                    _error_class = "patch_unreadable"
+                    _error = "no patch file could be read; verify paths and permissions"
                 else:
-                    _error_class = "framework_source_root_rejected"
-                    _error = (
-                        f"framework_source_root {explicit_framework_root!r} is not "
-                        "under the configured trusted source scope"
-                    )
+                    missing_records = _preflight_missing_targets(declared_root, patch_paths)
+                    if missing_records:
+                        _error_class = "patch_target_missing"
+                        _error = missing_records
+                    else:
+                        _error_class = "patch_root_ambiguous"
+                        _error = (
+                            f"framework_source_root {explicit_framework_root!r} could not "
+                            "be unambiguously matched to the patch targets"
+                        )
             else:
                 _error_class = "no_framework_agent_root"
                 _error = (
@@ -4314,7 +4256,7 @@ class IntegratePatchExecutor:
         stable base and must not be reverted when this round's candidate is rolled back.
 
         Each entry is validated before installation:
-        - ``target`` must resolve inside an allowlisted framework root
+        - ``target`` must resolve inside a framework root
           (via :func:`_resolve_artifact_target`).
         - ``source`` must resolve inside the session directory.
 
@@ -4353,7 +4295,7 @@ class IntegratePatchExecutor:
             resolved = _resolve_artifact_target(target_str)
             if resolved is None:
                 log.warning(
-                    "integrate_patch: base artifact target %r not in allowlisted root; skipping",
+                    "integrate_patch: base artifact target %r not in a framework root; skipping",
                     target_str,
                 )
                 continue

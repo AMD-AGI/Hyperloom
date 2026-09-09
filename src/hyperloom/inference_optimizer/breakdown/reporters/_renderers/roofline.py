@@ -50,17 +50,7 @@ def _snapshots(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
-    """Render one roofline snapshot as a labelled key-value block.
-
-    Args:
-        label (str): The block heading (e.g. ``"Baseline"`` or ``"Latest"``).
-        snap (dict[str, Any] | None): The snapshot record, including an
-            optional ``top_kernel`` sub-dict.
-
-    Returns:
-        str: The markdown block, or an empty string when the snapshot is
-            missing or has no displayable fields.
-    """
+    """Render one roofline snapshot as a labelled key-value block."""
     if not isinstance(snap, dict) or not snap:
         return ""
     tk = as_dict(snap.get("top_kernel"))
@@ -83,15 +73,7 @@ def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
 
 
 def _delta_block(delta: dict[str, Any] | None) -> str:
-    """Render the roofline ``delta`` mapping as a two-column table.
-
-    Args:
-        delta (dict[str, Any] | None): Field-to-value delta mapping.
-
-    Returns:
-        str: A markdown ``field``/``value`` table, or an empty string when the
-            delta is missing or empty.
-    """
+    """Render the roofline ``delta`` mapping as a two-column table."""
     if not isinstance(delta, dict) or not delta:
         return ""
     rows = [[key, value] for key, value in delta.items()]

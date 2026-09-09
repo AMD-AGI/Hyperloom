@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Concrete ActionRunner implementations.
-
-Each runner is an ``async def fn(RunnerContext) -> dict`` dispatched by
-SubAgentRunner when a queued task's ``kind`` matches its registered name.
-"""
+"""Concrete ActionRunner implementations."""
 
 from .baseline import (
     BaselineExecutor,

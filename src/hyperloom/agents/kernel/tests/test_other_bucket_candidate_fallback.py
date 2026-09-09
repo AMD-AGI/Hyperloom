@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the high-GPU-time missing-candidate recovery fallback.
-
-Hyperloom builds candidates only from analysis.md reasoning-candidate (P-item)
-blocks, and TraceLens emits no such block for some hot kernels — notably ones
-filed under the un-roofline'd ``other`` category. The fallback recovers any
-high-GPU-time op missing from analysis.md, whatever its category, from the
-per-op ranking sidecar so it flows through classify_patchability and reaches
-GEAK.
-"""
+"""Tests for the high-GPU-time missing-candidate recovery fallback."""
 
 from __future__ import annotations
 
@@ -117,8 +109,8 @@ def test_recover_skips_op_already_in_candidates(tmp_path):
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,3300.0\n"),
     )
-    # The op already surfaced in analysis.md (fused_moe_kernel) is NOT duplicated;
-    # the broadened gate still recovers the high-time GEMM that was missing.
+    # The op already surfaced in analysis.md (fused_moe_kernel) is NOT duplicated; the broadened gate still recovers
+    # the high-time GEMM that was missing.
     recovered = tla.recover_other_bucket_candidates(
         tmp_path,
         [{"name": "fused_moe_kernel"}],
@@ -144,8 +136,7 @@ def test_recover_skips_below_threshold(tmp_path):
 
 
 def test_recover_surfaces_high_time_non_other_category(tmp_path):
-    # A high-time op in a rooflined category missing from analysis.md
-    # candidates IS recovered.
+    # A high-time op in a rooflined category missing from analysis.md candidates IS recovered.
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("big_gemm,GEMM,9000.0\nrmsnorm,elementwise,1000.0\n"),
@@ -222,8 +213,8 @@ def test_synthetic_analysis_md_missing_high_time_op_is_recovered(tmp_path):
     assert [c["name"] for c in report_cands] == ["aten::mm"], (
         "synthetic analysis.md should yield exactly the P1 GEMM candidate"
     )
-    # The #1 kernel (67% other-bucket Triton fused-MoE GEMM) has no
-    # reasoning-candidate block, so it is absent from report_cands.
+    # The #1 kernel (67% other-bucket Triton fused-MoE GEMM) has no reasoning-candidate block, so it is absent from
+    # report_cands.
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv(
@@ -244,9 +235,7 @@ def test_synthetic_analysis_md_missing_high_time_op_is_recovered(tmp_path):
 
 
 def test_recovered_other_bucket_kernel_routes_to_geak(tmp_path, monkeypatch):
-    """A recovered raw candidate (source_file unset) flows through
-    _finalize_candidates -> classify_patchability and a Triton kernel under
-    /sgl-workspace/sglang/ is marked reusable_native_kernel=True (routable to GEAK)."""
+    """A recovered raw candidate (source_file unset) flows through _finalize_candidates -> classify_patchability and a Triton kernel under /sgl-workspace/sglang/ is marked reusable_native_kernel=True (routable to GEAK)."""
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,3300.0\n"),
@@ -291,8 +280,8 @@ def test_classify_patchability_marks_triton_sglang_kernel_reusable(monkeypatch):
     assert reusable is True, reason
 
 
-# REAL ops_summary.csv schema: the columns TraceLens actually emits
-# (Categories list-repr, total_direct_kernel_time_ms, Percentage (%)).
+# REAL ops_summary.csv schema: the columns TraceLens actually emits (Categories list-repr,
+# total_direct_kernel_time_ms, Percentage (%)).
 _REAL_OPS_SUMMARY_HEADER = (
     "name,parent_module,total_direct_kernel_time_sum,"
     "total_subtree_kernel_time_sum,total_subtree_kernel_time_count,"
@@ -309,8 +298,8 @@ def _real_ops_summary_csv() -> str:
         "\n".join(
             [
                 _REAL_OPS_SUMMARY_HEADER,
-                # MoE_fused row: Categories is a python-list-repr string; quote the
-                # call_stack cell because it contains commas/=>.
+                # MoE_fused row: Categories is a python-list-repr string; quote the call_stack cell because it
+                # contains commas/=>.
                 f"{_REAL_MOE_NAME}, nn.Module: FusedMoE ,302875.90625,302875.90625,"
                 "96,302.87590625,96,['MoE_fused'],"
                 f'"{_REAL_MOE_NAME} => nn.Module: FusedMoE_0",'
@@ -353,8 +342,7 @@ def test_clean_category_label_swallows_oversized_literal():
 
 
 def test_recover_moe_fused_real_schema(tmp_path):
-    """The dominant MoE_fused row (67% GPU time) is recovered from the REAL
-    ops_summary.csv schema even though it is NOT an "other"-bucket op."""
+    """The dominant MoE_fused row (67% GPU time) is recovered from the REAL ops_summary.csv schema even though it is NOT an "other"-bucket op."""
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     # analysis.md surfaced the GEMM; the 67% MoE_fused kernel had no block.
     recovered = tla.recover_other_bucket_candidates(
@@ -370,12 +358,10 @@ def test_recover_moe_fused_real_schema(tmp_path):
 
 
 def test_compound_subwindow_keywords_extracts_function():
-    """The embedded function symbol is recoverable from the profiler-wrapped
-    op name so source resolution can grep for it."""
+    """The embedded function symbol is recoverable from the profiler-wrapped op name so source resolution can grep for it."""
     windows = tla._compound_subwindow_keywords(_REAL_MOE_NAME)
     assert "invoke_fused_moe_kernel" in windows
-    # The full compound token (which never appears verbatim in source) is not
-    # the only keyword we try.
+    # The full compound token (which never appears verbatim in source) is not the only keyword we try.
     assert any("fused_moe_kernel" in w for w in windows)
 
 
@@ -395,8 +381,7 @@ def _make_fake_sglang_tree(root: Path) -> Path:
 
 
 def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
-    """locate_source_via_grep resolves a profiler-wrapped op name to its kernel
-    source via trailing sub-window keywords (hermetic — uses a fake source tree)."""
+    """locate_source_via_grep resolves a profiler-wrapped op name to its kernel source via trailing sub-window keywords (hermetic — uses a fake source tree)."""
     src = _make_fake_sglang_tree(tmp_path / "src")
     monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "src"),))
     tla._GREP_CACHE.clear()
@@ -405,8 +390,7 @@ def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
 
 
 def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
-    """End-to-end (hermetic): real-schema MoE_fused row -> recovered ->
-    _finalize_candidates -> source resolved -> reusable_native_kernel=True."""
+    """End-to-end (hermetic): real-schema MoE_fused row -> recovered -> _finalize_candidates -> source resolved -> reusable_native_kernel=True."""
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     src = _make_fake_sglang_tree(tmp_path / "src")
     fake_root = str(tmp_path / "src") + "/"
@@ -428,19 +412,11 @@ def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
     assert item["reusable_native_kernel"] is True, item.get("skip_reason")
 
 
-# ---------------------------------------------------------------------------
 # gpu_pct basis — the denominator must match what parse_analysis_md reports
-# ---------------------------------------------------------------------------
 
 
 def test_recover_normalizes_gpu_pct_against_trace_window(tmp_path):
-    """With the trace wall span known, gpu_pct is an end-to-end share.
-
-    ``ops_summary.csv`` percentages are a share of total *op* time, which
-    excludes collectives. On a comm-dominated trace that inflates them by an
-    order of magnitude relative to the analysis.md candidates they get ranked
-    against, so the window total wins when it is available.
-    """
+    """With the trace wall span known, gpu_pct is an end-to-end share."""
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("fused_moe_kernel,other,121.821899\naten::mm,GEMM,48.708459\n"),
@@ -459,14 +435,7 @@ def test_recover_normalizes_gpu_pct_against_trace_window(tmp_path):
 
 
 def test_admission_is_unchanged_by_the_reporting_basis(tmp_path):
-    """GLM-5.2: 16.8% of compute is 0.67% of the window — recovered, but labelled.
-
-    ``min_gpu_pct`` keeps its original meaning (a large slice of the GPU work we
-    know about), so switching the *published* number to an e2e share must not
-    quietly raise the admission bar; the same op is recovered with or without a
-    window total, and only ``gpu_pct`` / ``gpu_pct_basis`` differ. Suppressing a
-    window like this one is the low-compute gate's job, not this path's.
-    """
+    """GLM-5.2: 16.8% of compute is 0.67% of the window — recovered, but labelled."""
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("moe_flydsl_stage1,MoE_unfused,121.821899\n"),
@@ -487,12 +456,7 @@ def test_admission_is_unchanged_by_the_reporting_basis(tmp_path):
 
 
 def test_window_basis_does_not_starve_a_healthy_compute_bound_trace(tmp_path):
-    """A 60%-compute trace with work spread over eight kernels keeps its candidates.
-
-    Comparing the 10% floor against an e2e share instead of an op share raises
-    the bar by the reciprocal of the compute share; on this shape that is 12.5%
-    op time vs 7.5% e2e, and every candidate would silently disappear.
-    """
+    """A 60%-compute trace with work spread over eight kernels keeps its candidates."""
     rows = "".join(f"k{i},other,75.0\n" for i in range(8))
     _write(tmp_path / "ops_summary.csv", _ops_summary_csv(rows))
     recovered = tla.recover_other_bucket_candidates(
@@ -507,12 +471,7 @@ def test_window_basis_does_not_starve_a_healthy_compute_bound_trace(tmp_path):
 
 
 def test_recover_flags_a_batch_that_mixes_gpu_pct_bases(tmp_path):
-    """Two bases in one batch is the unrankable state the label exists to catch.
-
-    Reachable within a single sidecar when only some rows carry an absolute GPU
-    time: those are normalized against the e2e window, while a row that reports
-    only a percentage keeps whatever denominator the sidecar used.
-    """
+    """Two bases in one batch is the unrankable state the label exists to catch."""
     _write(
         tmp_path / "priority_data.json",
         json.dumps(

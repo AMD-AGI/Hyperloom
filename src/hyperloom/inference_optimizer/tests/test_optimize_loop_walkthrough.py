@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The loop driven end to end over mock backends.
-
-Every other test in this tree exercises one rule with the state it needs
-already arranged. That is what let a phase ship with a zero budget, a
-discovery lane that re-fetched one finished task forever, and an exit rung
-nothing could reach: each defect was invisible to a test that set up the
-condition the rule reads, and fatal to a run that had to arrive at it.
-
-These two walk the machine instead and assert where it ends up.
-"""
+"""The loop driven end to end over mock backends."""
 
 from __future__ import annotations
 
@@ -66,18 +57,7 @@ def _chain(state: Any) -> list[tuple[str, str, str]]:
 
 @pytest.mark.asyncio
 async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(session_dir: Path):
-    """Entering the phase must produce dispatches, not just a history row.
-
-    The phase held a 0.0 budget share and left on its first tick; before that
-    the discovery lane re-keyed every request identically and re-fetched one
-    finished task on every tick. Both read as "the phase ran" in a history row
-    and as nothing at all in the task registry.
-
-    No backend runs specialists here, so what the arms produce is a dispatch,
-    not a result. That is the whole assertion: the empty-discovery streak is
-    deliberately not read, because in this harness the round fails to run
-    rather than running and finding nothing.
-    """
+    """Entering the phase must produce dispatches, not just a history row."""
     coord = _coordinator(session_dir)
     try:
         coord.shared_state.baseline_tput = 1500.0
@@ -109,8 +89,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
         # Source arm: no local exploration, and discovery past its retries.
         state.framework_local_explore_enabled = False
         state.framework_agent_empty_discoveries = 99
-        # Config arm: trailing winners below the gain floor, rounds producing
-        # nothing.
+        # Config arm: trailing winners below the gain floor, rounds producing nothing.
         state.explore_search = {"winners_history": [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)]}
         state.specialist_rounds = [{"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(6)]
         state.save(session_dir)

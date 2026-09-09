@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Independent benchmark/test-file discovery for the bypass analysis backend.
-
-Populates ``benchmark_files`` on routable hot-kernel candidates so the shared
-GEAK harness generator can build a runnable per-kernel benchmark. Discovery is a
-content-grep over the kernel repo's benchmark/test subdirs, so a content match
-finds tests even when the file name does not contain the op.
-"""
+"""Independent benchmark/test-file discovery for the bypass analysis backend."""
 
 from __future__ import annotations
 
@@ -29,17 +23,7 @@ _MULTIGPU_RE = re.compile(r"(?i)multi_?gpu|distributed|_dist\b|all_?reduce|all_?
 
 
 def repo_root_from_source(source_file: str) -> str:
-    """Best-effort kernel-repo root for a resolved source path.
-
-    Walks up from ``source_file`` until an ancestor directory contains one of
-    :data:`_BENCHMARK_DIRS`.
-
-    Args:
-        source_file: Resolved kernel source path.
-
-    Returns:
-        The repo root path, or ``""`` when none is found / the path is empty.
-    """
+    """Best-effort kernel-repo root for a resolved source path."""
     if not source_file:
         return ""
     try:
@@ -74,16 +58,7 @@ def _keywords(op_name: str, source_file: str) -> list[str]:
 
 
 def find_benchmark_files(op_name: str, source_file: str, *, max_files: int = 10) -> list[str]:
-    """Find on-disk benchmark/test ``.py`` files for a kernel via content grep.
-
-    Args:
-        op_name: Launching op name (e.g. ``aiter::rmsnorm``).
-        source_file: Resolved kernel source path (repo root + keyword source).
-        max_files: Cap on returned paths.
-
-    Returns:
-        Absolute benchmark-file paths (multi-GPU harnesses demoted), or ``[]``.
-    """
+    """Find on-disk benchmark/test ``.py`` files for a kernel via content grep."""
     root = repo_root_from_source(source_file)
     if not root:
         return []

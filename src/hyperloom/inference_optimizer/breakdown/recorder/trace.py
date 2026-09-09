@@ -1,34 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Write-path trace log for the breakdown recorder.
-
-The recorder is deliberately fire-and-forget: producers call it from deep
-inside their own work, every call site swallows exceptions, and the result is
-a spool directory of fragments that only becomes a breakdown much later, in a
-different process. That is the right shape for recording facts without holding
-up the run, and it is the wrong shape for answering "who wrote this number,
-from where, and what did it replace" -- which is the question asked every time
-an exported figure is doubted.
-
-Enabling this turns each write into one line naming the section, the fragment
-file, the entity, the call site, and, for the merging writes, the fields whose
-values changed. An overwrite is the interesting case: a fragment id is stable
-per entity so a second write merges into the first, which is what lets a later
-re-measure land on the readings an earlier decision was made on. Traced, that
-shows up as ``changed=value:5081.01->5100.76`` at the moment it happens instead
-of as a contradiction in an archive weeks later.
-
-The level is below ``DEBUG`` on purpose and is switched on by
-``HYPERLOOM_BREAKDOWN_TRACE`` alone, because a long session writes tens of
-thousands of fragments and this must not arrive mixed into output someone
-enabled to read something else. Nothing here may raise or slow down a run that
-has it switched off: every entry point is guarded by one level check and
-wrapped against its own failure, since a broken trace must never be the reason
-a fact went unrecorded. What it emits is redacted on the way out, because a
-line drawn from payloads and fragment names must not be the one copy of a
-credential that the code persisting those same values took care to mask.
-"""
+"""Write-path trace log for the breakdown recorder."""
 
 from __future__ import annotations
 
@@ -41,8 +14,7 @@ from typing import Any, Mapping
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 
-#: Below ``DEBUG`` (10). See the module docstring: this is a per-write firehose,
-#: so it cannot share a level with output read for any other purpose.
+#: Below ``DEBUG`` because every recorder write emits an event.
 TRACE = 5
 
 #: Sole switch for the write trace. Independent of global verbosity, which the
@@ -100,11 +72,7 @@ def enable_trace(enabled: bool = True) -> None:
 
 
 def trace_enabled() -> bool:
-    """Report whether the write trace would be emitted.
-
-    Returns:
-        bool: ``True`` when a call to :func:`trace_write` would log.
-    """
+    """Report whether the write trace would be emitted."""
     return _enabled and log.isEnabledFor(TRACE)
 
 
@@ -127,13 +95,7 @@ def _entity(payload: Mapping[str, Any]) -> str:
 
 
 def _transition(previous: Any, new: Any) -> str:
-    """Render a field's change, spelling out the values only when they are scalar.
-
-    A measurement being overwritten is the case worth reading in full, and it
-    is always a number. Nested payloads are named but not dumped: a line long
-    enough to hold two of them is one nobody reads, and the fragment file has
-    the detail anyway.
-    """
+    """Render a field's change, spelling out the values only when they are scalar."""
     if isinstance(previous, (str, int, float, bool, type(None))) and isinstance(
         new, (str, int, float, bool, type(None))
     ):
@@ -142,11 +104,7 @@ def _transition(previous: Any, new: Any) -> str:
 
 
 def _changed(previous: Mapping[str, Any], merged: Mapping[str, Any]) -> str:
-    """Summarise what a merging write did to the fragment already on disk.
-
-    Only the top level is compared, which is enough to know that the write was
-    not a no-op and which record to go read.
-    """
+    """Summarise what a merging write did to the fragment already on disk."""
     added: list[str] = []
     changed: list[str] = []
     for key in sorted(set(previous) | set(merged)):
@@ -161,8 +119,8 @@ def _changed(previous: Mapping[str, Any], merged: Mapping[str, Any]) -> str:
         return "changed=none"
     shown_changed = changed[:_CHANGED_LIMIT]
     shown_added = added[:_CHANGED_LIMIT]
-    # Both lists are capped, so both have to be counted; a write that only adds
-    # fields is otherwise reported as if nothing had been left out.
+    # Both lists are capped, so both have to be counted; a write that only adds fields is otherwise reported as if
+    # nothing had been left out.
     hidden = (len(changed) - len(shown_changed)) + (len(added) - len(shown_added))
     parts = shown_changed + shown_added
     if hidden > 0:
@@ -171,14 +129,7 @@ def _changed(previous: Mapping[str, Any], merged: Mapping[str, Any]) -> str:
 
 
 def _call_site() -> str:
-    """Locate the code responsible for a write, on both sides of the SDK.
-
-    Reports the innermost frame still inside the recorder package as ``via``
-    (the SDK helper that built the payload) and the first frame outside it as
-    ``from`` (the producer that decided to record something). The second is
-    what identifies the owner of a questionable number; the first is what
-    identifies the helper to go read.
-    """
+    """Locate the code responsible for a write, on both sides of the SDK."""
     via = ""
     try:
         frame: Any = sys._getframe(1)  # noqa: SLF001 - cheap, and guarded by the level check
@@ -196,15 +147,7 @@ def _call_site() -> str:
 
 
 def _emit(section: str, fields: list[str]) -> None:
-    """Mask one assembled trace line and log it.
-
-    The single point every trace line leaves through. Each line is producer
-    text at one remove -- payload values, ids that can carry an error excerpt,
-    fragment names built from those ids -- and those are masked where they are
-    persisted, so a trace that did not mask too would be the widest copy of
-    what the rest of the code is careful about. One exit keeps that from being
-    a rule each caller has to remember.
-    """
+    """Mask one assembled trace line and log it."""
     log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
 
 
@@ -223,25 +166,7 @@ def trace_write(
     previous: Mapping[str, Any] | None = None,
     error: BaseException | None = None,
 ) -> None:
-    """Log one fragment write, or the failure of one.
-
-    Args:
-        section (str): the breakdown section written.
-        kind (str): the declared section shape (``item`` / ``singleton``).
-        operation (str): ``write`` when the fragment is replaced wholesale,
-            ``upsert`` when it is merged into what was already there.
-        target (Path): the fragment file written.
-        payload (Mapping[str, Any]): the payload as written, post-merge.
-        producer (str): the producer label owning the fragment.
-        seq (int): the writer's per-process sequence number.
-        ts (str): the timestamp stamped into the fragment envelope.
-        size (int): the serialized size in bytes.
-        existed (bool): whether the target already existed, making this write a
-            replacement of an earlier fact rather than a new one.
-        previous (Mapping[str, Any] | None): for a merging write, the payload
-            found on disk, so the line can name what the write changed.
-        error (BaseException | None): the failure, when the write did not land.
-    """
+    """Log one fragment write, or the failure of one."""
     if not trace_enabled():
         return
     try:
@@ -275,22 +200,7 @@ def trace_skip(
     entity: Any = None,
     error: BaseException | None = None,
 ) -> None:
-    """Log a recording that was wanted but never attempted.
-
-    :func:`trace_write` only sees writes that got as far as the disk, so it
-    covers the outcome of recording and none of the reasons recording never
-    started. The gaps this fills are the ones that produce a breakdown with a
-    hole in it and nothing to explain the hole: an entry guard that returns
-    early because an id was empty, and a swallowed exception that keeps a
-    producer running at the cost of the record it was writing.
-
-    Args:
-        reason (str): why nothing was written, in a few words.
-        section (str): the breakdown section that would have been written.
-        producer (str): the producer label, when the caller knows it.
-        entity (Any): the id or name the record would have carried.
-        error (BaseException | None): the exception that was swallowed.
-    """
+    """Log a recording that was wanted but never attempted."""
     if not trace_enabled():
         return
     try:

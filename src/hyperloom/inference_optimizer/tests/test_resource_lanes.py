@@ -210,15 +210,16 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
 
 @pytest.mark.asyncio
 async def test_ray_observation_admits_up_to_pending_limit(conn):
-    """§3.2: under single-node Ray, admission is COUNT-based (pending limit),
-    not physical-capacity-based — so multiple specialists queue on ONE GPU."""
+    """§3.2: under single-node Ray, admission is COUNT-based (pending limit), not physical-capacity-based — so multiple
+    specialists queue on ONE GPU.
+    """
     # A single physical GPU: the legacy try_acquire caps at 1 concurrent...
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
     a = await pool.try_acquire_ray_observation(holder_id="h-a", task_id="t-a", pending_limit=3, ttl_sec=60)
     b = await pool.try_acquire_ray_observation(holder_id="h-b", task_id="t-b", pending_limit=3, ttl_sec=60)
     c = await pool.try_acquire_ray_observation(holder_id="h-c", task_id="t-c", pending_limit=3, ttl_sec=60)
-    # ...but the Ray observation ledger admits up to pending_limit (3) at once,
-    # each on a distinct synthetic slot id above the real device id space.
+    # ...but the Ray observation ledger admits up to pending_limit (3) at once, each on a distinct synthetic slot id
+    # above the real device id space.
     assert a is not None and b is not None and c is not None
     slots = sorted(list(a.gpu_ids) + list(b.gpu_ids) + list(c.gpu_ids))
     assert slots == [100000, 100001, 100002]
@@ -660,11 +661,7 @@ async def test_concurrent_acquires_respect_capacity(conn, locks):
 
 
 def test_gpu_research_lane_known_and_conflicts_are_symmetric():
-    """gpu_research_lane is a known lane, mutually exclusive with serving.
-
-    Conflicts must be declared symmetrically — each serving lane must list
-    gpu_research_lane and vice versa.
-    """
+    """gpu_research_lane is a known lane, mutually exclusive with serving."""
     assert "gpu_research_lane" in KNOWN_LANES
     assert LANE_CONFLICTS["gpu_research_lane"] == frozenset({"benchmark_lane", "profile_lane", "server_lifecycle"})
     for serving in ("benchmark_lane", "profile_lane", "server_lifecycle"):
@@ -719,11 +716,7 @@ async def test_serving_blocks_gpu_research_lane(locks):
 
 @pytest.mark.asyncio
 async def test_gpu_research_lane_is_strictly_serial(locks):
-    """A second GPU specialist is blocked while the first holds the lane.
-
-    gpu_research_lane is capacity-1 / strictly serial (one GPU specialist holds
-    the whole machine at a time).
-    """
+    """A second GPU specialist is blocked while the first holds the lane."""
     first = await locks.acquire_many(
         ["gpu_research_lane"],
         holder_id="g0",

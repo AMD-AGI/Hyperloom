@@ -33,8 +33,6 @@ from hyperloom.orchestrator.state.optimization_journal import (
 
 
 # Unified token + decision timeline.
-# Token-counter keys, re-declared here (not imported) so the breakdown package
-# stays free of orchestrator deps — collectors run offline against a tarball.
 _TOKEN_IN_KEY = "input_tokens"
 
 
@@ -47,16 +45,11 @@ _TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
 _TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
 
 
-# Hidden reasoning output. Billed like completion tokens but absent from the
-# visible reply, so it is rolled up in its own column and folded into
-# ``grand_total`` (the all-in spend figure) rather than into ``total_out``
-# (which is what the model actually said).
+# Hidden reasoning output.
 _TOKEN_REASONING_KEY = "reasoning_output_tokens"
 
 
-# Terminal-status key + its success value, re-declared for the same reason as the
-# token keys above. A ``status="error"`` row records a call that never returned,
-# so it carries no tokens and must stay out of every spend / call-count rollup.
+# Terminal-status key + its success value, re-declared for the same reason as the token keys above.
 _STATUS_KEY = "status"
 
 
@@ -73,17 +66,7 @@ _TOKEN_KEYS_ALL: tuple[str, ...] = (
 
 
 def _coerce_token(value: Any) -> int:
-    """Coerce a token counter to int, treating ``None`` / bad as 0.
-
-    The rollup sums tokens, so a missing counter contributes 0 here.
-
-    Args:
-        value (Any): A raw token-counter value.
-
-    Returns:
-        int: The integer count, or ``0`` when ``value`` is ``None`` / not
-        numeric.
-    """
+    """Coerce a token counter to int, treating ``None`` / bad as 0."""
     if value is None:
         return 0
     try:
@@ -93,11 +76,7 @@ def _coerce_token(value: Any) -> int:
 
 
 def _empty_token_bucket() -> dict[str, int]:
-    """Return a fresh, zeroed token-rollup bucket.
-
-    Returns:
-        A dict with zeroed input/output/cache token totals and call count.
-    """
+    """Return a fresh, zeroed token-rollup bucket."""
     return {
         "total_in": 0,
         "total_out": 0,
@@ -109,12 +88,7 @@ def _empty_token_bucket() -> dict[str, int]:
 
 
 def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
-    """Add one call's token counts into a rollup bucket in place.
-
-    Args:
-        bucket: Token bucket to accumulate into (mutated).
-        call: Per-call record carrying token counters.
-    """
+    """Add one call's token counts into a rollup bucket in place."""
     bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
     bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
     bucket["total_cache_creation"] += _coerce_token(call.get(_TOKEN_CACHE_CREATE_KEY))
@@ -127,28 +101,7 @@ def _load_llm_calls(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every *successful* LLM-call row from the trace ledger and ext shards.
-
-    Merges ``reports/trace/llm_calls.jsonl`` with every
-    ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
-    Best-effort: missing files / dirs yield ``[]``; malformed lines are
-    skipped by :func:`_load_jsonl_safe`.
-
-    Rows whose ``status`` is not ``ok`` are dropped: they describe a call that
-    never returned, so counting them would inflate ``calls`` and skew the
-    per-decision spend attribution. Rows predating the ``status`` field have no
-    such key and are kept. Failure visibility is Langfuse's job (the emitter
-    maps them to ``level=ERROR``), not the spend rollup's.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on scan
-            failures).
-
-    Returns:
-        list[dict[str, Any]]: Every well-formed successful LLM-call row across
-        the ledger and ext shards. Empty when no trace files exist.
-    """
+    """Read every *successful* LLM-call row from the trace ledger and ext shards."""
     trace_root = session_dir / "reports" / "trace"
     rows: list[dict[str, Any]] = list(_load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings))
     ext_dir = trace_root / "ext"
@@ -169,13 +122,7 @@ def _load_proposal_task_map(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, str]:
-    """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``.
-
-    Written by the Coordinator when an approved proposal is materialized into a
-    task. Lets the join attribute a Critic review call (which only carries the
-    reviewed proposal ``msg_id``) to the decision the proposal became. Later
-    rows win on duplicate msg_id. Best-effort: missing file yields ``{}``.
-    """
+    """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``."""
     rows = _load_jsonl_safe(
         session_dir / "reports" / "trace" / "proposal_task_map.jsonl",
         warnings,
@@ -195,14 +142,7 @@ def _attribute_critic_calls(
     calls: list[dict[str, Any]],
     msg_to_task: dict[str, str],
 ) -> None:
-    """Backfill ``task_id`` on Critic review calls from the proposal->task map.
-
-    A Critic reasoning call records the proposal ``msg_id``s it reviewed but not
-    a ``task_id``. Only a call that reviewed exactly ONE proposal resolving to
-    exactly one task is attributed; batch, ambiguous, or unresolvable reviews
-    are left unkeyed (→ overhead), so a batch's cost is not collapsed onto one
-    decision. The call dicts are mutated in place. No-op when the map is empty.
-    """
+    """Backfill ``task_id`` on Critic review calls from the proposal->task map."""
     if not msg_to_task:
         return
     for call in calls:
@@ -215,8 +155,8 @@ def _attribute_critic_calls(
             continue
         reviewed_ids = {m for m in reviewed if isinstance(m, str) and m}
         resolved = {msg_to_task[m] for m in reviewed_ids if m in msg_to_task}
-        # Single-target review only: a partial mapping (reviewed several, only
-        # one materialized) must NOT collapse the batch's cost onto that one.
+        # Single-target review only: a partial mapping (reviewed several, only one materialized) must NOT collapse the
+        # batch's cost onto that one.
         if len(reviewed_ids) == 1 and len(resolved) == 1:
             call["task_id"] = next(iter(resolved))
 
@@ -225,21 +165,7 @@ def _load_dispatch_history_all(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every dynamic_action ``dispatch_history.jsonl`` row.
-
-    Walks ``agents/orchestration/dynamic_actions/<dyn_id>/`` and stamps
-    each row with its owning ``dyn_id`` so the join can key on it. Returns
-    ``[]`` when the dynamic_actions tree is absent (no dynamic actions ran).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on scan
-            failures).
-
-    Returns:
-        list[dict[str, Any]]: Every dispatch-history row, each stamped with its
-        owning ``dyn_id``. Empty when no dynamic actions ran.
-    """
+    """Read every dynamic_action ``dispatch_history.jsonl`` row."""
     root = session_dir / "agents" / "orchestration" / "dynamic_actions"
     if not root.is_dir():
         return []
@@ -262,21 +188,7 @@ def _load_dispatch_history_all(
 def _build_phase_windows(
     state: dict[str, Any],
 ) -> list[tuple[float, str]]:
-    """Build a sorted ``[(entered_unix, phase), ...]`` timeline.
-
-    Derived from ``state.phase_history`` rows that carry a ``to_phase``
-    (real transitions). Used to backfill a call's / decision's phase from
-    its ``ts`` when the producer didn't stamp one (out-of-process children,
-    sub-agent runners, the proposal_scorer off the dispatch path). Empty when
-    phase_history is missing.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        list[tuple[float, str]]: ``(entered_unix, phase)`` pairs sorted by
-        timestamp. Empty when ``phase_history`` is missing.
-    """
+    """Build a sorted ``[(entered_unix, phase), ...]`` timeline."""
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return []
@@ -298,17 +210,7 @@ def _build_phase_windows(
 
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
-    """Return the phase active at ISO-or-numeric ``ts`` per ``windows``.
-
-    Args:
-        ts (Any): An ISO-8601 timestamp (or numeric Unix value).
-        windows (list[tuple[float, str]]): The ``(entered_unix, phase)``
-            timeline from :func:`_build_phase_windows`.
-
-    Returns:
-        str: The latest phase whose boundary is ``<= ts``, or ``""`` when ``ts``
-        is unparseable or the timeline is empty.
-    """
+    """Return the phase active at ISO-or-numeric ``ts`` per ``windows``."""
     unix = _parse_iso_unix(ts)
     if unix is None or not windows:
         return ""
@@ -316,18 +218,7 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
 
 
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
-    """Canonical join key for a decision / call: ``dyn_id`` wins over
-    ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
-    neither is present (the call can only be ts-window bucketed).
-
-    Args:
-        task_id (str): The call's / decision's task id.
-        dyn_id (str): The owning dynamic-action id.
-
-    Returns:
-        str | None: ``"dyn:<dyn_id>"`` when a dyn id is present, else
-        ``"task:<task_id>"``, else ``None``.
-    """
+    """Canonical join key for a decision / call: ``dyn_id`` wins over ``task_id`` (a dynamic_action dispatch owns both)."""
     d = (dyn_id or "").strip()
     if d:
         return f"dyn:{d}"
@@ -338,27 +229,7 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
 
 
 def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
-    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and
-    ``cache_hit_rate``.
-
-    Handles both bucket shapes: the rollup view (split
-    ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
-    (pre-summed ``total_cache``). ``total_in_out`` is the visible
-    prompt+completion pair only; ``grand_total`` is the all-in spend, so it
-    folds in every cache token *and* the hidden reasoning output — leaving
-    reasoning out would under-report a reasoning model's bill by most of its
-    output budget.
-
-    Args:
-        bucket (dict[str, Any] | None): A token bucket in either shape, or
-            ``None``.
-
-    Returns:
-        dict[str, Any]: A copy of the bucket with added ``total_in_out``,
-        ``grand_total`` and ``cache_hit_rate`` figures (``cache_hit_rate`` is
-        the float ratio of cache-read over cache-read + cache-creation tokens,
-        0.0 when neither is present).
-    """
+    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and ``cache_hit_rate``."""
     b = dict(bucket or {})
     ti = int(b.get("total_in", 0) or 0)
     to = int(b.get("total_out", 0) or 0)
@@ -377,19 +248,7 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Index ``specialist_rounds[].ensemble_scores`` by variant name.
-
-    Returns ``{variant_name: [{rater, score, reason}, ...]}`` so a decision row
-    can show who scored the proposal and how (the proposal_scorer signal that
-    fed the KEEP/REVERT). Best-effort: shape drift yields an empty map.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        dict[str, list[dict[str, Any]]]: Per-variant rater scores. Empty when
-        no ensemble scores are present.
-    """
+    """Index ``specialist_rounds[].ensemble_scores`` by variant name."""
     out: dict[str, list[dict[str, Any]]] = {}
     rounds = state.get("specialist_rounds")
     if not isinstance(rounds, list):
@@ -539,9 +398,7 @@ def write_decision_trace(
             }
         )
 
-    # Attach calls to decisions; build the joined trace. A given key's calls
-    # attach to exactly ONE decision — the first by ts. Later same-key events
-    # get empty token buckets so the per-decision sums don't double-count.
+    # Attach calls to decisions; build the joined trace.
     consumed_keys: set[str] = set()
     decision_trace: list[dict[str, Any]] = []
     for dec in sorted(decisions, key=lambda d: d.get("ts") or ""):

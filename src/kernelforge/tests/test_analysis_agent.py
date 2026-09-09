@@ -484,8 +484,8 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
         "directions.json",
     } & {Path(artifact["path"]).name for artifact in catalog["artifacts"]}
     applied = bundle.apply(context)
-    # The bundle rebuilds the context field by field; the editable set is a
-    # property of the campaign, not of the analysis, so it must survive intact.
+    # The bundle rebuilds the context field by field; the editable set is a property of the campaign, not of the
+    # analysis, so it must survive intact.
     assert applied.editable_sources == context.editable_sources
     evidence_paths = {reference.path for reference in applied.evidence_refs}
     directions_path = next(

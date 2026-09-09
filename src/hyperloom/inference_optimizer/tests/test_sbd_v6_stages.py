@@ -132,15 +132,9 @@ def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
     assert target.read_text(encoding="utf-8") == "{not json"
 
 
-# ---------------------------------------------------------------------------
 # what the consumer actually receives
-# ---------------------------------------------------------------------------
 def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
-    """Return the ``close`` key as delivered, from inside the zip and loose.
-
-    External sync ships the package, not the session directory, so these two
-    copies — not the one under ``session_dir`` — are what a consumer reads.
-    """
+    """Return the ``close`` key as delivered, from inside the zip and loose."""
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
     with zipfile.ZipFile(zip_path) as bundle:
         zipped = json.loads(bundle.read(exporter.BREAKDOWN_FILENAME))
@@ -149,11 +143,7 @@ def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
 
 
 def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
-    """Patching the session copy is not delivery; the package has to be rebuilt.
-
-    Mirrors the sequencer's order: package (CLOSE step 5), then patch the close
-    section, then rebuild the bundle so the copies that ship agree with it.
-    """
+    """Patching the session copy is not delivery; the package has to be rebuilt."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -191,12 +181,7 @@ def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
 
 
 def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
-    """A surgical member swap would leave the manifest describing the old file.
-
-    Hence a full repackage: the manifest is rebuilt from the members that were
-    actually written, so its digest of ``session_breakdown.json`` matches what
-    the consumer unzips.
-    """
+    """A surgical member swap would leave the manifest describing the old file."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -213,7 +198,6 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
     assert entry["bytes"] == member.file_size
 
 
-# ---------------------------------------------------------------------------
 # outcome
 # ---------------------------------------------------------------------------
 def _v6_outcome(timeline: list | None = None) -> dict:
@@ -387,7 +371,7 @@ def test_an_unknown_close_step_status_is_reported():
     }
     section = collect_v6_close(warnings, recorded=recorded)
 
-    # Passed through unchanged -- inventing ``done`` is the one thing this key
-    # cannot afford -- but no longer silent about it.
+    # Passed through unchanged -- inventing ``done`` is the one thing this key cannot afford -- but no longer silent
+    # about it.
     assert section["steps"][0]["status"] == "completed"
     assert any("unrecognized close step status" in warning for warning in warnings)

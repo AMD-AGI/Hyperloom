@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the two units that turn an acceptance into a named kernel.
-
-``_geak_accepted_kernel_specs`` decides WHICH acceptances count as a kernel;
-``KernelPhase._record_geak_adopted_kernels`` writes them into
-``state.kernel_integrate_attempts``, the per-kernel ledger that ``by_kernel``,
-``kernel_lifecycle.adopted`` and the attribution split all read. GEAK wrote only
-the per-ACTION headline, so an adopted kernel existed in the headline and
-nowhere a report could name it.
-
-Both are exercised end to end by the collector tests, but only through inputs
-that reach the early returns. These cover the selection rules and the ledger row
-itself, which are the parts a downstream report depends on being exact.
-"""
+"""Unit coverage for the two units that turn an acceptance into a named kernel."""
 
 from __future__ import annotations
 
@@ -35,9 +23,7 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
     return {"short_name": name, "e2e_delta_pct": delta, **extra}
 
 
-# --------------------------------------------------------------------------
 # Which acceptances count as a kernel
-# --------------------------------------------------------------------------
 
 
 def test_non_dict_result_yields_no_specs() -> None:
@@ -46,8 +32,7 @@ def test_non_dict_result_yields_no_specs() -> None:
 
 
 def test_both_lanes_are_read() -> None:
-    # 11 campaign runs carry an acceptance: 8 in accepted_heads only, 3 in
-    # accepted_kernels only. Reading one lane loses most of them.
+    # 11 campaign runs carry an acceptance: 8 in accepted_heads only, 3 in accepted_kernels only.
     result = {
         "accepted_kernels": [_spec("k_from_kernels", 4.0)],
         "accepted_heads": [_spec("k_from_heads", 6.0)],
@@ -59,8 +44,8 @@ def test_both_lanes_are_read() -> None:
 
 
 def test_env_selections_are_excluded() -> None:
-    # ``kind: env`` selects an existing library (ck_gemm_a8w8_blockscale_...);
-    # no kernel was authored, so it belongs in the config half of the gain.
+    # ``kind: env`` selects an existing library (ck_gemm_a8w8_blockscale_...); no kernel was authored, so it belongs
+    # in the config half of the gain.
     result = {
         "accepted_kernels": [
             _spec("ck_gemm_a8w8_blockscale_bpreshuffle", 14.9, kind="env"),
@@ -95,8 +80,7 @@ def test_unnamed_and_non_dict_rows_are_skipped() -> None:
 
 
 def test_alias_twin_collapses_to_the_kernel_symbol() -> None:
-    # One acceptance written under both the candidate tag and the symbol. The
-    # tag says which slot proposed it; only the symbol can be named in a report.
+    # One acceptance written under both the candidate tag and the symbol.
     result = {
         "accepted_kernels": [_spec("cand_c0_triton", 29.994, op_kind="sparse_attn")],
         "accepted_heads": [_spec("dsa_sparse_attn_prefill_main_kernel", 29.994, op_kind="sparse_attn")],
@@ -126,9 +110,7 @@ def test_same_delta_on_a_different_op_kind_is_not_a_twin() -> None:
     assert len(_geak_accepted_kernel_specs(result)) == 2
 
 
-# --------------------------------------------------------------------------
 # Overlay evidence on malformed manifests
-# --------------------------------------------------------------------------
 
 
 def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
@@ -140,8 +122,8 @@ def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
 
 
 def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
-    # A digest is a comparison key, not a verdict: unreadable JSON must still
-    # produce a stable value so two runs of the same overlay compare equal.
+    # A digest is a comparison key, not a verdict: unreadable JSON must still produce a stable value so two runs of
+    # the same overlay compare equal.
     root = tmp_path / "ov"
     root.mkdir()
     (root / "_overlay_manifest.json").write_text("{not json")
@@ -149,9 +131,7 @@ def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
     assert digest and digest == _geak_overlay_digest(str(root))
 
 
-# --------------------------------------------------------------------------
 # The per-kernel ledger row
-# --------------------------------------------------------------------------
 
 
 def _phase() -> SimpleNamespace:
@@ -201,8 +181,8 @@ def test_single_kernel_with_a_loaded_overlay_is_attributable() -> None:
 
 
 def test_an_unproven_overlay_records_the_row_without_a_gain() -> None:
-    # The kernel is still named -- withholding the row loses it entirely -- but
-    # a gain measured without proof the kernel ran is not the kernel's.
+    # The kernel is still named -- withholding the row loses it entirely -- but a gain measured without proof the
+    # kernel ran is not the kernel's.
     phase = _phase()
     _record(
         phase,
@@ -248,9 +228,8 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``by_kernel`` and ``kernel_lifecycle`` read ``best_gain_pct`` from this
-    # writer and from ``_kernel_decisions.py`` alike, and that one is a max. A
-    # second, worse rebench must not lower the kernel's best.
+    # ``by_kernel`` and ``kernel_lifecycle`` read ``best_gain_pct`` from this writer and from ``_kernel_decisions.py``
+    # alike, and that one is a max.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%

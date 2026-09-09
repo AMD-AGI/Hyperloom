@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression: KERNEL phase-budget-pct CLI override must reach KERNEL_AGENT.
-
-Both ``--*-kernel-pct`` flag spellings must parse and survive
-``normalize_budget_pct`` under the canonical ``KERNEL_AGENT`` key.
-"""
+"""Regression: KERNEL phase-budget-pct CLI override must reach KERNEL_AGENT."""
 
 from __future__ import annotations
 
@@ -57,8 +53,7 @@ def test_kernel_pct_key_is_canonical_phase_name() -> None:
     ["--max-minutes-framework-pct", "--phase-budget-framework-pct"],
 )
 def test_framework_pct_override_reaches_framework_agent(flag: str) -> None:
-    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse
-    and survive normalize_budget_pct as FRAMEWORK_AGENT."""
+    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse and survive normalize_budget_pct as FRAMEWORK_AGENT."""
     args = _parse_optimize([flag, "0.42"])
     raw = cli._build_phase_budget_pct(args)
     assert raw.get(PHASE_FRAMEWORK_AGENT) == pytest.approx(0.42)
@@ -101,22 +96,10 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
 
 
 def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
-    """The 3h demo budget stays normalized after disabling the kernel phase.
+    """Pin the 3h demo's framework-on, kernel-off budget shape.
 
-    This mirrors the demo's *real* flag set: it runs FRAMEWORK_AGENT and passes
-    ``--no-kernel`` only. ``--no-framework-agent`` is explicitly forbidden by
-    the skill and must not appear here — disabling the very phase the demo
-    exists to run leaves SWEEP as the sole absorber and hides the shape this
-    test is meant to pin.
-
-    The two literals below MUST stay in lockstep with the flags documented in
-    ``examples/hyperloom-qwen3-8b-3h/SKILL.md``.
-
-    The totals here exceed 1.0 and that is not a bug: a budget is a per-phase
-    *cap* on wall clock, not a slice of one pie. Only the caps of phases that
-    actually run can be spent, and with ``--no-kernel`` that is FRAMEWORK_AGENT
-    alone. What must hold is that each surviving cap is in range and that
-    FRAMEWORK_AGENT ends up with the wall clock the demo intends.
+    Values mirror its SKILL.md; phase budgets are independent caps, so their
+    total may exceed 1.0.
     """
     args = _parse_optimize(
         [
@@ -190,21 +173,14 @@ def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
 
 
 def test_optimize_path_is_wired_to_helper() -> None:
-    """Guard: the live optimize path must build the budget via the helper.
-
-    Asserts the helper is actually called and the buggy inline literal is gone
-    from the module.
-    """
+    """Guard: the live optimize path must build the budget via the helper."""
     src = inspect.getsource(cli)
     assert "_build_phase_budget_pct(args)" in src
     assert '("phase_budget_kernel_pct", "KERNEL")' not in src
 
 
 def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
-    """A disabled phase's pct is zeroed and spread across enabled work phases.
-
-    PRELUDE/CLOSE are fixed overhead and must not absorb; the total is preserved.
-    """
+    """A disabled phase's pct is zeroed and spread across enabled work phases."""
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
     out = redistribute_budget_pct(base, kernel_enabled=False, optimize_enabled=True)
     assert out[PHASE_KERNEL_AGENT] == 0.0

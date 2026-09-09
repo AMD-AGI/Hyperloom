@@ -55,8 +55,7 @@ def test_a_write_says_what_it_wrote_and_who_asked(tmp_path, traced):
 
     assert "section=session" in line
     assert "outcome=created" in line
-    # Both sides of the SDK: the helper that built the payload, and the code
-    # that decided to record something.
+    # Both sides of the SDK: the helper that built the payload, and the code that decided to record something.
     assert "via=instrument.py:" in line
     assert "record_singleton_section" in line
     assert f"from={__file__.rsplit('/', 1)[-1]}:" in line
@@ -197,11 +196,7 @@ def test_the_trace_level_stays_below_debug():
 
 
 def test_turning_the_trace_off_is_not_the_same_as_leaving_it_unset(tmp_path, caplog):
-    """Clearing the level hands the decision to whatever the root happens to be.
-
-    A root logger at NOTSET enables everything, so a caller that explicitly
-    asked for silence kept getting a firehose.
-    """
+    """Clearing the level hands the decision to whatever the root happens to be."""
     caplog.set_level(trace_mod.TRACE, logger=trace_mod.log.name)
     trace_mod.enable_trace(True)
     trace_mod.enable_trace(False)
@@ -277,12 +272,7 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):
-    """The recorder can only trace calls that arrive.
-
-    Producers call it from inside ``try`` blocks wider than the call itself, so
-    a failure in the import, the arguments, or a pre-condition means none of
-    the recorder's own guards ever rule and the loss is silent.
-    """
+    """The recorder can only trace calls that arrive."""
     trace_recording_skipped(
         "kernel_invocations",
         reason="caller raised before the recorder",

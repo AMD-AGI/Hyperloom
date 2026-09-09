@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Top-level composer: run every renderer, optionally call the LLM, stitch to one markdown doc.
-
-:func:`render_session_report` is the main API. The compose layer is
-section-agnostic (walks :data:`base.REGISTRY`), and degrades to
-deterministic-only output when ``llm_client`` is ``None``.
-"""
+"""Top-level composer: run every renderer, optionally call the LLM, stitch to one markdown doc."""
 
 from __future__ import annotations
 
@@ -68,15 +63,7 @@ class LLMClient(Protocol):
     """Minimal LLM client interface (``(system, user) -> str``); a Protocol so tests can mock it."""
 
     def complete(self, *, system: str, user: str) -> str:
-        """Run one completion and return the model's text.
-
-        Args:
-            system (str): The system prompt.
-            user (str): The user message.
-
-        Returns:
-            str: The model's response text.
-        """
+        """Run one completion and return the model's text."""
 
 
 @dataclass(frozen=True)
@@ -96,23 +83,7 @@ def render_session_report(
     *,
     llm_client: LLMClient | None = None,
 ) -> ComposeResult:
-    """Render ``breakdown`` (a parsed session_breakdown.json) to markdown.
-
-    Runs every registered renderer, builds the deterministic
-    :class:`GlobalFacts`, optionally calls the LLM for narrative prose,
-    and stitches everything into a single report.
-
-    Args:
-        breakdown (dict[str, Any]): The parsed ``session_breakdown.json`` dict.
-        llm_client (LLMClient | None): Optional LLM client for the narrative
-            pass; when ``None`` (or when the call fails), only the
-            deterministic output is produced.
-
-    Returns:
-        ComposeResult: The final markdown plus the intermediate artifacts
-            (sections, global facts, prompt and raw LLM response) for replay
-            and debugging.
-    """
+    """Render ``breakdown`` (a parsed session_breakdown.json) to markdown."""
     sections = [render_section(sid, fn, breakdown) for sid, fn in REGISTRY]
     global_facts = build_global_facts(breakdown, sections)
     user_prompt = build_user_prompt(sections, global_facts)
@@ -182,10 +153,7 @@ def _stitch(
     parts.append("## Executive Summary")
     if used_llm and llm_exec_summary:
         parts.append(llm_exec_summary)
-        # The system prompt asks the model to surface every data-quality flag,
-        # but a prompt is a request. These flags are where a skipped section's
-        # evidence ends up, so leaving them to the narrative is how "this was
-        # never measured" silently becomes "this came back clean".
+        # The system prompt asks the model to surface every data-quality flag, but a prompt is a request.
         flag_lines = _data_quality_flag_lines(global_facts)
         if flag_lines:
             parts.append("")
@@ -224,14 +192,7 @@ def _stitch(
 
 
 def _deterministic_exec_summary(g: GlobalFacts) -> str:
-    """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag.
-
-    Args:
-        g: Global facts used to populate the summary lines.
-
-    Returns:
-        The rendered executive-summary markdown block.
-    """
+    """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag."""
     out: list[str] = []
     out.append(
         f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
@@ -256,17 +217,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
 
 
 def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
-    """Render the data-quality flags as markdown bullets.
-
-    Shared by the deterministic summary and the LLM path so both report the
-    same facts in the same shape.
-
-    Args:
-        g (GlobalFacts): Global facts carrying the flags.
-
-    Returns:
-        list[str]: Markdown lines, empty when there are no flags.
-    """
+    """Render the data-quality flags as markdown bullets."""
     if not g.data_quality_flags:
         return []
     lines = ["- **Data quality flags**:"]
@@ -275,14 +226,7 @@ def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
 
 
 def _render_global_facts_block(g: GlobalFacts) -> str:
-    """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report.
-
-    Args:
-        g: Global facts to render as a key-value block.
-
-    Returns:
-        The rendered markdown key-value block.
-    """
+    """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report."""
     funnel = g.kernel_pipeline_funnel
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")

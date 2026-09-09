@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for dense GEMM (N,K) shape derivation across attention architectures.
-
-The MLA and separate-head-dim shape sets are anchored to the actual GEMM shapes
-recorded by GEAK tuning runs. The generic path must stay byte-identical to the
-historical Llama formula.
-"""
+"""Tests for dense GEMM (N,K) shape derivation across attention architectures."""
 
 from __future__ import annotations
 
@@ -113,9 +108,9 @@ from kernelforge.gemm_tune.dense_shapes import compute_dense_m_values
 
 
 class TestDenseMValueIslCap:
-    """A long-context ISL (e.g. ~32k) must not inject M=32k/65k giant GEMMs;
-    ISL-derived M is capped at the same high-watermark as the other terms
-    (8192 fast / 16384 thorough)."""
+    """A long-context ISL (e.g. ~32k) must not inject M=32k/65k giant GEMMs; ISL-derived M is capped at the same
+    high-watermark as the other terms (8192 fast / 16384 thorough).
+    """
 
     def test_fast_mode_caps_isl_at_8192(self):
         m = compute_dense_m_values(conc=64, thorough=False, isl=32768)
@@ -146,9 +141,7 @@ from kernelforge.gemm_tune.dense_shapes import compute_decode_m_values
 
 
 class TestDecodeMValues:
-    """Decode M is the number of running requests, so it cannot exceed ``conc``.
-    The cap itself is always present (steady-state decode sits there) and so is
-    1 (ramp-up / tail)."""
+    """Decode M is the number of running requests, so it cannot exceed ``conc``."""
 
     @pytest.mark.parametrize(
         ("conc", "expected"),

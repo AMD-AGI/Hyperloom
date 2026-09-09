@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End-to-end proof that a non-graceful exit still yields final.json.
-
-Launches a real subprocess that mirrors how ``cli.py`` runs the optimizer: it
-installs an asyncio SIGINT/SIGTERM handler that lets the event loop unwind, and
-calls ``write_minimal_final_json`` from a ``finally`` block. A real signal is
-sent and the on-disk result asserted, pinning down which kill modes the fix
-covers.
-"""
+"""End-to-end proof that a non-graceful exit still yields final.json."""
 
 from __future__ import annotations
 
@@ -22,8 +15,8 @@ from pathlib import Path
 # Worktree/repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
-# Miniature of the cli.py run+finally lifecycle: seed state.json, install the
-# SIGTERM handler, block until signalled, flush the crash-safe final.json.
+# Miniature of the cli.py run+finally lifecycle: seed state.json, install the SIGTERM handler, block until signalled,
+# flush the crash-safe final.json.
 _HARNESS = """
 import asyncio, signal, sys
 from pathlib import Path
@@ -56,14 +49,7 @@ asyncio.run(main())
 
 
 def _child_env() -> dict[str, str]:
-    """Environment whose ``hyperloom`` is this worktree's, not the installed one.
-
-    Both children below assert something about *these* sources, so inheriting a
-    bare environment would quietly test whichever copy is installed -- passing or
-    failing for reasons that have nothing to do with the worktree. ``src`` is what
-    makes the package importable under the src layout; the repo root stays for the
-    top-level helpers the harness reaches for.
-    """
+    """Environment whose ``hyperloom`` is this worktree's, not the installed one."""
     env = dict(os.environ)
     roots = (str(_REPO_ROOT / "src"), str(_REPO_ROOT))
     env["PYTHONPATH"] = os.pathsep.join((*roots, env.get("PYTHONPATH", "")))
@@ -113,11 +99,7 @@ def test_sigterm_runs_finally_and_writes_final_json(tmp_path):
 
 
 def test_sigkill_cannot_write_final_json(tmp_path):
-    """SIGKILL (hard kill / Slurm reclaim) -> finally CANNOT run -> no final.json.
-
-    Documents the boundary of the in-process fix: a -9 kill bypasses Python's
-    finally entirely, so only an offline rebuild can recover here.
-    """
+    """SIGKILL (hard kill / Slurm reclaim) -> finally CANNOT run -> no final.json."""
     proc = _spawn(tmp_path, install_handler=True)
     proc.send_signal(signal.SIGKILL)
     proc.wait(timeout=30)
@@ -127,14 +109,7 @@ def test_sigkill_cannot_write_final_json(tmp_path):
 
 
 def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
-    """The safety net must not import the subsystems that may have just failed.
-
-    The orchestrator's report renderer imports the message bus and a SQLite
-    connection layer at module level, so reaching it for this record would
-    acquire that dependency after a run has already died -- and if the crash
-    came from that subsystem, the record explaining it is what breaks.
-    Run in a subprocess because the import is global and one test cannot unsee it.
-    """
+    """The safety net must not import the subsystems that may have just failed."""
     probe = (
         "import sys;"
         "from hyperloom.inference_optimizer.breakdown.exporter import _crash_safe_platform;"
@@ -157,8 +132,8 @@ def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
         timeout=120,
     )
     assert out.returncode == 0, out.stderr
-    # Without this the child imports whichever ``hyperloom`` is installed, and a
-    # green result would say nothing about the sources under test.
+    # Without this the child imports whichever ``hyperloom`` is installed, and a green result would say nothing about
+    # the sources under test.
     origin = next(ln[len("FROM:") :] for ln in out.stdout.splitlines() if ln.startswith("FROM:"))
     assert origin.startswith(str(_REPO_ROOT / "src")), f"child imported {origin}"
     assert "CLEAN" in out.stdout, out.stdout

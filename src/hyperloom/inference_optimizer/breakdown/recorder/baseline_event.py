@@ -1,38 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The SBD V6 ``baseline`` event: the reference measurement, recorded live.
-
-Baseline is the measurement every later gain in the session is read against,
-and until this recorder existed it was the one stage the timeline could only
-project. The projection's limit was not its logic but its evidence: V5 stamps
-an action row and an attempt summary when the measurement *completes*, and
-nothing anywhere recorded when it began. So the projected event's window
-collapsed onto its own end -- a baseline that ran for four minutes was
-published as an instant -- and it sorted onto the timeline as though it had
-happened at the moment it finished, behind actions that started after it.
-
-Recording it removes the guess rather than improving it. The event opens when
-the action starts, which is a fact only the action holds, and closes when it
-ends.
-
-The event holds an array of actions for the same reason the roofline event
-does: the id is ``{phase}:{macro_cycle}:baseline`` and one phase and cycle can
-measure more than once -- a failure streak re-dispatches, enablement
-re-validates after fixing an eval, a warm replay is measured through this same
-executor. Each of those is an action keyed by its task id, and the event that
-holds them reports the worst of their statuses.
-
-Inside one action the structure is two levels deep because the executor retries
-at two levels, and flattening them would lose which retry a round belonged to.
-A *run* is one pass through the executor's core, of which there can be three:
-the first, the salvage retry taken when the accuracy eval is what aborted the
-benchmark, and the retry taken when a MoE runner backend killed the server. A
-*round* is one Magpie subprocess inside a run, of which there can also be
-three: the discarded cold-start warmup, the measured hot pass, and the deferred
-accuracy pass. A run that was refused before it booted anything still records
-its own row, which is the case a round-only model would drop entirely.
-"""
+"""The SBD V6 ``baseline`` event: the reference measurement, recorded live."""
 
 from __future__ import annotations
 
@@ -80,14 +49,14 @@ ROW_ACTION = "action"
 ROW_RUN = "run"
 ROW_ROUND = "round"
 
-# Every run row names why it ran, so a baseline that measured three times can
-# be read without re-deriving the retry reason from log text.
+# Every run row names why it ran, so a baseline that measured three times can be read without re-deriving the retry
+# reason from log text.
 RUN_INITIAL = "initial"
 RUN_AFTER_EVAL_FAILURE = "retry_after_eval_failure"
 RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
 
-# The round labels the executor reports, mirrored here so a consumer can select
-# the measured pass without matching on prose.
+# The round labels the executor reports, mirrored here so a consumer can select the measured pass without matching on
+# prose.
 ROUND_SINGLE = "single"
 ROUND_WARMUP = "warmup"
 ROUND_MEASURE = "measure"
@@ -108,9 +77,7 @@ ARGS_UNAVAILABLE = "unavailable"
 # ``skipped``.
 _BUDGET_ERROR_CLASS = "session_time_exhausted"
 
-# Warnings are prose an operator reads, and a round can accumulate one per
-# harvested artifact. The head characterizes the round and the count carries
-# the rest.
+# Warnings are prose an operator reads, and a round can accumulate one per harvested artifact.
 _MAX_ROUND_WARNINGS = 12
 
 __all__ = [
@@ -264,9 +231,8 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         dict[str, Any]: The measurement block, with absent numbers as ``None``.
     """
     return {
-        # Named as the V5 section names it, which is what the projected event
-        # published and what a consumer already selects on. The executor's own
-        # key for it is ``output_throughput``.
+        # Named as the V5 section names it, which is what the projected event published and what a consumer already
+        # selects on.
         "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
         # The field name above is the serving case; an image framework measures
         # img/s through the same key, so the unit has to be stated rather than
@@ -359,13 +325,7 @@ def _failure(result: Mapping[str, Any], *, phase: str) -> dict[str, Any] | None:
 
 
 class BaselineEventRecorder:
-    """Records one baseline action's facts into the event it belongs to.
-
-    Holds a sink, a task id, and the counters the round rows are keyed by.
-    Every method is total over the executor's exits: a run or a round the
-    executor abandoned leaves the row it already wrote, and closing the action
-    is what decides the event's status.
-    """
+    """Records one baseline action's facts into the event it belongs to."""
 
     def __init__(
         self,
@@ -460,11 +420,7 @@ class BaselineEventRecorder:
     # ---- lifecycle -------------------------------------------------------
 
     def begin(self) -> None:
-        """Open the event this action belongs to.
-
-        Opening is idempotent, so several baselines dispatched in one phase and
-        cycle share one timeline entry rather than each adding their own.
-        """
+        """Open the event this action belongs to."""
         self._sequence = open_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -475,15 +431,7 @@ class BaselineEventRecorder:
         )
 
     def begin_run(self, *, attempt_reason: str) -> int:
-        """Record that a pass through the executor's core has started.
-
-        Args:
-            attempt_reason (str): Why this pass ran (a ``RUN_*`` value).
-
-        Returns:
-            int: The 1-based run index, which the rounds of this run are
-                recorded under.
-        """
+        """Record that a pass through the executor's core has started."""
         self._run_index += 1
         self._sink.record(
             SECTION_RUN,
@@ -501,12 +449,7 @@ class BaselineEventRecorder:
         return self._run_index
 
     def end_run(self, *, run_index: int, result: Mapping[str, Any] | None) -> None:
-        """Record how a pass through the executor's core ended.
-
-        Args:
-            run_index (int): The index :meth:`begin_run` returned.
-            result (Mapping[str, Any] | None): The result the pass returned.
-        """
+        """Record how a pass through the executor's core ended."""
         payload = _as_dict(result)
         self._sink.record(
             SECTION_RUN,
@@ -592,19 +535,7 @@ class BaselineEventRecorder:
         timeout_sec: Any = None,
         result: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record one Magpie benchmark round.
-
-        Args:
-            run_index (int): The run this round belonged to.
-            label (str): The round's name (a ``ROUND_*`` value).
-            started_at (str): ISO start of the round.
-            duration_sec (float | None): Wall-clock seconds the round took,
-                boot and teardown included. Distinct from the subprocess
-                runtime the round reports for itself.
-            timeout_sec (Any): The cap the round ran under, so a round that
-                timed out can be read against what it was allowed.
-            result (Mapping[str, Any] | None): The round's result dict.
-        """
+        """Record one Magpie benchmark round."""
         payload = _as_dict(result)
         self._rounds += 1
         self._sink.record(
@@ -612,12 +543,8 @@ class BaselineEventRecorder:
             {
                 "task_id": self._task_id,
                 "run_index": int(run_index),
-                # The order the rounds ran in, which their start stamps cannot
-                # be relied on to give: those are ISO seconds, and a round that
-                # failed fast can start and finish inside the same second as
-                # the next one. Without it the tie falls through to the label
-                # and the rounds come back alphabetically -- ``measure`` ahead
-                # of the ``warmup`` that booted the server it re-attached to.
+                # The order the rounds ran in, which their start stamps cannot be relied on to give: those are ISO
+                # seconds, and a round that failed fast can start and finish inside the same second as the next one.
                 "ordinal": self._rounds,
                 "label": str(label),
                 "status": str(payload.get("status") or "failed"),
@@ -769,16 +696,7 @@ def assemble_baseline_actions(
     *,
     event: str,
 ) -> list[dict[str, Any]]:
-    """Assemble every baseline action belonging to one event.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The baseline sections as
-            read back from the spool.
-        event (str): The event id whose rows to select.
-
-    Returns:
-        list[dict[str, Any]]: The actions, ordered by when they started.
-    """
+    """Assemble every baseline action belonging to one event."""
     action_rows = sort_rows(
         rows_for_event(parts.get(SECTION_ACTION) or [], event),
         keys=("start_time", "task_id"),
@@ -844,18 +762,7 @@ def assemble_baseline_action(
     event: str,
     task_id: str,
 ) -> dict[str, Any] | None:
-    """Assemble one baseline action out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The baseline sections as
-            read back from the spool.
-        event (str): The event id whose rows to select.
-        task_id (str): The action to assemble.
-
-    Returns:
-        dict[str, Any] | None: The assembled action, or ``None`` when the event
-            holds no action with that task id.
-    """
+    """Assemble one baseline action out of its recorded rows."""
     wanted = str(task_id or "")
     for action in assemble_baseline_actions(parts, event=event):
         if str(action.get("task_id") or "") == wanted:

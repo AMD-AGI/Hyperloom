@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_ExploreStateMixin`` — explore / gap / specialist-ledger mutators for
-:class:`..shared_state.SharedState`.
-"""
+"""``_ExploreStateMixin`` — explore / gap / specialist-ledger mutators for :class:`..shared_state.SharedState`."""
 
 from __future__ import annotations
 
@@ -23,12 +21,7 @@ def _shared_state_module():
 
 class _ExploreStateMixin:
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
-
-        Args:
-            entry (dict[str, Any]): The round summary; an empty / non-dict
-                value is a no-op. A blank ``round_id`` always appends.
-        """
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
         if not isinstance(entry, dict) or not entry:
             return
         entry = dict(entry)
@@ -55,9 +48,7 @@ class _ExploreStateMixin:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
     def bump_domain_round_counters(self) -> None:
-        """Increment both per-anchor round counters for every knowledge-domain
-        anchor. Called once per optimisation round so a long-idle domain's counters
-        climb until the Coordinator escalation forces a dispatch."""
+        """Increment both per-anchor round counters for every knowledge-domain anchor."""
         from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
 
         for anchor in KNOWLEDGE_DOMAIN_TAGS:
@@ -66,15 +57,7 @@ class _ExploreStateMixin:
 
     @staticmethod
     def _anchor_for(domain_or_anchor: str) -> str:
-        """Resolve a domain key or raw tag to its canonical kb_anchor.
-
-        Args:
-            domain_or_anchor (str): A domain key, raw tag, or anchor string.
-
-        Returns:
-            str: The canonical kb_anchor, falling back to the trimmed input
-                when no mapping resolves (``""`` for blank input).
-        """
+        """Resolve a domain key or raw tag to its canonical kb_anchor."""
         from ...specialists.domains import domain_for_tag, get_domain
 
         s = str(domain_or_anchor or "").strip()
@@ -89,23 +72,13 @@ class _ExploreStateMixin:
         return s
 
     def note_specialist_dispatched(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_specialist`` for the dispatched anchor.
-
-        Args:
-            domain_or_anchor (str): The dispatched domain / anchor whose
-                counter should be reset.
-        """
+        """Reset ``rounds_since_last_specialist`` for the dispatched anchor."""
         anchor = self._anchor_for(domain_or_anchor)
         if anchor:
             self.rounds_since_last_specialist[anchor] = 0
 
     def note_domain_keep(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT.
-
-        Args:
-            domain_or_anchor (str): The domain / anchor whose KEEP counter
-                should be reset.
-        """
+        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT."""
         anchor = self._anchor_for(domain_or_anchor)
         if anchor:
             self.rounds_since_last_keep[anchor] = 0
@@ -116,20 +89,7 @@ class _ExploreStateMixin:
         specialist_threshold: int,
         keep_threshold: int,
     ) -> list[str]:
-        """Return anchors whose ``rounds_since_last_specialist`` ≥
-        ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
-        ``keep_threshold``. Deterministically ordered by widest gap first.
-
-        Args:
-            specialist_threshold (int): Rounds-since-last-specialist value at
-                or above which an anchor counts as stalled.
-            keep_threshold (int): Rounds-since-last-keep value at or above
-                which an anchor counts as stalled.
-
-        Returns:
-            list[str]: Stalled anchors ordered by widest gap first, then by
-                anchor name.
-        """
+        """Return anchors whose ``rounds_since_last_specialist`` ≥ ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥ ``keep_threshold``."""
         anchors = set(self.rounds_since_last_specialist) | set(self.rounds_since_last_keep)
         hits: list[tuple[int, str]] = []
         for anchor in anchors:
@@ -141,17 +101,7 @@ class _ExploreStateMixin:
         return [anchor for _, anchor in hits]
 
     def best_gap_for_anchor(self, anchor: str) -> str:
-        """Return the canonical_id of the most actionable open gap whose
-        ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
-        highest severity, then least-attempted, then oldest.
-
-        Args:
-            anchor (str): The domain / anchor to match gaps against.
-
-        Returns:
-            str: The ``canonical_id`` of the most actionable matching gap, or
-                ``""`` when none match.
-        """
+        """Return the canonical_id of the most actionable open gap whose ``domain_hint`` resolves to ``anchor`` (or ``""`` when none)."""
         target = self._anchor_for(anchor)
         if not target:
             return ""
@@ -175,15 +125,7 @@ class _ExploreStateMixin:
         return matches[0][1]
 
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
-        """Return the gap entry matching ``canonical_id`` (or ``None``).
-
-        Args:
-            canonical_id (str): The gap's canonical identifier.
-
-        Returns:
-            dict[str, Any] | None: The matching gap row, or ``None`` when the
-                id is blank or not present.
-        """
+        """Return the gap entry matching ``canonical_id`` (or ``None``)."""
         if not canonical_id:
             return None
         cid = str(canonical_id)
@@ -193,16 +135,7 @@ class _ExploreStateMixin:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry.
-
-        Args:
-            entry (dict[str, Any]): The gap row to upsert; must carry a
-                non-empty ``canonical_id`` (else a no-op returning ``{}``).
-
-        Returns:
-            dict[str, Any]: The inserted-or-merged gap row, or ``{}`` when the
-                entry is invalid.
-        """
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()
@@ -249,15 +182,7 @@ class _ExploreStateMixin:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
-                """Sort key for gap trimming: newest-updated timestamp.
-
-                Args:
-                    g (dict[str, Any]): A gap row.
-
-                Returns:
-                    str: ``last_updated_ts`` (falling back to
-                        ``first_seen_ts`` then ``""``) for chronological sort.
-                """
+                """Sort key for gap trimming: newest-updated timestamp."""
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
@@ -271,17 +196,7 @@ class _ExploreStateMixin:
         canonical_id: str,
         attempt: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown.
-
-        Args:
-            canonical_id (str): The gap's canonical identifier.
-            attempt (dict[str, Any]): The attempt row to append (a ``ts`` is
-                stamped when absent).
-
-        Returns:
-            dict[str, Any] | None: The updated gap row, or ``None`` when no
-                gap matches ``canonical_id``.
-        """
+        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown."""
         gap = self.find_gap(canonical_id)
         if gap is None:
             return None
@@ -302,16 +217,7 @@ class _ExploreStateMixin:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """Append one intervention entry and update config-only counters; the consecutive-config counter advances on ``"config"`` and resets on ``"code_patch"``.
-
-        Args:
-            change_type (str): The intervention kind (e.g. ``config`` /
-                ``code_patch`` / ``code_patch_attempt``).
-            action (str): The action name driving the intervention.
-            task_id (str): The originating task id.
-            delta_pct (float | None): Optional measured gain delta for the
-                intervention.
-        """
+        """Append one intervention entry and update config-only counters; the consecutive-config counter advances on ``\"config\"`` and resets on ``\"code_patch\"``."""
         ct = str(change_type or "").strip().lower()
         entry = {
             "change_type": ct,
@@ -330,27 +236,12 @@ class _ExploreStateMixin:
             self.consecutive_config_only_rounds = 0
 
     def bump_research_scout_runs(self, n: int = 1) -> int:
-        """Increment the research-scout dispatch counter; return new total.
-
-        Args:
-            n (int): Amount to add to the scout-run counter (default 1).
-
-        Returns:
-            int: The post-increment scout-run total.
-        """
+        """Increment the research-scout dispatch counter; return new total."""
         self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
         return self.research_scout_runs
 
     def register_seen_pr_ids(self, pr_ids: Any) -> int:
-        """Add PR ids to the shared seen-set (scout + FRAMEWORK dedup); returns count newly added.
-
-        Args:
-            pr_ids (Any): An iterable of PR id values; blanks and duplicates
-                are skipped.
-
-        Returns:
-            int: The number of PR ids newly added to the seen-set.
-        """
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK dedup); returns count newly added."""
         seen = set(self.research_scout_seen_pr_ids or [])
         added = 0
         for raw in pr_ids or []:
@@ -371,14 +262,7 @@ class _ExploreStateMixin:
         self.params_no_promote_streak = 0
 
     def reset_per_cycle_plateau_state(self) -> None:
-        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint.
-
-        ``pending_escalate_hint`` isn't plateau or dispatch state, but it is
-        reset here too: a hint set during the prior macro-cycle (e.g. by
-        kernel_agent completion) and never claimed by the transition it
-        caused must not survive into the next cycle's phases as if they'd
-        earned it.
-        """
+        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint."""
         self.params_no_promote_streak = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
@@ -390,13 +274,7 @@ class _ExploreStateMixin:
         self.discard_pending_escalate_hint()
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
-        """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
-
-        Args:
-            promoted (bool): ``True`` when the explore task produced a KEEP
-                (resets the proxy); ``False`` increments the no-promote
-                streak.
-        """
+        """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
         if promoted:
             self.reset_explore_plateau_proxy()
         else:
@@ -407,14 +285,7 @@ class _ExploreStateMixin:
         subject: str,
         verdict: str,
     ) -> None:
-        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
-
-        Args:
-            subject (str): The specialist task id for an authored patch, the
-                candidate id for a PR pre-screen; blank is a no-op.
-            verdict (str): The Critic verdict; blank clears the recorded
-                verdict to force re-review.
-        """
+        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review."""
         sid = str(subject or "").strip()
         if not sid:
             return
@@ -428,39 +299,19 @@ class _ExploreStateMixin:
         self,
         subject: str,
     ) -> str:
-        """Return the patch verdict, or empty when no Critic decision exists.
-
-        Args:
-            subject (str): The review subject, as
-                :meth:`record_specialist_patch_verdict` keys it.
-
-        Returns:
-            str: The recorded verdict, or ``""`` when none exists or the id
-                is blank.
-        """
+        """Return the patch verdict, or empty when no Critic decision exists."""
         sid = str(subject or "").strip()
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*).
-
-        Args:
-            snapshot (dict[str, Any]): The specialist task snapshot to copy
-                into ``last_specialist``. A non-dict value is ignored.
-        """
+        """Snapshot the most recent specialist task (parity with last_*)."""
         if isinstance(snapshot, dict):
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
-
-        Args:
-            update (dict[str, Any]): The executor's explore-search update
-                (tested / rejected / name_index / history fields); a non-dict
-                value is a no-op.
-        """
+        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""
         if not isinstance(update, dict):
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
@@ -520,12 +371,7 @@ class _ExploreStateMixin:
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry.
-
-        Args:
-            variant (dict[str, Any]): The promoted variant to record; an
-                empty / non-dict value is a no-op.
-        """
+        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
         if not isinstance(variant, dict) or not variant:
             return
         from ...actions.executors._canonical_fingerprint import canonical_fingerprint
@@ -568,8 +414,8 @@ class _ExploreStateMixin:
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
-            # Carried through so the ledger records what the KEEP was judged on;
-            # ``None`` means the variant was never gated, not that it scored 0.
+            # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
+            # gated, not that it scored 0.
             "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
@@ -619,33 +465,7 @@ class _ExploreStateMixin:
         specialist_task_id: str = "",
         stack_delta_pct: float | None = None,
     ) -> bool:
-        """Register accepted framework-rewrite switches as search levers.
-
-        Each switch behind an accepted rewrite becomes a lever the explore phase
-        can toggle, which is what turns an authored bundle into per-rewrite
-        attribution and a searchable combination space instead of a take-it-or-
-        leave-it patch.
-
-        ``default_on`` records whether the switch is part of the running
-        configuration. It is ``False`` for an inert KEEP — the patch cleared
-        correctness but the bundle did not clear the throughput gate, so the code
-        is kept dormant and the levers are registered for the explore phase to
-        try one bundle at a time. Keeping default-off code costs nothing, and
-        discarding it would throw away the rewrites that do pay along with the
-        one that does not.
-
-        Existing rows are updated in place, keyed by switch name, so a re-run of
-        the same rewrite does not duplicate its lever.
-
-        Args:
-            switches: Parsed manifest entries (see ``_framework_switch_manifest``).
-            default_on: Whether these switches are on in the current best config.
-            specialist_task_id: The authoring specialist, for provenance.
-            stack_delta_pct: Throughput delta measured with the whole bundle on.
-
-        Returns:
-            ``True`` when any lever row was added or changed.
-        """
+        """Register accepted framework-rewrite switches as search levers."""
         if not isinstance(switches, list) or not switches:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
@@ -670,9 +490,8 @@ class _ExploreStateMixin:
                 "default_on": bool(default_on),
                 "specialist_task_id": str(specialist_task_id or ""),
                 "stack_delta_pct": (float(stack_delta_pct) if isinstance(stack_delta_pct, (int, float)) else None),
-                # Filled in by the explore phase once the lever has been
-                # measured on its own; ``None`` means "registered, not yet
-                # attributed".
+                # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
+                # "registered, not yet attributed".
                 "attributed_gain_pct": None,
                 "attribution_source": "",
                 "ts": now,
@@ -685,8 +504,8 @@ class _ExploreStateMixin:
                 changed = True
                 continue
             prior = rows[index] if isinstance(rows[index], dict) else {}
-            # Preserve an attribution already measured for this lever; the
-            # measurement is more informative than this registration.
+            # Preserve an attribution already measured for this lever; the measurement is more informative than this
+            # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
             row["attribution_source"] = str(prior.get("attribution_source") or "")
             if prior != row:
@@ -703,18 +522,7 @@ class _ExploreStateMixin:
         gain_pct: float | None,
         source: str,
     ) -> bool:
-        """Record a lever's individually measured contribution.
-
-        Args:
-            switch: Switch name.
-            gain_pct: Measured contribution; ``None`` clears a prior value.
-            source: How it was measured — ``"additive"`` (lever switched on
-                against the running base) or ``"leave_one_out"`` (lever removed
-                from a stack that already had it).
-
-        Returns:
-            ``True`` when a lever row was updated.
-        """
+        """Record a lever's individually measured contribution."""
         name = str(switch or "").strip().upper()
         if not name:
             return False

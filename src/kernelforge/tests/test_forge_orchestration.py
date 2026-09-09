@@ -98,16 +98,7 @@ def _definitions() -> dict[str, SpecialistDefinition]:
 
 
 def test_the_planning_context_states_the_editable_source_set() -> None:
-    """The planner is told what it may edit, in campaign order.
-
-    A campaign that never states its own editable set leaves the planner to
-    infer the edit surface from the one path in ``program_context``. That
-    inference has closed real directions in writing: a module constant in a
-    sibling file was rejected as "an environment variable, not one of the
-    editable files", and a tuned CSV that was the FIRST entry of the editable
-    list was never considered a file at all. Order carries meaning (entry 0 is
-    the primary kernel path) and non-``.py`` entries are first-class.
-    """
+    """The planner is told what it may edit, in campaign order."""
     campaign_source_files = (
         "/workspace/aiter/ops/triton/op.py",
         "/workspace/aiter/fused_moe.py",
@@ -169,8 +160,8 @@ def test_factory_uses_same_runtime_for_independent_critic_backend(
             agent_runtime=lambda: runtime,
             workspace="/workspace",
             max_turns=500,
-            # The probe fields the factory now reads as attributes rather than
-            # through a ``getattr`` default that restated them a fourth time.
+            # The probe fields the factory now reads as attributes rather than through a ``getattr`` default that
+            # restated them a fourth time.
             specialist_probe=True,
             specialist_probe_max=6,
             specialist_probe_budget_sec=600.0,
@@ -764,13 +755,7 @@ _GROUND_B = "chunk.py: the scale stream's staging"
 
 @pytest.mark.asyncio
 async def test_each_lane_is_given_its_ground_and_every_other_lane_s() -> None:
-    """Overlapping lanes spend two Implementer sessions on one change.
-
-    The boundary has to reach the lane as the code it may edit. Told only which
-    specialist role a sibling holds, a lane can do no better than guess where
-    that role's edits will land -- and the roles are three readings of one
-    kernel, so the guess is regularly wrong.
-    """
+    """Overlapping lanes spend two Implementer sessions on one change."""
     backend = _PerCallBackend(
         [
             _partition(_GROUND_A, _GROUND_B),
@@ -803,13 +788,7 @@ async def test_each_lane_is_given_its_ground_and_every_other_lane_s() -> None:
 
 @pytest.mark.asyncio
 async def test_every_lane_receives_the_whole_round_s_evidence() -> None:
-    """A lane's ground is a slice of the code, not a slice of the reading.
-
-    Each role reads the same kernel, so the memory analysis has something to say
-    about the compute lane's ground. Handing a lane only its "own" report leaves
-    it planning from a fraction of what was bought, and holding a report about
-    ground it may not touch.
-    """
+    """A lane's ground is a slice of the code, not a slice of the reading."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -858,12 +837,7 @@ async def test_the_partition_reads_every_analysis_before_it_divides() -> None:
 
 @pytest.mark.asyncio
 async def test_a_replace_verdict_spends_one_lane_on_the_challenge() -> None:
-    """A critic rules on a plan that exists, so REPLACE lands on the next round.
-
-    The verdict says the route itself is dominated. Dividing that round into
-    more regions of the same implementation would spend every lane refining the
-    thing the critic just said to stop refining.
-    """
+    """A critic rules on a plan that exists, so REPLACE lands on the next round."""
     backend = _PerCallBackend([_partition("validate the CK GEMM path", _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -943,13 +917,7 @@ async def test_an_accepted_round_raises_no_challenger() -> None:
 
 @pytest.mark.asyncio
 async def test_the_partition_is_told_a_cross_cutting_move_is_one_lane() -> None:
-    """The width follows the directions, not the other way around.
-
-    Asked to divide into at most N, a planner will reach for N pieces, and the
-    move that rewrites one shape everywhere it appears is the one that pieces
-    worst: each site is already the best it can be alone, so a lane per site
-    finds nothing and the change that was there is never attempted by anyone.
-    """
+    """The width follows the directions, not the other way around."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
     outcomes = (
@@ -990,14 +958,7 @@ def _lane(ground: str, **extra) -> dict:
 
 @pytest.mark.asyncio
 async def test_the_partition_keeps_a_launch_config_with_the_body_it_serves() -> None:
-    """A body lane measured at the old body's config closes an untested axis.
-
-    Split across lanes, the config lane is a pass-through -- it cannot choose
-    values for a body it may not read -- and the body lane is scored at numbers
-    tuned for code it deleted. Measured on this kernel class: the same wider
-    tile read 2.80 ms at the narrow tile's config and 1.28 ms at its own, so
-    the split does not buy two attributable answers, it buys one wrong one.
-    """
+    """A body lane measured at the old body's config closes an untested axis."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1022,14 +983,7 @@ async def test_the_partition_keeps_a_launch_config_with_the_body_it_serves() -> 
 
 @pytest.mark.asyncio
 async def test_a_joint_lane_reaches_its_implementer_time_boxed() -> None:
-    """Wider ground is bought with a fallback, not granted for free.
-
-    A joint lane's gain cannot be attributed to the body or to the config, and
-    a joint lane that does not converge returns nothing at all. The fallback is
-    what keeps the second failure mode off the table, so it has to reach the
-    Implementer's planner along with the ground -- and be visible afterwards to
-    anyone asking which of the round's scores were decomposable.
-    """
+    """Wider ground is bought with a fallback, not granted for free."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1074,13 +1028,7 @@ async def test_a_joint_lane_reaches_its_implementer_time_boxed() -> None:
 
 @pytest.mark.asyncio
 async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
-    """The lane still runs; what it is risking stops being invisible.
-
-    Dropping it would spend the change this exception exists to allow, so the
-    round keeps it. But a joint lane with nothing behind it is the one lane
-    that can end a session with no measurement at all, and a reviewer reading
-    only the ground cannot tell it from a lane that has a fallback.
-    """
+    """The lane still runs; what it is risking stops being invisible."""
     backend = _PerCallBackend(
         [
             _partition_lanes([_lane(_JOINT_GROUND, joint=True), _lane(_GROUND_B)]),
@@ -1113,13 +1061,7 @@ async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
-    """The move that fits no one region is what four kernels lost.
-
-    Named in an analysis, filed under nobody's ground, absent from every
-    artifact the next round reads. Assigned, it is recorded against the lane
-    that took it and against that lane's ground, so the round's own output
-    says both that the move was attempted and by whom.
-    """
+    """The move that fits no one region is what four kernels lost."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1158,14 +1100,7 @@ async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
 
 @pytest.mark.asyncio
 async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
-    """A move no lane took is a finding, not an absence.
-
-    The round is still divided and still runs; what changes is that the move
-    and the reason it was passed over are in the round's own output, where an
-    operator reading the artifact finds them. Nothing feeds them to the next
-    round. A partition that gave no reason is reported separately from one
-    that did, because only the second was a decision.
-    """
+    """A move no lane took is a finding, not an absence."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1208,12 +1143,7 @@ async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
 async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
     caplog,
 ) -> None:
-    """Owned by a lane that does not exist is unowned, and is reported as such.
-
-    The ceiling truncates the lanes, so a move pointed past it would otherwise
-    read as assigned in the diagnostics while no session on earth was going to
-    attempt it -- the exact failure this record exists to make impossible.
-    """
+    """Owned by a lane that does not exist is unowned, and is reported as such."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1249,12 +1179,7 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
 
 @pytest.mark.asyncio
 async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> None:
-    """Named none and left one unowned are different answers.
-
-    Both leave the round with no lane on the move, but only the second says
-    the partition looked. Collapsing them would let a partition that skipped
-    the question read exactly like one that answered it.
-    """
+    """Named none and left one unowned are different answers."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1282,13 +1207,7 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
 async def test_a_move_named_as_a_plain_string_is_still_a_named_move(
     caplog,
 ) -> None:
-    """The schema shows an object; a model answering it with prose is ordinary.
-
-    Read as "no move", that answer is filed as `missing` -- the partition
-    skipped the question -- when what happened is the `mhc-fused` shape
-    exactly: a move named out loud and owned by nobody. The two must not read
-    alike, so the string is taken as the move and the absent lane is said.
-    """
+    """The schema shows an object; a model answering it with prose is ordinary."""
     backend = _PerCallBackend(
         [
             _partition_lanes([_lane(_GROUND_A), _lane(_GROUND_B)], _CROSS_CUTTING),
@@ -1327,13 +1246,7 @@ async def test_a_move_named_as_a_plain_string_is_still_a_named_move(
 async def test_a_move_field_of_the_wrong_shape_is_not_reported_as_no_move(
     caplog,
 ) -> None:
-    """A shape the parser cannot read is not evidence the partition looked.
-
-    `missing` is a statement about the partition -- it named none. A list where
-    an object was asked for says nothing about what the partition found, so it
-    gets its own status and the field is quoted, rather than being folded into
-    the one answer an operator would stop reading at.
-    """
+    """A shape the parser cannot read is not evidence the partition looked."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1369,13 +1282,7 @@ async def test_a_move_field_of_the_wrong_shape_is_not_reported_as_no_move(
 
 @pytest.mark.asyncio
 async def test_an_owned_move_records_the_ground_that_owns_it() -> None:
-    """The lane_id is the partitioner grading its own answer.
-
-    Nothing downstream can tell a move handed to the lane that can actually
-    make it from one pointed at whichever lane came to mind: both read
-    `assigned` and neither warns. Recording the owning lane's ground next to
-    the move makes the claim falsifiable from the artifact alone.
-    """
+    """The lane_id is the partitioner grading its own answer."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1441,13 +1348,7 @@ async def test_a_move_naming_a_lane_that_is_not_a_number_is_unowned() -> None:
 
 @pytest.mark.asyncio
 async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> None:
-    """Falling back to narrow ground is right; doing it without a word is not.
-
-    "partial" is neither true nor false, and the safe reading is not joint --
-    but then a lane whose ground spans a body and the config that serves it
-    runs with no fallback required and nothing in the artifact saying the
-    width was refused rather than never asked for.
-    """
+    """Falling back to narrow ground is right; doing it without a word is not."""
     backend = _PerCallBackend(
         [
             _partition_lanes([_lane(_JOINT_GROUND, joint="partial"), _lane(_GROUND_B)]),
@@ -1477,12 +1378,7 @@ async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> Non
 
 @pytest.mark.asyncio
 async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
-    """A quoted "false" is a no, and the flag it sets is the one that widens.
-
-    Read with ``bool``, every string is true, so a partition that quoted its
-    booleans would hand joint ground -- and the attribution cost that comes
-    with it -- to lanes that never asked for any.
-    """
+    """A quoted \"false\" is a no, and the flag it sets is the one that widens."""
     backend = _PerCallBackend(
         [
             _partition_lanes(
@@ -1514,13 +1410,7 @@ async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
 
 
 def test_an_answer_that_is_not_a_boolean_is_read_as_the_note_promises() -> None:
-    """The flag stored and the note written have to describe one reading.
-
-    `joint: 1` is a shape a model emits constantly, and read through ``bool``
-    it widened the lane while the note in the same artifact said the answer was
-    unreadable and the lane kept its narrow ground. Whichever of the two an
-    operator believed, the other was a lie about the round that ran.
-    """
+    """The flag stored and the note written have to describe one reading."""
     assert orchestration_module._as_bool(True) == (True, True)
     assert orchestration_module._as_bool("true") == (True, True)
     assert orchestration_module._as_bool(None) == (False, True)
@@ -1535,13 +1425,7 @@ def test_an_answer_that_is_not_a_boolean_is_read_as_the_note_promises() -> None:
 
 @pytest.mark.asyncio
 async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() -> None:
-    """The lane list and the note are read by the same operator.
-
-    A truthy non-boolean filed the lane under the round's joint lanes and under
-    the note saying it was read as not joint. The lane also reached its own
-    Implementer marked joint, so the artifact contradicted the payload as well
-    as itself.
-    """
+    """The lane list and the note are read by the same operator."""
     backend = _PerCallBackend(
         [
             _partition_lanes([_lane(_JOINT_GROUND, joint=1), _lane(_GROUND_B)]),
@@ -1573,14 +1457,7 @@ async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() ->
 
 @pytest.mark.asyncio
 async def test_a_launch_site_two_bodies_share_is_owned_by_one_lane() -> None:
-    """The exception that widens a lane cannot be handed to every lane.
-
-    "the lane that changes the body owns the configuration that serves it" is
-    stated to the whole partition, so two body lanes dispatched from one launch
-    site each own that site by it, and the disjointness the round asserts --
-    and stacks its candidates on -- is gone. Stacking then drops the second
-    patch, which is one Implementer session bought and thrown away.
-    """
+    """The exception that widens a lane cannot be handed to every lane."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1600,20 +1477,15 @@ async def test_a_launch_site_two_bodies_share_is_owned_by_one_lane() -> None:
     partition = backend.specs[0].system_prompt
     assert "One launch site belongs to exactly one lane" in partition
     assert "name that launch in exactly one\nlane's ground" in partition
-    # The boundary is derived, never written twice: a lane's ground says only
-    # what it owns, so the prompt must not ask for a "stay off" clause that
-    # would reach the owning lane as ground it does not own.
+    # The boundary is derived, never written twice: a lane's ground says only what it owns, so the prompt must not ask
+    # for a "stay off" clause that would reach the owning lane as ground it does not own.
     assert "every other lane sees it as ground it does not own" in partition
     assert "keep the other lane off it" not in partition
 
 
 @pytest.mark.asyncio
 async def test_a_partition_that_could_not_be_bought_claims_no_move() -> None:
-    """A collapsed round found nothing, so it must not report having looked.
-
-    The fallback ground is assembled from the specialist role names; it has no
-    reading of the kernel behind it and cannot name a move or rule one out.
-    """
+    """A collapsed round found nothing, so it must not report having looked."""
     backend = _PerCallBackend(["not json at all", "# One plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1638,13 +1510,7 @@ async def test_a_partition_that_could_not_be_bought_claims_no_move() -> None:
 
 @pytest.mark.asyncio
 async def test_the_partition_divides_what_it_was_given_without_reading_more() -> None:
-    """The analyses already name the files and functions they are about.
-
-    A partition allowed to read source re-derives the analysis instead of
-    dividing it, and it does so on the critical path where every lane of the
-    round is waiting. Measured before this bound existed: one partition over
-    three analyses was still exploring after eighteen minutes.
-    """
+    """The analyses already name the files and functions they are about."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
     outcomes = (
@@ -1675,15 +1541,7 @@ async def test_the_partition_divides_what_it_was_given_without_reading_more() ->
 
 @pytest.mark.asyncio
 async def test_a_partition_that_cannot_be_bought_still_leaves_a_round() -> None:
-    """A round that cannot be divided by code runs as one lane, not a wide one.
-
-    The value of a fan-out round is that each lane edits code no other lane
-    edits, so each candidate earns a score that can be attributed to it. The
-    old fallback dealt the analyses out by role, which divides the evidence
-    without dividing the code -- observed in production, one lane's edited files
-    a subset of its sibling's -- so the round spent N sessions and could get one
-    answer. A partition that cannot be bought collapses to a single lane.
-    """
+    """A round that cannot be divided by code runs as one lane, not a wide one."""
     backend = _PerCallBackend(["not json at all", "# One plan", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1712,12 +1570,7 @@ async def test_a_partition_that_cannot_be_bought_still_leaves_a_round() -> None:
 
 @pytest.mark.asyncio
 async def test_a_challenge_survives_a_partition_that_could_not_be_bought() -> None:
-    """A REPLACE is not asked for again, and the round it judged is this one.
-
-    A single ordinary lane would answer "this route is dominated" by refining
-    that very route, through the one path that never reports having done so. A
-    challenged round that falls back collapses to the one challenger lane.
-    """
+    """A REPLACE is not asked for again, and the round it judged is this one."""
     backend = _PerCallBackend(["not json at all", "# Challenger plan", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1748,8 +1601,7 @@ async def test_a_challenge_survives_a_partition_that_could_not_be_bought() -> No
     grounds = diagnostics["grounds"]
     assert [ground["lane_id"] for ground in grounds] == [1]
     assert "last_plan_critic" in grounds[0]["ground"]
-    # The single lane's own payload carries the challenger ground, not the
-    # ordinary synthesis prompt.
+    # The single lane's own payload carries the challenger ground, not the ordinary synthesis prompt.
     lane_spec = backend.specs[1]
     assert "last_plan_critic" in json.loads(lane_spec.user_prompt)["lane"]["ground"]
 
@@ -1805,13 +1657,7 @@ class _OneLaneFailsBackend:
 
 @pytest.mark.asyncio
 async def test_one_lost_lane_does_not_cost_the_round_its_healthy_plans() -> None:
-    """Each lane is its own call, so one failure is one lane, not the round.
-
-    Letting it propagate would throw away siblings that already answered and
-    were already paid for -- and the loop reads a raised synthesis as a planning
-    outage, so asking for N lanes would multiply the chance of tripping the
-    orchestration circuit breaker by N.
-    """
+    """Each lane is its own call, so one failure is one lane, not the round."""
     backend = _OneLaneFailsBackend(failing_ground=_GROUND_A, answer="# Lane B\nStage via LDS.")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -1971,14 +1817,7 @@ async def test_orchestration_service_dispatches_and_synthesizes() -> None:
 
 @pytest.mark.asyncio
 async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path, monkeypatch) -> None:
-    """The round's teardown finding has to leave the analysis phase.
-
-    Reaping the probe tree answers nothing on its own: what a probe left on the
-    device holds the same GPU this round's canonical measurement is about to
-    use, and only the loop can decide not to take it. So the finding rides out
-    with the planning diagnostics -- in this process and this iteration, which
-    is the one whose measurement it has to stop.
-    """
+    """The round's teardown finding has to leave the analysis phase."""
 
     async def _leaked(directory, *, description):
         return ReapReport(
@@ -2182,8 +2021,8 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
     result = await service.run(_context(), lanes=2)
 
     assert len(result.optimization_plans) == 2
-    # One review for the round, not one per lane: the width is what the round
-    # most needs reviewed, and it is a question no single lane can be asked.
+    # One review for the round, not one per lane: the width is what the round most needs reviewed, and it is a
+    # question no single lane can be asked.
     assert critic_backend.calls == 1
     assert result.plan_critic is not None
     assert result.plan_critic.verdict == "REVISE"
@@ -2231,13 +2070,7 @@ def _two_lane_critic_service(orchestration_backend, critic_backend):
 
 @pytest.mark.asyncio
 async def test_the_round_reports_how_it_was_divided() -> None:
-    """A round is audited after the fact or not at all.
-
-    The service snapshots the agent's diagnostics once dispatch has answered,
-    which is before the partition has run, so how the round was divided --
-    bought or fallen back to, and whether a challenger was asked for -- was
-    recorded on the agent and then left out of everything published.
-    """
+    """A round is audited after the fact or not at all."""
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
@@ -2284,12 +2117,7 @@ def _two_lane_round(critic_review: str, *, revisions: list[str] | None = None):
 
 @pytest.mark.asyncio
 async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
-    """The round's width is the one thing the verdict could not say.
-
-    Six production reviews found a named lane not worth its Implementer
-    session; every one of those rounds ran that lane anyway, because
-    ACCEPT/REVISE/REPLACE cover the round and cannot single a lane out.
-    """
+    """The round's width is the one thing the verdict could not say."""
     _backend, service = _two_lane_round(
         "VERDICT: ACCEPT\n\n"
         + _width_block(
@@ -2342,11 +2170,7 @@ async def test_a_dropped_lane_is_not_revised_first() -> None:
 
 @pytest.mark.asyncio
 async def test_a_round_narrowed_to_nothing_keeps_every_lane() -> None:
-    """A round that publishes nothing spent its planning window for no score.
-
-    The review ranked no lane above another, so there is no principled single
-    survivor to keep: the narrowing is refused whole and says so.
-    """
+    """A round that publishes nothing spent its planning window for no score."""
     _backend, service = _two_lane_round(
         "VERDICT: ACCEPT\n\n"
         + _width_block(
@@ -2368,12 +2192,7 @@ async def test_a_round_narrowed_to_nothing_keeps_every_lane() -> None:
 
 @pytest.mark.asyncio
 async def test_a_round_collapsed_to_one_lane_cannot_be_narrowed() -> None:
-    """Two decisions about width meet here, and the floor wins.
-
-    The partition could not be bought, so the round already collapsed to the
-    single lane that is the floor. Narrowing runs after it and would otherwise
-    win on width; below one lane it does not run at all.
-    """
+    """Two decisions about width meet here, and the floor wins."""
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
@@ -2398,12 +2217,7 @@ async def test_a_round_collapsed_to_one_lane_cannot_be_narrowed() -> None:
 
 @pytest.mark.asyncio
 async def test_a_challenged_round_refuses_narrowing_it_cannot_aim() -> None:
-    """One of these lanes is the challenger, and nothing records which.
-
-    The previous round's REPLACE bought exactly one lane to validate the route
-    it named. A drop applied here could spend that challenge without anyone
-    being able to tell afterwards, so the challenge outranks the narrowing.
-    """
+    """One of these lanes is the challenger, and nothing records which."""
     _backend, service = _two_lane_round(
         "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it duplicates lane 1"})
     )
@@ -2456,14 +2270,7 @@ def _joint_lane_round(critic_review: str):
 
 @pytest.mark.asyncio
 async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
-    """A ruling on width made blind to the width is not the ruling asked for.
-
-    The narrowing step obeys the review, so the review is where the fact that a
-    lane was deliberately widened -- and the smaller change it falls back to --
-    has to arrive. Given only ground and draft, the step that decides whether a
-    lane is worth its session could not tell a joint lane from any other, and
-    the round's one linkage between the two decisions did not exist.
-    """
+    """A ruling on width made blind to the width is not the ruling asked for."""
     _backend, service = _joint_lane_round("VERDICT: ACCEPT\n\n" + _width_block())
 
     await service.run(_context(), lanes=2)
@@ -2480,14 +2287,7 @@ async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
 
 @pytest.mark.asyncio
 async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> None:
-    """The width is sunk; refusing the drop spends a session instead of saving one.
-
-    The partition has already granted the wider ground by the time the review
-    rules, so keeping the lane recovers nothing -- it buys an Implementer
-    session for a lane the review, which was shown the width, judged not worth
-    one. What the round owes is the record: it widened ground and measured none
-    of it.
-    """
+    """The width is sunk; refusing the drop spends a session instead of saving one."""
     _backend, service = _joint_lane_round(
         "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 1, "reason": "the tile rewrite is too large a bet"})
     )
@@ -2507,11 +2307,7 @@ async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> N
 
 @pytest.mark.asyncio
 async def test_a_drop_aimed_past_the_joint_lane_leaves_the_widened_lane() -> None:
-    """A round that carries a joint lane narrows around it like any other.
-
-    The joint lane is published because nobody asked to drop it, and the record
-    separates that from a round with no joint lane at all.
-    """
+    """A round that carries a joint lane narrows around it like any other."""
     _backend, service = _joint_lane_round(
         "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it is lane 1's staging in other words"})
     )
@@ -2551,15 +2347,7 @@ def _ruling(*drops: tuple[int, str]) -> PlanCriticOutcome:
 
 
 def test_a_joint_lane_does_not_make_an_emptying_ruling_survivable() -> None:
-    """The floor is one lane, and it must not be raised into a ranking.
-
-    A refusal aimed at the joint lane alone took an emptying ruling apart: the
-    drops on the other lanes applied, the emptiness check never fired because
-    the refused drop was missing from the count, and the round published exactly
-    the lane the review had named -- an arbitrary survivor chosen by the
-    partition's width rather than by any ranking the review gave, and reported
-    as an ordinary narrowing.
-    """
+    """The floor is one lane, and it must not be raised into a ranking."""
     drafts = _drafts(True, False, False)
 
     kept, diagnostics = OrchestrationService._narrow_round(
@@ -2580,14 +2368,7 @@ def test_a_joint_lane_does_not_make_an_emptying_ruling_survivable() -> None:
 
 
 def test_a_round_of_only_joint_lanes_still_narrows() -> None:
-    """Marking every lane joint must not switch narrowing off.
-
-    Nothing bounds how many lanes a partition may call joint, and the partition
-    is told that the lane changing a body owns the configuration serving it --
-    so every body lane that re-tunes its launch qualifies. A round that refused
-    every drop it carried a joint flag for would hand the partition a veto over
-    the review, by an answer the partition is invited to give.
-    """
+    """Marking every lane joint must not switch narrowing off."""
     drafts = _drafts(True, True, True)
 
     kept, diagnostics = OrchestrationService._narrow_round(
@@ -2651,15 +2432,7 @@ async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
 
 @pytest.mark.asyncio
 async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
-    """The case the DROP LANE regex passed over in silence.
-
-    The review states a drop as a sentence and ends with no block. The regex
-    matched neither the directive nor the "looks like a directive" pattern, so
-    the round narrowed nothing and recorded nothing -- indistinguishable from a
-    review that wanted both lanes. The static backend answers the repair pass
-    with the same prose, so this is the worst case: the block is never read.
-    The round still runs both lanes, and it says why.
-    """
+    """The case the DROP LANE regex passed over in silence."""
     _backend, service = _two_lane_round(
         "VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
         revisions=["# Lane 1 revised", "# Lane 2 revised"],
@@ -2681,12 +2454,7 @@ async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
 
 @pytest.mark.asyncio
 async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> None:
-    """One repair call buys back an Implementer session the round would run.
-
-    Same prose-only review as above, but the repair pass answers with the block
-    the review owed. The drop is applied, and the round records that the ruling
-    was not read the first time.
-    """
+    """One repair call buys back an Implementer session the round would run."""
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
@@ -2723,15 +2491,7 @@ async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> N
 async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     caplog,
 ) -> None:
-    """The record of a narrowed round has to agree with itself.
-
-    Same recovered path as above: block absent, one repair pass restated it,
-    lane 2 dropped. The round persisted a note saying it kept every lane it
-    planned beside the `dropped` entry saying it did not, and warned twice that
-    the narrowing was not applied one line above the line saying it had
-    narrowed. Whoever audits the round afterwards is told both things, and an
-    operator who sees that warning contradicted stops reading it.
-    """
+    """The record of a narrowed round has to agree with itself."""
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
@@ -2760,8 +2520,8 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     assert narrowing["status"] == "narrowed"
     assert narrowing["kept"] == 1
     assert narrowing["dropped"] == [{"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}]
-    # Each note says what reading the block found and leaves the outcome to
-    # `status` and `dropped`, which is the only way the three can agree.
+    # Each note says what reading the block found and leaves the outcome to `status` and `dropped`, which is the only
+    # way the three can agree.
     assert narrowing["notes"] == [
         "the review ended with no lane_narrowing block",
         "the review did not end with a readable width block; one repair pass restated it",
@@ -2776,13 +2536,7 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
 async def test_a_narrowing_the_round_refused_is_still_reported_as_one(
     caplog,
 ) -> None:
-    """The warning has to survive where it is true.
-
-    The review named a lane, the round is running it anyway, and this is the
-    outcome the operator is being warned about. It is logged here, where what
-    the round did with the ruling is known, rather than once per note while the
-    reading was still going on.
-    """
+    """The warning has to survive where it is true."""
     _backend, service = _two_lane_round(
         "VERDICT: ACCEPT\n\n"
         + _width_block(
@@ -2818,13 +2572,7 @@ async def test_a_review_that_asked_for_nothing_is_not_reported_as_a_failure(
 
 @pytest.mark.asyncio
 async def test_the_round_records_what_each_planning_phase_cost() -> None:
-    """A quarter of an eleven-hour budget went on planning, a third unseen.
-
-    Every phase but one persisted or logged its own duration; the rest could
-    only be arrived at by subtracting those from the round's total, which made
-    the second most expensive phase of the planning window the only one nobody
-    could look up.
-    """
+    """A quarter of an eleven-hour budget went on planning, a third unseen."""
     _backend, service = _two_lane_round(
         "VERDICT: REVISE\n\nBoth lanes need a stop condition.",
         revisions=["# Lane 1 revised", "# Lane 2 revised"],
@@ -2844,8 +2592,8 @@ async def test_the_round_records_what_each_planning_phase_cost() -> None:
     ]
     assert all(value >= 0 for value in durations.values())
     phases = [name for name in durations if name != "total"]
-    # The named phases account for the round without exceeding it; what they do
-    # not cover stays visible as the difference rather than being distributed.
+    # The named phases account for the round without exceeding it; what they do not cover stays visible as the
+    # difference rather than being distributed.
     assert sum(durations[name] for name in phases) <= durations["total"] + 0.01
     assert durations["plan_critic"] == pytest.approx(result.plan_critic.duration_sec, abs=0.001)
     assert durations["plan_revision"] == pytest.approx(
@@ -2887,12 +2635,7 @@ async def test_a_round_that_never_partitioned_reports_no_partition_cost() -> Non
 
 @pytest.mark.asyncio
 async def test_a_lane_that_cannot_be_revised_keeps_its_draft() -> None:
-    """The verdict was about the round, not about that lane being dangerous.
-
-    Its siblings were revised, so replacing the whole round with the
-    non-executable fallback would throw away work over one lost follow-up turn.
-    A single-lane round still falls back: there is nothing else left in it.
-    """
+    """The verdict was about the round, not about that lane being dangerous."""
     orchestration_backend = _QueuedBackend(
         [
             _dispatch_payload(both_roles=True),
@@ -3024,8 +2767,8 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
     assert spec.timeout_sec == 600
     revision_payload = json.loads(feedback)
     assert revision_payload["draft_plan"] == draft
-    # The resumed session already holds the planning bundle, and the revision
-    # instructions are the system prompt; neither is copied back into the payload.
+    # The resumed session already holds the planning bundle, and the revision instructions are the system prompt;
+    # neither is copied back into the payload.
     assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
     assert "revision_instructions" not in revision_payload
     revision_diagnostics = result.structured_output_diagnostics["plan_revision"]
@@ -3037,15 +2780,7 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
 
 @pytest.mark.asyncio
 async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
-    """The synthesis session already holds the whole planning bundle.
-
-    A resume re-enters the lane's own synthesis session, which already contains
-    the dispatch, every specialist analysis and the synthesis conversation.
-    Appending a near-complete duplicate of that bundle in the feedback ran the
-    revision out of context: one 12-hour run compacted the revision 17 times
-    across 7 rounds, once per lane, dropping the recap it went on to answer over.
-    The feedback carries only the critic's addition and the draft it judged.
-    """
+    """The synthesis session already holds the whole planning bundle."""
     backend = _ResumableQueuedBackend(["# Revised plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
@@ -3072,8 +2807,8 @@ async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
     assert payload["draft_plan"] == "# Draft plan"
     assert payload["critic_verdict"] == "REVISE"
     assert "existing GEMM" in payload["critic_review"]
-    # The revision instructions are the system prompt, not a second copy inside
-    # the payload; the rest of the bundle is already in the resumed session.
+    # The revision instructions are the system prompt, not a second copy inside the payload; the rest of the bundle is
+    # already in the resumed session.
     assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
     for absent in (
         "revision_instructions",
@@ -3349,10 +3084,8 @@ async def test_non_api_format_failure_still_produces_implementer_plan() -> None:
     assert "Successful specialist roles: (none)" in (result.optimization_plan)
     assert "analysis/abc123/source_map.json" in (result.optimization_plan)
     assert result.optimization_plan_executable is False
-    # One plan, and that is what keeps a round nobody could synthesize out of
-    # lane recovery: the loop only recovers a published set of two or more, so
-    # a recovered set is always one a synthesis produced. Recovery reports
-    # executability by leaving it unset, which rests on exactly this.
+    # One plan, and that is what keeps a round nobody could synthesize out of lane recovery: the loop only recovers a
+    # published set of two or more, so a recovered set is always one a synthesis produced.
     assert len(result.optimization_plans) == 1
     assert orchestration_backend.calls == 2
     assert any("invalid dispatch JSON" in note for note in result.dispatch_plan.normalization_notes)

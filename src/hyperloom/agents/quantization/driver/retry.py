@@ -1,12 +1,4 @@
-"""Multi-attempt orchestration: ``quantize_via_prompt`` public entry.
-
-Wraps :func:`.runner.run_one_attempt` with the diagnose-fix-retry protocol
-(the per-attempt contract lives in ``SKILL.md``). Each attempt is classified
-into an outcome that decides done/failed/partial/retry; retryable outcomes
-require a ``fix_hypothesis_attempt_N.md`` and are capped by
-``max_requantize_attempts``. The counter file persists across interpreter
-restarts so a re-invocation on the same workspace continues counting.
-"""
+"""Multi-attempt orchestration: ``quantize_via_prompt`` public entry."""
 
 from __future__ import annotations
 
@@ -32,18 +24,13 @@ from .runner import RunOneAttemptFn, run_one_attempt
 
 _COUNTER_FILE = "requantize_attempts.txt"
 
-# Upstream git URL for the Quark repo; quoted in the quark_root_missing error
-# so operators know where to clone from.
+# Upstream git URL for the Quark repo; quoted in the quark_root_missing error so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 
 
 @dataclass(frozen=True)
 class QuantSkillRunResult:
-    """Public return shape of :func:`quantize_via_prompt`.
-
-    Exactly three fields; details are folded into ``assessment`` (`final` /
-    `attempts` / `recovered` / `eval_gap` + `notes`).
-    """
+    """Public return shape of :func:`quantize_via_prompt`."""
 
     status: str  # "success" | "partial" | "failed"
     quantized_model_dir: Path | None
@@ -54,15 +41,7 @@ class QuantSkillRunResult:
 
 
 def _read_counter(workspace: Path) -> int:
-    """Read the persisted requantize-attempt counter.
-
-    Args:
-        workspace: Run workspace holding the counter file.
-
-    Returns:
-        The current counter value, or ``0`` when the file is absent or
-        unreadable.
-    """
+    """Read the persisted requantize-attempt counter."""
     f = workspace / _COUNTER_FILE
     if not f.is_file():
         return 0
@@ -73,14 +52,7 @@ def _read_counter(workspace: Path) -> int:
 
 
 def _bump_counter(workspace: Path) -> int:
-    """Increment and persist the requantize-attempt counter.
-
-    Args:
-        workspace: Run workspace holding the counter file.
-
-    Returns:
-        The new counter value after incrementing.
-    """
+    """Increment and persist the requantize-attempt counter."""
     n = _read_counter(workspace) + 1
     (workspace / _COUNTER_FILE).write_text(str(n), encoding="utf-8")
     return n
@@ -90,15 +62,7 @@ def _bump_counter(workspace: Path) -> int:
 
 
 def _resolve_interactive(interactive: bool | None) -> bool:
-    """Resolve the effective interactive mode.
-
-    Args:
-        interactive: Explicit mode, or ``None`` to auto-detect from the tty.
-
-    Returns:
-        The explicit value when provided, otherwise ``True`` only when both
-        stdin and stderr are attached to a tty.
-    """
+    """Resolve the effective interactive mode."""
     if interactive is not None:
         return interactive
     # Auto: enable only if both stdin and stderr are ttys.
@@ -109,15 +73,7 @@ def _resolve_interactive(interactive: bool | None) -> bool:
 
 
 def _ask_operator(message: str) -> bool:
-    """Prompt the operator on stderr for a yes/no decision.
-
-    Args:
-        message: Question to display.
-
-    Returns:
-        ``True`` if the operator answers ``y``/``yes``; ``False`` otherwise,
-        including on EOF or interrupt.
-    """
+    """Prompt the operator on stderr for a yes/no decision."""
     print(message, file=sys.stderr, flush=True)
     try:
         line = sys.stdin.readline()
@@ -130,34 +86,14 @@ def _ask_operator(message: str) -> bool:
 
 
 def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
-    """Look for the hypothesis written by SKILL.md for the NEXT attempt.
-
-    Absence is the gate that prevents blind retries.
-
-    Args:
-        workspace: Workspace directory to inspect.
-        attempt_number: The current attempt number; the next attempt's
-            hypothesis file is ``attempt_number + 1``.
-
-    Returns:
-        ``True`` if the next attempt's fix-hypothesis file exists.
-    """
+    """Look for the hypothesis written by SKILL.md for the NEXT attempt."""
 
     return (workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md").is_file()
 
 
 @dataclass(frozen=True)
 class _RetryDecision:
-    """Outcome of one ``_decide_next_step`` call.
-
-    Exactly one of ``retry`` / ``promote_to`` is meaningful at a time:
-    * ``retry=True`` → run another attempt; loop bumps counter.
-    * ``retry=False`` and ``promote_to`` set → operator overrode the outcome;
-      loop stops and rewrites the last attempt's outcome.
-    * ``retry=False`` and ``promote_to`` unset → terminal, assemble assessment.
-
-    ``note`` is appended to ``Assessment.notes`` for caller debugging.
-    """
+    """Outcome of one ``_decide_next_step`` call."""
 
     retry: bool
     note: str
@@ -173,20 +109,7 @@ def _decide_next_step(
     max_requantize_attempts: int,
     counter: int,
 ) -> _RetryDecision:
-    """Decide whether to retry, accept, or stop after one attempt.
-
-    Args:
-        outcome: The classified outcome of the just-finished attempt.
-        workspace: Attempt workspace directory.
-        attempt_number: 1-based index of the attempt just completed.
-        interactive: Whether operator prompts are allowed.
-        max_requantize_attempts: Cap on requantize retries.
-        counter: Current value of the persisted requantize counter.
-
-    Returns:
-        A :class:`_RetryDecision` describing whether to retry, promote, or
-        terminate, plus a debugging note.
-    """
+    """Decide whether to retry, accept, or stop after one attempt."""
 
     if outcome is None or outcome in SUCCESS_TAGS:
         return _RetryDecision(retry=False, note="")
@@ -248,28 +171,7 @@ async def quantize_via_prompt(
     runner_fn: RunOneAttemptFn | None = None,
     log: Callable[[str], None] | None = None,
 ) -> QuantSkillRunResult:
-    """Run the quantization-agent against ``prompt`` and return a result.
-
-    ``quark_root`` falls back to ``$QUARK_ROOT`` then to a hard error (mapped
-    to ``quark_root_missing`` at the assessment level). The threshold resolves
-    per ``eval.resolve_threshold``; the interactive flag per
-    ``_resolve_interactive``.
-
-    Args:
-        prompt: The quantization instruction prompt.
-        workspace: Directory for attempt artifacts (created if needed).
-        quark_root: Quark checkout root; falls back to ``$QUARK_ROOT``.
-        interactive: Force interactive operator prompts; auto-resolved
-            when ``None``.
-        acceptable_eval_gap: Maximum tolerated relative accuracy gap.
-        max_requantize_attempts: Cap on requantize retries.
-        model: Optional model identifier passed to the runner.
-        runner_fn: Override for the single-attempt runner (testing hook).
-        log: Optional line-logging callback.
-
-    Returns:
-        The assembled :class:`QuantSkillRunResult`.
-    """
+    """Run the quantization-agent against ``prompt`` and return a result."""
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
@@ -369,18 +271,7 @@ def _build_failed_bootstrap_result(
     outcome: OutcomeId,
     note: str,
 ) -> QuantSkillRunResult:
-    """Fast-path failure that bypasses the SDK (used for bootstrap errors).
-
-    Args:
-        workspace: Workspace directory for the (failed) attempt.
-        outcome: The bootstrap-level outcome to record.
-        note: Human-readable note attached to the assessment.
-
-    Returns:
-        A well-formed failed :class:`QuantSkillRunResult` so callers can branch
-        on ``status`` / ``assessment.final`` without special-casing pre-flight
-        failures.
-    """
+    """Fast-path failure that bypasses the SDK (used for bootstrap errors)."""
 
     return QuantSkillRunResult(
         status="failed",

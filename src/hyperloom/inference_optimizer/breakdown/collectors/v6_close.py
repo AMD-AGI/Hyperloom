@@ -67,11 +67,7 @@ _KNOWN_STEPS = frozenset(
     }
 )
 
-# The status vocabulary the sequencer actually writes. A word outside it is
-# passed through unchanged — inventing ``done`` for something spelled
-# differently is the one failure mode this key cannot afford — but it is also
-# warned about, because an unrecognized status counts as unsettled and would
-# otherwise pin ``close.status`` to ``degraded`` with nothing to explain why.
+# The status vocabulary the sequencer actually writes.
 _KNOWN_STATUSES = frozenset({"running", "done", "failed", "skipped"})
 
 # The section's own status while the sequencer is still working through the
@@ -87,9 +83,8 @@ def _close_step(row: dict[str, Any]) -> dict[str, Any]:
     detail = str(row.get("detail") or "") or None
     return {
         "step": step,
-        # An unrecognized status is passed through rather than coerced into
-        # the enum: inventing ``done`` for something a producer spelled
-        # differently would be the one failure mode this key cannot afford.
+        # An unrecognized status is passed through rather than coerced into the enum: inventing ``done`` for something
+        # a producer spelled differently would be the one failure mode this key cannot afford.
         "status": status,
         "ts": str(row.get("ts") or ""),
         "task_id": task_id,

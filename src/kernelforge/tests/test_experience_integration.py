@@ -8,18 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.config import Config
 from kernelforge.knowledge import experience_integration as integ
-from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
-    KnowledgeConfig,
-)
 from kernelforge.knowledge.implementation_identity import implementation_signature
 from kernelforge.rewrite_by_flydsl import driver_contract, record_store, runner
 from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
     DriverPreflight,
 )
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
+from kernelforge.conftest import kb_store_run_config as _kb_store_config
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_READ_ERROR_LENGTH = 240
@@ -125,9 +121,8 @@ def _indexed_reference(root: Path, rank: int) -> Path:
 
 
 def test_git_apply_normalizes_strip_depth_for_deeper_workspace(tmp_path):
-    # Producer recorded the diff relative to a repo root ('pkg/kernel.py'), but
-    # the consumer workspace root sits one level deeper (inside 'pkg/'), so the
-    # file is just 'kernel.py' here. -p1 would miss; the normalizer must find the
+    # Producer recorded the diff relative to a repo root ('pkg/kernel.py'), but the consumer workspace root sits one
+    # level deeper (inside 'pkg/'), so the file is just 'kernel.py' here. -p1 would miss; the normalizer must find the
     # right strip depth and apply cleanly.
     repo = _init_repo(tmp_path)  # repo/kernel.py == "old\n"
     deep_patch = """diff --git a/pkg/kernel.py b/pkg/kernel.py
@@ -279,11 +274,7 @@ def test_kb_read_status_is_compact_and_stable():
 
 
 def test_kb_read_status_keeps_a_refused_amendment():
-    """A store that refused a correction must reach the persisted record.
-
-    The KB goes on ranking a claim no consumer reproduced, so the refusal is
-    exactly the outcome an operator needs to see later.
-    """
+    """A store that refused a correction must reach the persisted record."""
     status = integ.kb_read_status(
         {
             "candidate": True,
@@ -487,8 +478,8 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
     monkeypatch,
     tmp_path,
 ):
-    # The first-ranked candidate fails to apply, so the loop must fall through
-    # to the next-ranked candidate and adopt it if it is safe.
+    # The first-ranked candidate fails to apply, so the loop must fall through to the next-ranked candidate and adopt
+    # it if it is safe.
     repo = _init_repo(tmp_path)
     _patch_read_solutions(
         monkeypatch,
@@ -765,12 +756,7 @@ def test_kb_warmstart_preserves_candidate_measurements_and_repeat(
 
 
 def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
-    """Use three-run case medians for pristine and candidate measurements.
-
-    The candidate runs disagree by enough that the median is neither the first
-    of them nor their mean, and by little enough that the adoption gate -- three
-    sigma of the candidate's own scores -- still admits the 2x gain.
-    """
+    """Use three-run case medians for pristine and candidate measurements."""
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = iter(
@@ -1070,8 +1056,8 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tm
 def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    # Only the three pristine measurements should run; correctness rejects the
-    # applied patch before candidate measurement.
+    # Only the three pristine measurements should run; correctness rejects the applied patch before candidate
+    # measurement.
     benches = _three_measurements(_bench(10.0))
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
@@ -1137,8 +1123,8 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
 def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    # Applied kernel is correct but slower than the pristine baseline (12 >= 10):
-    # it must be discarded and the loop cold-started from the pristine baseline.
+    # Applied kernel is correct but slower than the pristine baseline (12 >= 10): it must be discarded and the loop
+    # cold-started from the pristine baseline.
     benches = _three_measurements(_bench(10.0), _bench(12.0))
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
@@ -1436,14 +1422,7 @@ def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
     monkeypatch,
     tmp_path,
 ):
-    """The refusal is persisted, so it has to say which failure happened.
-
-    This status becomes ``kb_experience.write`` in the run's result JSON. What a
-    caller needs from it is that the mirror did not happen and that the text
-    identifies the failure well enough to act on. The literal ``error:`` prefix
-    is not part of that contract, so asserting it pinned the format instead of
-    the behaviour.
-    """
+    """The refusal is persisted, so it has to say which failure happened."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("def kernel(x):\n    return x\n")
 
@@ -1536,40 +1515,13 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
 
 
 # --- the rewrite warm start's persisted read error --------------------------- #
-def _kb_store_config(tmp_path: Path, token: str) -> Config:
-    """A KB Store run configuration whose credential is a recognizable string."""
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
-        local_root=tmp_path / "remote-knowledge",
-        kb_store_url="http://in-memory",
-        kb_store_token=token,
-        remote_backend=REMOTE_BACKEND_KB_STORE,
-    )
-    return Config.from_env(
-        workspace=str(tmp_path),
-        gpu_target="gfx950",
-        gpu_type="mi355x",
-        knowledge_config=knowledge,
-        agent_precheck=False,
-    )
 
 
 def test_rewrite_warm_start_failure_is_persisted_without_its_credential(
     tmp_path,
     monkeypatch,
 ):
-    """The rewrite runner persists this reason, so it may not carry a credential.
-
-    The warm start builds a KB Store client and reads over HTTP, and this guard
-    catches everything the reader's own sanitizer does not: the store client is
-    constructed outside that sanitizer's ``try``, so a construction failure of
-    any type other than ``KBStoreError`` arrives here verbatim. It lands in the
-    run's result JSON as ``kb_experience.read.read_error``, so a KB Store
-    exception quoting the bearer token it authenticated with, a credentialed URL
-    and an unbounded response body is redacted and bounded at 240 characters
-    exactly like every sibling write path.
-    """
+    """The rewrite runner persists this reason, so it may not carry a credential."""
     token = "kb-store-secret-9f3c"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1631,19 +1583,7 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
     monkeypatch,
     tmp_path,
 ):
-    """The credential-bearing half of ``write_experience_to_kb``'s contract.
-
-    Its own handler reports ``f"error:{e!r}"``, which redacts nothing and bounds
-    nothing, and the status is persisted as ``kb_experience.write``. That is safe
-    only because no configured credential can reach it: the single store call,
-    ``write_run_experience``, wraps its whole body in a handler that redacts
-    against ``kb_store_secrets`` and caps at 240 characters, and everything else
-    in the gathering step is ``getattr`` on local run state, a local ``git diff``
-    helper that returns "" on any error, and reads inside
-    ``contextlib.suppress``. This drives the real store path to prove the claim
-    rather than restate it, so moving a store call out of that handler's reach
-    fails here.
-    """
+    """The credential-bearing half of ``write_experience_to_kb``'s contract."""
     token = "kb-store-secret-9f3c"
     kernel = tmp_path / "vllm" / "ops" / "kernel.py"
     kernel.parent.mkdir(parents=True)

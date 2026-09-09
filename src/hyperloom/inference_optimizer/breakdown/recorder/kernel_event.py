@@ -119,12 +119,7 @@ ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
 ROUTE_COLLECTIVE_ONLY = "collective_only"
 
-# The six candidate producers a KERNEL entry can adopt from. The first four are
-# forge's independently gated lanes; the last two split GEAK's acceptances,
-# which the ledger used to merge. A ``kind == "env"`` acceptance selects an
-# existing library or environment variable and authors no kernel, so it belongs
-# to the config half of GEAK's gain rather than to the per-kernel adoption
-# ledger -- and before this recorder it was filtered out and lost entirely.
+# The six candidate producers a KERNEL entry can adopt from.
 SOURCE_KERNEL_REWRITE = "kernel_rewrite"
 SOURCE_FUSION = "fusion"
 SOURCE_GEMM_TUNING = "gemm_tuning"
@@ -166,16 +161,15 @@ OUTCOME_REJECTED = "rejected"
 OUTCOME_IN_FLIGHT = "in_flight"
 OUTCOME_UNATTEMPTED = "unattempted"
 
-# A rebench either validated the candidate, found its win immaterial, measured
-# it truthfully without beating current_best, or could not conclude because the
-# config it was asked to reproduce did not engage.
+# A rebench either validated the candidate, found its win immaterial, measured it truthfully without beating
+# current_best, or could not conclude because the config it was asked to reproduce did not engage.
 REBENCH_VALIDATED = "validated"
 REBENCH_NO_MATERIAL = "no_material"
 REBENCH_NO_PROMOTE = "no_promote"
 REBENCH_FALLBACK = "fallback"
 
-# A rebench that reports one of these measured nothing, so it concluded nothing
-# about the candidate it was dispatched for.
+# A rebench that reports one of these measured nothing, so it concluded nothing about the candidate it was dispatched
+# for.
 _REBENCH_FAULTED_STATUSES = frozenset({"failed", "error", "failure", "faulted", "timeout", "aborted"})
 
 _ACCEPTANCE_AUTHORED = "authored"
@@ -830,24 +824,7 @@ def _rebench_row(
 
 
 def _acceptance_rows(specs: Any) -> list[dict[str, Any]]:
-    """Split GEAK's acceptances into authored kernels and env selections.
-
-    GEAK routes an acceptance to ``accepted_kernels`` or ``accepted_heads``
-    purely by which queue proposed it, and both lanes carry the same
-    parity-checked ``e2e_delta_pct``; reading only the first drops most of the
-    campaign. A candidate tag such as ``cand_c0_triton`` names the slot that
-    proposed the acceptance, so the row records which of the two named it.
-
-    Args:
-        specs (Any): The combined ``accepted_kernels`` + ``accepted_heads``
-            rows, each tagged with the lane it came from.
-
-    Returns:
-        list[dict[str, Any]]: One row per acceptance, each tagged with the kind
-            it is and the position it was reported in. The position stands in
-            for a timestamp GEAK does not report, and it is stable across a
-            replay of the same report, which is what an ordering key has to be.
-    """
+    """Split GEAK's acceptances into authored kernels and env selections."""
     rows: list[dict[str, Any]] = []
     for ordinal, spec in enumerate(_as_list(specs)):
         row = _as_dict(spec)
@@ -907,13 +884,7 @@ def _acceptance_identity(row: Mapping[str, Any], ordinal: int) -> str:
 
 
 class KernelEventRecorder:
-    """Records the facts of one KERNEL entry, one fragment per row.
-
-    The recorder holds an event id and two sinks, and no event. Nothing it
-    writes is read back until :meth:`finish`, which assembles the whole event
-    out of the fragments rather than out of anything the recorder remembers --
-    so an entry recorded across a resume assembles from both halves.
-    """
+    """Records the facts of one KERNEL entry, one fragment per row."""
 
     def __init__(
         self,
@@ -924,20 +895,7 @@ class KernelEventRecorder:
         resumed: bool = False,
         code_revision: str = "",
     ):
-        """Bind a recorder to the event of one KERNEL entry.
-
-        Args:
-            macro_cycle (int): The macro cycle this entry belongs to. It is a
-                segment of the event id rather than a row field, because it is
-                part of what identifies the event.
-            route (str): The dispatch route the entry hook selected.
-            route_reason (str): Why that route was selected.
-            resumed (bool): Whether the phase was entered by a resume.
-            code_revision (str): Orchestration commit the entry ran.
-
-        Raises:
-            ValueError: If ``macro_cycle`` is not a non-negative integer.
-        """
+        """Bind a recorder to the event of one KERNEL entry."""
         self._event_id = kernel_event_id(macro_cycle)
         self._sink = make_sink(self._event_id, producer=PRODUCER)
         self._geak_sink = make_sink(self._event_id, producer=PRODUCER_GEAK)
@@ -980,22 +938,7 @@ class KernelEventRecorder:
         snapshot: dict[str, Any] | None = None,
         snapshot_staleness: str = "",
     ) -> None:
-        """Record the entry measurements and put the event on the timeline.
-
-        ``tput_before`` is the throughput the previous stage exited on, which is
-        what this entry's net gain must be measured against. The session
-        baseline is recorded beside it because the rebench path measures against
-        that instead, and a reader comparing the two needs both on record.
-
-        Args:
-            stack_depth_in (Any): Optimization-stack depth on entry.
-            budget_remaining_sec (Any): Phase budget left on entry.
-            tput_before (Any): Throughput the previous stage exited on.
-            session_baseline_tput (Any): The session's raw baseline throughput.
-            snapshot (dict[str, Any] | None): The ``last_trace_analyze`` cache
-                the entry inherited.
-            snapshot_staleness (str): ``fresh`` / ``stale`` / ``absent``.
-        """
+        """Record the entry measurements and put the event on the timeline."""
         inherited = _as_dict(snapshot)
         self._sink.record(
             SECTION_EVENT,
@@ -1080,29 +1023,7 @@ class KernelEventRecorder:
         snapshot_id_after: Any = None,
         task_id: str = "",
     ) -> None:
-        """Record the entry re-profile that decides whether analysis is stale.
-
-        ``task_kind`` is the judgement the rest of the chain hangs on: a
-        ``roofline`` task carries its own ``trace_analyze`` and refreshes the
-        cache, while a plain ``profile`` task invalidates it and forces the phase
-        to request analysis of its own. This runs on the forge and
-        collective-only routes only -- GEAK profiles from scratch itself and is
-        handed no trace, so re-profiling for it would buy nothing.
-
-        Args:
-            ran (bool): Whether a re-profile was actually dispatched.
-            task_kind (str): ``roofline`` or ``profile``.
-            trigger (str): ``gain`` / ``config_changed`` / ``workload_changed``.
-            skipped_reason (str): Why it was skipped, when it was.
-            idempotency_reason (str): The dispatch reason tag.
-            snapshot_landed (bool): Whether a new snapshot actually landed.
-            snapshot_id_before (Any): Snapshot counter before the attempt.
-            snapshot_id_after (Any): Snapshot counter after the attempt.
-            task_id (str): The dispatched task, which is how the re-profile's
-                own rows are found again: the roofline executor records them
-                into this event under that id, and assembly folds the action it
-                names into ``forge.reprofile.run``.
-        """
+        """Record the entry re-profile that decides whether analysis is stale."""
         self._sink.record(
             SECTION_EVENT,
             {
@@ -1178,12 +1099,7 @@ class KernelEventRecorder:
         )
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
-        """Write one lane row, keyed by the run it describes.
-
-        Args:
-            row (Mapping[str, Any]): The lane row, carrying its ``source_kind``
-                and ``run_id``.
-        """
+        """Write one lane row, keyed by the run it describes."""
         self._sink.record(
             SECTION_LANE_RUN,
             row,
@@ -1376,18 +1292,7 @@ class KernelEventRecorder:
         )
 
     def record_rebench_attempt(self, **fields: Any) -> None:
-        """Record one forge rebench attempt.
-
-        A dispatch and the verdict that lands minutes later are two calls on one
-        ``attempt_id`` describing one attempt, and keying the fragment by that id
-        is what keeps them one row instead of two. Both calls state the whole
-        row, so the later one wins field by field -- a caller that knows only
-        the verdict should pass the dispatch fields through rather than letting
-        them default, because a stated ``None`` is a value like any other.
-
-        Args:
-            **fields: The :func:`_rebench_row` fields.
-        """
+        """Record one forge rebench attempt."""
         fields.setdefault("ledger", LEDGER_FORGE)
         row = _rebench_row(**fields)
         self._sink.record(
@@ -1494,18 +1399,7 @@ class KernelEventRecorder:
         )
 
     def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
-        """Replay what GEAK tried, from the journey it emits.
-
-        GEAK's ``kernel_journey.json`` names every kernel it considered, which
-        backends it dispatched, and what each one measured -- not just the
-        acceptances that survived. Those rows land in sections of their own
-        rather than merged into forge's lanes, which is what the projection did:
-        they are a different producer's account of a different campaign, and the
-        counts a reader wants are per-campaign.
-
-        Args:
-            journey (dict[str, Any] | None): The parsed ``kernel_journey.json``.
-        """
+        """Replay what GEAK tried, from the journey it emits."""
         parsed = _as_dict(journey)
         for ordinal, run in enumerate(_as_list(parsed.get("discovery_runs"))):
             row = _as_dict(run)
@@ -1585,17 +1479,7 @@ class KernelEventRecorder:
             )
 
     def record_geak_claim(self, pending: dict[str, Any] | None, *, specs: Any = None) -> None:
-        """Record what GEAK reported about itself, before any re-measurement.
-
-        Every number here is the optimizer's own account of its run. ``verified``
-        is stored as a constant so a consumer cannot mistake this block for a
-        conclusion: nothing in it has been re-measured by the orchestrator's own
-        harness, and the adoption verdict rests solely on the rebench.
-
-        Args:
-            pending (dict[str, Any] | None): The recorded GEAK candidate slot.
-            specs (Any): The combined acceptance rows from both proposal queues.
-        """
+        """Record what GEAK reported about itself, before any re-measurement."""
         slot = _as_dict(pending)
         self._sink.record(
             SECTION_EVENT,
@@ -1688,12 +1572,7 @@ class KernelEventRecorder:
         )
 
     def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
-        """Record one GEAK rebench attempt.
-
-        Args:
-            max_attempts (Any): The per-cycle attempt ceiling.
-            **fields: The :func:`_rebench_row` fields.
-        """
+        """Record one GEAK rebench attempt."""
         fields.setdefault("source_kind", SOURCE_GEAK_AUTHORED_KERNEL)
         fields["ledger"] = LEDGER_GEAK
         row = _rebench_row(**fields)
@@ -1739,30 +1618,7 @@ class KernelEventRecorder:
         stack_added: Any = None,
         stack_removed: Any = None,
     ) -> None:
-        """Record the exit facts, assemble the event and close it.
-
-        The exit facts are written as rows before assembly rather than passed
-        into it, so the event finalize would rebuild from the fragments alone is
-        the same event this writes.
-
-        Args:
-            verdict (str): The entry's conclusion, for a caller that knows one
-                assembly cannot derive -- the failure path, which closes before
-                any candidate settles. Leave it empty otherwise: assembly reads
-                the conclusion off the settled rows. Either way it is dropped
-                when nothing was adopted, so an entry that adopted nothing
-                cannot read as having concluded something about a candidate.
-            status (str): The event status to close with. Derived from the
-                rebench evidence when empty, so the ladder cannot drift per call
-                site.
-            exit_reason (str): The phase's own exit reason.
-            tput_after (Any): Throughput the entry exited on.
-            cumulative_gain_validated_out (Any): Validated cumulative gain on
-                exit.
-            stack_depth_out (Any): Optimization-stack depth on exit.
-            stack_added (Any): Stack entries this visit added.
-            stack_removed (Any): Stack entries this visit removed.
-        """
+        """Record the exit facts, assemble the event and close it."""
         if self._closed:
             return
         self._closed = True
@@ -1787,8 +1643,8 @@ class KernelEventRecorder:
                 },
             },
         )
-        # Both families of sections: an inline roofline recorded its rows into
-        # this event, and assembly needs them to fill the re-profile block.
+        # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
+        # fill the re-profile block.
         ext, derived = assemble_kernel_ext(event_parts(EVENT_SECTIONS), event=self._event_id)
         finish_event(
             event_type=EVENT_TYPE,
@@ -1835,22 +1691,7 @@ def _settle(
     geak_ref: str,
     geak_conflicted: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, int]]]:
-    """Resolve every candidate row against the rebench that measured it.
-
-    Args:
-        lanes (Mapping[str, list[dict[str, Any]]]): The forge lane rows by wire
-            array name, mutated in place with their settled ``outcome``.
-        verdicts (Mapping[str, Mapping[str, Any]]): Rebench rows by attempt id.
-        acceptances (Mapping[str, list[dict[str, Any]]]): GEAK's acceptance rows
-            by kind, mutated in place with their settled ``outcome``.
-        geak_ref (str): The GEAK attempt whose verdict the acceptances are
-            settled against, or ``""`` when none may be honoured.
-        geak_conflicted (bool): Whether GEAK's settled attempts disagreed.
-
-    Returns:
-        tuple: The adopted rows, the rows still awaiting review, and the
-            per-source counters.
-    """
+    """Resolve every candidate row against the rebench that measured it."""
     by_source = _empty_by_source()
     adopted: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
@@ -1963,20 +1804,7 @@ def assemble_kernel_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble one kernel event's ``ext`` out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The kernel sections as read
-            back from the spool, section name to row list.
-        event (str): The event id to assemble; rows of every other event in the
-            same session are ignored.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status derived
-            from the rebench evidence. The caller may override the status -- a
-            phase that failed outright knows something the rows do not -- but it
-            never has to compute it.
-    """
+    """Assemble one kernel event's ``ext`` out of its recorded rows."""
     event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = event_rows[0] if event_rows else {}
 
@@ -2054,18 +1882,16 @@ def assemble_kernel_ext(
         integrate_by_kernel=integrate_by_kernel,
     )
 
-    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of
-    # the two arrays a row landed in, so on the wire the array itself says it.
+    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
+    # the wire the array itself says it.
     acceptance_drop = ("event_id", "ordinal", "acceptance_kind", "source_kind")
     authored = wire_rows(acceptances.get(_ACCEPTANCE_AUTHORED, []), drop=acceptance_drop)
     env_selections = wire_rows(acceptances.get(_ACCEPTANCE_ENV, []), drop=acceptance_drop)
 
     reprofile = _as_dict(header.get("forge_reprofile")) or None
     if reprofile:
-        # The re-profile dispatched the roofline executor inline, so its rows
-        # are in this event under the task id the re-profile recorded. Nesting
-        # the assembled action here rather than leaving a sibling roofline event
-        # is the whole reason the inline mode exists.
+        # The re-profile dispatched the roofline executor inline, so its rows are in this event under the task id the
+        # re-profile recorded.
         reprofile = {
             **reprofile,
             "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
@@ -2133,11 +1959,8 @@ def assemble_kernel_ext(
     before = _float_or_none(outcome_block.get("tput_before"))
     after = _float_or_none(outcome_block.get("tput_after"))
     route = _text(header.get("route")) or _text(_as_dict(header.get("entry")).get("route"))
-    # Derived here rather than taken from the phase, which has no verdict of its
-    # own to give: an entry is adopted because a rebench validated something, and
-    # that join is what ``_settle`` above has just done. A caller's word is
-    # honoured only when it names something assembly cannot see for itself --
-    # the failure path's, which closes before any of this is settled.
+    # Derived here rather than taken from the phase, which has no verdict of its own to give: an entry is adopted
+    # because a rebench validated something, and that join is what ``_settle`` above has just done.
     stated = _text(outcome_block.get("verdict"))
     outcome = {
         "route": route or "",

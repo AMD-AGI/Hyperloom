@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for GEAK acceptance identity in the breakdown collectors.
-
-Each test here is anchored to a case measured on the recorded campaign at
-``/shared_nfs/hyperloom-claw``. The behaviours under test are the ones a
-reviewer flagged on Hyperloom PR #1209:
-
-* **Two lanes.** An acceptance lands in ``accepted_kernels`` *or*
-  ``accepted_heads``. Measured: 8 of 11 sessions with an acceptance carry it in
-  ``accepted_heads`` alone, 3 in ``accepted_kernels`` alone, 0 in both. Reading
-  one lane loses most of them.
-* **Alias twins.** GEAK records one acceptance as two journey rows: the
-  candidate-slot row carries the measurement, the resolved-symbol row does not.
-  The symbol is on the *unmeasured* twin, and ``name`` holds it while
-  ``kernel_id`` holds an underscore-stripped slug.
-* **Shared admission.** A journey row declares no ``kind``, so a library
-  selection (``kind="env"``) would be credited as an authored kernel. The kind
-  is recovered by joining the symbol back to the run's ``result.json`` lane, and
-  what the join cannot resolve is recorded as unresolved rather than guessed.
-"""
+"""Unit coverage for GEAK acceptance identity in the breakdown collectors."""
 
 from __future__ import annotations
 
@@ -40,7 +22,6 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------
 # B2 — the alias twin collapses onto the resolved symbol
-# --------------------------------------------------------------------------
 
 
 def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
@@ -94,12 +75,7 @@ def test_acceptance_specs_do_not_alias_a_row_to_its_own_name() -> None:
 
 
 def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
-    """No measured delta is no evidence of twinning.
-
-    Reading the delta as ``float(x or 0.0)`` mapped absent and zero onto the
-    same number, so two unrelated env selections on one op_kind collapsed into
-    one acceptance for carrying no measurement at all.
-    """
+    """No measured delta is no evidence of twinning."""
     result = {
         "accepted_heads": [
             {"short_name": "ck_gemm_a8w8", "kind": "env", "op_kind": "gemm"},
@@ -136,14 +112,11 @@ def test_cand_tag_recognises_slot_tags_only() -> None:
     assert not geak_is_cand_tag("")
 
 
-# --------------------------------------------------------------------------
 # B3 — one admission test, shared with the ledger
-# --------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------
 # The shared helpers the two collectors now agree on
-# --------------------------------------------------------------------------
 
 
 def test_spec_kind_returns_none_for_absent_and_for_empty() -> None:

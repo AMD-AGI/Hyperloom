@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -74,21 +68,7 @@ def _load_json_safe(
     *,
     require_dict: bool = False,
 ) -> Any | None:
-    """Parse a JSON file, recording any failure instead of raising.
-
-    Args:
-        path (Path | None): File to read, or ``None``.
-        warnings (list[str]): Shared warnings list; a parse/read failure is
-            appended here (mutated in place).
-        require_dict (bool): When True, a top-level non-object is treated as
-            a parse failure (recorded in ``warnings``, returns ``None``).
-            Defaults to False so existing callers that accept any JSON value
-            keep their behaviour.
-
-    Returns:
-        Any | None: The decoded JSON value, or ``None`` if ``path`` is
-        ``None``, the file does not exist, or decoding failed.
-    """
+    """Parse a JSON file, recording any failure instead of raising."""
     if path is None:
         return None
     if not path.exists():
@@ -102,19 +82,7 @@ def _load_json_safe(
 
 
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
-    """Parse a JSON-Lines file into a list of dict rows, never raising.
-
-    Blank lines are skipped. Malformed lines and read failures are recorded
-    in ``warnings`` and otherwise ignored; only dict-valued rows are kept.
-
-    Args:
-        path (Path | None): The ``.jsonl`` file to read, or ``None``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: One dict per well-formed object line. Empty when
-        ``path`` is ``None`` / missing or no line parsed to a dict.
-    """
+    """Parse a JSON-Lines file into a list of dict rows, never raising."""
     if path is None or not path.exists():
         return []
 
@@ -126,20 +94,7 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
 
 
 def _to_float(value: Any) -> float | None:
-    """Coerce an arbitrary value to ``float`` without raising.
-
-    Booleans are rejected (returned as ``None``) so ``True``/``False`` never
-    silently become ``1.0``/``0.0``. Strings are stripped, the sentinel
-    ``"SKIPPED"`` and empty strings map to ``None``, and thousands separators
-    (``,``) are removed before parsing.
-
-    Args:
-        value (Any): The value to convert.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when the value is missing,
-        a bool, or not numeric.
-    """
+    """Coerce an arbitrary value to ``float`` without raising."""
     if isinstance(value, str):
         text = value.strip()
         if not text or text.upper() == "SKIPPED":
@@ -149,31 +104,13 @@ def _to_float(value: Any) -> float | None:
 
 
 def _to_int(value: Any) -> int | None:
-    """Coerce a value to ``int`` via :func:`_to_float`, never raising.
-
-    Args:
-        value (Any): The value to convert.
-
-    Returns:
-        int | None: The truncated integer, or ``None`` when ``value`` is not
-        numeric (same rules as :func:`_to_float`).
-    """
+    """Coerce a value to ``int`` via :func:`_to_float`, never raising."""
     number = _to_float(value)
     return int(number) if number is not None else None
 
 
 def _rel(path: Path | None, session_dir: Path) -> str | None:
-    """Express ``path`` relative to ``session_dir`` as a POSIX string.
-
-    Args:
-        path (Path | None): The path to relativize, or ``None``.
-        session_dir (Path): The session root the result is relative to.
-
-    Returns:
-        str | None: The POSIX-style relative path, or ``None`` when ``path``
-        is ``None``. Falls back to ``str(path)`` when ``path`` is not under
-        ``session_dir``.
-    """
+    """Express ``path`` relative to ``session_dir`` as a POSIX string."""
     if path is None:
         return None
     try:
@@ -185,20 +122,7 @@ def _rel(path: Path | None, session_dir: Path) -> str | None:
 def _benchmark_report_metrics(
     report: dict[str, Any] | None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    """Extract (output_throughput, ttft, tpot, e2el) from a benchmark_report.json across schema generations.
-
-    Priority: V2 nested (``throughput.*`` / ``latency.<m>.mean_ms``), flat
-    top-level, then ``result.<flat>``.
-
-    Args:
-        report (dict[str, Any] | None): A parsed ``benchmark_report.json``, or
-            ``None``.
-
-    Returns:
-        tuple[float | None, float | None, float | None, float | None]:
-        ``(output_throughput, ttft, tpot, e2el)`` with each element ``None``
-        when not present or not numeric.
-    """
+    """Extract (output_throughput, ttft, tpot, e2el) from a benchmark_report.json across schema generations."""
     if not isinstance(report, dict):
         return (None, None, None, None)
     tput_section = report.get("throughput") if isinstance(report.get("throughput"), dict) else None
@@ -206,14 +130,7 @@ def _benchmark_report_metrics(
     result_section = report.get("result") if isinstance(report.get("result"), dict) else None
 
     def _from_lat(metric: str) -> Any:
-        """Read ``latency.<metric>.mean_ms`` from the V2 latency section.
-
-        Args:
-            metric (str): Latency metric name (e.g. ``"ttft"``, ``"tpot"``).
-
-        Returns:
-            Any: The metric's ``mean_ms`` value, or ``None`` when absent.
-        """
+        """Read ``latency.<metric>.mean_ms`` from the V2 latency section."""
         if isinstance(lat_section, dict):
             sub = lat_section.get(metric)
             if isinstance(sub, dict):
@@ -234,18 +151,7 @@ def _benchmark_report_metrics(
 
 
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
-    """Walk a nested dict by successive keys without raising.
-
-    Args:
-        d (Any): The (possibly nested) mapping to traverse.
-        *keys (str): Keys to follow in order.
-        default (Any): Value returned when traversal hits a missing key, a
-            non-dict node, or a ``None`` leaf. Defaults to ``None``.
-
-    Returns:
-        Any: The resolved value, or ``default`` if any step fails or the
-        final value is ``None``.
-    """
+    """Walk a nested dict by successive keys without raising."""
     cur = d
     for k in keys:
         if not isinstance(cur, dict):
@@ -257,15 +163,7 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def _parse_iso_unix(ts: Any) -> float | None:
-    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure.
-
-    Args:
-        ts (Any): An ISO-8601 string or already-numeric timestamp.
-
-    Returns:
-        float | None: The timestamp in Unix seconds, or ``None`` when ``ts`` is
-        empty or unparseable.
-    """
+    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure."""
     if ts is None:
         return None
     if isinstance(ts, (int, float)):
@@ -287,17 +185,7 @@ def phase_at(
     *,
     fallback: str = "",
 ) -> str:
-    """Return the phase active at ``ts_unix``.
-
-    Args:
-        ts_unix: The timestamp to classify.
-        phase_boundaries: ``(unix_ts, phase_name)`` transition points sorted
-            ascending; the last one at or before ``ts_unix`` wins.
-        fallback: Phase name returned when every boundary is later.
-
-    Returns:
-        The phase name active at ``ts_unix``, or ``fallback``.
-    """
+    """Return the phase active at ``ts_unix``."""
     current = fallback
     for boundary, phase in phase_boundaries:
         if boundary <= ts_unix:
@@ -311,17 +199,7 @@ def _load_optimization_journal(
     session_dir: Path | None,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions.
-
-    Args:
-        session_dir (Path | None): Absolute session root, or ``None``.
-        warnings (list[str]): Shared warnings list (mutated in place on parse
-            failure).
-
-    Returns:
-        list[dict[str, Any]]: The journal ``entries`` list, or ``[]`` when the
-        file is missing / malformed or ``session_dir`` is ``None``.
-    """
+    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions."""
     if session_dir is None:
         return []
     data = _load_json_safe(

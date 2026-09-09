@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A row removed for being wrong is not a shape the run failed to reach.
-
-``_build_result`` compared the surviving row count against ``n_expected``, but
-``drop_inaccurate_rows`` had already deleted rows from the artifact by then. A
-batch that tuned every shape and then had two of them removed by aiter's own
-accuracy check therefore reported ``partial_output`` with a warning blaming the
-grouped batch budget -- pointing the reader at ``--timeout`` when the timeout
-was never the problem and a backend was computing wrong answers.
-"""
+"""A row removed for being wrong is not a shape the run failed to reach."""
 
 from __future__ import annotations
 
@@ -90,8 +82,8 @@ class TestAccuracyFilteringIsNotBudgetExhaustion:
         result = _build(tmp_path, kept=6, dropped=2, expected=8)
 
         assert result.status == "ok"
-        # The old text sent the reader to --timeout; the new one names the
-        # accuracy check and says outright that the budget was not the cause.
+        # The old text sent the reader to --timeout; the new one names the accuracy check and says outright that the
+        # budget was not the cause.
         assert "likely exhausted" not in caplog.text
         assert "accuracy filtering, not budget exhaustion" in caplog.text
 
@@ -140,13 +132,7 @@ class TestTheServializedCountsAgree:
 
 
 class TestPartialOutputStillReachesE2E:
-    """Guard against "fixing" this by refusing to integrate a partial run.
-
-    ``partial_output`` is deliberately on the E2E path (see
-    ``phases/kernel.py`` and ``test_partial_output_still_reaches_e2e``): rows
-    that were written are real tuning results. This accounting fix must not
-    quietly become a new gate.
-    """
+    """Guard against \"fixing\" this by refusing to integrate a partial run."""
 
     def test_partial_output_still_carries_a_deployable_artifact(self, tmp_path):
         result = _build(tmp_path, kept=6, dropped=2, expected=20)

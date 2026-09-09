@@ -46,8 +46,8 @@ def test_allowed_actions_disjoint_phases():
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL
-    # entry from a lane budget, so they are proposable in no phase at all.
+    # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL entry from a lane budget, so they
+    # are proposable in no phase at all.
     assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     for phase in phase_state.PHASE_NAMES:
         assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
@@ -58,12 +58,7 @@ def test_allowed_actions_disjoint_phases():
 
 
 def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
-    """The closed vocabulary must actually close over what the rules emit.
-
-    Restating the frozenset here would only assert that a copy matches its
-    original. What matters is that no exit rule can hand PolicyGate a reason it
-    will then reject, stranding the transition.
-    """
+    """The closed vocabulary must actually close over what the rules emit."""
     import itertools
 
     rules = (
@@ -210,14 +205,7 @@ def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
 
 
 def test_a_resumed_prelude_is_not_charged_for_what_the_earlier_leg_spent():
-    """Banked phase spend and the session clock answer to different origins.
-
-    A resume that reanchors the budget restarts the session clock while the
-    phase ledger keeps every second the earlier leg banked. A bound read off
-    the ledger therefore declared preparation overspent on a session that had
-    its whole budget ahead of it, and the measured half of the baseline was
-    refused on every resumed run. Only the clock decides.
-    """
+    """Banked phase spend and the session clock answer to different origins."""
     state = _prelude_state(spent_sec=10_000.0, usable_sec=10_000.0)
     affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
     assert affordable is True
@@ -265,12 +253,8 @@ def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     assert evidence["fits_one_optimization_round"] is False
 
 
-# The workload the cold-anchor cases below are priced against: a 900s cold round
-# whose last 550s was the benchmark, so the boot took 350s, and a 400s hot pass.
-# One further measured variant therefore costs 750s -- its own boot and a
-# benchmark on a populated JIT cache -- while a double-run round costs the whole
-# measured cold pass plus a second benchmark, 1300s. Together they are what a
-# session must afford before measuring another baseline is worth doing.
+# The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
+# the boot took 350s, and a 400s hot pass.
 _COLD_ANCHOR_WORKLOAD = {
     "baseline_tput": 1074.7,
     "baseline_runtime_sec": 900.0,
@@ -282,16 +266,7 @@ _RETRY_COST_SEC = 1300.0 + 750.0
 
 
 class TestAColdAnchorIsNotAFinishedPrelude:
-    """What happens to a session whose baseline could only keep its cold figure.
-
-    The figure exists, so every rule that asks only whether a baseline landed
-    reads preparation as done. It is not: the number carries the boot, the first
-    request's compile and the graph capture, so every variant measured against it
-    reads as an improvement over a baseline that was never the baseline.
-
-    Two outcomes are correct and the budget picks between them -- measure another
-    baseline, or stop and say why -- and neither is "optimize against it".
-    """
+    """What happens to a session whose baseline could only keep its cold figure."""
 
     def test_a_dropped_hot_pass_does_not_finish_the_phase(self):
         state = _prelude_state(
@@ -325,14 +300,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert phase_state.is_valid_phase_exit_reason(reason)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
-        """The marker outlives the shortfall, so it must not decide on its own.
-
-        A resume reanchors the session clock while the marker from the earlier leg
-        persists. Closing on the marker would end every resumed run before it
-        began, and no later baseline could clear the marker because none would
-        run. So the phase stays open with nothing to advance it but a new
-        baseline.
-        """
+        """The marker outlives the shortfall, so it must not decide on its own."""
         state = _prelude_state(
             **_COLD_ANCHOR_WORKLOAD,
             baseline_measure_round_dropped=True,
@@ -343,12 +311,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
-        """A cold figure by configuration is consistent with what follows it.
-
-        A session that never asked for a hot pass measures everything the same
-        way, so its comparisons hold. Only a pass that was *dropped* leaves a
-        denominator out of step with the numerators.
-        """
+        """A cold figure by configuration is consistent with what follows it."""
         state = _prelude_state(
             baseline_tput=1074.7,
             baseline_runtime_sec=900.0,
@@ -403,8 +366,8 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         stop_reason="",
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
-        # At least one specialist round this cycle, required for skip_to_kernel
-        # to fire at all (see test_exit_normal_optimize_skip_to_kernel_*).
+        # At least one specialist round this cycle, required for skip_to_kernel to fire at all (see
+        # test_exit_normal_optimize_skip_to_kernel_*).
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
@@ -417,12 +380,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
 
 
 def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
-    """A skip_to_kernel hint must not end EXPLORE with zero validated work.
-
-    Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
-    before EXPLORE ever dispatched a specialist round this cycle, and must not
-    be honored until one actually has.
-    """
+    """A skip_to_kernel hint must not end EXPLORE with zero validated work."""
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
@@ -524,8 +482,7 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
-    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would
-    recover it as ``time_exhausted`` -- a met target reported as a timeout."""
+    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
     state = SimpleNamespace(
         phase=phase_state.PHASE_SWEEP,
         phase_started_unix=1.0,
@@ -741,12 +698,7 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
 
 
 def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
-    """A phase this build does not have was written by a build whose machine differed.
-
-    Treating it as a fresh start re-runs PRELUDE on top of a session that
-    already has a baseline, a KEPT stack and hours of measurement, and the
-    numbers of the two builds end up in one report.
-    """
+    """A phase this build does not have was written by a build whose machine differed."""
     c = coordinator_with_mocks
     c.shared_state.phase = "EXPLORE"
 

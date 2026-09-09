@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic working-memory aggregation for FRAMEWORK candidate selection.
-
-``_build_framework_working_memory`` folds the "already tried this session"
-ledger into the shape the selection path reads, capped and most-recent-first.
-"""
+"""Deterministic working-memory aggregation for FRAMEWORK candidate selection."""
 
 from __future__ import annotations
 
@@ -74,8 +70,8 @@ def test_build_working_memory_aggregates_tried_excluded_learnings():
     assert "baseline" in revert["why"]
     # excluded_refs = known ids ∪ processed keys.
     assert {"PR:723", "PR:1015", "PR:900", "PR:2000"} <= set(mem["excluded_refs"])
-    # Learnings come from the denial rows in the progress ledger, which is the
-    # only place a Critic rejection is recorded.
+    # Learnings come from the denial rows in the progress ledger, which is the only place a Critic rejection is
+    # recorded.
     assert mem["learnings"] == ["does not address mem-bw bottleneck"]
     # pending = unprocessed candidate in the latest batch.
     assert mem["pending"] == ["PR:2000"]

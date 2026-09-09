@@ -131,13 +131,7 @@ def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
-    """The GEMM shape-capture path reuses this executor but measures no arm.
-
-    It dispatches as ``gemm_shape_capture`` and carries no reason of its own, so
-    defaulting the arm to current_best would state a measurement the run never
-    made -- and a consumer counting roofline dispatches would have nothing in the
-    event to exclude it by.
-    """
+    """The GEMM shape-capture path reuses this executor but measures no arm."""
     recorder = _recorder(task_id="t-capture-1", task_kind="gemm_shape_capture", framework="vllm")
     recorder.begin(max_profile_attempts=1)
     recorder.finish_failed(phase="profile", message="stopped")
@@ -148,11 +142,7 @@ def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) ->
 
 
 def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) -> None:
-    """A roofline task may carry no reason, and current_best remains its default.
-
-    The arm is withheld by dispatch kind rather than by an absent reason, so this
-    case must not be caught by the shape-capture rule above.
-    """
+    """A roofline task may carry no reason, and current_best remains its default."""
     recorder = _recorder(task_id="t-2", task_kind="roofline")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_failed(phase="profile", message="stopped")
@@ -278,13 +268,7 @@ def _succeed(recorder, *, snapshot_id: int = 1) -> None:
 
 
 def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Path) -> None:
-    """A phase can dispatch roofline more than once, and the task id separates them.
-
-    The event id names a phase in a macro cycle, which is what a reader looks
-    for; the actions inside it are what a reader counts. Making each dispatch
-    its own event would need the task id in the event id, and then nothing on
-    the timeline would say those two rooflines belonged to the same phase.
-    """
+    """A phase can dispatch roofline more than once, and the task id separates them."""
     for index, reason in enumerate(("kernel_followup", "close_post_opt")):
         recorder = _recorder(task_id=f"t-{index}", reason=reason, phase="sweep", macro_cycle=2)
         recorder.begin(max_profile_attempts=3)
@@ -524,11 +508,7 @@ def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -
 
 
 def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
-    """The KERNEL entry's re-profile belongs to the kernel event, not beside it.
-
-    A sibling event would claim the inline run is dispatchable on its own, and
-    a reader counting roofline events would count a sub-step of another phase.
-    """
+    """The KERNEL entry's re-profile belongs to the kernel event, not beside it."""
     from hyperloom.inference_optimizer.breakdown.recorder.assembler import roofline_event_parts
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import assemble_roofline_action
@@ -589,8 +569,8 @@ def test_steady_state_normalizes_across_tools() -> None:
         requested_mode="decode_only",
         tool="tracelens",
     )
-    # Same question, different mechanism: one selects a chunk file, the other a
-    # window in memory, and a consumer must not have to branch on which ran.
+    # Same question, different mechanism: one selects a chunk file, the other a window in memory, and a consumer must
+    # not have to branch on which ran.
     assert tracelens["source"] == "split_chunk"
     assert tracelens["selected"]["selected_chunk"].startswith("decode_only")
     assert set(bypass) == set(tracelens)
@@ -614,11 +594,7 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
 
 
 def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
-    """A trace both consumers can route can still carry a false decode answer.
-
-    This is the case a single healthy/degraded/unusable grade cannot express:
-    nothing fails, the analysis completes, and the conclusion is wrong anyway.
-    """
+    """A trace both consumers can route can still carry a false decode answer."""
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
         trace_dir=Path("/w"),
@@ -642,15 +618,15 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    # Chunks do not exist until the splitter runs, so the profile stage records
-    # the forecast the analysis stage will later be measured against instead.
+    # Chunks do not exist until the splitter runs, so the profile stage records the forecast the analysis stage will
+    # later be measured against instead.
     assert out["chunk_level"] == []
     assert out["steady_state_forecast"]["viable_modes"] == ["mixed"]
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"
-    # Numerator and denominator are kept apart: a coverage ratio alone cannot
-    # say whether the capture recorded two launches or two hundred.
+    # Numerator and denominator are kept apart: a coverage ratio alone cannot say whether the capture recorded two
+    # launches or two hundred.
     assert coverage["detail"]["graph_launch_count"] == 128
     assert coverage["detail"]["graph_launches_with_kernels"] == 1
     assert coverage["detail"]["coverage_max"] == 0.5
@@ -776,13 +752,7 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
 
 
 def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Path) -> None:
-    """The profile succeeded and was adopted, so it is not what failed.
-
-    ``finish_crashed`` reports the in-flight substep, which ``adopt_profile_run``
-    has already moved to ``analysis``. Deciding the blame by prefixing that
-    against the executor's ``trace_analyze`` exit name meant the crash landed on
-    the half that had just been recorded as complete.
-    """
+    """The profile succeeded and was adopted, so it is not what failed."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(

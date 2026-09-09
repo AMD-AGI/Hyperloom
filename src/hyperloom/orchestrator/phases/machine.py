@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase state-machine handler: initialisation, exit-condition scan/transition,
-and the per-phase entry dispatcher (``_on_phase_entered``)."""
+"""Phase state-machine handler: initialisation, exit-condition scan/transition, and the per-phase entry dispatcher
+(``_on_phase_entered``).
+"""
 
 from __future__ import annotations
 import logging as _logging
@@ -20,17 +21,9 @@ class MachinePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _ensure_phase_initialised(self) -> None:
-        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
-
-        Raises:
-            RuntimeError: When the session was recorded at a phase this build's
-                machine does not have.
-        """
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
         state = self.shared_state
         # Redistribute disabled phases' budget shares to the enabled work phases.
-        # Done here (not in Coordinator.__init__) because the enablement flags on
-        # shared_state are only authoritative after load_or_init. Idempotent, so
-        # the per-tick refresh below is a no-op once applied.
         self._phase_budget_pct = _phase_state.redistribute_budget_pct(
             self._phase_budget_pct,
             optimize_enabled=self._optimize_enabled(),
@@ -40,8 +33,8 @@ class MachinePhase(PhaseHandler):
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
-        # Only an unset phase means fresh; an unknown one would otherwise
-        # re-run PRELUDE over the earlier build's baseline and KEPT stack.
+        # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
+        # baseline and KEPT stack.
         if current and current not in _phase_state.PHASE_NAMES:
             raise RuntimeError(
                 f"session was recorded at phase {current!r}, which this build's phase machine "
@@ -71,29 +64,7 @@ class MachinePhase(PhaseHandler):
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
-        """Put a session persisted in CLOSE back at the phase machine's entrance.
-
-        CLOSE is terminal -- the machine has no transition out of it -- so a
-        resumed session that loads it stays there for the whole leg. The run loop
-        does not stop on CLOSE either, so what such a leg actually does is tick
-        in a phase that admits only ``report``, ``session_breakdown`` and
-        ``recover``: it spends its new clock on none of the work it was resumed
-        for.
-
-        Reopened at PRELUDE rather than at the phase CLOSE was entered from,
-        because PRELUDE is the phase that works out where a session belongs. It
-        exits on its first evaluation when the anchor the run needs is already
-        measured, and it measures one when it is not. A session stopped for a
-        cold anchor is the second case, and re-measuring is the whole reason its
-        stop was worth resuming from.
-
-        A session that still cannot fund the work is not kept open by this: the
-        PRELUDE exits price the new clock and route it back to CLOSE, this time
-        against the budget it actually has.
-
-        Reached only from the constructor, so a session cannot reopen itself
-        mid-run -- within one leg, CLOSE is entered long after this has run.
-        """
+        """Put a session persisted in CLOSE back at the phase machine's entrance."""
         state = self.shared_state
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
@@ -105,10 +76,8 @@ class MachinePhase(PhaseHandler):
             reason="phase_entered",
             evidence={"trigger": "resumed_from_close"},
         )
-        # Locked True by the CLOSE sequencer and read by the end-of-run safety
-        # nets as "the sequencer already wrote the breakdown". Carried into a leg
-        # that then never reaches CLOSE, it suppresses the write that would have
-        # stood in for it, and the leg produces no breakdown at all.
+        # Locked True by the CLOSE sequencer and read by the end-of-run safety nets as "the sequencer already wrote
+        # the breakdown".
         state.close_sequence_done = False
 
     def _ensure_recipe_kb_t0_anchored(self) -> None:
@@ -156,33 +125,11 @@ class MachinePhase(PhaseHandler):
         return bool(self.shared_state.kernel_enabled)
 
     def _optimize_enabled(self) -> bool:
-        """Whether the optimisation phase is enabled for this run.
-
-        Returns:
-            ``True`` unless ``--no-framework-agent`` disabled it, collapsing
-            the chain to KERNEL/SWEEP.
-        """
+        """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
-        """Return the ids of queued/running tasks doing KERNEL-lane work.
-
-        The task registry, not the kernel ledger, is what tells the idle guard
-        whether the phase is genuinely busy: a kernel build or benchmark can
-        occupy half an hour without touching a single ledger field while ticks
-        keep advancing every few seconds. Queued counts as in flight alongside
-        running, because a task waiting on a resource lane is work the phase is
-        committed to, not dead air.
-
-        The kind filter is ``KERNEL_LANE_TASK_KINDS``, not the phase's proposable
-        actions: a Coordinator-owned lane is dispatched without ever being
-        proposable, and its task is every bit as much work in flight. Reusing the
-        proposable set here once made a running kernel_opt invisible to the idle
-        guard the moment that action stopped being model-requestable.
-
-        Returns:
-            tuple[str, ...]: Sorted ids of in-flight kernel-lane tasks.
-        """
+        """Return the ids of queued/running tasks doing KERNEL-lane work."""
         kinds = _phase_state.KERNEL_LANE_TASK_KINDS
         tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
         return tuple(
@@ -190,29 +137,7 @@ class MachinePhase(PhaseHandler):
         )
 
     async def _track_kernel_idle_streak(self) -> None:
-        """Advance or reset the KERNEL idle-streak counters for this tick.
-
-        ``exit_normal_kernel`` winds KERNEL down to SWEEP once the streak proves
-        the phase has stopped moving. The streak is measured against an
-        observable progress fingerprint rather than ``kernel_work_pending``: that
-        predicate answers "does the ledger still list something unresolved",
-        which stays true forever once an attempt can no longer be advanced, and
-        it was resetting the counter on every one of 1130 consecutive idle ticks.
-
-        Three outcomes per tick:
-
-        * the fingerprint changed — something moved, so the streak restarts;
-        * kernel-lane work is in flight — the phase is legitimately busy, so the
-          streak is frozen AND its clock rebased, or a long build would silently
-          accumulate idle time and trip the guard mid-build;
-        * otherwise — nothing happened and nothing is running, so the streak
-          grows.
-
-        The tick counter can advance more than once per coordinator tick (the
-        phase machine is scanned several times per tick); that imprecision is
-        harmless because the wall-clock floor, not the tick count, is what
-        actually decides when the guard may fire.
-        """
+        """Advance or reset the KERNEL idle-streak counters for this tick."""
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
             state.kernel_idle_ticks = 0
@@ -235,16 +160,12 @@ class MachinePhase(PhaseHandler):
         if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
             state.kernel_idle_since_unix = now
             return
-        # Only reachable after a tick that opened the streak above, so
-        # ``kernel_idle_since_unix`` is already stamped whenever the counter is
-        # non-zero — the pairing the guard's wall-clock floor relies on.
+        # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
+        # whenever the counter is non-zero — the pairing the guard's wall-clock floor relies on.
         state.kernel_idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0) + 1
 
     async def _advance_phase_if_needed(self) -> None:
-        """Scan exit conditions and transition phase at most once per tick.
-
-        Priority order (Inv-8.2): global terminal > closing phase > met target > exit_terminal > exit_normal, per phase_state.compute_next_phase.
-        """
+        """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
         await self._track_kernel_idle_streak()
         optimize_enabled = self._optimize_enabled()
@@ -272,18 +193,12 @@ class MachinePhase(PhaseHandler):
             and str(getattr(state, "pending_escalate_hint", "") or "").strip()
             == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
         ):
-            # SWEEP already had an honest closeout, so skip_to_close was
-            # suppressed in _global_terminal. Consume it (not discard) here:
-            # the hint's intended outcome -- reaching CLOSE -- did happen, just
-            # via the more honest reason, so the next phase must not re-evaluate
-            # it as if it were still unclaimed.
+            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # ``exit_normal_optimize`` is the hint's only consumer, so a
-            # transition away from that phase leaves it unclaimable; keeping it
-            # would let an unrelated phase re-evaluate it. A transition *into*
-            # that phase is the opposite case: discarding there would drop the
-            # hint on the doorstep of the one rule that reads it.
+            # Both ``exit_normal_optimize`` and ``exit_normal_kernel`` consume ``skip_to_sweep``, so a transition to
+            # any phase other than FRAMEWORK_AGENT leaves the hint unclaimable. A transition *into* FRAMEWORK_AGENT is
+            # the opposite case: discarding there would drop the hint on the doorstep of the rules that read it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
@@ -302,8 +217,8 @@ class MachinePhase(PhaseHandler):
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
-        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``:
-        # record the plateaued bottleneck so the next cycle steers specialists off it.
+        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
+        # so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
             try:
                 state.mark_bottleneck_switch(
@@ -323,8 +238,8 @@ class MachinePhase(PhaseHandler):
                 prior_cycle=prior_cycle,
                 new_cycle=int(getattr(state, "macro_cycle", 0) or 0),
             )
-        # Also persist the no-gain streak on a cyclic-mode terminal close so
-        # a subsequent resume sees the convergence state.
+        # Also persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence
+        # state.
         elif (
             target == _phase_state.PHASE_CLOSE
             and isinstance(evidence, dict)
@@ -343,19 +258,27 @@ class MachinePhase(PhaseHandler):
             ),
         )
         if cancelled:
-            log.info(
-                "Coordinator.phase: cancelled %d queued task(s) incompatible with %s",
-                len(cancelled),
-                target,
+            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "queued_tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "count": len(cancelled),
+                    "detail": f"kind not allowed in {target}; re-dispatch if still needed",
+                },
             )
         state.record_phase_transition(
             to_phase=target,
             reason=reason,
             evidence=evidence,
         )
-        # Mirror the phase boundary into the operator-facing lifecycle log using
-        # the ENTER status (a point-in-time marker, not a START/END interval).
-        # Best-effort; never rolls back the transition.
+        # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
+        # marker, not a START/END interval).
         try:
             state.record_lifecycle_event(
                 step=target,
@@ -424,26 +347,13 @@ class MachinePhase(PhaseHandler):
                 a phase that recomputed them at close would report counts over
                 a history that kept growing after the decision.
         """
-        # Orchestration checkpoint at the phase seam.
-        try:
-            await self._maybe_checkpoint_orchestration(
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase_changed=True,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("Coordinator: phase-boundary checkpoint failed")
-        # Cache-safe here only because the checkpoint above already re-seeded
-        # the conversation, so the cached prefix is rebuilt regardless.
         try:
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort
             log.exception("Coordinator: phase-boundary prompt reseed failed")
 
-        # The machine has entry hooks only, so the phase being left closes its
-        # own timeline event here rather than in a hook of its own. A KERNEL
-        # event must span the whole visit -- the entry hook's deterministic
-        # lanes plus the LLM-driven kernel_opt loop that follows -- and the
-        # transition is the first point at which the visit is over.
+        # The machine has entry hooks only, so the phase being left closes its own timeline event here rather than in
+        # a hook of its own.
         if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
             try:
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
@@ -472,19 +382,7 @@ class MachinePhase(PhaseHandler):
             await self._on_enter_close(from_phase=from_phase)
 
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
-        """Re-scope the orchestration system prompt to the phase being entered.
-
-        Carries the current macro-cycle and cycle directive over unchanged; only
-        the phase scope moves. Snapshots the installed scope so the artefacts
-        record what each phase actually ran under. Skips a user-supplied
-        ``--orch-prompt``.
-
-        Args:
-            to_phase: The phase being entered.
-
-        Returns:
-            ``True`` when the override was rebuilt, else ``False``.
-        """
+        """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
         if not phase or getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
@@ -504,12 +402,7 @@ class MachinePhase(PhaseHandler):
         return True
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
-        """Merge ``kvs`` into the latest phase_history row's evidence dict (no-op when empty).
-
-        Args:
-            **kvs: Arbitrary key/value pairs merged into the latest
-                phase_history row's evidence dict.
-        """
+        """Merge ``kvs`` into the latest phase_history row's evidence dict (no-op when empty)."""
         history = self.shared_state.phase_history or []
         if not history:
             return

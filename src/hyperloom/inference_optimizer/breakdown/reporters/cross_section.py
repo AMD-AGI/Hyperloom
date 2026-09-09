@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-section fact synthesis for the executive summary + LLM prompt.
-
-All facts are computed deterministically here (the LLM never invents
-numbers); any cross-section reasoning belongs in this module.
-"""
+"""Cross-section fact synthesis for the executive summary + LLM prompt."""
 
 from __future__ import annotations
 
@@ -38,27 +34,12 @@ class GlobalFacts:
     attribution_method: str
 
     def as_prompt_dict(self) -> dict[str, Any]:
-        """Serialize the fact pack to a plain dict for the LLM prompt.
-
-        Returns:
-            dict[str, Any]: All fields of this dataclass as a JSON-friendly
-                mapping (via ``dataclasses.asdict``).
-        """
+        """Serialize the fact pack to a plain dict for the LLM prompt."""
         return asdict(self)
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:
-    """Build a compact one-line description of the workload.
-
-    Args:
-        workload (dict[str, Any]): The ``workload`` section of the breakdown,
-            with keys such as ``model_name``, ``framework_name``, ``precision``,
-            ``tp``, ``conc``, ``isl`` and ``osl``.
-
-    Returns:
-        str: A single line like ``"DeepSeek-R1 vllm fp8 tp=8 conc=64 ..."``,
-            using placeholders for any missing fields.
-    """
+    """Build a compact one-line description of the workload."""
     model = workload.get("model_name") or "(unknown-model)"
     fw = workload.get("framework_name") or "?"
     prec = workload.get("precision") or "?"
@@ -167,24 +148,12 @@ def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> list[str]:
-    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks.
-
-    Args:
-        breakdown: The full ``session_breakdown.json`` dict.
-        rendered: Rendered sections whose warnings are folded in.
-
-    Returns:
-        A de-duplicated list of data-quality flag strings.
-    """
+    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks."""
     flags: list[str] = []
     seen: set[str] = set()
 
     def _push(line: str) -> None:
-        """Append ``line`` to ``flags`` once, de-duplicating via ``seen``.
-
-        Args:
-            line (str): The flag text to record.
-        """
+        """Append ``line`` to ``flags`` once, de-duplicating via ``seen``."""
         if line in seen:
             return
         seen.add(line)
@@ -238,15 +207,7 @@ def _capabilities_split(
 
 
 def _headline(breakdown: dict[str, Any]) -> str:
-    """Build the one-line baseline→final throughput headline.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        str: A line such as ``"baseline X → final Y tok/s/gpu = +Z% validated
-            gain"``, or a fallback message when validated throughput is missing.
-    """
+    """Build the one-line baseline→final throughput headline."""
     from ... import framework_registry
 
     fw = task_config_of(breakdown).get("framework_name")

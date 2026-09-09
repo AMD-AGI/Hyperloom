@@ -36,7 +36,6 @@ log = logging.getLogger(__name__)
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 DEFAULT_CODEX_MODEL = "gpt-5.6"
-FALLBACK_CODEX_MODEL = "gpt-5.5"
 
 
 class CodexBackendError(AgentProviderError):
@@ -51,13 +50,7 @@ class CodexUnavailableError(
 
 
 class CodexExecutionError(CodexBackendError):
-    """Report a failed or timed-out Codex SDK session.
-
-    ``session_id`` carries the thread handle when the failure happened AFTER the
-    thread existed. By then the session already holds every turn it spent reading,
-    building and benchmarking, so the caller has to continue that thread rather
-    than open a new one — which is what ``session_resume`` reads it for.
-    """
+    """Report a failed or timed-out Codex SDK session."""
 
     def __init__(self, *args: Any, session_id: str = "") -> None:
         super().__init__(*args)
@@ -168,8 +161,8 @@ def _provider_overrides(gateway: LlmGateway) -> list[str]:
         f"model_providers.{provider}.wire_api={_toml_string('responses')}",
         f"model_providers.{provider}.env_key={_toml_string(gateway.key_env)}",
     ]
-    # Every header the operator configured for THIS provider, not just the
-    # gateway's mandatory ``user``: an APIM subscription key is equally required.
+    # Every header the operator configured for THIS provider, not just the gateway's mandatory ``user``: an APIM
+    # subscription key is equally required.
     overrides.extend(
         f"model_providers.{provider}.http_headers.{_toml_key(name)}={_toml_string(value)}"
         for name, value in sorted(gateway.headers.items())
@@ -303,12 +296,7 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
             if item_paths:
                 edit_count += 1
 
-    # The SDK reports a provider-side failure in-band: the turn "completes" while
-    # the model never answered. Reporting that as a successful agent_stopped made
-    # a rate limit indistinguishable from a deliberate no-op -- resume never
-    # fired, and the empty diff was recorded as NO_CHANGES, i.e. an optimization
-    # verdict about a kernel nobody looked at. Label it the way ClaudeBackend
-    # does so `session_resume.is_api_failure` sees it.
+    # The SDK reports a provider-side failure in-band: the turn "completes" while the model never answered.
     error = getattr(result, "error", None)
     subtype = "success"
     end_reason = "agent_stopped"
@@ -379,15 +367,14 @@ class CodexBackend:
         self.runtime = runtime or AgentRuntimeConfig(
             provider=self.name,
             model=DEFAULT_CODEX_MODEL,
-            fallback_model=FALLBACK_CODEX_MODEL,
             executable=codex_bin,
             sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
         )
         configured_gateway = self.runtime.options.get("gateway")
         if gateway is None and isinstance(configured_gateway, Mapping):
             gateway = configured_gateway
-        # An empty override is "no override": converting it would yield a
-        # gateway object that reads as configured and shadow the environment.
+        # An empty override is "no override": converting it would yield a gateway object that reads as configured and
+        # shadow the environment.
         if isinstance(gateway, Mapping):
             gateway = LlmGateway.from_mapping(gateway) if gateway else None
         self._configured_codex_bin = (
@@ -421,19 +408,14 @@ class CodexBackend:
             codex_home = Path(self._codex_home)
         codex_home.mkdir(parents=True, exist_ok=True)
         env["CODEX_HOME"] = str(codex_home)
-        # These outrank -C and cwd, so a caller that set them to reach one
-        # repository would answer every git command the session runs anywhere.
+        # These outrank -C and cwd, so a caller that set them to reach one repository would answer every git command
+        # the session runs anywhere.
         env.pop("GIT_DIR", None)
         env.pop("GIT_WORK_TREE", None)
         return env
 
     def _effective_gateway(self) -> LlmGateway:
-        """Return the explicit override, else what the environment configures.
-
-        Spelled out rather than ``self.gateway or ...`` because ``LlmGateway``
-        has no truthiness: an override that resolved to nothing would otherwise
-        shadow the environment instead of deferring to it.
-        """
+        """Return the explicit override, else what the environment configures."""
         if self.gateway is not None and self.gateway.is_complete():
             return self.gateway
         return _resolve_gateway()
@@ -499,16 +481,8 @@ class CodexBackend:
             role_model = resolve_codex_model(role.model or spec.model)
             effort = role.reasoning_effort or spec.reasoning_effort
             effort = resolve_codex_reasoning_effort(effort)
-            # config.toml spells full access with the warning in the name.
-            # Derived from the role alone, never from the parent's ``bypass``.
-            # Bypass withdraws OS confinement because the operator placed the
-            # process in an external sandbox, but a role's read-only-ness is
-            # carried by nothing else here -- the role config has no tool
-            # allowlist -- so widening it would hand a reviewer full write access
-            # with only its prompt to stop it. A host with no bubblewrap
-            # therefore cannot run native roles at all, which is a limit on the
-            # paths that use them, not a reason to remove the only enforcement
-            # they have.
+            # Derive confinement only from the role. Parent bypass removes OS isolation, but roles have no tool
+            # allowlist, so inheriting it here could silently give a read-only reviewer write access.
             sandbox_mode = "workspace-write" if role.writable else "read-only"
             role_path = (roles_dir / f"{role_name}.toml").resolve()
             role_path.write_text(
@@ -601,13 +575,7 @@ class CodexBackend:
         spec: AgentRunSpec | None,
         child_env: dict[str, str],
     ) -> Any:
-        """Build one isolated Codex SDK app-server configuration.
-
-        The app server is the parent of every command the session runs, so the
-        spec's environment is applied over ``child_env`` here: that is the one
-        place this session's shell commands can be given values that differ from
-        the Forge process's own.
-        """
+        """Build one isolated Codex SDK app-server configuration."""
         return sdk.CodexConfig(
             codex_bin=self.codex_bin or None,
             config_overrides=self._config_overrides(spec),
@@ -751,9 +719,8 @@ class CodexBackend:
         guard.prepare()
         turn_handle = None
         turn_task: asyncio.Task[Any] | None = None
-        # Set as soon as the thread exists, so a failure past that point can hand
-        # the handle to the caller instead of stranding the turns it already paid
-        # for. Falls back to the id we were asked to resume.
+        # Set as soon as the thread exists, so a failure past that point can hand the handle to the caller instead of
+        # stranding the turns it already paid for.
         thread_id = session_id
         try:
             with tempfile.TemporaryDirectory(prefix="forge-codex-git-") as tmpdir:
@@ -832,12 +799,8 @@ class CodexBackend:
         try:
             actual_changes = guard.verify()
         except Exception:
-            # verify() restores the baseline itself before raising a rejection, so
-            # this second call only covers the paths that fail before it gets
-            # there. Its own failure must not replace the exception it was
-            # recovering from: under allow_dirty_baseline a restore that cannot
-            # finish raises, and the caller would then be told about a restore
-            # instead of about the paths the session was rejected for.
+            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
+            # paths that fail before it gets there.
             with contextlib.suppress(Exception):
                 guard.rollback()
             raise
@@ -885,7 +848,6 @@ __all__ = [
     "CodexExecutionError",
     "CodexUnavailableError",
     "DEFAULT_CODEX_MODEL",
-    "FALLBACK_CODEX_MODEL",
     "resolve_codex_cli",
     "resolve_codex_gateway",
     "resolve_codex_model",
