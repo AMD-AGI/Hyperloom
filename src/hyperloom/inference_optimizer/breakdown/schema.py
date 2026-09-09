@@ -624,66 +624,39 @@ class OrchestrationContext(TypedDict, total=False):
 class KvCacheAggregate(TypedDict, total=False):
     """Session-level KV pool occupancy and pressure, measured phase only.
 
-    Every metric is ``float | None`` and is never coerced to 0.0: these gauges
-    legitimately read zero, and "the pool was empty" is a different finding from
-    "nobody sampled the pool". Test with ``is None``.
+    Every metric is ``float | None`` and is never coerced to 0.0: these gauges legitimately read zero, and "the pool was
+    empty" is a different finding from "nobody sampled the pool". Test with ``is None``.
 
-    Occupancy is deliberately reported as time above a threshold rather than as
-    a mean. On a saturated run the mean read 0.763 while the pool was at or
-    above 0.95 for 13.8% of the time -- the mean hid exactly the episodes doing
-    the damage.
-
-    Attributes:
-        schema_version (int): Payload version of this section.
-        source (str): How the numbers were obtained; ``"metrics"`` for the
-            engine's HTTP endpoint. Recorded because the log fallback computes
-            hit rate and pressure by a different method, and two numbers under
-            one name will otherwise be compared directly.
-        available (bool | None): Whether any round reached the endpoint.
-            ``None`` means no round ever settled the question -- not the same as
-            reaching it and finding no pressure.
-        rounds (int): Round artifacts folded in.
-        aborted_rounds (int): Of those, how many left through an exception path,
-            so their window was cut short rather than closed.
-        measured_samples (int): Samples taken during the measured phase.
-        capacity_tokens (float | None): KV pool size in tokens.
-        capacity_gb (float | None): KV pool size as the engine reports it. The
-            engine's "GB" is 1024-based; do not rescale it.
-        active_pool_usage_p50 (float | None): Median occupancy by running
-            requests. Excludes blocks the prefix cache holds but would release.
-        active_pool_usage_p95 (float | None): 95th percentile of the same.
-        active_pool_usage_max (float | None): Peak of the same.
-        physical_pool_usage_max (float | None): Peak occupancy including
-            releasable prefix-cache blocks. A pool at 100% here can be under no
-            pressure at all, which is why it is never reported as "the"
-            occupancy. SGLang only; vLLM cannot express it.
-        time_at_saturation_pct (float | None): Share of measured time at or
-            above 0.95. The leading indicator: it covers every observed retract
-            with room to spare, but part of that band passes without one.
-        time_at_retract_band_pct (float | None): Share at or above 0.99, where
-            retracts were actually observed to happen.
-        retract_total (float | None): SGLang requests retracted. Diffed per
-            counter series so an engine restart does not read as a negative.
-        preempt_total (float | None): vLLM requests preempted. Same quantity by
-            a different name and a different measurement path, which is why the
-            two are separate fields rather than one.
-        engines (list[str]): Engines seen across the folded rounds.
+    Occupancy is deliberately reported as time above a threshold rather than as a mean. On a saturated run the mean read
+    0.763 while the pool was at or above 0.95 for 13.8% of the time -- the mean hid exactly the episodes doing the
+    damage.
     """
 
     schema_version: int
+    # How the numbers were obtained; "metrics" for the engine's HTTP endpoint. Recorded because the log fallback
+    # computes hit rate and pressure by a different method, and two numbers under one name get compared directly.
     source: str
+    # Whether any round reached the endpoint. None means no round ever settled the question, which is not the same as
+    # reaching it and finding no pressure.
     available: bool | None
     rounds: int
-    aborted_rounds: int
+    aborted_rounds: int  # of those, how many left through an exception path, cutting their window short
     measured_samples: int
     capacity_tokens: float | None
-    capacity_gb: float | None
+    capacity_gb: float | None  # as the engine reports it -- 1024-based, do not rescale
+    # Occupancy by running requests, excluding blocks the prefix cache holds but would release.
     active_pool_usage_p50: float | None
     active_pool_usage_p95: float | None
     active_pool_usage_max: float | None
+    # Peak occupancy including releasable prefix-cache blocks. A pool at 100% here can be under no pressure at all,
+    # which is why it is never reported as "the" occupancy. SGLang only; vLLM cannot express it.
     physical_pool_usage_max: float | None
+    # Share of measured time at or above 0.95. The leading indicator: it covers every observed retract with room to
+    # spare, but part of that band passes without one.
     time_at_saturation_pct: float | None
-    time_at_retract_band_pct: float | None
+    time_at_retract_band_pct: float | None  # share at or above 0.99, where retracts were actually observed
+    # Requests retracted (SGLang) and preempted (vLLM): the same quantity by two names and two measurement paths, which
+    # is why they stay separate fields. Diffed per counter series so an engine restart does not read as a negative.
     retract_total: float | None
     preempt_total: float | None
     engines: list[str]

@@ -180,14 +180,7 @@ _KV_COMPARABLE_PHASE = "measured"
 
 
 def _scan_kv_artifacts(session_dir: Path) -> list[Path]:
-    """Find every round's ``kv_metrics.json`` under ``runs/``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        list[Path]: Matching artifacts, sorted. Empty when none exist.
-    """
+    """Find every round's ``kv_metrics.json`` under ``runs/``."""
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -195,15 +188,7 @@ def _scan_kv_artifacts(session_dir: Path) -> list[Path]:
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
-    """Nearest-rank percentile of an unsorted sample.
-
-    Args:
-        values (list[float]): Sample values.
-        fraction (float): Percentile in ``[0, 1]``.
-
-    Returns:
-        float | None: The value at that rank, or ``None`` for an empty sample.
-    """
+    """Nearest-rank percentile of an unsorted sample."""
     if not values:
         return None
     ordered = sorted(values)
@@ -217,22 +202,13 @@ def _aggregate_kv_metrics(
 ) -> dict[str, Any]:
     """Aggregate per-round KV artifacts into one session-level summary.
 
-    Occupancy statistics are taken over the measured phase only. The mean is
-    deliberately not reported: on a real saturated run it read 0.763 while the
-    pool sat at or above 0.95 for 13.8% of the time and above 0.99 for 3.6% --
-    the mean hid precisely the episodes that were doing the damage. Time above
-    each threshold is reported instead.
+    Occupancy statistics are taken over the measured phase only. The mean is deliberately not reported: on a real
+    saturated run it read 0.763 while the pool sat at or above 0.95 for 13.8% of the time and above 0.99 for 3.6% -- the
+    mean hid precisely the episodes that were doing the damage. Time above each threshold is reported instead.
 
-    Args:
-        artifacts (list[Path]): ``kv_metrics.json`` paths to fold together.
-        warnings (list[str]): Shared warnings list (mutated on parse failure).
-
-    Returns:
-        dict[str, Any]: The summary. ``{}`` when no artifact was readable.
-        ``available`` is tri-state: ``None`` means no round ever reached the
-        endpoint one way or the other, which is not the same as reaching it and
-        finding an idle pool. Every metric is ``float | None`` and is never
-        coerced to 0.0.
+    Returns ``{}`` when no artifact was readable. Every metric is ``float | None`` and never coerced to 0.0, and
+    ``available`` is tri-state: ``None`` means no round ever reached the endpoint one way or the other, which is not the
+    same as reaching it and finding an idle pool.
     """
     payloads: list[dict[str, Any]] = []
     for path in artifacts:
