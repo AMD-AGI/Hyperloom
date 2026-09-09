@@ -184,6 +184,11 @@ def _lane(session_dir: Path, **overrides: Any):
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
+        # The host preflight stats a checkpoint named by the ambient
+        # ``MODEL_PATH``, which belongs to whichever test ran before this one.
+        # These tests are about what the lane records, so the host is asked and
+        # answers that it cannot tell.
+        _environment_verdict=lambda: None,
     )
     for name in (
         "_registry_lanes_ttl",
@@ -203,7 +208,6 @@ def _lane(session_dir: Path, **overrides: Any):
     for name in (
         "_refused_argv_is_terminal",
         "_environment_fault_is_terminal",
-        "_environment_verdict",
         "_enablement_in_flight",
         "_round_has_live_work",
         "_open_authoring_round",
