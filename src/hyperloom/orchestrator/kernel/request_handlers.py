@@ -6187,6 +6187,64 @@ def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
     return stats
 
 
+_INTEGRATE_LOG_NAMES = ("server.log", "benchmark_stderr.log", "benchmark_stdout.log")
+
+
+def _workspace_log_sizes(workspace: Path) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for name in _INTEGRATE_LOG_NAMES:
+        path = workspace / name
+        try:
+            sizes[name] = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            sizes[name] = 0
+    return sizes
+
+
+def _workspace_has_compiled_registry_error(
+    workspace: Path,
+    *,
+    after_sizes: dict[str, int] | None = None,
+) -> bool:
+    """True when an integrate workspace log shows a compiled-registry miss."""
+    from ..actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
+
+    for name in _INTEGRATE_LOG_NAMES:
+        path = workspace / name
+        if not path.is_file():
+            continue
+        start = 0 if after_sizes is None else max(0, int(after_sizes.get(name, 0)))
+        try:
+            with path.open("rb") as handle:
+                if after_sizes is None:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    handle.seek(max(0, size - 65536))
+                else:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    if start >= size:
+                        handle.seek(max(0, size - 65536))
+                    else:
+                        handle.seek(start)
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if is_aiter_jit_registry_mismatch(text):
+            return True
+    return False
+
+
+def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
+    task = getattr(ctx, "task", None)
+    params = getattr(task, "params", None)
+    if isinstance(params, dict):
+        envs = params.get("extra_envs")
+        if isinstance(envs, dict):
+            return envs
+    return None
+
+
 async def _run_integrate_rebaseline_with_lock_retry(
     executor: Any,
     ctx: Any,
@@ -6194,14 +6252,44 @@ async def _run_integrate_rebaseline_with_lock_retry(
     workspace: Path,
     reason: str,
 ) -> dict[str, Any]:
-    """Run one integrate baseline and retry once after a confirmed baton stall."""
-    from ..actions.executors._aiter_jit import find_aiter_baton_wait
+    """Run one integrate baseline and retry once after a JIT registry miss or baton stall."""
+    from ..actions.executors._aiter_jit import (
+        drop_serving_so_for_envs,
+        find_aiter_baton_wait,
+        result_is_aiter_jit_registry_mismatch,
+    )
 
     prelaunch_sweep = _sweep_integrate_aiter_locks(reason=reason)
     first_started_unix = time.time()
     result = await executor(ctx)
     if not isinstance(result, dict) or result.get("status") == "succeeded":
         return result
+
+    if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
+        envs = _integrate_extra_envs(ctx)
+        log_sizes = _workspace_log_sizes(workspace)
+        cleanup = drop_serving_so_for_envs(
+            envs,
+            backup_dir=workspace / "aiter_jit_backup",
+        )
+        log.warning(
+            "integrate_handler: classified %s as aiter_jit_registry_mismatch; retrying once after so drop",
+            reason,
+        )
+        retry_result = await executor(ctx)
+        if not isinstance(retry_result, dict):
+            return retry_result
+        retry_result["aiter_jit_registry_mismatch_retry"] = {
+            "cleanup": cleanup,
+            "retry_attempted": True,
+            "retry_succeeded": retry_result.get("status") == "succeeded",
+        }
+        if result_is_aiter_jit_registry_mismatch(retry_result) or (
+            retry_result.get("status") != "succeeded"
+            and _workspace_has_compiled_registry_error(workspace, after_sizes=log_sizes)
+        ):
+            retry_result["error_class"] = "aiter_jit_registry_mismatch"
+        return retry_result
 
     evidence = find_aiter_baton_wait(
         workspace,

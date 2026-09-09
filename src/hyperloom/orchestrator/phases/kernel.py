@@ -3005,6 +3005,13 @@ class KernelPhase(PhaseHandler):
                 running_tput,
             )
 
+            from ..actions.executors._aiter_jit import (
+                drop_serving_so_for_envs,
+                prepare_serving_so_for_csvs,
+            )
+
+            jit_backup_dir = self.session_dir / "runs" / "aiter_jit_backup"
+
             from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
             integrate_verdict: dict[str, Any] | None = None
@@ -3025,6 +3032,7 @@ class KernelPhase(PhaseHandler):
                 "mode": "env_only",
             }
             for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+                await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
                 try:
                     integrate_result = await integrate_handler(
                         integrate_payload,
@@ -3055,6 +3063,7 @@ class KernelPhase(PhaseHandler):
                             "fault_attempts": fault_attempt,
                         }
                     )
+                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
                     break
 
                 stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
@@ -3094,6 +3103,7 @@ class KernelPhase(PhaseHandler):
                             "fault_attempts": fault_attempt,
                         }
                     )
+                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
                     break
 
                 integrate_verdict = integrate_result
@@ -3215,6 +3225,7 @@ class KernelPhase(PhaseHandler):
                     # a wiring defect.
                     reason = f"tuned_config_never_applied[{'+'.join(apply_blockers)}] ({reason})"
                 reverted.append({**cand, "reason": reason})
+                await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
 
         # The watermark covers the whole run, so it waits for the last KEEP.
         if kept:

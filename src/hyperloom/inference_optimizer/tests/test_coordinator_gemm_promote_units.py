@@ -3105,6 +3105,58 @@ class TestValidateForgeGemmTuningE2E:
         # Fallback budget is 15 minutes.
         assert captured["budget"] == 15
 
+    @pytest.mark.asyncio
+    async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        candidate = tmp_path / "candidate.csv"
+        candidate.write_text("kernelName\nnew_k\n", encoding="utf-8")
+        prepared: list[dict] = []
+        dropped: list[dict] = []
+
+        def _prepare(envs, backup_dir=None):
+            prepared.append(dict(envs))
+            return {"action": "skip"}
+
+        def _drop(envs=None, backup_dir=None):
+            dropped.append(dict(envs or {}))
+            return {"action": "invalidate"}
+
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
+            _prepare,
+        )
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
+            _drop,
+        )
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
+        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        result = {
+            "workspace": str(tmp_path),
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "a8w8_blockscale_bpreshuffle",
+                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
+                    "env_value": str(candidate),
+                    "best_micro_speedup": 1.2,
+                },
+            ],
+        }
+        await coord._validate_gemm_tuning_e2e(result)
+
+        assert prepared
+        assert prepared[0]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"] == str(candidate)
+        assert dropped
+
 
 class TestForgeGemmE2EApplyGate:
     """A measured gain is only creditable if the artifact was actually used."""

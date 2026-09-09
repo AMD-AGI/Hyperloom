@@ -55,6 +55,7 @@ from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
+    is_aiter_jit_registry_mismatch,
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
@@ -4012,6 +4013,11 @@ class BaselineExecutor:
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
 
+        registry_mismatch = is_aiter_jit_registry_mismatch(
+            server_log_text,
+            proc_stderr or "",
+            proc_stdout or "",
+        )
         # The same read that produced the observation answers whether the wall
         # is the recoverable cuda-graph capture one (OOM-rooted ones excluded)
         # that arms the one-shot eager retry below.
@@ -4056,6 +4062,18 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            # Registry mismatch is wrapped in "Capture cuda graph failed" and must win so we do not arm the
+            # disable-cuda-graph retry.
+            if registry_mismatch:
+                return {
+                    "status": "failed",
+                    "error_class": "aiter_jit_registry_mismatch",
+                    "returncode": proc_returncode,
+                    "error": redact_secret_values(
+                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
+                    ),
+                    **failure_extras,
+                }
             # cuda-graph capture failures take priority over server_init_dead: only this class arms the one-shot
             # disable-cuda-graph retry.
             if cuda_graph_capture_failed:
@@ -4117,9 +4135,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            # cuda-graph capture failure wins over server_init_dead so the one-shot disable-cuda-graph retry is armed
-            # even when both co-occur.
-            if cuda_graph_capture_failed:
+            if registry_mismatch:
+                error_class = "aiter_jit_registry_mismatch"
+                error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
+            elif cuda_graph_capture_failed:
                 error_class = "cuda_graph_capture_failed"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
             elif server_init_dead:
