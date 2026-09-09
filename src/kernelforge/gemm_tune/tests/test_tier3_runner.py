@@ -561,8 +561,18 @@ class TestTheWholeChain:
     def test_without_a_dispatch_nothing_is_emitted(self, tmp_path, monkeypatch, open_gate):
         # An unverified generated tuner is exactly what this tier must not emit.
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
-        assert out.stage == "referee" and not out.ok
-        assert "cannot be re-timed" in out.reason
+        assert not out.ok
+        assert "re-timed" in out.reason
+
+    def test_without_a_dispatch_it_stops_before_it_spends_anything(self, tmp_path, monkeypatch, open_gate):
+        # This used to be checked at the referee, so a table with no adapter
+        # first paid for an authoring session and a sandbox run and then had the
+        # result thrown away unread. Nothing between the gate and the referee
+        # changes the verdict, so it belongs before the spending.
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
+        assert out.stage == "gate"
+        assert not out.attempted
+        assert not out.script, "no script should have been generated"
 
     def test_the_kill_switch_stops_it_before_anything_happens(self, tmp_path, monkeypatch):
         monkeypatch.setenv(gate.DISABLE_ENV, "1")
