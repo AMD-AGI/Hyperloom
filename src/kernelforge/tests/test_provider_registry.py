@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pytest
@@ -137,9 +138,7 @@ def test_builtin_model_ownership_predicates() -> None:
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
     assert claude.default_model == "claude-opus-5"
-    assert claude.fallback_model == "claude-opus-4-8"
     assert codex.default_model == "gpt-5.6"
-    assert codex.fallback_model == "gpt-5.5"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
@@ -150,15 +149,6 @@ def test_builtin_model_ownership_predicates() -> None:
     assert not codex.owns_model("openchat-3.5")
     assert not codex.owns_model("claude-opus-5")
     assert not codex.owns_model("")
-    assert resolve_agent_runtime("claude").fallback_model == "claude-opus-4-8"
-    assert (
-        resolve_agent_runtime(
-            "claude",
-            model="claude-opus-4-8",
-        ).fallback_model
-        == ""
-    )
-    assert resolve_agent_runtime("codex").fallback_model == "gpt-5.5"
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:
@@ -166,16 +156,14 @@ def test_default_runtime_uses_high_reasoning_effort() -> None:
     assert config.agent_reasoning_effort == "high"
 
 
-def test_provider_probe_falls_back_to_supported_model() -> None:
+def test_provider_probe_failure_does_not_retry_another_model() -> None:
     attempted_models = []
 
     class Backend(_FakeBackend):
         def probe(self, *, cwd, usage=None):
             del cwd, usage
             attempted_models.append(self.runtime.model)
-            if self.runtime.model == "future-model":
-                raise AgentProviderUnavailableError("model not served")
-            return AgentRunResult(text="OK")
+            raise AgentProviderUnavailableError("model not served")
 
     def factory(runtime):
         backend = Backend(name=runtime.provider)
@@ -187,16 +175,64 @@ def test_provider_probe_falls_back_to_supported_model() -> None:
             name="modelprobe",
             factory=factory,
             default_model="future-model",
-            fallback_model="stable-model",
             capabilities=AgentCapabilities(probe=True),
         )
     )
     runtime = resolve_agent_runtime("modelprobe")
-    backend = create_registered_backend(runtime, probe_cwd="/tmp")
+    with pytest.raises(AgentProviderUnavailableError, match="model not served"):
+        create_registered_backend(runtime, probe_cwd="/tmp")
 
-    assert attempted_models == ["future-model", "stable-model"]
-    assert backend.runtime.model == "stable-model"
-    assert "future-model" in backend.model_fallback_reason
+    assert attempted_models == ["future-model"]
+
+
+def test_unavailable_provider_logs_and_does_not_probe(caplog) -> None:
+    """Preflight failure is logged as provider unavailability, not a model probe."""
+    _register_fake("offlinecli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli")
+    with caplog.at_level(logging.WARNING, logger="kernelforge.agent_backends.registry"):
+        with pytest.raises(AgentProviderUnavailableError, match="offlinecli"):
+            create_registered_backend(runtime)
+
+    assert "agent provider unavailable" in caplog.text
+    assert "offlinecli" in caplog.text
+
+
+def test_fallback_provider_failure_raises_combined_error() -> None:
+    """When both the primary and fallback providers fail, both names are reported."""
+    _register_fake("offlinecli", unavailable=True)
+    _register_fake("backupcli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    with pytest.raises(
+        AgentProviderUnavailableError,
+        match="offlinecli unavailable:.*fallback backupcli unavailable",
+    ):
+        create_registered_backend(runtime)
+
+
+def test_broken_entry_point_is_isolated(monkeypatch) -> None:
+    """A plugin that fails to load is recorded and skipped, not raised."""
+
+    class _EntryPoint:
+        name = "brokencli"
+
+        @staticmethod
+        def load():
+            raise RuntimeError("boom")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            if group == registry.PROVIDER_ENTRY_POINT_GROUP:
+                return [_EntryPoint()]
+            return []
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+    assert "brokencli" in registry._plugin_errors
+    with pytest.raises(ValueError, match="plugin error"):
+        get_agent_provider("brokencli")
 
 
 def test_select_prefers_model_owning_provider() -> None:
