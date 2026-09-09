@@ -440,11 +440,30 @@ class ProposalsCollaborator:
         the grid, which stays orchestration's call.
 
         A variant is only claimed when it matches a recorded proposal exactly,
-        so an LLM that edited the flags keeps the credit for the edit. No-op
-        when no predictor ever wrote to the queue.
+        so an LLM that edited the flags keeps the credit for the edit. What that
+        exactness misses is recorded separately: a variant that *contains* a
+        proposal's whole delta gets ``primatune_contains`` naming it, while its
+        ``provenance`` stays whatever authored the combination. One real round
+        composed ``--enable-expert-parallel --async-scheduling --kv-cache-dtype
+        fp8`` around a predictor's ``--kv-cache-dtype fp8`` and measured the
+        second-best configuration result of the session under ``llm_direct``, so
+        without this the predictor's reach reads smaller than it was. The field
+        is for measurement only -- nothing schedules or promotes on it.
+
+        Containment is only looked for on orchestration-authored variants.
+        Orchestration is the one reader of ``=== Untested proposals ===``; a
+        specialist is dispatched against a gap and never sees that block, so a
+        specialist variant that happens to be a superset arrived there by its
+        own research. Counting those would inflate the predictor's reach with
+        coincidence -- one real session had a research_scout variant sitting on
+        top of a ``--max-num-batched-tokens 32768`` the predictor proposed two
+        cycles later.
+
+        No-op when no predictor ever wrote to the queue.
 
         Note:
-            Side-effecting: rewrites ``provenance`` on matching grid entries.
+            Side-effecting: rewrites ``provenance`` on exactly-matching grid
+            entries and adds ``primatune_contains`` to superset ones.
 
         Args:
             params: Explore-task params, mutated in place.
@@ -455,7 +474,10 @@ class ProposalsCollaborator:
         from ..predictor.pump import PROVENANCE as FIRST_PASS_PROVENANCE
         from ..predictor.pump import QUEUE_DOMAIN as FIRST_PASS_DOMAIN
 
+        from ..predictor.attempted import delta_pairs
+
         offered: set[str] = set()
+        deltas: list[tuple[str, frozenset[tuple[str, str]]]] = []
         for entry in getattr(self.shared_state, "specialist_rounds", None) or []:
             if not isinstance(entry, dict) or str(entry.get("domain") or "") != FIRST_PASS_DOMAIN:
                 continue
@@ -470,9 +492,15 @@ class ProposalsCollaborator:
                         controls=controls_of(fields),
                     )
                 )
+                pairs = delta_pairs(fields["extra_args"], fields["extra_envs"])
+                # An empty delta is contained by everything, which would claim
+                # the whole grid rather than measure anything.
+                if pairs:
+                    deltas.append((str(fields["name"] or proposal.get("name") or ""), pairs))
         if not offered:
             return
         stamped = 0
+        contained = 0
         for variant in grid:
             if not isinstance(variant, dict):
                 continue
@@ -482,16 +510,24 @@ class ProposalsCollaborator:
                 fields["extra_envs"],
                 controls=controls_of(fields),
             )
-            if fingerprint not in offered:
+            if fingerprint in offered:
+                variant["provenance"] = FIRST_PASS_PROVENANCE
+                stamped += 1
                 continue
-            variant["provenance"] = FIRST_PASS_PROVENANCE
-            stamped += 1
-        if stamped:
+            if variant.get("domain") or str(variant.get("provenance") or "").startswith("specialist"):
+                continue
+            pairs = delta_pairs(fields["extra_args"], fields["extra_envs"])
+            names = [name for name, delta in deltas if delta <= pairs]
+            if names:
+                variant["primatune_contains"] = names
+                contained += 1
+        if stamped or contained:
             log.info(
-                "explore grid: stamped %d/%d variant(s) as %s (matched a queued first-pass proposal)",
+                "explore grid: stamped %d/%d variant(s) as %s; %d more contain a queued first-pass delta",
                 stamped,
                 len(grid),
                 FIRST_PASS_PROVENANCE,
+                contained,
             )
 
     async def _materialize_approved_proposal(

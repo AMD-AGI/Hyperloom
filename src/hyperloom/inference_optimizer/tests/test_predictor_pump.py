@@ -360,16 +360,25 @@ class TestRanking:
         assert pp._family_key("", {"VLLM_A": "1"}) == frozenset({"env:VLLM_A"})
         assert pp._family_key("--x 1", {"VLLM_A": "1"}) == frozenset({"--x", "env:VLLM_A"})
 
-    def test_truncates_to_the_surface_cap(self, active, monkeypatch):
+    def test_queues_a_batch_plus_overflow_and_drops_the_rest(self, active, monkeypatch):
+        """The cap sizes the batch; it is not a discard threshold.
+
+        Rows past the batch stay on the queue up to ``MAX_QUEUED`` — they cost
+        nothing there and they are what the batch refills from once the
+        exclusion filter has thinned it. Only rows past *that* are surplus.
+        """
         answer = _sampled(*[({f"--f{i}": "1"}, {}, 8 - i) for i in range(8)])
         _stub(monkeypatch, answer)
         phase = _Phase()
         _run(phase)
         rows = _queued(phase)
-        assert len(rows) == pp.MAX_PROPOSALS
-        assert _args_of(phase) == ["--f0 1", "--f1 1", "--f2 1", "--f3 1"]
+        assert len(rows) == pp.MAX_QUEUED
+        assert _args_of(phase) == [f"--f{i} 1" for i in range(pp.MAX_QUEUED)]
+        assert [r["batch"] for r in rows] == [True] * pp.MAX_PROPOSALS + [False] * (
+            pp.MAX_QUEUED - pp.MAX_PROPOSALS
+        )
         dropped = _rounds(phase)[0]["dropped"]
-        assert len(dropped) == 4
+        assert len(dropped) == 8 - pp.MAX_QUEUED
         assert {d["dropped_reason"] for d in dropped} == {"over_surface_cap"}
 
 
@@ -510,10 +519,76 @@ class TestQueueRow:
         ]
         _run(phase)
         block = phase.shared_state.to_untested_proposals_summary()
-        assert "[first-pass] votes=5/5 +args=--kv-cache-dtype fp8" in block
+        # Batch members carry their round id; the tag is what the block tells
+        # orchestration to dispatch as one grid.
+        assert "[first-pass:c0-s0-r0] votes=5/5 +args=--kv-cache-dtype fp8" in block
         first_pass_at = block.index("--kv-cache-dtype fp8")
         specialist_at = block.index("--max-num-seqs 512")
         assert first_pass_at < specialist_at
+
+    def test_the_block_states_the_batch_and_how_much_of_it_is_left(self, active, monkeypatch):
+        """Orchestration is told the batch is a unit, and how far through it is.
+
+        Without the count a half-worked batch is indistinguishable from a
+        smaller one, because benched rows leave the queue.
+        """
+        _stub(monkeypatch, _sampled(*[({f"--f{i}": "1"}, {}, 4 - i) for i in range(4)]))
+        phase = _Phase()
+        _run(phase)
+        block = phase.shared_state.to_untested_proposals_summary()
+        assert "First-pass batch c0-s0-r0 (cycle 0): 4 rows, 0 benched so far." in block
+        assert "make the newest batch your next `explore` grid IN FULL" in block
+        assert "very likely never measured in this cycle" in block
+
+    def test_overflow_rows_carry_no_batch_tag(self, active, monkeypatch):
+        """Only the batch is a dispatchable unit; the rest are suggestions."""
+        _stub(monkeypatch, _sampled(*[({f"--f{i}": "1"}, {}, 8 - i) for i in range(8)]))
+        phase = _Phase()
+        _run(phase)
+        block = phase.shared_state.to_untested_proposals_summary()
+        # Row lines only: the header explains the untagged form, so counting
+        # the whole block would score its own prose.
+        lines = [line for line in block.splitlines() if line.startswith("•")]
+        tagged = [line for line in lines if "[first-pass:c0-s0-r0]" in line]
+        untagged = [line for line in lines if "[first-pass]" in line]
+        assert len(tagged) == pp.MAX_PROPOSALS, block
+        assert len(untagged) == pp.MAX_QUEUED - pp.MAX_PROPOSALS, block
+        # The summary counts the batch, not the overflow.
+        assert f"{pp.MAX_PROPOSALS} rows, 0 benched so far." in block
+
+    def test_a_first_pass_row_outlives_its_cycle(self, active, monkeypatch):
+        """A cycle_reloop must not hide a proposal nothing ever measured.
+
+        The predictor is re-asked because the decision point moved, so a row
+        dropped at the rollover is never measured and its re-proposal lands as
+        a duplicate of something invisible.
+        """
+        _stub(monkeypatch, _answer(server_args={"--kv-cache-dtype": "fp8"}))
+        phase = _Phase()
+        _run(phase)
+        assert "--kv-cache-dtype fp8" in phase.shared_state.to_untested_proposals_summary()
+
+        phase.shared_state.macro_cycle = 1
+        block = phase.shared_state.to_untested_proposals_summary()
+        assert "--kv-cache-dtype fp8" in block, "first-pass row vanished at the rollover"
+        assert "(cycle 0)" in block, "the batch line should say which cycle it came from"
+
+    def test_a_specialist_row_does_not_outlive_its_cycle(self, active, monkeypatch):
+        """The exemption is first-pass only; nothing else changes."""
+        _stub(monkeypatch, _answer(server_args={"--kv-cache-dtype": "fp8"}))
+        phase = _Phase()
+        phase.shared_state.specialist_rounds = [
+            {
+                "cycle": 0,
+                "domain": "serving_specialist",
+                "task_id": "spec1",
+                "proposal_set": [{"name": "spec-hi", "extra_args": "--max-num-seqs 512"}],
+            }
+        ]
+        _run(phase)
+        assert "--max-num-seqs 512" in phase.shared_state.to_untested_proposals_summary()
+        phase.shared_state.macro_cycle = 1
+        assert "--max-num-seqs 512" not in phase.shared_state.to_untested_proposals_summary()
 
 
 class TestPatchMandate:

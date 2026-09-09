@@ -24,6 +24,7 @@ from hyperloom.orchestrator.phases.machine_state import (
 )
 from hyperloom.orchestrator.predictor import evidence as ev
 from hyperloom.orchestrator.predictor import source_sites as ss
+from hyperloom.orchestrator.predictor.attempted import queued_unbenched
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,16 @@ _KERNEL_FIELDS = (
 
 #: Fields the hot-kernel projection lacks; the P-item tables carry them.
 _KERNEL_FROM_P_ITEM = ("time_us", "args", "call_count")
+
+#: Benched variants forwarded, newest first. The service reads these to withhold
+#: answers this session already measured, so the cap bounds request size rather
+#: than relevance -- and a config surface wide enough to need more than this has
+#: already told the model what it needs to know.
+MAX_ATTEMPTED_BENCHED = 20
+
+#: Queue rows forwarded, newest first. Bounded tighter because the batch the
+#: service is sizing its answer to is only four to six rows.
+MAX_ATTEMPTED_OFFERED = 10
 
 
 def _num(value: Any) -> float | None:
@@ -231,6 +242,76 @@ def _stack(state: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _benched(state: Any) -> list[dict[str, Any]]:
+    """Every variant this session ran, newest first, with how it turned out."""
+    search = getattr(state, "explore_search", None)
+    tested = search.get("tested") if isinstance(search, dict) else None
+    if not isinstance(tested, dict):
+        return []
+    rows = [row for row in tested.values() if isinstance(row, dict)]
+    rows.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+    out: list[dict[str, Any]] = []
+    for row in rows[:MAX_ATTEMPTED_BENCHED]:
+        envs = row.get("extra_envs")
+        out.append(
+            {
+                "extra_server_args": str(row.get("extra_server_args") or "").strip() or None,
+                "extra_envs": dict(envs) if isinstance(envs, dict) and envs else None,
+                "outcome": str(row.get("outcome") or "").strip() or None,
+                "gain_pct": _num(row.get("gain_pct")),
+                "tput": _positive(row.get("tput")),
+            }
+        )
+    return out
+
+
+def _offered_not_benched(state: Any) -> list[dict[str, Any]]:
+    """Predictor proposals still on the queue that no explore round has run."""
+    rows = list(queued_unbenched(state).values())
+    rows.sort(key=lambda r: str(r.get("round_id") or ""), reverse=True)
+    out: list[dict[str, Any]] = []
+    for row in rows[:MAX_ATTEMPTED_OFFERED]:
+        envs = row.get("extra_envs")
+        out.append(
+            {
+                "extra_server_args": str(row.get("extra_args") or "").strip() or None,
+                "extra_envs": dict(envs) if isinstance(envs, dict) and envs else None,
+                "votes": row.get("votes"),
+                "round_id": row.get("round_id") or None,
+            }
+        )
+    return out
+
+
+def _attempted(state: Any) -> dict[str, Any]:
+    """What this session has measured, and what it has offered without measuring.
+
+    Two ledgers because they fail differently. ``performance.optimization_stack``
+    above carries only KEEPs, so a cycle that lands none sends a request its
+    predecessor could not be told apart from -- and the model answered one such
+    pair by re-proposing the same lever with its vote count risen from 2/8 to
+    4/8. The queue rows cover the other half: a proposal orchestration passed
+    over was never measured, so nothing in the measured ledger marks it answered.
+
+    Read by the service as an exclusion set and **never rendered into its
+    prompt**: ``state_t_from_request`` selects its keys explicitly, so a new
+    top-level field here cannot reach the prompt and move a live request off the
+    corpus the adapter was tuned on. A service build that does not know the
+    field ignores it and behaves exactly as before.
+
+    Args:
+        state (Any): The ``SharedState``.
+
+    Returns:
+        dict[str, Any]: ``benched`` and ``offered_not_benched``, each possibly
+            empty.
+    """
+    return {
+        "benched": _benched(state),
+        "offered_not_benched": _offered_not_benched(state),
+    }
+
+
 def build_request(state: Any, *, session_id: str = "", phase_label: str = "EXPLORE") -> dict[str, Any]:
     """Build the predictor request body from live session state.
 
@@ -290,4 +371,5 @@ def build_request(state: Any, *, session_id: str = "", phase_label: str = "EXPLO
             "optimization_stack": _stack(state),
         },
         "evidence": _evidence(state),
+        "attempted": _attempted(state),
     }

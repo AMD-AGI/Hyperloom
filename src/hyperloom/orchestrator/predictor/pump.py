@@ -40,13 +40,18 @@ self-consistency measurable: ranking by how many samples voted for a proposal
 is a real signal that costs nothing. Family de-duplication then stops one knob
 sweep from taking every slot -- at N=8 three of eight proposals differed only in
 ``--block-size``, and spending three of four slots on that measures almost
-nothing. What survives is truncated to :data:`MAX_PROPOSALS`, which matches the
-grid size orchestration is told to target, so the predictor and the LLM
-specialists contribute on symmetric terms.
+nothing.
+
+The first :data:`MAX_PROPOSALS` survivors are marked as the batch, which is the
+grid size orchestration is told to target: one decision point's answer is one
+grid. The next few are queued too, up to :data:`MAX_QUEUED`, as ordinary rows --
+they cost nothing on the queue and they are what the batch refills from when
+the exclusion filter thins it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -58,36 +63,49 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 from hyperloom.orchestrator.actions.executors._proposal_identity import (
     effective_fingerprint,
 )
-from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+from hyperloom.orchestrator.phases.machine_state import (
+    PHASE_FRAMEWORK_AGENT,
+    phase_budget_remaining_seconds,
+    phase_cap_seconds,
+    phase_cumulative_seconds,
+)
+from hyperloom.orchestrator.predictor.attempted import (
+    MAX_PROPOSALS,
+    MAX_QUEUED,
+    PROVENANCE,
+    QUEUE_DOMAIN,
+    QUEUE_PRIORITY,
+    queued_unbenched,
+)
 from hyperloom.orchestrator.predictor import config as predictor_config
 from hyperloom.orchestrator.predictor.client import Action, Prediction, predict
 from hyperloom.orchestrator.predictor.payload import build_request
 
 log = logging.getLogger(__name__)
 
-#: Audit label on everything the predictor produced. Not a scheduling gate:
-#: ``proposer_for()`` passes an unknown provenance through unchanged, so this
-#: reaches the stack, the journal and the breakdown without a closed set.
-PROVENANCE = "primatune"
-
-#: ``domain`` on the queue rows, so the renderer and any offline analysis can
-#: tell them from a specialist's. Deliberately not a member of the specialist
-#: domain vocabulary: nothing dispatches it.
-QUEUE_DOMAIN = "primatune"
-
-#: Sort ahead of specialist proposals in the untested queue. A predictor row
-#: carries no gap, so without an explicit priority it would rank below every
-#: gap-anchored proposal -- see ``_untested_proposal_rows``.
-QUEUE_PRIORITY = 1
-
-#: Proposals surfaced per decision point. Matches the grid size orchestration is
-#: told to target (4, hard maximum 6), which is what keeps the predictor and the
-#: LLM specialists contributing on comparable terms.
-MAX_PROPOSALS = 4
+#: Re-exported so importers that predate the split keep working: ``render.py``
+#: reads ``QUEUE_DOMAIN`` off this module to mark first-pass rows.
+__all__ = [
+    "MAX_PROPOSALS",
+    "MAX_QUEUED",
+    "PROVENANCE",
+    "QUEUE_DOMAIN",
+    "QUEUE_PRIORITY",
+    "already_asked",
+    "decision_point_key",
+    "find_mandate",
+    "note_asked",
+    "pump",
+]
 
 #: Cap on a mandate handed to a specialist. The prompt builder allows more; this
 #: is model-authored text entering another model's prompt, so it stays short.
 MAX_MANDATE_CHARS = 4000
+
+#: Fallback cost of one explore variant, used until the session has measured its
+#: own. A 120B MoE spends about as long restarting the server as benchmarking it,
+#: so this is deliberately a bench-plus-restart figure rather than a bench one.
+DEFAULT_MIN_VARIANT_SEC = 600.0
 
 
 def decision_point_key(state: Any) -> str:
@@ -131,6 +149,63 @@ def _declined(reason: str) -> None:
     log.debug("predictor_pump: standing down (%s)", reason)
 
 
+def _min_variant_sec(state: Any) -> float:
+    """What one explore variant costs, measured off this session when it can.
+
+    ``explore_elapsed_accum_s`` over the number of benched variants is the
+    session's own answer, which beats any constant: the same grid costs ~9
+    minutes a variant on one model and ~13 on another, and the figure decides
+    whether a request is worth sending.
+
+    Args:
+        state (Any): The ``SharedState``.
+
+    Returns:
+        float: Seconds, falling back to :data:`DEFAULT_MIN_VARIANT_SEC`.
+    """
+    search = getattr(state, "explore_search", None)
+    tested = search.get("tested") if isinstance(search, dict) else None
+    benched = len(tested) if isinstance(tested, dict) else 0
+    try:
+        accum = float(getattr(state, "explore_elapsed_accum_s", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        accum = 0.0
+    if benched > 0 and accum > 0:
+        return accum / benched
+    return DEFAULT_MIN_VARIANT_SEC
+
+
+def _optimize_headroom_sec(state: Any) -> float | None:
+    """Seconds OPTIMIZE can still spend, or ``None`` when nothing bounds it.
+
+    Both terms matter and the phase itself consults both. The per-entry budget
+    is what ends a cycle's OPTIMIZE (``optimize_phase_budget_exhausted``); the
+    cumulative cap across every entry is what makes a re-entry after
+    ``cycle_reloop`` fall straight back out (``optimize_budget_cap``) -- 59 and
+    55 seconds in the run that motivated this gate, each of which still spent a
+    predictor request on a decision point that had no benchmark slot to fill.
+
+    ``None`` from either term means unbounded, so it contributes no limit
+    rather than a zero: a falsy-or-infinity idiom would read a genuine ``0.0``
+    remaining as "no limit" and is exactly backwards.
+
+    Args:
+        state (Any): The ``SharedState``, with ``phase`` already checked.
+
+    Returns:
+        float | None: The tighter of the two limits, or ``None`` when neither
+            applies. May be negative once the cap is overshot.
+    """
+    limits: list[float] = []
+    remaining = phase_budget_remaining_seconds(state)
+    if remaining is not None:
+        limits.append(float(remaining))
+    cap = phase_cap_seconds(state)
+    if cap is not None:
+        limits.append(float(cap) - float(phase_cumulative_seconds(state)))
+    return min(limits) if limits else None
+
+
 def _gate(phase: Any, conf: predictor_config.PredictorConfig) -> bool:
     """Whether to spend a request at this decision point."""
     state = phase.shared_state
@@ -152,6 +227,18 @@ def _gate(phase: Any, conf: predictor_config.PredictorConfig) -> bool:
         # request whose reply could not be trusted.
         _declined(f"framework {framework!r} has no flag catalogue")
         return False
+
+    # An answer is only worth its request if OPTIMIZE can still bench one
+    # variant off it. Checked before ``already_asked`` so a decision point
+    # declined for want of budget is not recorded as answered: the same key
+    # cannot recur (the cycle number is in it), but a future key must not
+    # inherit a "done" mark from this one.
+    headroom = _optimize_headroom_sec(state)
+    if headroom is not None:
+        needed = _min_variant_sec(state)
+        if headroom < needed:
+            _declined(f"OPTIMIZE headroom {headroom:.0f}s below one variant ({needed:.0f}s)")
+            return False
 
     key = decision_point_key(state)
     if already_asked(state, key):
@@ -251,8 +338,17 @@ def _skip_reason(
     base_envs: dict[str, str],
     tested_delta: set[str],
     tested_launch: set[str],
+    queued_delta: set[str],
 ) -> str | None:
-    """Why this proposal should not be queued, or ``None`` to keep it."""
+    """Why this proposal should not be queued, or ``None`` to keep it.
+
+    ``already_queued_unbenched`` is the belt to the service-side exclusion
+    filter's braces. The service is the side that can act on this usefully --
+    it can spend its samples elsewhere -- but the request takes tens of seconds
+    to answer, a variant can finish benching inside that window, and the service
+    may be an older build that ignores the exclusion set entirely. None of those
+    should put a second copy of a queued row on the queue.
+    """
     delta_fp = effective_fingerprint(extra_args, extra_envs)
     merged_args, merged_envs = _merge_launch(base_args, extra_args, base_envs, extra_envs)
     launch_fp = canonical_fingerprint(merged_args, merged_envs)
@@ -265,6 +361,8 @@ def _skip_reason(
         return "already_tested_delta"
     if launch_fp in tested_launch:
         return "already_tested_launch"
+    if delta_fp in queued_delta:
+        return "already_queued_unbenched"
     return None
 
 
@@ -319,6 +417,54 @@ def _vote_counts(answer: Prediction) -> dict[tuple, int]:
     return counts
 
 
+#: Flags whose value is a structured config rather than a scalar. Discarding
+#: values is the point of the family key everywhere else, but for these the
+#: value is what says which knobs move: two ``--compilation-config`` proposals
+#: share the flag name while opening entirely different optimizations, and
+#: collapsing them dropped ``enable_sp`` + ``fuse_allreduce_rms`` from a real
+#: round -- levers orchestration then listed as never benched.
+_STRUCTURED_VALUE_FLAGS = frozenset({"--compilation-config"})
+
+
+def _structured_keys(flag: str, value: str) -> set[str]:
+    """Sub-keys a structured flag's value moves, named ``flag:path``.
+
+    One level of nesting is enough for the shapes that exist: vLLM's
+    ``pass_config`` is the only nested member anyone proposes, and a deeper walk
+    would split families on a leaf the proposer never chose.
+    """
+    try:
+        parsed = json.loads(value.strip().strip("'\""))
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(parsed, dict):
+        return set()
+    out: set[str] = set()
+    for key, member in parsed.items():
+        out.add(f"{flag}:{key}")
+        if isinstance(member, dict):
+            out.update(f"{flag}:{key}.{sub}" for sub in member)
+    return out
+
+
+def _next_value(tokens: list[str], index: int) -> tuple[str, int]:
+    """The value at ``index``, re-joining a JSON object split on whitespace.
+
+    ``str.split`` is the tokenizer everywhere else here and it is fine for
+    scalars, but ``{"a": 1}`` arrives as two tokens. Re-joining on brace balance
+    recovers it without a shell-quoting model this does not otherwise need.
+    """
+    if index >= len(tokens) or tokens[index].startswith("-"):
+        return "", index
+    chunk = tokens[index]
+    index += 1
+    if chunk.lstrip("'\"").startswith("{"):
+        while chunk.count("{") > chunk.count("}") and index < len(tokens):
+            chunk = f"{chunk} {tokens[index]}"
+            index += 1
+    return chunk, index
+
+
 def _family_key(extra_args: str, extra_envs: dict[str, str]) -> frozenset[str]:
     """Which knobs a proposal moves, ignoring the values it moves them to.
 
@@ -328,14 +474,34 @@ def _family_key(extra_args: str, extra_envs: dict[str, str]) -> frozenset[str]:
     member that KEEPs brings its neighbours back at the next decision point
     anyway.
 
+    Two shapes need more than the flag name to land in the right family.
+    A ``-cc.pass_config.fuse_rope_kvcache=True`` short form carries its value
+    inside the token, so keeping the token whole would give one knob a family
+    per value -- the opposite of the intent. A structured value
+    (:data:`_STRUCTURED_VALUE_FLAGS`) hides the knobs it moves inside JSON, so
+    the flag name alone merges proposals that share nothing but the flag.
+
     Args:
         extra_args (str): The proposal's launch flags.
         extra_envs (dict[str, str]): The proposal's environment variables.
 
     Returns:
-        frozenset[str]: Flag names plus ``env:``-prefixed variable names.
+        frozenset[str]: Flag names, ``flag:path`` sub-keys for structured
+            values, plus ``env:``-prefixed variable names.
     """
-    names = {token for token in extra_args.split() if token.startswith("-")}
+    tokens = extra_args.split()
+    names: set[str] = set()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token.startswith("-"):
+            continue
+        name = token.split("=", 1)[0]
+        names.add(name)
+        if name in _STRUCTURED_VALUE_FLAGS:
+            value, index = _next_value(tokens, index)
+            names.update(_structured_keys(name, value))
     names.update(f"env:{name}" for name in extra_envs)
     return frozenset(names)
 
@@ -378,6 +544,7 @@ def _proposal_rows(
     """
     base_args, base_envs = _stack_base(state)
     tested_delta, tested_launch = _tested_maps(state)
+    queued_delta = set(queued_unbenched(state))
     votes = _vote_counts(answer)
     samples = answer.meta.get("samples")
     samples = int(samples) if isinstance(samples, int) else None
@@ -395,6 +562,7 @@ def _proposal_rows(
             base_envs=base_envs,
             tested_delta=tested_delta,
             tested_launch=tested_launch,
+            queued_delta=queued_delta,
         )
         delta_fp = effective_fingerprint(extra_args, extra_envs)
         if reason is not None:
@@ -434,10 +602,14 @@ def _proposal_rows(
         if family and family in seen_families:
             dropped.append({**row, "dropped_reason": "same_flag_family"})
             continue
-        if len(rows) >= MAX_PROPOSALS:
+        if len(rows) >= MAX_QUEUED:
             dropped.append({**row, "dropped_reason": "over_surface_cap"})
             continue
         seen_families.add(family)
+        # The batch is what orchestration is asked to dispatch as one grid;
+        # anything past it is an ordinary queue row it may reach for when the
+        # batch comes up short.
+        row["batch"] = len(rows) < MAX_PROPOSALS
         rows.append(row)
     if dropped:
         log.info(

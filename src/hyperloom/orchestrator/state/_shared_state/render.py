@@ -456,11 +456,13 @@ class _RenderMixin:
         carried at the time, so a KEEP that changes those controls mid-round
         would otherwise make everything benched before it look untried.
 
+        First-pass rounds are exempt from the cycle filter; see the loop.
+
         Returns:
             Rows ranked by proposer priority, then gap severity, then recency,
             each carrying the normalized proposal fields plus ``domain`` /
             ``severity`` / ``priority`` / ``first_pass`` and, when the proposer
-            recorded them, ``votes`` / ``samples``.
+            recorded them, ``votes`` / ``samples`` / ``batch`` / ``batch_id``.
         """
         from hyperloom.common.coerce import to_int
 
@@ -491,9 +493,19 @@ class _RenderMixin:
         ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
-            if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+            if not isinstance(entry, dict):
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
+            first_pass = domain == _FIRST_PASS_DOMAIN
+            # A first-pass round outlives its cycle; every other round does not.
+            # The predictor is re-asked only when the decision point moves, and
+            # a ``cycle_reloop`` moves it -- so a row that leaves the block at
+            # the rollover is a proposal this run will never measure, and its
+            # re-proposal arrives on the next tick as a duplicate of something
+            # nobody can see. A specialist round has no such second life: its
+            # proposals answered a gap in the cycle that raised them.
+            if not first_pass and to_int(entry.get("cycle"), default=0) != cycle:
+                continue
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
             task_id = str(entry.get("task_id") or "")[:8]
             # A proposer with no gap anchor would otherwise rank below every
@@ -501,7 +513,6 @@ class _RenderMixin:
             # ordering of a queue that carries no prioritised round exactly as
             # it was before this key existed.
             priority = to_int(entry.get("priority"), default=0)
-            first_pass = domain == _FIRST_PASS_DOMAIN
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -524,6 +535,11 @@ class _RenderMixin:
                 if votes >= 0 and samples > 0:
                     row["votes"] = votes
                     row["samples"] = samples
+                if first_pass:
+                    # Absent on rounds recorded before batching existed, and
+                    # those were all inside the old cap, so they read as batch.
+                    row["batch"] = bool(proposal.get("batch", True))
+                    row["batch_id"] = str(entry.get("round_id") or task_id)
                 ranked.append((priority, rank.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
@@ -540,7 +556,11 @@ class _RenderMixin:
         """
         parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
         if row.get("first_pass"):
-            parts.append("[first-pass]")
+            # Only a batch member carries its batch id: that tag is what the
+            # block tells orchestration to dispatch as one grid, and an
+            # overflow row is an ordinary suggestion rather than part of it.
+            batch_id = str(row.get("batch_id") or "") if row.get("batch") else ""
+            parts.append(f"[first-pass:{batch_id}]" if batch_id else "[first-pass]")
         if "votes" in row:
             parts.append(f"votes={row['votes']}/{row['samples']}")
         if row["atomic"]:
@@ -559,6 +579,68 @@ class _RenderMixin:
         if reason:
             parts.append(f"why={reason}")
         return _flatten_for_prompt(" ".join(parts))
+
+    def _first_pass_batches(self) -> list[dict[str, Any]]:
+        """First-pass batches and how much of each is still unmeasured.
+
+        Counted before the benched filter drops rows, so the block can say
+        "4 rows, 2 benched" rather than silently shrinking as a batch is worked
+        through -- which is the difference between orchestration seeing a
+        half-finished batch and seeing a smaller one.
+
+        Returns:
+            Newest first, each ``{"id", "total", "unbenched"}``. Batch members
+            only; overflow rows are not part of a dispatchable unit.
+        """
+        from hyperloom.common.coerce import to_int
+
+        from ...actions.executors._proposal_identity import (
+            controls_of,
+            effective_fingerprint,
+            is_executable,
+            normalize_proposal,
+        )
+        from ...predictor.pump import QUEUE_DOMAIN as _FIRST_PASS_DOMAIN
+
+        benched = {
+            effective_fingerprint(
+                normalize_proposal(row)["extra_args"],
+                normalize_proposal(row)["extra_envs"],
+                controls=controls_of(normalize_proposal(row)),
+            )
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+        out: list[dict[str, Any]] = []
+        for entry in self.specialist_rounds or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("domain") or "").removesuffix("_specialist") != _FIRST_PASS_DOMAIN:
+                continue
+            total = 0
+            unbenched = 0
+            for proposal in entry.get("proposal_set") or []:
+                if not isinstance(proposal, dict) or not proposal.get("batch", True):
+                    continue
+                fields = normalize_proposal(proposal)
+                if not is_executable(fields):
+                    continue
+                total += 1
+                fingerprint = effective_fingerprint(
+                    fields["extra_args"], fields["extra_envs"], controls=controls_of(fields)
+                )
+                if fingerprint not in benched:
+                    unbenched += 1
+            if total and unbenched:
+                out.append(
+                    {
+                        "id": str(entry.get("round_id") or str(entry.get("task_id") or "")[:8]),
+                        "total": total,
+                        "unbenched": unbenched,
+                        "cycle": to_int(entry.get("cycle"), default=0),
+                    }
+                )
+        return list(reversed(out))
 
     def _untested_patch_mandate(self) -> dict[str, str]:
         """The newest un-benched first-pass source-change mandate this cycle.
@@ -605,13 +687,18 @@ class _RenderMixin:
             return ""
         if any(row.get("first_pass") for row in shown) or mandate:
             out = [
-                "Executable proposals from this cycle that no explore round has benched.",
+                "Executable proposals that no explore round has benched.",
                 "Ranked first-pass predictions first, then by gap severity and recency. Compose the",
                 "next `explore` grid from these; dispatch an ATOMIC entry verbatim as one variant —",
                 "never split or re-derive its flags.",
-                "A `[first-pass]` row is a free local prediction that costs no API spend: prefer it",
-                "over an equally plausible idea of your own and copy its fields verbatim. `votes=k/n`",
-                "is how many of the predictor's own samples proposed it, so it reads as confidence.",
+                "A `[first-pass:<id>]` row belongs to one predictor batch, already sized to your",
+                "grid target: make the newest batch your next `explore` grid IN FULL and copy each",
+                "row's fields verbatim. Top up from other proposers only when a batch is short of",
+                "four rows. `votes=k/n` is how many of the predictor's own samples proposed it.",
+                "The predictor is re-asked only when the optimization stack moves, so a first-pass",
+                "row you pass over now is very likely never measured in this cycle — that is the",
+                "cost of skipping one, and if you do skip one, say why in your rationale.",
+                "A `[first-pass]` row without an id is batch overflow: available, not part of the unit.",
             ]
         else:
             out = [
@@ -620,6 +707,11 @@ class _RenderMixin:
                 "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
             ]
         out.append("")
+        for batch in self._first_pass_batches():
+            out.append(
+                f"First-pass batch {batch['id']} (cycle {batch['cycle']}): "
+                f"{batch['total']} rows, {batch['total'] - batch['unbenched']} benched so far."
+            )
         out.extend(self._untested_proposal_line(row) for row in shown)
         if len(rows) > max_entries:
             out.append(f"(+{len(rows) - max_entries} more not shown)")
