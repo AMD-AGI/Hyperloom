@@ -554,3 +554,106 @@ class TestHipblasltCannotTakeTheRunDownWithIt:
         adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
         adapter._build((1024, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
         assert aiter.calls == ["findallsols", "findallsols"]
+
+
+class TestTheAuthorIsToldWhatACandidateHasToLookLike:
+    """The brief used to ask for re-dispatchable candidates without saying how.
+
+    ``dispatch._build`` reads five backend names and a ``k=v;k=v`` config, and
+    files candidates by an ``MxNxK`` key. None of that appeared anywhere the
+    author could see it, so a script written from the mandate alone -- the whole
+    premise of this tier -- proposes candidates in some other vocabulary and
+    every one of them is recorded as "not dispatchable". The gate opens, the
+    search runs, and nothing can be promoted.
+    """
+
+    def _gap(self, table="bf16_tuned_gemm.csv"):
+        return CoverageGap(
+            table=table,
+            tuner="sglang_dense_bf16",
+            env_var="AITER_CONFIG_GEMM_BF16",
+            key_schema=["M", "N", "K"],
+            miss_count=40,
+            reason="sglang_dense_bf16 produced nothing landable",
+        )
+
+    def _brief(self, table="bf16_tuned_gemm.csv"):
+        return build_mandate(self._gap(table), [{"M": 16, "N": 1536, "K": 7168}]).render()
+
+    def test_every_backend_the_referee_can_run_is_named_in_the_brief(self):
+        from kernelforge.gemm_tune.tier3.dispatch import DENSE_BF16_BACKENDS
+
+        text = self._brief()
+        for backend in DENSE_BF16_BACKENDS:
+            assert backend in text, f"{backend} is dispatchable but the author is never told"
+
+    def test_the_config_grammar_and_the_shape_key_are_spelled_out(self):
+        text = self._brief()
+        assert "MxNxK" in text, "the keys of candidates.json are parsed, not free text"
+        assert "8192x3456x1152" in text, "an example beats a description of one"
+        assert "key=value" in text and "`;`" in text
+
+    def test_the_required_key_of_each_backend_is_stated(self):
+        text = self._brief()
+        # A candidate missing these is refused, so leaving them implicit costs
+        # the whole shape.
+        assert "solidx" in text
+        assert "kernelName" in text
+        assert "kernelId" in text
+
+    def test_a_table_with_no_adapter_is_told_so_rather_than_told_nothing(self):
+        text = self._brief("odd_tuned_gemm.csv")
+        assert "re-dispatch" in text
+        assert "hipblaslt" not in text, "naming backends that cannot re-time this table misleads"
+
+    def test_the_protocol_reaches_the_machine_readable_form(self):
+        d = build_mandate(self._gap(), [{"M": 16, "N": 1536, "K": 7168}]).to_dict()
+        assert "hipblaslt" in d["candidate_protocol"]
+
+    def test_a_caller_can_still_supply_its_own(self):
+        m = build_mandate(self._gap(), [], candidate_protocol="say it however you like")
+        assert "say it however you like" in m.render()
+        assert "hipblaslt" not in m.render()
+
+
+class TestTheVocabularyIsOneObject:
+    """Advertised and dispatchable have to be the same set, or the gap is silent.
+
+    ``_build`` checks the candidate's backend against the very table the mandate
+    is rendered from, so a name can neither be runnable-but-unadvertised (the
+    author never proposes it) nor advertised-but-unrunnable (every proposal of
+    it is refused) without a test failing here.
+    """
+
+    def test_a_backend_nobody_advertised_is_refused_before_anything_is_touched(self, monkeypatch):
+        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+
+        adapter = _Bf16DenseAdapter()
+
+        def explode(*_a, **_k):
+            raise AssertionError("an unknown backend must not reach the operands")
+
+        monkeypatch.setattr(adapter, "_ops", explode)
+        assert adapter._build((16, 16, 16), {"backend": "cutlass", "config": "tile=128"}) is None
+
+    def test_the_advertised_names_are_the_ones_build_implements(self, monkeypatch):
+        """Each advertised backend reaches its own branch, not the fallthrough."""
+        import sys
+        import types
+
+        import kernelforge.gemm_tune.tier3.dispatch as d
+
+        # Enough of aiter to be imported; the branches are reached and then
+        # bail on their own missing config, which is the point.
+        monkeypatch.setitem(sys.modules, "aiter", types.ModuleType("aiter"))
+        reached = []
+        monkeypatch.setattr(d.log, "warning", lambda msg, *a: reached.append(a[0] if a else msg))
+        adapter = d._Bf16DenseAdapter()
+        operand = types.SimpleNamespace(t=lambda: "bt")
+        monkeypatch.setattr(adapter, "_ops", lambda key: (operand, operand))
+        monkeypatch.setattr(adapter, "_torch", lambda: types.SimpleNamespace(bfloat16="bf16"))
+        for backend in d.DENSE_BF16_BACKENDS:
+            # Deliberately configless: every branch then returns None early or
+            # raises inside its own try, and neither is the fallthrough.
+            adapter._build((16, 16, 16), {"backend": backend, "config": ""})
+        assert reached == [], f"advertised but not implemented: {reached}"
