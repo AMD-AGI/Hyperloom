@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Every shape a scripted round has to be able to say.
-
-A scenario is only worth writing if the outcomes it can express cover the ones
-a real round produces. These pin that coverage: each case is a shape that used
-to require a GPU to reach, checked here through the same classifier and the
-same result types production uses.
-"""
+"""Every shape a scripted round has to be able to say."""
 
 from __future__ import annotations
 
@@ -130,13 +124,7 @@ def test_a_session_deadline_the_attempt_runs_past_stops_the_round(tmp_path):
 
 
 def test_a_deadline_from_a_clock_this_backend_does_not_read_is_refused(tmp_path):
-    """A deadline is an instant on one clock, and this backend must be that clock.
-
-    Left unchecked the comparison is silently wrong rather than absent: a real
-    ``time.monotonic()`` deadline sits far above the virtual origin on a
-    long-uptime host and far below it on a freshly booted one, so the budget
-    branch never fires or always does.
-    """
+    """A deadline is an instant on one clock, and this backend must be that clock."""
     backend = _backend(LaunchAttempt(outcome=READY))
 
     with pytest.raises(ScenarioError):
@@ -146,14 +134,7 @@ def test_a_deadline_from_a_clock_this_backend_does_not_read_is_refused(tmp_path)
 
 
 def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(tmp_path):
-    """The double and production have to name the same cause when both gates trip.
-
-    Production tests the session budget at the top of every poll iteration,
-    before the hard-timeout gate, so a hang whose budget ran out reports the
-    budget rather than a reap. A double that answered the other way would make
-    a scenario about a hang eating the next attempt's budget -- the case the
-    scenario format exists to express -- assert the wrong stop reason.
-    """
+    """The double and production have to name the same cause when both gates trip."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         SESSION_TIME_EXHAUSTED_RETURNCODE,
         run_with_session_kill,

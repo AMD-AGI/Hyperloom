@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two files the coordinator and its supervisor share.
-
-The supervisor never opens the session's SQLite database, whose shared-memory
-journal mode is unsafe with a second writer on a network filesystem. The
-coordinator stamps ``coordinator_tick.json`` at the top of every tick and the
-supervisor reads it; the supervisor rewrites ``status.json`` after every
-reading. Both writes are atomic and fsynced, because the reader is a different
-process and, on a network filesystem, often a different host.
-"""
+"""The two files the coordinator and its supervisor share."""
 
 from __future__ import annotations
 

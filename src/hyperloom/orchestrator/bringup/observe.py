@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The single entry point that turns bring-up streams into a verdict.
-
-Every caller classifies through :func:`observe_bringup` so two attempts are
-compared on the same reading. :func:`verdict_of` recovers the same verdict from
-an observation persisted earlier.
-"""
+"""The single entry point that turns bring-up streams into a verdict."""
 
 from __future__ import annotations
 
@@ -22,23 +17,14 @@ if TYPE_CHECKING:
 
 
 def session_root(owner: Any) -> Path | None:
-    """Return the owning coordinator's session root, when it has one.
-
-    ``owner`` is duck-typed and need not carry a session at all; ``None`` then
-    means nothing is redacted and no trees are pinned.
-    """
+    """Return the owning coordinator's session root, when it has one."""
     root = getattr(owner, "session_dir", None)
     return Path(root) if root else None
 
 
 @dataclass(frozen=True)
 class BringupVerdict:
-    """One classification of one bring-up, in the two shapes callers need.
-
-    ``observation`` carries the ladder stage, terminal frame and redacted
-    excerpt that get recorded and digested; ``signature`` is the enablement rule
-    signature the bridge search and the runnable gate consume.
-    """
+    """One classification of one bring-up, in the two shapes callers need."""
 
     observation: "BootObservation"
     signature: "FailureSignature"
@@ -96,11 +82,7 @@ def observe_bringup(
 
 
 def verdict_of(observation: "BootObservation") -> BringupVerdict:
-    """Recover a verdict from an observation that was persisted earlier.
-
-    The signature is re-derived from the observation's own excerpt, which was
-    materialised at capture time.
-    """
+    """Recover a verdict from an observation that was persisted earlier."""
     from hyperloom.agents.framework.enablement import classify_failure
 
     excerpt = observation.excerpt
@@ -118,10 +100,6 @@ def recorded_verdict(
 ) -> tuple[BringupVerdict, LoadedObservation]:
     """Recover a round's verdict from what it recorded, or from wrapper text.
 
-    Wrapper text classifies to a different digest than the recorded observation
-    would for the same failure, so the returned load result says which reading
-    was used and, when nothing was recorded, why.
-
     Args:
         observation_path: The artifact path the round recorded; may be empty.
         wrapper_text: Launcher-side text to classify when nothing was recorded.
@@ -134,11 +112,7 @@ def recorded_verdict(
 
 
 def stage_of(observation: BootObservation | None) -> int:
-    """Return how far up the ladder ``observation`` got, as a stage value.
-
-    The greater of ``stage_reached`` and ``stage_failed``, which is the furthest
-    point the boot demonstrably got to; ``0`` for ``None``.
-    """
+    """Return how far up the ladder ``observation`` got, as a stage value."""
     if observation is None:
         return 0
     failed = observation.stage_failed
@@ -146,10 +120,7 @@ def stage_of(observation: BootObservation | None) -> int:
 
 
 def digest_of(observation: BootObservation | None) -> str:
-    """Return the failure digest of the wall ``observation`` hit.
-
-    ``""`` when the boot did not stop at a wall, or there is no observation.
-    """
+    """Return the failure digest of the wall ``observation`` hit."""
     if observation is None or observation.stage_failed is None:
         return ""
     return failure_digest(observation)

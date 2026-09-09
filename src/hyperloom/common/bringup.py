@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed boot observations for a served-model bring-up attempt.
-
-A bring-up advances along a fixed ladder of observable milestones or stops at
-one; this module carries that observation as data. :func:`failure_digest` hashes
-only the shape of a failure -- never a path, timestamp, pid, or other per-run
-identifier -- so the same failure on two hosts collapses to one dedup key.
-
-Standard library only apart from :mod:`hyperloom.common.env_safety`, which is
-itself stdlib-only: imported by both the launcher and the orchestrator.
-"""
+"""Typed boot observations for a served-model bring-up attempt."""
 
 from __future__ import annotations
 
@@ -34,11 +25,7 @@ EXTERNAL_PREFIX = "<external>"
 
 
 class LadderStage(IntEnum):
-    """Ordered milestones a server bring-up passes through.
-
-    Values are spaced so a milestone can be inserted without renumbering its
-    neighbours; ordering comparisons are how progress is judged.
-    """
+    """Ordered milestones a server bring-up passes through."""
 
     ARGV_PARSE = 10
     PROCESS_START = 20
@@ -86,14 +73,6 @@ def _stage_or_none(name: Any) -> LadderStage | None:
 
 def redact(text: str, *, roots: Sequence[str] = ()) -> str:
     """Replace absolute session paths and secret values in ``text``.
-
-    Everything this module materialises is cut from a server log, a wrapper's
-    stderr or a probe's own message, and each of those routinely carries the
-    launch environment -- so an excerpt is a place secrets reach disk, the
-    session package and an LLM prompt. It goes through the one rule set every
-    other on-disk text in the tree uses
-    (:func:`hyperloom.common.env_safety.redact_secret_values`) rather than a
-    second, weaker one here.
 
     Args:
         text: Raw text to redact.
@@ -166,9 +145,6 @@ def render_excerpt(
 ) -> Excerpt:
     """Materialise a window of ``text`` anchored at a match offset.
 
-    The window is placed around ``anchor``, never at the end of ``text``, so it
-    does not move as the log grows.
-
     Args:
         text: The full stream text.
         anchor: Character offset of the match to centre the window on.
@@ -193,9 +169,6 @@ def render_excerpt(
 
 def normalise_file_rel(path: str, roots: Sequence[str]) -> str:
     """Return ``path`` relative to the longest pinned root that contains it.
-
-    Purely textual: no filesystem access, no symlink resolution, no ``..``
-    collapsing, so a root absent on this host still normalises identically.
 
     Args:
         path: An absolute or relative source path from a terminal frame.
@@ -364,9 +337,6 @@ def _message_template(text: str) -> str:
 
 def failure_digest(observation: BootObservation) -> str:
     """Return a stable dedup key for the failure in ``observation``.
-
-    The key covers the failed stage, the terminal frame's exception type, module
-    and normalised file, and the masked message template, and nothing else.
 
     Args:
         observation: The observation to key.

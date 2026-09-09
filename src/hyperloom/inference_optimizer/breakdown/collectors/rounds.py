@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bring-up round ledger, read out of the session database for the breakdown.
-
-Round truth lives in ``storage/coordinator.db``, so how many rounds ran, which
-one is still open and how far any boot got are only answerable here. The read
-is read-only; a session whose database is gone, locked, or predates these
-tables reports no rounds.
-"""
+"""The bring-up round ledger, read out of the session database for the breakdown."""
 
 from __future__ import annotations
 

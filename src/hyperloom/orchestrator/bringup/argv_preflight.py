@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Judge a server argv with the installed framework's own argument parser.
-
-Only the parser that will reject an argument knows which spellings it accepts
-today, so the parser is what answers: the adapter supplies the source that
-builds it, the probe runs that source in the interpreter that will serve.
-Nothing here is a table of flags.
-
-Three outcomes, never two: :data:`OK` and :data:`INVALID` are verdicts,
-:data:`UNAVAILABLE` is the answer whenever the check could not be made and never
-stops a round. Nothing is cached -- a round exists to change the installed
-framework, so a probe that reached no parser this round may reach one next.
-"""
+"""Judge a server argv with the installed framework's own argument parser."""
 
 from __future__ import annotations
 
@@ -252,9 +241,6 @@ def run_probe_json(
 def resolve_serving_interpreter(framework: str, launch_env: Mapping[str, str]) -> str:
     """Return the interpreter that will run the server, from the launch env.
 
-    Read from the environment the launch is handed rather than the ambient
-    process env, because that is what the server's own resolution reads.
-
     Args:
         framework: Framework the config serves.
         launch_env: The environment the benchmark subprocess is launched with.
@@ -323,11 +309,7 @@ def _same_install(left: Mapping[str, object], right: Mapping[str, object]) -> bo
 
 
 def _offending_flags(unknown: Sequence[object]) -> tuple[str, ...]:
-    """Return the flag names among a parser's leftover tokens, de-duplicated.
-
-    A leftover that is not a flag is the value of one that is, and dropping a
-    flag takes its value with it.
-    """
+    """Return the flag names among a parser's leftover tokens, de-duplicated."""
     out: list[str] = []
     for token in unknown:
         text = str(token).strip()
@@ -385,14 +367,6 @@ def check_server_argv(
     probe: ProbeFn | None = None,
 ) -> ArgvVerdict:
     """Decide whether the installed framework will accept ``argv``.
-
-    The probe and serving interpreters are proven to be one -- same interpreter,
-    same Python, same framework origin, same distribution version -- before any
-    verdict is claimed; anything short of that is :data:`UNAVAILABLE`.
-
-    One repair is allowed per distinct argv and it only ever removes: an
-    unrecognised flag is dropped and the parser asked again. A value the parser
-    rejected is never rewritten.
 
     Args:
         framework: Framework the config serves.
@@ -532,9 +506,6 @@ def check_server_argv(
 def argv_invalid_observation(verdict: ArgvVerdict, *, session_dir: Path | None = None) -> BootObservation:
     """Return the boot observation for an argv the installed parser refused.
 
-    Recorded at :data:`~hyperloom.common.bringup.LadderStage.ARGV_PARSE` under
-    this module's producer: no process was started, so there is no server log.
-
     Args:
         verdict: The refusing verdict.
         session_dir: Session root, redacted out of the recorded text.
@@ -562,9 +533,6 @@ def argv_invalid_observation(verdict: ArgvVerdict, *, session_dir: Path | None =
 
 def is_argv_invalid(observation: BootObservation | None) -> bool:
     """True when ``observation`` is this module's argv refusal.
-
-    An argv the framework never accepted is not a defect in framework source,
-    which is what the enablement path repairs.
 
     Args:
         observation: A loaded observation, or ``None``.

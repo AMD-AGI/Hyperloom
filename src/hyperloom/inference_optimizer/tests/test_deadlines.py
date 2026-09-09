@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a budget does when it runs out, played on a clock nobody has to wait for.
-
-The failure these pin is not that a timeout was too long. It is that a timeout
-of exactly zero was read one layer down as no timeout at all, so the sessions
-that most needed stopping were the only ones that never did. The shape of the
-check is therefore always comparative: whatever a session with time left gets,
-a session with none must get *less* of, at every layer the number crosses.
-
-The clock is virtual, so an hours-long ceiling is asserted in milliseconds and
-the ordering between deadlines -- which of them fires first -- stays the thing
-under test rather than something shortened until it fits.
-"""
+"""What a budget does when it runs out, played on a clock nobody has to wait for."""
 
 from __future__ import annotations
 
@@ -61,12 +50,7 @@ class _NeverExits:
 
 
 def _dispatcher() -> SpecialistSubprocessDispatcher:
-    """A dispatcher whose only live stop is the deadline.
-
-    The staleness window is pushed past every deadline under test so that the
-    reap the assertions read is the one the deadline caused, not one the
-    heartbeat check got to first.
-    """
+    """A dispatcher whose only live stop is the deadline."""
     return SpecialistSubprocessDispatcher(
         config=SpecialistSubprocessConfig(heartbeat_stale_seconds=10 * UNBOUNDED_REAP_CAP_SEC),
     )

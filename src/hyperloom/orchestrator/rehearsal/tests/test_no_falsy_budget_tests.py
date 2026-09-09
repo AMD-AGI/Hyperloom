@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""No budget or deadline may be tested for truth.
-
-``if budget:`` and ``budget or default`` read a value of zero as absent. For a
-duration that is the difference between "stop now" and "nobody said when", and
-the layer that made that mistake replaced an exhausted budget with a ceiling of
-its own, measured in days. The bug is not fixable by reviewing the one site: any
-new ``if wall_budget:`` reintroduces it, silently, and only under the conditions
-nobody tests -- a session that has already run out.
-
-So the shape is banned rather than the instance. This walks the syntax tree of
-the modules that carry time budgets and fails on any implicit truth test of a
-name that holds one. Comparisons are always allowed: ``budget > 0`` says which
-side of zero the author meant, and ``deadline is None`` says absent, and between
-them there is nothing left for a falsy test to express.
-
-Ruff has no rule for a truth test on a name matching a pattern and no way to
-add one, so the ban is a test, alongside the other tree-shape rules under
-``inference_optimizer/tests``.
-"""
+"""No budget or deadline may be tested for truth."""
 
 from __future__ import annotations
 

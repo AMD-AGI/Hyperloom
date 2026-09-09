@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Durable record of the backups a non-git apply takes, written before it mutates.
-
-Each record is appended the moment its backup lands and before the file it
-describes is touched, so a revert can run from disk alone.
-"""
+"""Durable record of the backups a non-git apply takes, written before it mutates."""
 
 from __future__ import annotations
 

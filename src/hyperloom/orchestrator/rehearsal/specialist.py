@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A specialist dispatcher that leaves the right files behind without an agent.
-
-What a specialist subprocess returns is a workspace -- a done-file, a
-heartbeat, a process log, patches -- so this writes one rather than stubbing a
-return value.
-"""
+"""A specialist dispatcher that leaves the right files behind without an agent."""
 
 from __future__ import annotations
 
@@ -80,9 +75,6 @@ class SpecialistStep:
 @dataclass
 class ScriptedSpecialist:
     """Stands in for :class:`~..specialists.subprocess_.SpecialistSubprocessDispatcher`.
-
-    Assign one to a runner's ``subprocess_dispatcher`` and every dispatch is
-    answered from the script instead of an agent CLI.
 
     Attributes:
         steps: The dispatches to serve, in order.

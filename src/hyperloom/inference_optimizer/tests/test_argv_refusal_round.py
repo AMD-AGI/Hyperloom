@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A refused argv costs a probe, not a round, and it terminates by name.
-
-The failure this reproduces used to look like every other launch failure: the
-server died a few seconds in, the round was consumed, and the enablement
-backstop -- which dispatches an authoring specialist for any non-blank launch
-log, because an unrecognised wall may still be one a patch gets past -- spent
-the next round writing a framework patch for an argument the framework simply
-does not have.
-
-Played here across ticks on the real executor, the real lane, the real round
-store and the real registry, with the launch subprocess scripted. What is
-asserted is the negative space: the scripted backend is never asked to launch,
-no repair task is opened, and the run stops under a name of its own.
-"""
+"""A refused argv costs a probe, not a round, and it terminates by name."""
 
 from __future__ import annotations
 
@@ -49,12 +36,7 @@ _PROBE_PYTHON = "/opt/probe/bin/python"
 
 @pytest.fixture
 def refusing_probe(monkeypatch):
-    """Answer the identity probes as one install, and the parser probe as a refusal.
-
-    The subprocess itself is scripted rather than run: what this test is about
-    is what the round does with a refusal, and the parser's own verdict is
-    established against a real parser elsewhere.
-    """
+    """Answer the identity probes as one install, and the parser probe as a refusal."""
     identity = '{"executable": "/opt/probe/bin/python", "python": "3.12.1", "origin": "/site/sglang/__init__.py", "dist": "0.5.1"}'
     refusal = '{"status": "invalid", "message": "argument --attention-backend: invalid choice: \'fa4\'", "unknown": []}'
     calls: list[list[str]] = []

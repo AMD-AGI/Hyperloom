@@ -41,12 +41,7 @@ class LoadedObservation:
 
 
 def _observation_path(session_dir: Path, output_dir: Path, attempt: int) -> Path:
-    """Return ``<session_dir>/reports/bringup/<slot>-<digest>-<attempt>.json``.
-
-    ``output_dir`` is the per-round workspace slot the attempt ran in and
-    ``attempt`` its index within that slot; the slug's digest separates two
-    slots that share a name.
-    """
+    """Return ``<session_dir>/reports/bringup/<slot>-<digest>-<attempt>.json``."""
     slug = path_slug(str(output_dir), fallback="round")
     return reports_dir(session_dir) / "bringup" / f"{slug}-{attempt:03d}.json"
 

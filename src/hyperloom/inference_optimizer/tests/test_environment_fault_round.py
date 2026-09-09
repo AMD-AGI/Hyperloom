@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A fault in the host ends the run instead of buying an authoring round.
-
-The enablement lane exists to repair framework source, and it installs
-frameworks and builds extensions on the way. So an import that fails now is not
-a fault: the next round may be the one that makes it import. Only a checkpoint
-path this host does not hold is beyond every lever the loop owns, and that is
-the one condition asserted here to end the run.
-"""
+"""A fault in the host ends the run instead of buying an authoring round."""
 
 from __future__ import annotations
 
@@ -78,12 +71,7 @@ def test_a_preflight_that_raises_does_not_end_the_run(tmp_path):
     [ep.FRAMEWORK_NOT_INSTALLED, ep.EXTENSION_MISSING, ep.EXTENSION_UNBUILT, ep.PORT_ALREADY_BOUND],
 )
 def test_a_condition_a_later_round_could_change_never_ends_the_run(tmp_path, fault):
-    """An extension still compiling, or a port an orphan still holds, is not a fault.
-
-    The preflight runs on every tick, including the ticks while a targeted build
-    it asked for is still queued. Ending the run on what that build exists to
-    fix would make the lane unable to use its own repair.
-    """
+    """An extension still compiling, or a port an orphan still holds, is not a fault."""
     lane = _lane(tmp_path, ep.EnvVerdict(status=ep.UNAVAILABLE, fault=fault, detail="undefined symbol"))
     assert lane._environment_fault_is_terminal() is False
     assert lane.shared_state.stop_reason == ""

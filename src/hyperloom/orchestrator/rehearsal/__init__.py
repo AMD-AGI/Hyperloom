@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Play a whole bring-up round in this process: no GPU, no subprocess, no waiting.
-
-What such a round consumes is small and writable -- a server log, a returncode,
-a workspace, and elapsed time -- and this package supplies all four from a
-written-down scenario.
-"""
+"""Play a whole bring-up round in this process: no GPU, no subprocess, no waiting."""
 
 from __future__ import annotations
 

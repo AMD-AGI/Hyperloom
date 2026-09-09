@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enumerate a process tree from procfs, signal it, and confirm it is gone.
-
-A tree is collected before anything is signalled: a child that re-parents to
-init is a descendant in a pass taken beforehand and an orphan in one taken
-afterwards.
-
-Members are remembered as ``(pid, start_time)`` -- field 22 of
-``/proc/<pid>/stat`` -- so :func:`signal_processes` can re-read the identity and
-skip a pid the kernel has since recycled onto an unrelated process.
-
-:func:`kill_tree` is the one escalation every caller reaps through, so a tree
-left by a benchmark, by a bring-up and by the kernel agent all get the same
-signals in the same order after the same grace.
-
-Standard library only, and procfs-only.
-"""
+"""Enumerate a process tree from procfs, signal it, and confirm it is gone."""
 
 from __future__ import annotations
 
@@ -136,9 +121,6 @@ def signal_processes(processes: list[ProcessId], sig: int) -> None:
 
 def running(pid: int) -> bool:
     """Whether ``pid`` names a process that is not a zombie.
-
-    A zombie nobody has waited on still answers signal 0, so the reading is the
-    process state rather than the signal.
 
     Args:
         pid: The process to inspect.

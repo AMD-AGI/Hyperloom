@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Record an operator's stop the instant it arrives, whatever the loop is doing.
-
-``loop.add_signal_handler`` does not record the stop until the loop is free to
-run its callback, which is the wrong order for the one signal whose purpose is
-to interrupt something taking too long. :class:`SignalDrain` reads the
-interpreter's wakeup pipe from a dedicated thread and records first, dispatches
-second.
-"""
+"""Record an operator's stop the instant it arrives, whatever the loop is doing."""
 
 from __future__ import annotations
 
@@ -29,13 +22,7 @@ STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM)
 
 
 class SignalDrain:
-    """Capture stop signals into a pipe and fan them out to loop and tick.
-
-    Handlers can only be installed from the main thread of the main
-    interpreter. Construction elsewhere installs nothing and reports
-    :attr:`armed` as False rather than raising, since a coordinator running off
-    the main thread is a supported shape.
-    """
+    """Capture stop signals into a pipe and fan them out to loop and tick."""
 
     def __init__(
         self,
@@ -126,11 +113,7 @@ class SignalDrain:
         return -1
 
     def close(self) -> None:
-        """Restore the previous handlers and stop the draining thread.
-
-        Idempotent, and safe to call when arming failed part-way: teardown of a
-        stop mechanism must never be the thing that raises.
-        """
+        """Restore the previous handlers and stop the draining thread."""
         if self._previous_wakeup != -1 or self._previous:
             try:
                 signal.set_wakeup_fd(self._previous_wakeup if self._previous_wakeup != -1 else -1)

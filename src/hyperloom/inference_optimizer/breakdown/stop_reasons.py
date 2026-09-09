@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a terminal ``stop_reason`` says about how a session ended.
-
-The vocabulary and the mapping live together so every consumer answers the same
-way. ``failed`` is a verdict about what the run was optimizing; a signal, an
-operator stop and a fault in the host are not, and read as ``aborted``.
-"""
+"""What a terminal ``stop_reason`` says about how a session ended."""
 
 from __future__ import annotations
 

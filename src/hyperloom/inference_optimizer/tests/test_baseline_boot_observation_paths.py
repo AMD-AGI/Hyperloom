@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A baseline round names its persisted boot observation on every result.
-
-The enablement gate exists for the case where a server still fails to boot, so
-the failure branches -- not just the success one -- have to carry the artifact
-the gate reads.
-"""
+"""A baseline round names its persisted boot observation on every result."""
 
 from __future__ import annotations
 
@@ -120,13 +115,7 @@ async def test_timeout_result_names_a_real_observation(slot, monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_attempts_without_a_server_log_still_get_distinct_artifacts(slot, monkeypatch) -> None:
-    """Three no-log attempts in one slot must not overwrite one another.
-
-    The Magpie-never-created-a-workspace branch produces no ``server.log`` at
-    all. An attempt index counted off retained log directories would stay at 0
-    for every one of them, so the before half of a progress comparison would be
-    replaced by the after half.
-    """
+    """Three no-log attempts in one slot must not overwrite one another."""
     session, out = slot
 
     def _run(cmd, **kwargs):

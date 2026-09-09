@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The durable bring-up round store: who may start a round, and when.
-
-Mutual exclusion between server bring-ups lives in the session database, not in
-Coordinator memory. Five operations over ``bringup_rounds`` -- ``open``,
-``renew``, ``handoff``, ``observe``, ``settle`` -- each append to the
-``round_events`` outbox whether they applied or not.
-
-An open round also holds a row in ``leases`` on
-:data:`~hyperloom.orchestrator.bus.resource_lock.BRINGUP_ROUND_LANE`, written by
-the same transaction that writes the round row. That row is the round's clock
-and the only place the loop looks to decide whether a round has run out, so the
-lease reaper is the one sweep over both. What the lease layer cannot express --
-the fence, the outcome, the exclusion a settled round leaves behind, the outbox
-and its re-drive -- stays here.
-"""
+"""The durable bring-up round store: who may start a round, and when."""
 
 from __future__ import annotations
 
@@ -143,8 +129,6 @@ class Round:
     def excludes_at(self, now_unix: float) -> bool:
         """Report whether this round denies an acquire at ``now_unix``.
 
-        The Python mirror of :data:`_LIVE_EXCLUSION`.
-
         Args:
             now_unix: The instant to test.
 
@@ -237,8 +221,6 @@ class RoundResult:
 class RoundStore:
     """Durable acquire / renew / handoff / settle for bring-up rounds.
 
-    Each operation runs inside one ``BEGIN IMMEDIATE``.
-
     Attributes:
         db (SqliteConnection): The session database.
     """
@@ -263,9 +245,6 @@ class RoundStore:
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """Acquire the round, if and only if no live exclusion denies it.
-
-        The round's lane row is written by the same transaction, so a round row
-        without its lease cannot exist.
 
         Args:
             round_id: Identity of the round to acquire.
@@ -356,9 +335,6 @@ class RoundStore:
     ) -> RoundResult:
         """Extend an open round's lease without changing who holds it.
 
-        The fence names the holder, not the lease, so a renewal leaves it alone.
-        The round's lane row is stamped with the same new expiry.
-
         Args:
             round_id: The round to renew.
             holder_task_id: The task claiming to hold it.
@@ -420,10 +396,6 @@ class RoundStore:
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """Move an open round to a new holder, advancing the fence.
-
-        The only fence increment in the store, so a fence value identifies
-        exactly one holder for exactly one span. The round stays open, so its
-        lane row moves to the new holder rather than being released.
 
         Args:
             round_id: The round to hand off.
@@ -498,10 +470,6 @@ class RoundStore:
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """End the round, releasing the machine.
-
-        A settled round denies nothing. The lane row goes with it, so what the
-        next acquire sees is the absence of an open round rather than a record
-        of this one.
 
         Args:
             round_id: The round to settle.
@@ -669,10 +637,6 @@ class RoundStore:
 
     async def consecutive_stalled(self) -> int:
         """Count the newest settled rounds that bought no ground.
-
-        The scan stops at the first :data:`BOOTED` or :data:`ADVANCED` round.
-        A round the machine ended -- :data:`ABANDONED` or expired -- proves
-        nothing either way and is skipped rather than counted.
 
         Returns:
             int: Consecutive stalled rounds, newest first.

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""There is one last writer of the server argv, and nothing writes after it.
-
-A preflight is only worth its subprocess if it inspects the argument list the
-server actually receives. The composer reaches that list through a long
-sequence of in-place steps, so "the argv" is whatever the last of them left
-behind -- and a step added below the seal would silently move the thing being
-checked out from under it.
-
-The checks here read the dataflow rather than the spelling. A writer is found
-by where its subscript key comes from -- a call to the registry's env-name
-resolver, a local bound from one, or a literal that is one of the names the
-registry actually returns -- so renaming the local it holds the key in, or
-reaching the mapping through another subscript, changes nothing about whether
-it is seen. That matters because a lint keyed on names is passed by the one
-thing it exists to catch: a writer whose author picked different names.
-"""
+"""There is one last writer of the server argv, and nothing writes after it."""
 
 from __future__ import annotations
 
@@ -96,13 +81,7 @@ def _seal_call(body: list[ast.stmt]) -> tuple[int, ast.Call]:
 
 
 def _argument_env_writes(source: str) -> list[tuple[str, int]]:
-    """Return ``(function, lineno)`` for every write to the framework argument env.
-
-    A subscript assignment counts when its key is the argument env's name, and
-    the key is traced to its source rather than matched by spelling: the
-    resolver call itself, any local this module binds from that call, or a
-    literal equal to one of the registry's env names.
-    """
+    """Return ``(function, lineno)`` for every write to the framework argument env."""
     tree = ast.parse(source)
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
@@ -144,11 +123,7 @@ def _argument_env_writes(source: str) -> list[tuple[str, int]]:
 
 @pytest.mark.parametrize(("module", "name"), _COMPOSERS)
 def test_nothing_the_seal_was_given_is_touched_again_after_it(module, name):
-    """The seal is the last statement naming the mapping it was handed.
-
-    The mapping is read off the seal call's own arguments, so this follows
-    whatever the composer calls it rather than a name recorded here.
-    """
+    """The seal is the last statement naming the mapping it was handed."""
     body = _function(module, name).body
     index, call = _seal_call(body)
     sealed = {node.id for argument in call.args for node in ast.walk(argument) if isinstance(node, ast.Name)}
@@ -163,11 +138,7 @@ def test_nothing_the_seal_was_given_is_touched_again_after_it(module, name):
 
 
 def test_every_write_to_the_argument_env_is_one_the_seal_settles():
-    """No module writes the argument env outside the composers and the seal.
-
-    A third writer would be a second last writer, and which one won would
-    depend on import order rather than on anything the code states.
-    """
+    """No module writes the argument env outside the composers and the seal."""
     offenders: list[str] = []
     for path in sorted(_PACKAGE.rglob("*.py")):
         if "/tests/" in str(path):
@@ -188,11 +159,7 @@ def test_every_write_inside_a_composer_happens_above_the_seal(module, name):
 
 
 def test_the_census_sees_a_writer_that_renames_everything_it_touches():
-    """The check is dataflow, not convention, so renaming does not hide a write.
-
-    Both plants below are real escapes from a lint that matches key spellings
-    or requires the mapping itself to be a plain name.
-    """
+    """The check is dataflow, not convention, so renaming does not hide a write."""
     plant = (
         "from hyperloom.inference_optimizer.framework_registry import server_args_env_name\n"
         "\n"
@@ -209,12 +176,7 @@ def test_the_census_sees_a_writer_that_renames_everything_it_touches():
 
 
 def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
-    """One rendered file answers both readers, so they cannot be given two argvs.
-
-    The preflight reads the sealed argv out of the materialised YAML; the
-    launch exports that file's benchmark envs around the server. This composes
-    a real config and asserts the two readings are the same string.
-    """
+    """One rendered file answers both readers, so they cannot be given two argvs."""
     source = tmp_path / "base.yaml"
     source.write_text(
         yaml.safe_dump(

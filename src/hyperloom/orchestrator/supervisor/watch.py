@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Watch the coordinator from outside it, and act when it stops being one.
-
-A wedged coordinator is asked to stop with SIGTERM, which is the one channel
-that reaches it while its loop is busy: the coordinator captures stop signals
-through :class:`~..loop.signals.SignalDrain`, a thread on the interpreter's
-wakeup pipe that records the arrival without the loop having to run a callback.
-A dead one cannot be asked anything, so the supervisor reaps what it left and
-writes the terminal artifact itself.
-
-It never opens ``coordinator.db`` and never transitions round state while the
-coordinator is alive. It asks one pid on this host to stop; it does not end
-process trees, because a process-group reap cannot prove one is gone.
-"""
+"""Watch the coordinator from outside it, and act when it stops being one."""
 
 from __future__ import annotations
 
@@ -249,11 +237,7 @@ class Supervisor:
         return await self._end(observation, WEDGED_STOP_REASON)
 
     def _ask_to_stop(self, observation: Observation) -> None:
-        """Send the coordinator the stop signal its drain thread is waiting on.
-
-        One pid, on this host, named by the lock it holds -- not the process
-        group, which is the supervisor's own parent tree.
-        """
+        """Send the coordinator the stop signal its drain thread is waiting on."""
         reason = f"{WEDGED_STOP_REASON}: {observation.detail}"
         try:
             os.kill(observation.pid, signal.SIGTERM)
@@ -287,10 +271,6 @@ class Supervisor:
 
     def _write_terminal(self, observation: Observation, stop_reason: str) -> None:
         """Write the terminal artifact the coordinator never got to write.
-
-        Nothing live is acted on, so this happens in observation-only mode too.
-        It goes into ``reports/final.json`` under the producer precedence that
-        keeps it from replacing a fuller report.
 
         Args:
             observation: The reading that ended the session.

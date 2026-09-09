@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pinned identity of the source trees a session may observe and patch.
-
-Resolved once at session start into ``reports/bringup/trees.json``. Frames are
-normalised against these roots, so a failure digest is comparable only between
-two attempts that agreed on them.
-"""
+"""Pinned identity of the source trees a session may observe and patch."""
 
 from __future__ import annotations
 
@@ -91,8 +86,6 @@ class TreeIdentity:
 def path_slug(path: str, *, fallback: str = "tree") -> str:
     """Return ``<basename>-<8 hex>`` for an absolute path.
 
-    The hash disambiguates two paths whose directories share a name.
-
     Args:
         path: The absolute path to name.
         fallback: Basename used when the path has none.
@@ -136,12 +129,7 @@ def head_commit(root: str | Path) -> str:
 
 
 def tree_kind(directory: Path | str) -> str:
-    """Return :data:`VCS_GIT` or :data:`VCS_NONE` for a directory used as a root.
-
-    The enclosing checkout counts only when it *is* the directory asked about:
-    the search walks upwards, and a wheel under an unrelated checkout is not
-    that repo.
-    """
+    """Return :data:`VCS_GIT` or :data:`VCS_NONE` for a directory used as a root."""
     path = Path(directory).expanduser().resolve()
     root = repo_root(path)
     return VCS_GIT if root is not None and Path(root) == path else VCS_NONE
@@ -187,8 +175,6 @@ def resolve_trees(roots: Sequence[str] | None = None) -> tuple[TreeIdentity, ...
 
 def tree_roots(trees: Sequence[TreeIdentity]) -> tuple[str, ...]:
     """Return every root and package directory the trees cover.
-
-    Both, because a frame may name either.
 
     Returns:
         tuple[str, ...]: De-duplicated absolute directories, longest first so a

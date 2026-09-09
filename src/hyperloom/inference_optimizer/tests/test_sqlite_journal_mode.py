@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session database's journal mode is chosen deliberately, then checked.
-
-Every session directory lives on a networked filesystem, where WAL's
-shared-memory mapping can corrupt the database. That makes the journal mode a
-deployment decision, and SQLite answers a mode it cannot honour -- or does not
-recognise -- by leaving the database in whatever mode it was already in rather
-than by failing. A mode nobody chose is the failure this guards against.
-"""
+"""The session database's journal mode is chosen deliberately, then checked."""
 
 from __future__ import annotations
 
@@ -51,13 +44,7 @@ def test_the_requested_mode_is_verified_after_the_database_is_open(tmp_path):
 
 
 def test_a_database_that_declined_the_mode_fails_loudly_instead_of_running_on(tmp_path):
-    """An in-memory database cannot enter WAL and does not say so by failing.
-
-    It is the same shape as the case this exists for on a networked mount: the
-    pragma is accepted, the mode does not change, and only the readback tells
-    the difference between the durability that was asked for and the one in
-    force.
-    """
+    """An in-memory database cannot enter WAL and does not say so by failing."""
     conn = sqlite3.connect(":memory:")
     try:
         with pytest.raises(JournalModeError):

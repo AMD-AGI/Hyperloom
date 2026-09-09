@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A bring-up round written down: what each attempt does, in order.
-
-An attempt states what the server's own log contained, that log being what the
-classifier reads; naming a ladder stage synthesises one for it.
-"""
+"""A bring-up round written down: what each attempt does, in order."""
 
 from __future__ import annotations
 
@@ -214,10 +210,6 @@ class LaunchScenario:
     def from_dict(cls, raw: Mapping[str, Any]) -> "LaunchScenario":
         """Build a scenario from its serialized form.
 
-        Exactly one of two spellings is declared: ``attempts`` lists them, or
-        ``blockers`` lists stages peeled one per attempt, with a clean boot
-        appended unless ``clean_after`` is false.
-
         Args:
             raw: The scenario mapping.
 
@@ -285,9 +277,6 @@ def _peel(blockers: Sequence[Any], *, clean_after: bool) -> tuple[LaunchAttempt,
 
 def boot_log_for(stage: LadderStage | None, *, message: str = "") -> str:
     """Render a server log for a boot that stopped at ``stage``.
-
-    Every milestone strictly below ``stage`` is announced, then the failure --
-    the shape the classifier's progress scan is written against.
 
     Args:
         stage: The stage the boot stopped at, or ``None`` for a clean boot.

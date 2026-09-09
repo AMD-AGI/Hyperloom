@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resource facts ``PolicyGate`` needs but cannot read where it is asked.
-
-Two reasons a fact lands here rather than being read in the rule that wants it:
-the round store and the task registry answer asynchronously and the gate is
-synchronous, and the pool sizes reach ``rocm-smi`` on a host with no
-visible-device mask, which is not a call to make once per validated intent.
-
-The repair pass updates this in place at the top of every tick, before anything
-is admitted, and it already reads both sources. It is not the authority on any
-of these resources -- the acquire is (``RoundStore.open``, the task registry's
-unique idempotency key, ``SpecialistGpuPool.try_acquire``,
-``TaskRegistry.extend_lease``) -- so a rule reading it can be wrong about a
-resource that changed since; being wrong here denies an attempt that the
-acquire would have refused anyway.
-"""
+"""Resource facts ``PolicyGate`` needs but cannot read where it is asked."""
 
 from __future__ import annotations
 
@@ -114,9 +100,6 @@ def effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
 def whole_machine_pool_size() -> int:
     """Size of the whole-machine (framework / bench) GPU pool.
 
-    Every visible card, with no serving carve and no specialist-capacity gate:
-    a whole-machine specialist time-shares with serving.
-
     Returns:
         int: Number of visible cards.
     """
@@ -126,10 +109,6 @@ def whole_machine_pool_size() -> int:
 @dataclass
 class ResourceFacts:
     """What the resource rules read, updated in place once per tick.
-
-    A default instance refuses nothing: an unknown fact denies nothing, so a
-    gate constructed without a repair pass behind it sends every attempt to its
-    acquire.
 
     Attributes:
         read: Whether anything has read these from their sources. False denies

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What each reap unit reaches, and what a success by it is allowed to claim.
-
-The three units are not interchangeable, and the tests are written around the
-difference rather than around the shared happy path: the weakest one reaches a
-child that left its process group only because the tree was enumerated first,
-and even then its success is not proof.
-"""
+"""What each reap unit reaches, and what a success by it is allowed to claim."""
 
 from __future__ import annotations
 
@@ -38,12 +32,7 @@ _ESCAPING_PARENT = (
 
 
 def _alive(pid: int) -> bool:
-    """Whether a pid names a live process.
-
-    Zombie-aware, like the reaper's own reading: this test's parent process is
-    a child of the test runner, so it lingers unreaped after it is killed and a
-    bare signal-0 probe would call it alive forever.
-    """
+    """Whether a pid names a live process."""
     return running(pid)
 
 
@@ -66,11 +55,7 @@ def test_the_unit_never_claims_proof():
 
 @pytest.mark.asyncio
 async def test_the_process_group_unit_reaches_a_child_that_left_the_group():
-    """The pre-collected tree is the only thing that reaches an escapee.
-
-    An engine that puts its workers in their own session is the shape that once
-    survived a bare group kill and kept holding a port.
-    """
+    """The pre-collected tree is the only thing that reaches an escapee."""
     parent = subprocess.Popen(  # nosec B603
         [sys.executable, "-c", _ESCAPING_PARENT],
         stdout=subprocess.PIPE,

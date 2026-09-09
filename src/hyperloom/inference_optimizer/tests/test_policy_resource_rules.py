@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The gate refuses from facts read before it ran, and the acquire agrees.
-
-The property under test is that a resource rule does not release itself. The
-gate reads facts the repair pass left; what lifts a refusal is a re-read
-showing the resource free, an explicit bypass, or the round's own holder
-asking. Firing twice is not one of them, because a second bring-up against a
-held machine fights the first for the same cards whether or not the gate
-already said so once.
-
-The rounds here are opened against a real database on the virtual clock the
-rehearsal seam supplies, so a lease that runs out an hour after the round
-opened is a line rather than an hour.
-"""
+"""The gate refuses from facts read before it ran, and the acquire agrees."""
 
 from __future__ import annotations
 
@@ -112,12 +100,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED])
 async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, outcome):
-    """Settling releases, whether or not anything confirmed the holder dead.
-
-    A process-group reap cannot prove a tree gone, so "unconfirmed" is the
-    ordinary answer. Holding the machine on the strength of what nobody could
-    observe is the shape that trapped a session before.
-    """
+    """Settling releases, whether or not anything confirmed the holder dead."""
     facts = ResourceFacts()
     gate = _gate(facts)
     opened = await store.open(
@@ -177,12 +160,7 @@ async def test_an_open_round_nobody_settled_stops_denying_when_its_lease_runs_ou
 
 @pytest.mark.asyncio
 async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock):
-    """The facts have not changed, so neither has the answer.
-
-    A rule that let the second consecutive attempt through would hand the
-    machine to a bring-up while the first one still holds it -- the case the
-    rule exists for.
-    """
+    """The facts have not changed, so neither has the answer."""
     facts = ResourceFacts()
     gate = _gate(facts)
     await store.open(
@@ -202,12 +180,7 @@ async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock)
 
 @pytest.mark.asyncio
 async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, clock):
-    """Ten ticks of a role that will not stop asking, against one live round.
-
-    Every attempt is refused, and the sweep for a second holder confirms the
-    gate never let one through: the round the loop started with is the round
-    still standing at the end.
-    """
+    """Ten ticks of a role that will not stop asking, against one live round."""
     facts = ResourceFacts()
     gate = _gate(facts)
     held = await store.open(
@@ -243,13 +216,7 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
 
 @pytest.mark.asyncio
 async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store, clock):
-    """A revalidation baseline is admitted because it holds the round it opened.
-
-    The rule keeps refusing while the round stands, and a denial at dispatch
-    does not defer the row, it cancels it -- so anything that refused the
-    holder would cancel the very bring-up the round was opened for, tick after
-    tick. The holder arm reads the acquire the row already won.
-    """
+    """A revalidation baseline is admitted because it holds the round it opened."""
     facts = ResourceFacts()
     gate = _gate(facts)
     opened = await store.open(
@@ -300,13 +267,7 @@ def _reachable_code(*entries: object) -> list:
 
 
 def test_no_validator_on_the_intent_path_reaches_a_database_call():
-    """The chokepoint runs on every intent; a lock taken here stalls the loop.
-
-    Asserted on what the code can reach and on what the module can name, not on
-    the import closure: ``policy.projection`` imports the round store, which
-    imports ``sqlite3``, so the closure contains it and always will. What must
-    not exist is a call.
-    """
+    """The chokepoint runs on every intent; a lock taken here stalls the loop."""
     gate = PolicyGate(role_registry=default_role_registry())
     validators = [
         getattr(type(gate), name)
@@ -339,11 +300,7 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
 
 
 def test_the_resource_rules_refuse_nothing_until_the_facts_are_read():
-    """A gate with no repair pass behind it sends every attempt to its acquire.
-
-    Unread facts are zeros, and a zero pool read as a configured zero refuses
-    every GPU dispatch on a session that never installed a pass.
-    """
+    """A gate with no repair pass behind it sends every attempt to its acquire."""
     request = {"needs_gpu": True, "gpu_count": 8}
     _gate().validate_intent("orchestration", _baseline())
     _gate()._validate_specialist_gpu_request(request)

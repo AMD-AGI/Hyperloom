@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The installed parser, not a rule table, decides whether an argv will launch.
-
-Both failures reproduced here are ones that cost real sessions a round each: a
-flag whose accepted spelling changed between framework versions, and a flag
-that belongs to a different framework. Neither is visible in the argv, and
-neither would be caught by a list of known-good flags kept in this repository,
-because such a list is a copy of a parser that keeps moving.
-
-So the framework here is a real installed package with a real ``argparse``
-parser, reached through the production sglang adapter, and the verdicts come
-from running it. No GPU, no server, and no rule added anywhere for either
-failure.
-"""
+"""The installed parser, not a rule table, decides whether an argv will launch."""
 
 from __future__ import annotations
 
@@ -59,11 +47,7 @@ def _install_sglang(root: Path, version: str) -> Path:
 
 @pytest.fixture
 def serving(tmp_path, monkeypatch):
-    """A launch env whose sglang is the one the probe interpreter also sees.
-
-    The probe interpreter is pinned to this process's own, which is the case
-    the check is meant to accept: one interpreter, one install, one verdict.
-    """
+    """A launch env whose sglang is the one the probe interpreter also sees."""
     site = _install_sglang(tmp_path / "serve", "0.5.1")
     monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
     return {
@@ -95,11 +79,7 @@ def test_an_argv_the_installed_parser_accepts_is_ok(serving):
     ),
 )
 def test_the_parser_refuses_an_argument_it_does_not_have(serving, argv, flag):
-    """Both failures are named by the installed parser, with no rule added here.
-
-    The repair is withheld so what is asserted is the refusal itself rather
-    than what the round does about it.
-    """
+    """Both failures are named by the installed parser, with no rule added here."""
     verdict = _check(argv, serving, digest="")
     assert verdict.status == pf.INVALID
     assert verdict.dropped == (flag,)

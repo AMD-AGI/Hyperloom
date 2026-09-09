@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run the out-of-band supervisor as its own process.
-
-Neither failure it catches -- a coordinator that died, a coordinator that
-stopped running its loop -- is observable from inside that process.
-"""
+"""Run the out-of-band supervisor as its own process."""
 
 from __future__ import annotations
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The repair pass, exercised against the states it exists to get a session out of.
-
-Every case here is a session that cannot move: a round nobody will settle, a
-task row with no process, a review nobody answered. The point of each test is
-not that the repair is possible but that it happens without anything having to
-admit it first.
-"""
+"""The repair pass, exercised against the states it exists to get a session out of."""
 
 from __future__ import annotations
 
@@ -59,13 +53,7 @@ _NOW = time.time()
 
 @pytest.fixture(autouse=True)
 def _anchor_now_to_this_test():
-    """Re-anchor :data:`_NOW` to the instant this test runs.
-
-    A stale origin dates the task rows AFTER the moment the rules are asked
-    about, and a rule measuring how long a holder has been terminal then reads a
-    negative age and waits forever -- a green file on its own, failing only in a
-    shard long enough for the drift to exceed the offsets the tests use.
-    """
+    """Re-anchor :data:`_NOW` to the instant this test runs."""
     global _NOW
     _NOW = time.time()
 
@@ -168,12 +156,7 @@ async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, l
 
 @pytest.mark.asyncio
 async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
-    """The pass is the one thing that runs when the session is already stopping.
-
-    A stopped session dispatches nothing, so every repair reached through a
-    dispatch is unreachable exactly when it is needed. Nothing here consults
-    the stop reason, the phase or the mode.
-    """
+    """The pass is the one thing that runs when the session is already stopping."""
     state = _State()
     state.stop_reason = "enablement_stalled"
     rec, rounds, tasks, _ = _build(db, state=state)
@@ -187,13 +170,7 @@ async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
 
 @pytest.mark.asyncio
 async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
-    """Recorded, not acted on.
-
-    A process-group reap can never prove a tree gone, so "unconfirmed" is the
-    ordinary answer rather than an emergency. The lease has run out either way,
-    and a round that held the machine on the strength of what nobody could
-    observe is the shape that trapped a session before.
-    """
+    """Recorded, not acted on."""
     rec, rounds, tasks, state = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
@@ -442,12 +419,7 @@ async def test_the_tick_is_stamped_before_any_rule_can_block(db):
 
 @pytest.mark.asyncio
 async def test_a_round_whose_lane_another_pass_took_is_settled_here(db):
-    """Whoever swept the lease, the round it belonged to still ends.
-
-    The round's row says it has hours of lease left. Its lane row is gone, which
-    is what a sweep running outside this pass leaves behind, and that -- not the
-    round's own column -- is what decides the round has run out.
-    """
+    """Whoever swept the lease, the round it belonged to still ends."""
     rec, rounds, tasks, _ = _build(db, reaper=_Reaper(Reap(_NOW, REAP_KILLED)))
     await _open_round(rounds, tasks, holder="spec-1", lease=_LEASE)
     async with db.transaction() as cur:
@@ -463,11 +435,7 @@ async def test_a_round_whose_lane_another_pass_took_is_settled_here(db):
 
 @pytest.mark.asyncio
 async def test_a_revalidation_window_whose_task_is_terminal_is_closed(db):
-    """A window nobody will close holds the guard that drops ``skip_to_close``.
-
-    ``validation_pending`` is true in every phase, so a revalidation task that
-    ended without reporting takes away the only exit an unpromotable run has.
-    """
+    """A window nobody will close holds the guard that drops ``skip_to_close``."""
     state = _State()
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"

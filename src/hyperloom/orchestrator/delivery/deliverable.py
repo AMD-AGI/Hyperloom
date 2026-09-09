@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The declared deliverable a specialist round hands back.
-
-A round names what it changed -- tree, target paths, env and arg layers, setup
-commands, whole-file artifacts -- rather than leaving the harness to infer it.
-"""
+"""The declared deliverable a specialist round hands back."""
 
 from __future__ import annotations
 
@@ -97,11 +93,6 @@ def _clean_seq(values: Any) -> tuple[str, ...]:
 
 def parse_deliverable(payload: Mapping[str, Any], *, default_tree_id: str) -> Deliverable:
     """Read a round's declared deliverable out of its ``specialist_done`` payload.
-
-    A ``deliverable`` object is read when the round emits one, otherwise the
-    flat keys (``patches_written``, ``extra_envs``, ``extra_server_args``,
-    ``setup_commands``). Artifacts are not read here: the install resolves each
-    declared entry against the workspace sandbox and the allowlisted roots.
 
     Args:
         payload: The parsed ``specialist_done`` content.

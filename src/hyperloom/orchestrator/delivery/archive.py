@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a round's archive actually holds, recorded one copy at a time.
-
-The archive collector drops ``runs/`` wholesale and retains ``reports/``, so a
-deliverable is resolvable by a later reader only once its copy lands under
-``reports/``. A record is therefore appended by the copy that made it, never
-derived ahead of the write: a path named before the copy exists is a path every
-consumer resolves to nothing, which is worse than naming none at all.
-
-Each record carries the role the file plays, because a reader that wants the
-launch config a bench started from should not have to recognise it by filename,
-and because a round applies any number of patches under names its specialist
-chose.
-"""
+"""What a round's archive actually holds, recorded one copy at a time."""
 
 from __future__ import annotations
 
@@ -61,11 +49,7 @@ class ArchivedFile:
 
 
 class RoundArchive:
-    """The copies one round's archive holds, in the order they landed.
-
-    A collector, not a plan: :meth:`record` is called by the copy, so the
-    archive never names a file the copy refused or never attempted.
-    """
+    """The copies one round's archive holds, in the order they landed."""
 
     def __init__(self, session_dir: Path | str) -> None:
         """Open an empty archive record rooted at ``session_dir``.

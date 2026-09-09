@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bring-up mutex, exercised across ticks on a clock nobody waits for.
-
-The store's whole job is to answer one question -- may another round start? --
-and every interesting answer is separated from the acquire that caused it by
-minutes of lease, so the behaviour only exists across ticks. The virtual clock
-supplies those ticks as numbers, so a lease that runs out an hour after the
-round opened is one line rather than an hour.
-"""
+"""The bring-up mutex, exercised across ticks on a clock nobody waits for."""
 
 from __future__ import annotations
 
@@ -41,11 +34,7 @@ def store(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED, ABANDONED, BOOTED])
 async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store, virtual_clock, outcome):
-    """Settling releases. No outcome buys a round exclusion it did not pay a lease for.
-
-    An exclusion that outlives every reader is what trapped a session before:
-    the row said the machine was held and nothing could say otherwise.
-    """
+    """Settling releases. No outcome buys a round exclusion it did not pay a lease for."""
     clock = virtual_clock
     opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
     assert opened.ok
@@ -330,12 +319,7 @@ async def _lane_row(store, round_id: str):
 
 @pytest.mark.asyncio
 async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, virtual_clock):
-    """The round and its lease are one write, so the lease reaper sees the round.
-
-    Without this the round is a holder of the machine that ``lane_holders`` has
-    no row for, and the lease sweep and the round sweep are two clocks over the
-    same fact.
-    """
+    """The round and its lease are one write, so the lease reaper sees the round."""
     clock = virtual_clock
     opened_at = clock.wall()
     opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")

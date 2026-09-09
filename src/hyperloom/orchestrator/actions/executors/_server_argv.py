@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The writes to the server argument string, and the argv they yield.
-
-:func:`add_server_arg_unless_pinned` is how a composer adds to the string: one
-merge that honours whatever the caller already pinned, so a per-model injection
-cannot silently overwrite an operator's choice. :func:`seal_server_argv` ends
-the composition -- it normalises the string, applies the shell guard, tokenises
-it into the argv the framework's parser will receive, and writes the canonical
-form back. Consumers downstream of materialisation read a :class:`ServerArgv`
-rather than the raw env value.
-"""
+"""The writes to the server argument string, and the argv they yield."""
 
 from __future__ import annotations
 
@@ -75,10 +66,6 @@ def add_server_arg_unless_pinned(
 ) -> bool:
     """Merge ``arg`` into the composed argument string unless it is already pinned.
 
-    Every injection reaching the argument env goes through here, so a model- or
-    host-specific flag is added the one way: merged onto the left of what is
-    there (last wins), and skipped outright when the caller already chose.
-
     Args:
         envs: The benchmark env mapping being materialised.
         framework: The framework the config serves.
@@ -100,8 +87,6 @@ def add_server_arg_unless_pinned(
 
 def seal_server_argv(envs: MutableMapping[str, Any], framework: str | None) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
-
-    Must be the last statement that touches the argument env.
 
     Args:
         envs: The benchmark env mapping being materialised.
@@ -155,10 +140,6 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
 
 def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[str, str]:
     """Return the environment the server will be launched into.
-
-    The rendered YAML's benchmark envs are exported around the server, so they
-    -- not the orchestrator's own environment -- decide which interpreter and
-    which installed packages it resolves.
 
     Args:
         config_path: Path to the materialised YAML.

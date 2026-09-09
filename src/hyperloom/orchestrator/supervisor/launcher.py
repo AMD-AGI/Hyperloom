@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Start and stop the supervisor alongside an optimizer run.
-
-The supervisor is spawned by the process it watches, into its own session, so
-that the coordinator's teardown -- which reaps process groups -- cannot take it
-down as collateral.
-"""
+"""Start and stop the supervisor alongside an optimizer run."""
 
 from __future__ import annotations
 
@@ -53,10 +48,6 @@ def _truthy(value: str) -> bool:
 
 def tick_stall_sec(session_sec: float) -> float:
     """Return the stall window a session of ``session_sec`` should be watched with.
-
-    Never more than half the budget, so a wedged coordinator is caught while
-    the session it is wedging still has time to run; never below the floor, so
-    a slow tick is not mistaken for a stopped one.
 
     Args:
         session_sec: The session's wall-clock budget; ``0`` when unknown.
@@ -125,8 +116,6 @@ def spawn_supervisor(
 
 def stop_supervisor(proc: subprocess.Popen | None) -> None:
     """Stop a supervisor started by :func:`spawn_supervisor`.
-
-    Terminates it, then kills its group after :data:`_STOP_GRACE_SEC`.
 
     Args:
         proc: The supervisor process; ``None`` is a no-op.

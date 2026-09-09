@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Name the faults in the host that no patch to the model could repair.
-
-The detection is structural -- an :func:`importlib.util.find_spec` and an import
-in the interpreter that will serve, an :func:`os.path.exists` on the checkpoint,
-a connect to the port, the free device memory against the weight bytes on disk
--- and the verdict comes off exception classes, never off
-error wording, which is carried into the record only for a human. Three
-outcomes, never two: :data:`OK` and :data:`FAULT` are verdicts, and
-:data:`UNAVAILABLE` is the answer whenever a check could not be made.
-"""
+"""Name the faults in the host that no patch to the model could repair."""
 
 from __future__ import annotations
 
@@ -137,9 +128,6 @@ class EnvVerdict:
 def _checkpoint_verdict(model: str) -> EnvVerdict:
     """Judge the checkpoint the config names.
 
-    Only an explicit filesystem path is judged; a bare repository id resolves
-    from a hub and is not this host's to hold.
-
     Returns:
         EnvVerdict: A fault when the path does not resolve, else :data:`OK`.
     """
@@ -188,10 +176,6 @@ def _port_verdict(port: int) -> EnvVerdict:
 def _proven_serving_interpreter(framework: str, launch_env: Mapping[str, str]) -> str:
     """Return the interpreter the server will run in, only when that is provable.
 
-    Proof is either the pin the launch env carries, or an interpreter sitting
-    beside the framework's own console script. Anything else is the resolution
-    falling back to whatever ``python3`` is on ``PATH``.
-
     Returns:
         str: The proven interpreter, or ``""`` when nothing proves one.
     """
@@ -214,10 +198,6 @@ def _import_verdict(
     probe: ProbeFn | None,
 ) -> EnvVerdict:
     """Judge the serving interpreter's ability to import the framework.
-
-    The probe runs under ``launch_env`` so it resolves the packages the server
-    will, and only against an interpreter :func:`_proven_serving_interpreter`
-    vouches for.
 
     Returns:
         EnvVerdict: The verdict; :data:`UNAVAILABLE` when the probe could not
@@ -280,8 +260,6 @@ def check_environment(
 ) -> EnvVerdict:
     """Decide whether the host can host this round at all.
 
-    The checks run cheapest-first and stop at the first fault.
-
     Args:
         framework: Framework the config serves.
         model: Model path or repository id the round would serve.
@@ -311,9 +289,6 @@ def check_environment(
 def env_fault_observation(verdict: EnvVerdict, *, session_dir: Path | None = None) -> BootObservation:
     """Return the boot observation for a host that cannot run this round.
 
-    Recorded like any other bring-up observation: at the ladder stage the launch
-    would have died at, under this module's producer, carrying ``env_fault``.
-
     Args:
         verdict: The faulting verdict.
         session_dir: Session root, redacted out of the recorded text.
@@ -342,12 +317,7 @@ def env_fault_observation(verdict: EnvVerdict, *, session_dir: Path | None = Non
 
 
 def is_env_fault(observation: BootObservation | None) -> bool:
-    """True when ``observation`` names one of the faults that end a run.
-
-    Membership is this module's own vocabulary, not any observation carrying an
-    ``env_fault``: the ladder classifier marks a host-resource shortfall that
-    way too, and a config lever can still address that one.
-    """
+    """True when ``observation`` names one of the faults that end a run."""
     return observation is not None and observation.env_fault in _FAULT_STAGE
 
 

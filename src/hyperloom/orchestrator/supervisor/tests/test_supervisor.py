@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two failure shapes, and that an escalation is reachable in both.
-
-A coordinator that died and a coordinator whose tick is wedged look identical
-from inside the session -- nothing happens -- and they need different responses,
-because in the second case there is still a process that can be asked to stop
-itself and in the first there is not.
-"""
+"""The two failure shapes, and that an escalation is reachable in both."""
 
 from __future__ import annotations
 
@@ -49,11 +43,7 @@ def _own_the_session(session_dir, pid: int) -> None:
 
 
 def _stamp_tick_as(session_dir, pid: int, *, tick: int, now_unix: float) -> None:
-    """Stamp a tick the way the coordinator owning ``pid`` would have.
-
-    The coordinator writes the lock and the stamp from one process, so a stamp
-    carrying a different pid than the lock owner is a previous leg's.
-    """
+    """Stamp a tick the way the coordinator owning ``pid`` would have."""
     with mock.patch.object(store.os, "getpid", return_value=pid):
         store.stamp_tick(session_dir, tick=tick, now_unix=now_unix)
 

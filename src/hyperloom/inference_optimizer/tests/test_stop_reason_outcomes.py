@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a terminal says about the run, read the same way everywhere.
-
-Two consumers derive an outcome from a ``stop_reason``: the live run snapshot
-the recorder writes while the session runs, and the session projection the
-exporter writes at the end. They must agree, and a terminal that names a fault
-in the host must not be reported as a verdict about the model.
-"""
+"""What a terminal says about the run, read the same way everywhere."""
 
 from __future__ import annotations
 
@@ -55,14 +49,7 @@ def test_a_refused_argv_is_the_harness_faulting_not_the_model():
 
 @pytest.mark.parametrize("reason", sorted(sr.INFRASTRUCTURE_STOP_REASONS))
 def test_an_infrastructure_terminal_survives_being_written_to_the_state(reason):
-    """The state's closed vocabulary admits every one of these terminals.
-
-    Asserting on the constants alone cannot see this: ``set_stop_reason`` maps
-    anything the vocabulary does not list to ``"unknown"``, and ``"unknown"``
-    is a failure. A terminal missing from the vocabulary therefore reaches the
-    report as a verdict about the model no matter what this module says about
-    it, and nothing but a write through the state notices.
-    """
+    """The state's closed vocabulary admits every one of these terminals."""
     state = SharedState()
 
     written = state.set_stop_reason(reason)
@@ -73,11 +60,7 @@ def test_an_infrastructure_terminal_survives_being_written_to_the_state(reason):
 
 
 def test_the_new_category_is_consulted_by_the_function_that_derives_the_outcome():
-    """A category no derivation reads is a category that changes nothing.
-
-    The model-gate set is the counterexample the codebase already carries: it
-    names the stage a session reached and is deliberately not consulted here.
-    """
+    """A category no derivation reads is a category that changes nothing."""
     for reason in sr.INFRASTRUCTURE_STOP_REASONS:
         assert sr.outcome_status(reason) == "aborted"
         assert _outcome_status(reason) == "aborted"
@@ -99,13 +82,7 @@ def test_both_consumers_derive_the_outcome_the_same_way():
 
 
 def test_every_classified_terminal_is_one_the_state_machine_can_actually_write():
-    """A classified reason outside the vocabulary is a rule for a dead terminal.
-
-    ``SharedState.set_stop_reason`` refuses anything outside
-    ``STOP_REASON_VOCAB``, so a name only this module knows can never reach it.
-    It is not inert either: it reads as a live rule, and the terminal it
-    silently stops covering keeps being classified by the fallthrough.
-    """
+    """A classified reason outside the vocabulary is a rule for a dead terminal."""
     from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
 
     classified = (

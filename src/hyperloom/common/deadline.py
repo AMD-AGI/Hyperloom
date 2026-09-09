@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""An absolute instant work must stop by, and the arithmetic that keeps it absolute.
-
-:class:`Deadline` is how a bound is held in this process: ``None`` is the only
-spelling of unbounded, and one with ``<= 0`` remaining is expired and every
-consumer must honour it as a stop. ``time.monotonic()`` has a per-process
-origin, so a bound that crosses a process boundary travels as
-:meth:`Deadline.remaining` seconds and is re-anchored on the far side with
-:meth:`Deadline.after`.
-"""
+"""An absolute instant work must stop by, and the arithmetic that keeps it absolute."""
 
 from __future__ import annotations
 
@@ -53,8 +45,6 @@ class Deadline:
 
     def tightened_to(self, other: "Deadline | None") -> "Deadline":
         """Return whichever of the two stops sooner.
-
-        Combining bounds only ever shortens; no spelling here grants time.
 
         Args:
             other: A second bound, or ``None`` for unbounded.

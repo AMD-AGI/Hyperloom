@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Property tests for the failure-digest invariant.
-
-The digest of a failure must be a function of the failure and nothing else: two
-hosts, two sessions, two pids and two log volumes that hit the same wall have to
-collapse to one key, or the bring-up path cannot tell "the same wall again" from
-"a new, deeper wall". The converse carries equal weight -- a digest that is
-stable but not discriminating collapses every failure into one key -- so both
-directions are asserted here.
-"""
+"""Property tests for the failure-digest invariant."""
 
 from __future__ import annotations
 

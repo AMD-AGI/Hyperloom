@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Repair first, admit second: the tick's opening act, run with nothing in its way.
-
-Runs at the top of every tick with no condition on phase, budget, mode or state,
-because the state it repairs is exactly what stops the dispatcher from
-dispatching. Each rule is an independent repair -- an expired round, a terminal
-holder, a task whose process is provably gone, an undecided review past its TTL,
-an unanswered review -- and the resource facts the gate reads are
-re-read from whatever they leave. A round ended here is also charged to the
-round ledger, so a round that died without reporting still costs the session one.
-
-This pass is also the loop's only sweep of the lease table. An open round holds
-a lane row for as long as it is open, so a round's expiry and a lease's expiry
-are the same fact, and the sweep has to run where the round can be settled in
-the same pass.
-"""
+"""Repair first, admit second: the tick's opening act, run with nothing in its way."""
 
 from __future__ import annotations
 
@@ -191,9 +177,6 @@ class Reconciler:
     async def run(self, now_unix: float) -> ReconcileReport:
         """Run every rule in order, the projection rebuild last.
 
-        A rule that raises is recorded on the report and does not stop the ones
-        after it.
-
         Args:
             now_unix: Current wall time.
 
@@ -228,17 +211,7 @@ class Reconciler:
         return report
 
     async def _stamp_tick(self, now_unix: float, report: ReconcileReport) -> None:
-        """Record that a tick has started, for the process watching from outside.
-
-        Runs before any rule that can block, so the supervisor can tell a tick
-        that started and is still going from one that finished. It is the only
-        thing the supervisor reads: a coordinator that has stopped ticking is
-        past reading anything this pass could have been left.
-
-        The write fsyncs the file and its directory, and the session directory
-        can be a network mount, so it runs off the loop thread: a stamp that
-        blocked the loop would manufacture the stall it exists to report.
-        """
+        """Record that a tick has started, for the process watching from outside."""
         if self._session_dir is None:
             return
         await asyncio.to_thread(
@@ -249,11 +222,7 @@ class Reconciler:
         )
 
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
-        """Fail every running task whose process is provably gone.
-
-        A row with no recorded pid, or one whose pid still answers, is left
-        running: inability to observe is not terminality.
-        """
+        """Fail every running task whose process is provably gone."""
         report.failed_tasks.extend(await self._tasks.reclaim_dead_running(reason="reconciler_dead_holder"))
 
     async def _deny_timed_out_reviews(self, now_unix: float, report: ReconcileReport) -> None:
@@ -310,12 +279,7 @@ class Reconciler:
         pending.verdict = TIMEOUT_VERDICT
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
-        """Expire, advance or leave each open round, oldest first.
-
-        A round has run out when it no longer holds its lane. The lane row is
-        the round's only clock, so whichever pass swept it -- and whether the
-        row is already deleted or merely past its TTL -- the answer is the same.
-        """
+        """Expire, advance or leave each open round, oldest first."""
         holding = await self._locks.bringup_round_holders(now_unix)
         for round_row in await self._rounds.open_rounds():
             if round_row.round_id not in holding:
@@ -324,14 +288,7 @@ class Reconciler:
             await self._advance_or_expire(round_row, now_unix, report)
 
     async def _close_stale_validation_window(self, now_unix: float, report: ReconcileReport) -> None:
-        """Close a revalidation window whose task will never report.
-
-        ``validation_pending`` holds ``enablement_close_guard_active()`` true in
-        every phase, and that guard drops ``skip_to_close``. A revalidation task
-        that ends without a result leaves the flag set, so the session keeps the
-        one exit an unpromotable run has left. Only a terminal tracked task
-        closes the window; an unobservable one is left alone.
-        """
+        """Close a revalidation window whose task will never report."""
         state = self._shared_state
         if state is None or not bool(state.enablement.validation_pending):
             return
@@ -348,22 +305,11 @@ class Reconciler:
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
-        """Sweep every lease past its TTL, this loop's only sweep of the table.
-
-        An open round's lane row is one of these leases, which is why the sweep
-        belongs to this pass rather than to the maintenance tick. It runs after
-        the rounds are resolved because :func:`.reap.holder_target` reads a
-        holder's processes out of the same rows: deleting them first would throw
-        away the evidence an expiry outcome is decided on.
-        """
+        """Sweep every lease past its TTL, this loop's only sweep of the table."""
         report.leases_reaped = len(await self._locks.reap_expired())
 
     async def _advance_or_expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
-        """Move a terminal-holder round forward, or end it once its cap passes.
-
-        A terminal task never settles the round by itself: the round covers the
-        specialist and the integrate that consumes its deliverable.
-        """
+        """Move a terminal-holder round forward, or end it once its cap passes."""
         holder = await self._task(round_row.holder_task_id)
         if holder is None or holder.state not in TERMINAL_STATES:
             return
@@ -390,10 +336,7 @@ class Reconciler:
         await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
 
     async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport, *, why: str) -> None:
-        """End a round, reaped on proof and unreaped without it.
-
-        ``why`` names the rule that ended it and is recorded on the outbox row.
-        """
+        """End a round, reaped on proof and unreaped without it."""
         reap = await self._confirm_gone(round_row.holder_task_id, now_unix)
         outcome = EXPIRED_REAPED if reap.confirmed_unix is not None else EXPIRED_UNREAPED
         result = await self._rounds.settle(
@@ -421,10 +364,6 @@ class Reconciler:
 
     async def _confirm_gone(self, holder_task_id: str, now_unix: float) -> Reap:
         """Establish whether the holder is gone, and say so only if it is.
-
-        Two things can establish it: the reap unit reporting every process it
-        addressed gone, or -- when nothing was recorded -- the holder's own task
-        row carrying a transition written because its work ended.
 
         Returns:
             Reap: The confirmation, carrying the claim of whichever unit ran, or
@@ -485,12 +424,7 @@ class Reconciler:
 
 
 def _terminal_by_observation(task: Task) -> bool:
-    """Whether the task's terminal transition was written because work ended.
-
-    Returns True when the row is terminal and its last transition observed the
-    work stop -- the worker reported it, or a reclaimer proved the pid dead. A
-    lease watchdog's transition returns False: it timed a lease, not a process.
-    """
+    """Whether the task's terminal transition was written because work ended."""
     if task.state not in TERMINAL_STATES:
         return False
     for entry in reversed(task.history):
@@ -506,10 +440,7 @@ def _terminal_by_observation(task: Task) -> bool:
 
 
 def _unix_of(stamp: str) -> float:
-    """Read an ISO-8601 timestamp from a task or event row as unix seconds.
-
-    A naive stamp is read as UTC, which is what ``now_iso`` wrote it in.
-    """
+    """Read an ISO-8601 timestamp from a task or event row as unix seconds."""
     parsed = datetime.fromisoformat(stamp)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)

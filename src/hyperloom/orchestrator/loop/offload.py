@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run blocking work on a worker thread under a deadline the caller controls.
-
-The coordinator tick notices an operator's stop, a blown deadline and a finished
-task, and notices none of them while a synchronous call is on its stack.
-:func:`offload` bounds the *await*, not the thread, so the tick resumes at a
-known instant whatever the work is still doing.
-"""
+"""Run blocking work on a worker thread under a deadline the caller controls."""
 
 from __future__ import annotations
 

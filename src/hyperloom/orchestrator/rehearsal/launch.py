@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A launch backend that plays a written-down round instead of booting a server.
-
-A round consumes the server log at the path the launch was handed, the
-artifacts left in its slot, the returncode, and the budget the attempt spent.
-The scenario states all four and this produces them on disk.
-"""
+"""A launch backend that plays a written-down round instead of booting a server."""
 
 from __future__ import annotations
 

@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A whole bring-up round, played in this process on a clock nobody waits for.
-
-The round under test is the one that runs when a baseline will not boot: an
-attempt fails, the failure is observed and recorded, the lane opens a repair
-task against the registry, the gate re-validates it before dispatch, the
-specialist answers, and the next attempt gets further. Every one of those steps
-had its own test and none of them had a test of the sequence, because the
-sequence needed a GPU.
-
-Here the sequence is a scenario: three attempts peeling two serial blockers,
-answered by scripted backends, charged to a virtual clock. What is asserted is
-what a later reader of the session has to be able to find -- one observation
-artifact per attempt, under the path the packaging reads, each naming a stage
-further up the ladder than the last.
-"""
+"""A whole bring-up round, played in this process on a clock nobody waits for."""
 
 from __future__ import annotations
 
@@ -90,12 +76,7 @@ def _ctx(task_id: str) -> RunnerContext:
 
 @pytest.fixture
 def round_slot(tmp_path, monkeypatch):
-    """A session root, a round workspace, and a baseline with no salvage pass.
-
-    The harvest/workspace helpers are stubbed because they scan for artifacts a
-    real Magpie leaves and a scripted attempt does not; what this test reads is
-    the boot observation, which the executor writes itself.
-    """
+    """A session root, a round workspace, and a baseline with no salvage pass."""
     session = tmp_path / "session"
     session.mkdir()
     slot = tmp_path / "round"
@@ -108,12 +89,7 @@ def round_slot(tmp_path, monkeypatch):
 
 @pytest.fixture
 def registry(tmp_path):
-    """A real ``TaskRegistry``, round store and lock manager over one database.
-
-    One database on purpose: the acquire and the holder's task row commit in a
-    single transaction, so a test that gave them separate connections would not
-    be exercising the thing that makes them atomic.
-    """
+    """A real ``TaskRegistry``, round store and lock manager over one database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
     ensure_schema(db.raw)
     yield TaskRegistry(db), RoundStore(db), ResourceLockManager(SqliteLeaseBackend(db))
@@ -150,11 +126,6 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
 
 def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: str):
     """Build the collaborator surface the enablement lane runs against.
-
-    Only the coordinator attributes the lane actually reads are supplied; the
-    lane's own methods are the real ones, so admission and the registry row are
-    all production behaviour. The cap is derived from the ledger (rounds),
-    so callers pre-seed the round store to set up the desired precondition.
 
     Args:
         session: The session root.
@@ -223,9 +194,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
 
 def _advanced_by(seconds: float):
     """A ``time.time`` reading ``seconds`` later than the one in force now.
-
-    The round's lifecycle is minutes wide and nothing in this test waits, so
-    the ticks are separated by moving the reading rather than the wall.
 
     Args:
         seconds: How much later the next reading is.
@@ -423,13 +391,7 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
     launch_backend,
     virtual_clock,
 ):
-    """A round with an open bring-up does not buy the baseline extra retries.
-
-    The round is deliberately made to look maximally alive -- patches stacked,
-    a specialist in flight, attempts on the board -- because that shape used to
-    stand the terminal down, and a session in it dispatched baselines until the
-    wall-clock ran out.
-    """
+    """A round with an open bring-up does not buy the baseline extra retries."""
     from hyperloom.orchestrator.phases import machine_state
 
     session, slot = round_slot
@@ -472,10 +434,7 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     registry,
     monkeypatch,
 ):
-    """Consecutive rounds that repair nothing exhaust the cap and stop the run.
-
-    The cap is derived from the ledger, so we seed FAILED rounds directly.
-    """
+    """Consecutive rounds that repair nothing exhaust the cap and stop the run."""
     import hyperloom.agents.framework.sources as sources
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
@@ -510,10 +469,7 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     registry,
     monkeypatch,
 ):
-    """An advancing round resets the streak so a bring-up outlives the cap.
-
-    The cap counts consecutive stalled rounds; ADVANCED resets the streak.
-    """
+    """An advancing round resets the streak so a bring-up outlives the cap."""
     import hyperloom.agents.framework.sources as sources
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
@@ -581,11 +537,7 @@ async def test_the_arg_error_terminal_survives_an_alternating_failure_sequence(
     launch_backend,
     virtual_clock,
 ):
-    """Two rejected-argument launches end the run even when one boot separates them.
-
-    The engine failure between them is not evidence that the arguments changed,
-    so it must not clear what the first rejection recorded.
-    """
+    """Two rejected-argument launches end the run even when one boot separates them."""
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_ALTERNATING), clock=virtual_clock)
     launch_backend(launches)

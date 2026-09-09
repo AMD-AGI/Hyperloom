@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Turn raw bring-up streams into one typed :class:`BootObservation`.
-
-The classifier is pure: everything it reads is handed to it. It borrows the
-failure vocabulary from the enablement rule table and maps each rule onto the
-boot ladder, so which wall was hit and how far the boot got are answered by one
-pass over the same text. The server child's own log is read before the wrapper's
-streams, which report a child's death rather than the cause of it.
-"""
+"""Turn raw bring-up streams into one typed :class:`BootObservation`."""
 
 from __future__ import annotations
 
@@ -107,11 +100,7 @@ def _roots_of(trees: Sequence[TreeIdentity] | Sequence[str] | None) -> tuple[str
 
 
 def _witness_progress(text: str) -> tuple[LadderStage | None, dict[str, str]]:
-    """Scan ``text`` for milestone markers.
-
-    Returns the deepest milestone witnessed (``None`` when none was) and, per
-    milestone, the marker that witnessed it.
-    """
+    """Scan ``text`` for milestone markers."""
     lowered = text.lower()
     witness: dict[str, str] = {}
     deepest: LadderStage | None = None
@@ -125,11 +114,7 @@ def _witness_progress(text: str) -> tuple[LadderStage | None, dict[str, str]]:
 
 
 def _terminal_frame(text: str, roots: Sequence[str]) -> TerminalFrame | None:
-    """Extract the innermost traceback frame and its exception type.
-
-    Returns ``None`` when ``text`` carries neither a traceback frame nor an
-    exception line. ``roots`` are the pinned roots paths are relativised to.
-    """
+    """Extract the innermost traceback frame and its exception type."""
     frames = _TB_FRAME.findall(text)
     exc_matches = _EXC_LINE.findall(text)
     exc_type = exc_matches[-1] if exc_matches else ""
@@ -147,12 +132,7 @@ def _terminal_frame(text: str, roots: Sequence[str]) -> TerminalFrame | None:
 
 
 def _anchor_for(text: str, signature: rules.FailureSignature) -> int:
-    """Return the character offset the excerpt window should be anchored at.
-
-    Prefers the matched rule text, then the innermost traceback frame, then the
-    end of the stream. An unmatched signature's own excerpt is not used: it is
-    cut end-relative, so its window shifts whenever the log grows.
-    """
+    """Return the character offset the excerpt window should be anchored at."""
     head = signature.raw_excerpt.strip()[:40] if signature.is_actionable else ""
     if head:
         # ``raw_excerpt`` is whitespace-collapsed; match it back with a
@@ -172,10 +152,7 @@ def _classified_streams(
     wrapper_stderr: str,
     wrapper_stdout: str,
 ) -> tuple[tuple[str, str, rules.FailureSignature], ...]:
-    """Return ``(stream_name, text, signature)`` per non-empty stream.
-
-    Server log first, then wrapper stderr, then wrapper stdout.
-    """
+    """Return ``(stream_name, text, signature)`` per non-empty stream."""
     out: list[tuple[str, str, rules.FailureSignature]] = []
     for name, text in (
         (SERVER_LOG, server_log),
@@ -197,10 +174,6 @@ def classify(
     session_root: str = "",
 ) -> BootObservation:
     """Classify one bring-up attempt into a :class:`BootObservation`.
-
-    Pure: no filesystem, process or network access. An attempt that matches no
-    rule is still fully described -- its terminal frame and excerpt give it a
-    stable :func:`~hyperloom.common.bringup.failure_digest`.
 
     Args:
         server_log: Full text of the server child's log.

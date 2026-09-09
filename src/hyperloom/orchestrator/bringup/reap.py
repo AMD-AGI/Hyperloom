@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End what a bring-up left running, and say precisely what that establishes.
-
-A process group can be left at will by an unprivileged child, so a success here
-covers only what was enumerable (:data:`CLAIM_REACHABLE`) and never proves the
-target holds nothing.
-
-The descendant set is collected BEFORE signalling, while a child that has left
-the group is still reachable as a descendant.
-"""
+"""End what a bring-up left running, and say precisely what that establishes."""
 
 from __future__ import annotations
 
@@ -114,11 +106,7 @@ class ReapBackend(Protocol):
 
 
 def pid_target(label: str, pids: Any) -> ReapTarget:
-    """Build a target from an iterable of pids, dropping this process.
-
-    Non-positive pids are dropped too, and this process is never a member of a
-    target however it was recorded.
-    """
+    """Build a target from an iterable of pids, dropping this process."""
     usable = {int(raw) for raw in pids if int(raw) > 0}
     usable.discard(os.getpid())
     return ReapTarget(label=label, pids=frozenset(usable))
@@ -150,9 +138,6 @@ async def _confirm(
     window_sec: float,
 ) -> Reap:
     """Poll ``probe`` until it reports nothing left, or ``window_sec`` runs out.
-
-    A kill is delivered asynchronously, so a single reading taken straight after
-    one proves nothing.
 
     Returns:
         Reap: Confirmed, or :data:`REAP_HOLDER_ALIVE`.

@@ -47,10 +47,7 @@ class VirtualClock:
 
     @property
     def installed(self) -> bool:
-        """bool: Whether ``time.monotonic`` currently reads this clock.
-
-        A deadline is an instant on whichever clock computed it.
-        """
+        """bool: Whether ``time.monotonic`` currently reads this clock."""
         return time.monotonic == self.monotonic
 
     def monotonic(self) -> float:
