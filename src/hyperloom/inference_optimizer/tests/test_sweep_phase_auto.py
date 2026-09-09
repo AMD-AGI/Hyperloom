@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -336,19 +337,80 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("grading_mode", "output", "total", "intvty", "missing", "submission_valid", "decision", "objective", "increment"),
+    (
+        "grading_mode",
+        "output",
+        "total",
+        "intvty",
+        "missing",
+        "submission_valid",
+        "decision",
+        "objective",
+        "increment",
+        "verdict",
+    ),
     [
         pytest.param(
-            "agentx", 130.0, 18000.0, 410.0, None, True, "REVERT", "total_throughput", -10.0, id="total-regresses"
+            "agentx", 130.0, 18000.0, 410.0, None, True, "REVERT", GRADED_INTVTY, 2.5, "RECORDED", id="total-regresses"
         ),
         pytest.param(
-            "agentx", 105.0, 22000.0, 410.0, None, True, "KEEP", "total_throughput", 10.0, id="total-wins-output-dips"
+            "agentx",
+            105.0,
+            22000.0,
+            410.0,
+            None,
+            True,
+            "KEEP",
+            GRADED_INTVTY,
+            2.5,
+            "KEEP",
+            id="intvty-wins-output-dips",
         ),
         pytest.param(
-            "agentx", 130.0, 22000.0, 300.0, None, True, "REVERT", "total_throughput", 10.0, id="interactivity-veto"
+            "agentx",
+            130.0,
+            22000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "RECORDED",
+            id="interactivity-regresses",
         ),
-        pytest.param("agentx", 130.0, 22000.0, 410.0, None, False, "REVERT", None, -100.0, id="invalid-submission"),
-        pytest.param("agentx", 130.0, 22000.0, 410.0, None, None, "REVERT", None, -100.0, id="unverified-submission"),
+        pytest.param(
+            "agentx",
+            130.0,
+            18000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "REVERT",
+            id="both-axes-regress",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            22000.0,
+            404.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            1.0,
+            "RECORDED",
+            id="intvty-below-keep-floor",
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, False, "REVERT", None, -100.0, "REVERT", id="invalid-submission"
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, None, "REVERT", None, -100.0, "REVERT", id="unverified-submission"
+        ),
         pytest.param(
             "synthetic",
             130.0,
@@ -359,6 +421,7 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
             "KEEP",
             "output_throughput",
             200.0 / 11.0,
+            "KEEP",
             id="synthetic-output",
         ),
         *[
@@ -372,6 +435,7 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
                 "NEEDS_REVIEW",
                 "output_throughput",
                 (output - 110.0) / 110.0 * 100.0,
+                "KEEP" if direction == "up" else "REVERT",
                 id=f"missing-{side}-{axis}-output-{direction}",
             )
             for side in ("candidate", "reference")
@@ -389,6 +453,7 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
                 "KEEP",
                 "output_throughput",
                 200.0 / 11.0,
+                "KEEP",
                 id=f"{mode}-missing-axes",
             )
             for mode in ("synthetic", "explicit-output")
@@ -407,6 +472,7 @@ async def test_stack_validation_preserves_actual_measurement(
     decision,
     objective,
     increment,
+    verdict,
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
@@ -427,7 +493,7 @@ async def test_stack_validation_preserves_actual_measurement(
     c.shared_state.baseline_accuracy = 0.9
     c.shared_state.current_best.update(
         total_throughput=20000.0,
-        intvty_p90=400.0,
+        e2e_norm_intvty_p90=400.0,
         extra_server_args="--max-model-len 8192",
     )
     stack = c._stack_entries_for_validation(["k001", "k004"])
@@ -445,7 +511,7 @@ async def test_stack_validation_preserves_actual_measurement(
         "output_throughput": output,
         "input_throughput": total - output if total is not None else None,
         "total_token_throughput": total,
-        "intvty_p90": intvty,
+        GRADED_INTVTY: intvty,
         "completed_requests": 64,
         "submission_valid": submission_valid,
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
@@ -466,7 +532,7 @@ async def test_stack_validation_preserves_actual_measurement(
         side, axis = missing
         incomplete = bench_result if side == "candidate" else c.shared_state.current_best
         missing_keys = (
-            ("total_token_throughput", "total_throughput", "input_throughput") if axis == "total" else ("intvty_p90",)
+            ("total_token_throughput", "total_throughput", "input_throughput") if axis == "total" else (GRADED_INTVTY,)
         )
         for key in missing_keys:
             incomplete.pop(key, None)
@@ -490,6 +556,7 @@ async def test_stack_validation_preserves_actual_measurement(
     assert len(calls) == 1
     assert result["status"] == "ok", result
     assert result["decision"] == decision
+    assert result["graded_verdict"] == verdict
     assert result["stack_incremental_gain_pct"] == pytest.approx(increment)
     assert result["base_tput"] == 100.0
     valid = not agentx or submission_valid is True
