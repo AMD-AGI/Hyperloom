@@ -599,9 +599,6 @@ def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
     an un-escalated session's findings, which are the ones that fired and were
     judged survivable, had nowhere to be read at all.
 
-    Args:
-        session_dir (Path | str): The session directory.
-
     Returns:
         dict[str, Any]: ``findings`` and ``findings_total``, or an empty
             mapping when the ladder never wrote anything. An absent key is the

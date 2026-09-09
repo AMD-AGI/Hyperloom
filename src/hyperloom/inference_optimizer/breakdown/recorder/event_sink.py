@@ -263,10 +263,6 @@ def make_sink(event: str, *, producer: str) -> EventSink:
     they differ only in the event id they pass, which is the whole of the
     difference between the two modes.
 
-    Args:
-        event (str): The event id rows are tagged with.
-        producer (str): The producer label owning the fragments.
-
     Returns:
         EventSink: A sink writing into ``event``.
 

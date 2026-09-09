@@ -281,10 +281,6 @@ def finish_event(
 def _opened_sequence(event: str, *, event_section: str) -> int | None:
     """Return the sequence an earlier :func:`open_event` took for this event.
 
-    Args:
-        event (str): The event id.
-        event_section (str): The event-level section for this type.
-
     Returns:
         int | None: The sequence on the event-level fragment, or ``None`` when
             the event has not been opened yet or the spool cannot be read.

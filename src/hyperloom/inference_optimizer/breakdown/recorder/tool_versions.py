@@ -63,9 +63,6 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
 def _run_first_line(argv: list[str]) -> str:
     """Run ``argv`` and return the trimmed first output line (never raises).
 
-    Args:
-        argv (list[str]): the command argv to run.
-
     Returns:
         str: the trimmed first line of output (capped at 120 chars), or ``""``
             on failure / non-zero exit.
@@ -91,9 +88,6 @@ def _run_first_line(argv: list[str]) -> str:
 def _git_short_commit(root: Path) -> str:
     """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises).
 
-    Args:
-        root (Path): the repo root to inspect.
-
     Returns:
         str: the short commit hash, or ``""`` when it cannot be resolved.
     """
@@ -105,9 +99,6 @@ def _git_short_commit(root: Path) -> str:
 def _git_describe(root: Path) -> str:
     """Best-effort ``git describe --tags --always --dirty`` (never raises).
 
-    Args:
-        root (Path): the repo root to inspect.
-
     Returns:
         str: the ``git describe`` output, or ``""`` when it cannot be resolved.
     """
@@ -118,10 +109,6 @@ def _git_describe(root: Path) -> str:
 
 def _dist_version(names: tuple[str, ...]) -> str:
     """First resolvable ``importlib.metadata`` version among ``names`` ("" if none).
-
-    Args:
-        names (tuple[str, ...]): candidate distribution names to resolve in
-            order.
 
     Returns:
         str: the first resolvable distribution version (rejecting a stale

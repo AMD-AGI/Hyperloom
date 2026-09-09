@@ -169,9 +169,6 @@ def stack_event_id() -> str:
 def source_for(action: str) -> str:
     """Classify an action kind into its attribution bucket.
 
-    Args:
-        action (str): The action kind that produced the adoption.
-
     Returns:
         str: One of :data:`SOURCES`.
     """
@@ -536,9 +533,6 @@ def assemble_stack_ext(
 def _by_source(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Sum each bucket's contribution, on the denominator they all share.
 
-    Args:
-        adoptions (Sequence[Mapping[str, Any]]): The adoption rows.
-
     Returns:
         dict[str, Any]: One entry per bucket in :data:`SOURCES`, each with its
         adoption count and summed contribution, plus a per-backend split for
@@ -577,9 +571,6 @@ def _by_source(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def _last_cumulative(adoptions: Sequence[Mapping[str, Any]]) -> float | None:
     """The chain's total, read off the last adoption that measured one.
 
-    Args:
-        adoptions (Sequence[Mapping[str, Any]]): The adoption rows, in order.
-
     Returns:
         float | None: The last recorded ``cumulative_gain_pct``, or ``None``
         when no adoption measured one.
@@ -593,9 +584,6 @@ def _last_cumulative(adoptions: Sequence[Mapping[str, Any]]) -> float | None:
 
 def _chain_breaks(adoptions: Sequence[Mapping[str, Any]]) -> int:
     """Count adoptions whose anchor is not the previous adoption's reading.
-
-    Args:
-        adoptions (Sequence[Mapping[str, Any]]): The adoption rows, in order.
 
     Returns:
         int: How many times the anchor moved between two adoptions.
@@ -627,14 +615,7 @@ def _status_for(adoptions: Sequence[Mapping[str, Any]], chain_total: float | Non
 
 
 def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header.
-
-    Args:
-        rows (Sequence[Mapping[str, Any]]): The event-level rows.
-
-    Returns:
-        dict[str, Any]: The merged header.
-    """
+    """Fold the event-level fragments into one header."""
     header: dict[str, Any] = {}
     for row in rows:
         if isinstance(row, Mapping):

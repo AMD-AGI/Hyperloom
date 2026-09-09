@@ -73,13 +73,6 @@ class EventId(NamedTuple):
 def _token(value: str, *, label: str) -> str:
     """Normalize and validate one author-time id segment.
 
-    Args:
-        value (str): The raw segment, in any case.
-        label (str): The segment's name, for the error message.
-
-    Returns:
-        str: The lowercased segment.
-
     Raises:
         ValueError: If the segment is empty or holds anything outside
             ``[a-z0-9_]`` once lowercased -- which includes the separator, so a
@@ -129,9 +122,6 @@ def parse_event_id(value: str) -> EventId:
 
     Args:
         value (str): An event id built by :func:`event_id`.
-
-    Returns:
-        EventId: The parsed segments.
 
     Raises:
         ValueError: If ``value`` is not three separator-joined segments, or a

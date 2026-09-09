@@ -70,9 +70,6 @@ def _sort_token(value: Any) -> tuple[int, float, str]:
     claim to a position among the rows that did record one, and putting it
     first would read as "this happened before everything else".
 
-    Args:
-        value (Any): The field value to render.
-
     Returns:
         tuple[int, float, str]: ``(is_empty, numeric, text)``. Numbers and
             strings both compare without raising, which matters because a
@@ -166,8 +163,5 @@ def wire_rows(
         rows (Iterable[Mapping[str, Any]]): The assembled rows.
         drop (Sequence[str]): Fields to remove; defaults to
             :data:`SCOPE_FIELDS`.
-
-    Returns:
-        list[dict[str, Any]]: The rows without those fields, in order.
     """
     return [wire_row(row, drop=drop) for row in rows if isinstance(row, Mapping)]

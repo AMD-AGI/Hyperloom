@@ -180,14 +180,7 @@ def finalize_events(session_dir: Path) -> list[str]:
 
 
 def _finalize_type(spec: _EventType) -> list[str]:
-    """Close the open events of one type.
-
-    Args:
-        spec (_EventType): The type to recover.
-
-    Returns:
-        list[str]: The event ids closed.
-    """
+    """Close the open events of one type."""
     try:
         parts = event_parts(spec.sections)
     except Exception:  # noqa: BLE001 — a spool we cannot read costs the export nothing else
@@ -223,10 +216,6 @@ def _finalize_type(spec: _EventType) -> list[str]:
 
 def _start_time(event_rows: list[dict[str, Any]], event: str) -> str:
     """Return the start time recorded when the event was opened.
-
-    Args:
-        event_rows (list[dict[str, Any]]): The event-level fragments.
-        event (str): The event id wanted.
 
     Returns:
         str: The ISO timestamp, or ``""`` when the event has none.

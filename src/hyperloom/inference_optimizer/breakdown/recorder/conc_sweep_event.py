@@ -153,10 +153,6 @@ __all__ = [
 def conc_sweep_event_id(*, phase: str, macro_cycle: Any) -> str:
     """Build the event id for a sweep dispatched in one phase and cycle.
 
-    Args:
-        phase (str): The phase the sweep was dispatched in.
-        macro_cycle (Any): The macro cycle it was dispatched in.
-
     Returns:
         str: The event id, ``{phase}:{macro_cycle}:conc_sweep``.
 
@@ -286,20 +282,11 @@ class ConcSweepEventRecorder:
         return self._sink.event_id
 
     def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this sweep's own row.
-
-        Args:
-            payload (Mapping[str, Any]): The fields this call knows.
-        """
+        """Update this sweep's own row."""
         self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     def _record_arm(self, arm: str, payload: Mapping[str, Any]) -> None:
-        """Update one arm's row.
-
-        Args:
-            arm (str): The arm label.
-            payload (Mapping[str, Any]): The fields this call knows.
-        """
+        """Update one arm's row."""
         self._sink.record(
             SECTION_ARM,
             {"task_id": self._action_id, "arm": _text(arm), **dict(payload)},
@@ -336,13 +323,6 @@ class ConcSweepEventRecorder:
         Which axis pair the points are drawn on follows from
         ``benchmark_mode``, so a reader never has to infer it from whether
         ``intvty_p90`` happens to be null.
-
-        Args:
-            session_id (Any): The session the sweep belongs to.
-            isl (Any): Input sequence length.
-            osl (Any): Output sequence length.
-            tp (Any): Tensor parallelism.
-            benchmark_mode (Any): The benchmark mode, naming the plotted axes.
         """
         self._record_action(
             {
@@ -684,12 +664,7 @@ class ConcSweepEventRecorder:
         )
 
     def finish_arm(self, arm: str, *, status: str) -> None:
-        """Record that one arm has finished its ladder.
-
-        Args:
-            arm (str): The arm label.
-            status (str): The arm's outcome.
-        """
+        """Record that one arm has finished its ladder."""
         self._record_arm(arm, {"status": _text(status), "end_time": _now_iso()})
 
     # ---- rungs -----------------------------------------------------------
@@ -794,10 +769,6 @@ class ConcSweepEventRecorder:
         The reason a pair failed is settled here rather than at export: the
         arm that broke is the only one that can say why, and its error is in
         hand at this point.
-
-        Args:
-            comparison (Any): The paired rows the sweep computed.
-            summary (Any): The roll-up over those rows.
         """
         for row in _as_list(comparison):
             if not isinstance(row, Mapping):
@@ -848,9 +819,6 @@ class ConcSweepEventRecorder:
         missing workload shape, no optimization yet, a config that would not
         materialize -- is what a reader wants of a phase that produced no
         curve.
-
-        Args:
-            payload (Mapping[str, Any] | None): The skip envelope.
         """
         envelope = _as_dict(payload)
         self._close(
@@ -922,11 +890,7 @@ class ConcSweepEventRecorder:
         self._close(status, action)
 
     def finish_crashed(self, exc: BaseException) -> None:
-        """Close a sweep whose own execution raised.
-
-        Args:
-            exc (BaseException): What was raised.
-        """
+        """Close a sweep whose own execution raised."""
         self._close(
             "failed",
             {
@@ -939,12 +903,7 @@ class ConcSweepEventRecorder:
         )
 
     def _close(self, status: str, action: Mapping[str, Any]) -> None:
-        """Write the sweep's terminal row and close its event.
-
-        Args:
-            status (str): The sweep's outcome.
-            action (Mapping[str, Any]): The terminal fields.
-        """
+        """Write the sweep's terminal row and close its event."""
         if self._closed:
             return
         self._closed = True
@@ -983,14 +942,6 @@ def _assemble_arm(
     ascending, which is the order a curve is read in. ``boot.attempts`` is the
     descend ladder in the order it was tried, carrying the rungs that never
     produced a point at all.
-
-    Args:
-        row (Mapping[str, Any]): The arm's own row.
-        variants (Sequence[Mapping[str, Any]]): The arm's rung rows, in the
-            order they ran.
-
-    Returns:
-        dict[str, Any]: The assembled arm.
     """
     points = [
         {
@@ -1049,11 +1000,6 @@ def assemble_conc_sweep_ext(
     event: str,
 ) -> tuple[dict[str, Any], str]:
     """Assemble one conc-sweep event's ``ext`` out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The conc-sweep sections as
-            read back from the spool.
-        event (str): The event id to assemble.
 
     Returns:
         tuple[dict[str, Any], str]: The ``ext`` payload and the sweep's status.

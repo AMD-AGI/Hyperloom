@@ -61,9 +61,6 @@ def _intent_rows(intents: Iterable[Any] | None) -> list[dict[str, Any]]:
     and a payload) or plain mappings, so a caller holding either shape records
     the same row.
 
-    Args:
-        intents (Iterable[Any] | None): the validated intents for one turn.
-
     Returns:
         list[dict[str, Any]]: one row per intent that named a type.
     """

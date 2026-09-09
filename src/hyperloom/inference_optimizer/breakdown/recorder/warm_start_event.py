@@ -458,21 +458,7 @@ def matched_block(
     lessons: Any = None,
     pitfalls: Any = None,
 ) -> dict[str, Any]:
-    """Build the ``matched`` block from the record T0 anchored on.
-
-    Args:
-        tier (str): The tier the match was served at.
-        confidence (Any): The match confidence.
-        source (str): Which store served it.
-        canonical_id (str): The matched record's identity.
-        recipe (Mapping[str, Any] | None): The matched recipe row.
-        expected_gain_pct (Any): The gain the record claims.
-        lessons (Any): The record's lessons list.
-        pitfalls (Any): The record's pitfalls list.
-
-    Returns:
-        dict[str, Any]: The ``matched`` block.
-    """
+    """Build the ``matched`` block from the record T0 anchored on."""
     row = _as_dict(recipe)
     tier_text = str(tier or "").strip()
     block: dict[str, Any] = {

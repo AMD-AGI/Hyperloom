@@ -144,10 +144,6 @@ __all__ = [
 def baseline_event_id(phase: str, macro_cycle: Any) -> str:
     """Build the event id of the baselines one phase measured in one cycle.
 
-    Args:
-        phase (str): The coordinator phase the measurement was dispatched in.
-        macro_cycle (Any): The macro cycle it was dispatched in.
-
     Returns:
         str: The event id, ``{phase}:{macro_cycle}:baseline``.
 
@@ -179,12 +175,6 @@ def record_action_decision(
     agree on the settle-in-the-same-tick path and can diverge on a resume, and
     an upsert onto an event with no such action would mint a row carrying a
     verdict and no measurement.
-
-    Args:
-        phase (str): The coordinator phase the write-back is running in.
-        macro_cycle (Any): The macro cycle it is running in.
-        task_id (str): The settled action's task id.
-        decision (str): The promotion decision the write-back reached.
     """
     if not str(task_id or "") or not str(decision or ""):
         return
@@ -226,9 +216,6 @@ def _republish_closed_event(event: str) -> None:
     An event with an action still running is left alone: that action's own
     close will assemble the row along with everything else, and publishing
     here would show a running measurement as finished.
-
-    Args:
-        event (str): The event id to re-publish.
     """
     from ...session.sbd_v6 import timeline_sequence
     from .assembler import baseline_event_parts
@@ -254,14 +241,7 @@ def _republish_closed_event(event: str) -> None:
 
 
 def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a result's non-fatal warnings into a bounded block.
-
-    Args:
-        result (Mapping[str, Any]): The executor result to read.
-
-    Returns:
-        dict[str, Any]: The full count and a bounded head of the messages.
-    """
+    """Project a result's non-fatal warnings into a bounded block."""
     rows = [str(row) for row in _as_list(result.get("nonfatal_warnings")) if str(row or "")]
     return {"count": len(rows), "messages": rows[:_MAX_ROUND_WARNINGS]}
 
@@ -324,9 +304,6 @@ def _observed_invocation(result: Mapping[str, Any]) -> dict[str, Any]:
     for is exactly what this block exists to make visible, and overwriting the
     request with the observation would erase it.
 
-    Args:
-        result (Mapping[str, Any]): The executor result to read.
-
     Returns:
         dict[str, Any]: The observed fields, empty when the result carries no
             launch evidence -- which is every failure path, since the evidence
@@ -355,14 +332,7 @@ def _observed_invocation(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the runtimes a benchmark round reported for itself.
-
-    Args:
-        result (Mapping[str, Any]): The executor result to read.
-
-    Returns:
-        dict[str, Any]: The subprocess wall-clock and its post-ready share.
-    """
+    """Project the runtimes a benchmark round reported for itself."""
     return {
         "subprocess_runtime_sec": _float_or_none(result.get("subprocess_runtime_sec")),
         "post_ready_runtime_sec": _float_or_none(result.get("post_ready_runtime_sec")),
@@ -371,10 +341,6 @@ def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
 
 def _failure(result: Mapping[str, Any], *, phase: str) -> dict[str, Any] | None:
     """Project a failed result's failure row, or ``None`` when it succeeded.
-
-    Args:
-        result (Mapping[str, Any]): The executor result to read.
-        phase (str): The sub-step the failure is attributed to.
 
     Returns:
         dict[str, Any] | None: The failure row, or ``None``.
@@ -488,11 +454,7 @@ class BaselineEventRecorder:
         return self._task_id
 
     def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this action's own row.
-
-        Args:
-            payload (Mapping[str, Any]): The fields this call knows.
-        """
+        """Update this action's own row."""
         self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     # ---- lifecycle -------------------------------------------------------
@@ -678,11 +640,7 @@ class BaselineEventRecorder:
         )
 
     def finish(self, result: Mapping[str, Any] | None) -> None:
-        """Close the action on the result the executor returned.
-
-        Args:
-            result (Mapping[str, Any] | None): The action's final result dict.
-        """
+        """Close the action on the result the executor returned."""
         payload = _as_dict(result)
         dropped = _as_dict(payload.get("measure_round_dropped"))
         action: dict[str, Any] = {
@@ -714,9 +672,6 @@ class BaselineEventRecorder:
     def _derived_status(self, result: Mapping[str, Any]) -> str:
         """Decide the status the action closes on.
 
-        Args:
-            result (Mapping[str, Any]): The action's final result dict.
-
         Returns:
             str: ``succeeded`` for a measured baseline, ``degraded`` for one
                 that stands on its cold warmup because the budget would not
@@ -738,9 +693,6 @@ class BaselineEventRecorder:
         Distinguishes "the executor blew up" from "the session was killed
         mid-baseline", which would otherwise both read as a dangling
         ``status="running"`` event.
-
-        Args:
-            exc (BaseException): The exception propagating out of the action.
         """
         if self._closed:
             return
@@ -756,12 +708,7 @@ class BaselineEventRecorder:
         )
 
     def _close(self, *, status: str, action: Mapping[str, Any]) -> None:
-        """Record the action's terminal facts and close the event.
-
-        Args:
-            status (str): The status the action ended on.
-            action (Mapping[str, Any]): The terminal fields to record.
-        """
+        """Record the action's terminal facts and close the event."""
         if self._closed:
             return
         self._closed = True
@@ -923,11 +870,6 @@ def assemble_baseline_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble one baseline event's ``ext`` out of its recorded rows.
 
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The baseline sections as
-            read back from the spool.
-        event (str): The event id to assemble.
-
     Returns:
         tuple[dict[str, Any], str]: The ``ext`` payload, holding one entry per
             action the event owns, and the status derived from them.
@@ -953,22 +895,6 @@ def make_baseline_recorder(
     Baseline behavior must not depend on the recorder existing, so construction
     failures degrade to "no event" rather than propagating -- as does an absent
     sink, which is what a caller with no session bound has.
-
-    Args:
-        sink (RecordSink | None): Where the rows go, or ``None`` to decline.
-        task_id (str): Dispatched task id.
-        task_kind (str): The dispatched task's kind.
-        reason (str): Why the measurement was dispatched.
-        framework (str): Resolved serving framework.
-        establishes_quality_ref (bool): Whether this run defines the session's
-            accuracy reference.
-        params (dict[str, Any] | None): The task params.
-        failure_streak_before (Any): Consecutive baseline failures at dispatch.
-        total_failures_before (Any): Session baseline failures at dispatch.
-
-    Returns:
-        BaselineEventRecorder | None: The recorder, or ``None`` when it could
-            not be built.
     """
     if sink is None:
         return None

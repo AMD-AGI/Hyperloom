@@ -48,10 +48,6 @@ _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 def _recorder(session_dir: Path | str, producer: str):
     """Return the process-cached recorder for ``session_dir`` and ``producer``.
 
-    Args:
-        session_dir (Path | str): the session directory backing the recorder.
-        producer (str): the breakdown producer label owning the fragments.
-
     Returns:
         The process-cached recorder for the ``(session_dir, producer)`` pair.
     """

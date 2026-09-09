@@ -173,10 +173,6 @@ __all__ = [
 def warm_replay_event_id(phase: str, macro_cycle: Any) -> str:
     """Build the event id of the warm replay one phase ran in one cycle.
 
-    Args:
-        phase (str): The coordinator phase the replay was dispatched in.
-        macro_cycle (Any): The macro cycle it was dispatched in.
-
     Returns:
         str: The event id, ``{phase}:{macro_cycle}:warm_replay``.
 
@@ -206,9 +202,6 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
 
     Args:
         settled (Mapping[str, Any]): The settled ``warm_replay_outcome``.
-
-    Returns:
-        dict[str, Any]: The verdict block.
     """
     return {
         "outcome_status": str(settled.get("status") or ""),
@@ -573,9 +566,6 @@ class WarmReplayEventRecorder:
         Distinguishes "the replay blew up" from "the session was killed
         mid-replay", which would otherwise both read as a dangling
         ``status="running"`` event.
-
-        Args:
-            exc (BaseException): The exception propagating out of the replay.
         """
         if self._closed:
             return
@@ -591,12 +581,7 @@ class WarmReplayEventRecorder:
         )
 
     def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
-        """Record the terminal facts and close the event.
-
-        Args:
-            status (str): The status the event ended on.
-            payload (Mapping[str, Any]): The terminal fields to record.
-        """
+        """Record the terminal facts and close the event."""
         if self._closed:
             return
         self._closed = True
@@ -674,9 +659,6 @@ def assemble_warm_replay_ext(
 def _blocking_gate(gates: list[dict[str, Any]]) -> str:
     """Name the first gate that did not pass, or ``""`` when all of them did.
 
-    Args:
-        gates (list[dict[str, Any]]): The gate rows in evaluation order.
-
     Returns:
         str: The gate's name. A gate that ruled ``None`` counts as blocking
             only if nothing after it failed outright, so a replay admitted on
@@ -717,24 +699,9 @@ def make_warm_replay_recorder(
     declines too: writing the timeline into whatever the working directory
     happens to be is worse than not recording.
 
-    Args:
-        phase (str): The phase the replay was dispatched in.
-        macro_cycle (Any): The macro cycle it was dispatched in.
-        task_id (str): The dispatched task id.
-        tier (str): The warm-recipe tier.
-        config_source (str): The canonical id the config came from.
-        config_donor_tier (str): Where that config came from.
-        donor (Mapping[str, Any] | None): The donor record's identity.
-        expected_gain_pct (Any): The gain the recipe claimed.
-        confidence (Any): The confidence it was admitted on.
-        min_reproduce_pct (Any): The fraction of the claim it must reproduce.
-        session_baseline_tput (Any): The session's recorded baseline.
-        kernel_count (Any): How many kernel entries the replay carried.
-        recipe_suppressed (Any): Whether the config half was withheld.
-        open_event_on_timeline (bool): Whether to open the event. ``False``
-            rebinds to an event a previous tick already opened, which is how
-            the promote seam records onto the arc the enqueue seam started
-            without opening it a second time.
+    A false ``open_event_on_timeline`` rebinds to an event a previous tick
+    already opened, which is how the promote seam records onto the arc the
+    enqueue seam started without opening it a second time.
 
     Returns:
         WarmReplayEventRecorder | None: The recorder, already opened on the

@@ -223,9 +223,6 @@ def producer_for_provenance(provenance: Any) -> tuple[str, str]:
     is the grid's own and changes with it. Translating it in one place keeps
     every seam that records a config proposal agreeing on the answer.
 
-    Args:
-        provenance (Any): The variant's provenance label.
-
     Returns:
         tuple[str, str]: The ``producer`` and its ``producer_ref``. The ref
             names the specialist's domain when a specialist proposed the
@@ -243,9 +240,6 @@ def producer_for_provenance(provenance: Any) -> tuple[str, str]:
 
 def framework_event_id(macro_cycle: Any) -> str:
     """Build the event id of the FRAMEWORK_AGENT entry in one macro cycle.
-
-    Args:
-        macro_cycle (Any): The macro cycle the entry belongs to.
 
     Returns:
         str: The event id, ``framework_agent:{macro_cycle}:framework``.
@@ -269,9 +263,6 @@ def _key(value: Any) -> str:
     ``%`` is escaped first and the separator second, which is undoable and
     therefore cannot collide.
 
-    Args:
-        value (Any): The id as the phase knows it.
-
     Returns:
         str: The escaped token. Only the key is escaped; the row's payload
             carries the id verbatim, which is what a reader sees.
@@ -281,9 +272,6 @@ def _key(value: Any) -> str:
 
 def _stack(values: Mapping[str, Any]) -> dict[str, Any]:
     """Project the configuration stack an attempt was measured against.
-
-    Args:
-        values (Mapping[str, Any]): The caller's stack fields.
 
     Returns:
         dict[str, Any]: The stack block. Both arms have one -- a source patch
@@ -1021,11 +1009,7 @@ class FrameworkEventRecorder:
         self._close(status="failed" if failed else "", payload=payload)
 
     def finish_crashed(self, exc: BaseException) -> None:
-        """Close an event whose phase raised instead of exiting.
-
-        Args:
-            exc (BaseException): The exception propagating out of the phase.
-        """
+        """Close an event whose phase raised instead of exiting."""
         if self._closed:
             return
         self._close(
@@ -1189,12 +1173,6 @@ def _derived_status(
 ) -> str:
     """Decide the status the event closes on.
 
-    Args:
-        header (Mapping[str, Any]): The event-level row.
-        runs (list[dict[str, Any]]): The assembled runs.
-        proposals (list[dict[str, Any]]): The assembled proposals.
-        attempts (list[dict[str, Any]]): The assembled attempts.
-
     Returns:
         str: ``failed`` when the entry recorded a failure, ``skipped`` when it
             did nothing at all, ``degraded`` when it worked but never closed,
@@ -1213,9 +1191,6 @@ def _derived_status(
 
 def _blocking_gate(gates: list[dict[str, Any]]) -> str:
     """Name the first gate that did not pass, or ``""`` when all of them did.
-
-    Args:
-        gates (list[dict[str, Any]]): The gate rows in evaluation order.
 
     Returns:
         str: The gate's name. A gate that ruled ``None`` counts as blocking
@@ -1292,9 +1267,6 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
     failures degrade to "no event" rather than propagating. An unbound session
     declines too: writing the timeline into whatever the working directory
     happens to be is worse than not recording.
-
-    Args:
-        macro_cycle (Any): The macro cycle this entry belongs to.
 
     Returns:
         FrameworkEventRecorder | None: The recorder, already opened on the

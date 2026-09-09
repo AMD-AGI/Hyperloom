@@ -59,10 +59,6 @@ def _visits(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
 def _best(current: Any, candidate: Any) -> float | None:
     """The larger of two speedups, ignoring the non-numeric.
 
-    Args:
-        current (Any): The best seen so far.
-        candidate (Any): The value to consider.
-
     Returns:
         float | None: The larger, or ``None`` when neither is a number.
     """

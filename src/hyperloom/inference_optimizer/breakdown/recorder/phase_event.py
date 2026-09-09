@@ -140,10 +140,6 @@ MAX_REASON_CHARS = 500
 def phase_event_id(phase: str, macro_cycle: int) -> str:
     """Build the event id for one phase's time in one macro cycle.
 
-    Args:
-        phase (str): The phase name, in any case.
-        macro_cycle (int): The macro cycle it ran in.
-
     Returns:
         str: ``{phase}:{macro_cycle}:phase``.
 
@@ -155,9 +151,6 @@ def phase_event_id(phase: str, macro_cycle: int) -> str:
 
 def _sink(event: str) -> EventSink | None:
     """The sink rows for ``event`` are written through, or ``None``.
-
-    Args:
-        event (str): The phase event id to bind to.
 
     Returns:
         EventSink | None: The bound session's sink, or ``None`` when no session
@@ -785,10 +778,6 @@ def _finish(event: str, *, end_time: str) -> None:
     several times in a cycle, so closing on a fresh sequence would publish one
     phase as two timeline entries -- the re-entry's close would not overwrite
     the first entry's.
-
-    Args:
-        event (str): The phase event id to close.
-        end_time (str): The exit timestamp to close with.
     """
     from .assembler import event_parts
     from .event_ids import parse_event_id
@@ -811,10 +800,6 @@ def _finish(event: str, *, end_time: str) -> None:
 
 def _rows(section: str, event: str) -> list[dict[str, Any]]:
     """Read one section's rows for one event back out of the spool.
-
-    Args:
-        section (str): The section to read.
-        event (str): The event id to filter by.
 
     Returns:
         list[dict[str, Any]]: The matching rows, empty when nothing is readable.
@@ -866,9 +851,6 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
 def _action_event(task_id: str) -> str | None:
     """Find which phase event holds ``task_id``'s dispatch row.
 
-    Args:
-        task_id (str): The task id to look up.
-
     Returns:
         str | None: The owning event id, or ``None`` when no dispatch was
         recorded for it.
@@ -889,9 +871,6 @@ def _action_event(task_id: str) -> str | None:
 
 def _proposal_event(proposal_msg_id: str) -> str | None:
     """Find which phase event holds ``proposal_msg_id``'s row.
-
-    Args:
-        proposal_msg_id (str): The proposal to look up.
 
     Returns:
         str | None: The owning event id, or ``None`` when the proposal was
@@ -1049,14 +1028,7 @@ def _span(start: Any, end: Any) -> float | None:
 
 
 def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header.
-
-    Args:
-        rows (Sequence[Mapping[str, Any]]): The event-level rows.
-
-    Returns:
-        dict[str, Any]: The merged header.
-    """
+    """Fold the event-level fragments into one header."""
     header: dict[str, Any] = {}
     for row in rows:
         if isinstance(row, Mapping):

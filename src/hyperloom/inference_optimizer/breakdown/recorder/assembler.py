@@ -28,14 +28,7 @@ _UNREADABLE = object()
 
 
 def parts_dir(session_dir: Path | str) -> Path:
-    """Return the breakdown spool directory for ``session_dir``.
-
-    Args:
-        session_dir (Path | str): the session root directory.
-
-    Returns:
-        Path: the breakdown parts (spool) directory under the session.
-    """
+    """Return the breakdown spool directory for ``session_dir``."""
     from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     return breakdown_parts_dir(Path(session_dir))
@@ -43,9 +36,6 @@ def parts_dir(session_dir: Path | str) -> Path:
 
 def has_parts(session_dir: Path | str) -> bool:
     """True iff at least one record fragment exists for this session.
-
-    Args:
-        session_dir: The session root directory.
 
     Returns:
         ``True`` when the spool directory holds at least one ``*.json``
@@ -232,9 +222,6 @@ def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
     Assembly folds this substream into ``close.steps``, so the sequencer
     deriving its own verdict reads it through here rather than re-globbing the
     spool.
-
-    Args:
-        session_dir: The session root directory.
 
     Returns:
         The recorded step rows, oldest first; empty when none were recorded.

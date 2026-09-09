@@ -116,9 +116,6 @@ def text_or_none(value: Any) -> str | None:
     producer ran and had nothing to say, which is a different fact, so callers
     that genuinely do not know must pass ``None`` rather than ``""``.
 
-    Args:
-        value: The raw value.
-
     Returns:
         The stripped text, or ``None`` when there is none.
     """
@@ -133,9 +130,6 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
 
     Args:
         rows: The tool's ``hot_kernels`` / ``hot_kernels_top15`` list.
-
-    Returns:
-        A dict with the full count and a bounded, trimmed ranking head.
     """
     candidates = [row for row in as_list(rows) if isinstance(row, dict)]
     top: list[dict[str, Any]] = []
@@ -162,9 +156,6 @@ def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
 
     Args:
         rows: The tool's ``trace_health_warnings`` list.
-
-    Returns:
-        The normalized warning rows.
     """
     out: list[dict[str, Any]] = []
     for row in as_list(rows):
@@ -232,9 +223,6 @@ STATUS_ORDER: tuple[str, ...] = ("failed", "degraded", "running", "succeeded", "
 def worst_status(statuses: Iterable[Any]) -> str:
     """Reduce the statuses of an event's actions to the one the event reports.
 
-    Args:
-        statuses (Iterable[Any]): The statuses of the actions the event holds.
-
     Returns:
         str: The worst of them per :data:`STATUS_ORDER`, an unranked status as
             given when that is all there is, or ``"skipped"`` when there are
@@ -259,9 +247,6 @@ def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict
 def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
     """Project the artifact paths a ``trace_analyze`` result surfaces.
 
-    Args:
-        result: The analysis tool's result dict.
-
     Returns:
         The artifact path block, with absent paths as empty strings.
     """
@@ -282,12 +267,6 @@ def analysis_detail(result: Any) -> dict[str, Any]:
     route reports ``agent`` / ``tracelens``, while the TraceLens-free reader
     reports ``bypass`` / ``bypass``. Keeping both preserves routing policy and
     tool provenance. Tool-specific output stays in ``route_ext``.
-
-    Args:
-        result: The analysis tool's result dict.
-
-    Returns:
-        The shared per-run detail block.
     """
     payload = as_dict(result)
     meta = as_dict(payload.get("analysis_meta"))

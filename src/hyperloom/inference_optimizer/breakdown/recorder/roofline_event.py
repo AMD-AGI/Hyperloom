@@ -171,10 +171,6 @@ __all__ = [
 def roofline_event_id(phase: str, macro_cycle: Any) -> str:
     """Build the event id of the rooflines one phase dispatched in one cycle.
 
-    Args:
-        phase (str): The coordinator phase that dispatched the action.
-        macro_cycle (Any): The macro cycle it was dispatched in.
-
     Returns:
         str: The event id, ``{phase}:{macro_cycle}:roofline``.
 
@@ -190,9 +186,6 @@ def _rank_of(path: str) -> str:
     xDiT tensor/sequence-parallel profiles write one trace per rank, named with
     a ``rank<N>`` / ``_<N>.pt.trace.json.gz`` suffix. Grouping by rank turns a
     424-entry path list into a histogram that shows whether every rank reported.
-
-    Args:
-        path (str): A trace file path.
 
     Returns:
         str: The rank token, or ``"unknown"`` when no rank is encoded.
@@ -262,9 +255,6 @@ def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]
     rather than something the exporter re-derives from whatever files survived
     to the end of the session.
 
-    Args:
-        path (Any): The sidecar path named by the analysis result.
-
     Returns:
         tuple[dict[str, Any], list[dict[str, Any]]]: The table's provenance
             header and its per-kernel rows, ordered by descending GPU share. An
@@ -314,13 +304,6 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     throughput sits against the memory and compute ceilings, and which of the
     two binds. The event recorded only its id, which made the conclusion
     reachable solely by joining against session state that later runs overwrite.
-
-    Args:
-        snapshot (Mapping[str, Any]): One entry of the snapshot history.
-
-    Returns:
-        dict[str, Any]: The snapshot's fields, with the per-operator model
-            bounded.
     """
     top_kernel = _as_dict(snapshot.get("top_kernel"))
     row = {
@@ -369,9 +352,6 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
     """Summarize the profile's trace file set without carrying every path.
 
-    Args:
-        profile_result (dict[str, Any]): The profile sub-step result dict.
-
     Returns:
         dict[str, Any]: The resolved main path, the file count, a per-rank
             histogram, a bounded sample of paths, and the selection reason.
@@ -398,12 +378,6 @@ def _summarize_trace_health(profile_result: dict[str, Any]) -> dict[str, Any]:
     Carries the three booleans the executor branches on, the structured
     per-check rows the profile validator emits, and a clipped slice of the
     operator-facing issue prose.
-
-    Args:
-        profile_result (dict[str, Any]): The profile sub-step result dict.
-
-    Returns:
-        dict[str, Any]: The health summary.
     """
     health = _as_dict(profile_result.get("trace_health"))
     issues = [_clip(row) for row in _as_list(health.get("issues"))]
@@ -423,9 +397,6 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     row rather than on the effective-run summary: "attempt 1 recorded no graph
     launches, attempt 2 did" is only answerable when each attempt keeps the
     verdict computed against the trace it produced.
-
-    Args:
-        profile_result (dict[str, Any]): The profile sub-step result dict.
 
     Returns:
         dict[str, Any]: The validation block, empty when the validator did not
@@ -552,11 +523,7 @@ class RooflineEventRecorder:
         return self._task_id
 
     def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this action's own row.
-
-        Args:
-            payload (Mapping[str, Any]): The fields this call knows.
-        """
+        """Update this action's own row."""
         self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     # ---- lifecycle -------------------------------------------------------
@@ -741,13 +708,7 @@ class RooflineEventRecorder:
         ta_result: dict[str, Any] | None,
         trace_input: str,
     ) -> None:
-        """Mark one analysis attempt as the one the action concluded from.
-
-        Args:
-            run_index (int): The adopted attempt's index.
-            ta_result (dict[str, Any] | None): The adopted attempt's result dict.
-            trace_input (str): The trace the adopted attempt analyzed.
-        """
+        """Mark one analysis attempt as the one the action concluded from."""
         result = _as_dict(ta_result)
         payload: dict[str, Any] = {
             "analysis_effective_run_index": int(run_index),
@@ -765,13 +726,7 @@ class RooflineEventRecorder:
         self._record_action(payload)
 
     def record_compute_bound_reprofile(self, *, attempted: bool, adopted: bool, reason: str = "") -> None:
-        """Record the multi-node compute-bound re-profile decision.
-
-        Args:
-            attempted (bool): Whether a re-profile was attempted.
-            adopted (bool): Whether its result was adopted.
-            reason (str): Why it went the way it did.
-        """
+        """Record the multi-node compute-bound re-profile decision."""
         self._record_action(
             {
                 "compute_bound_reprofile": {
@@ -880,9 +835,6 @@ class RooflineEventRecorder:
         Distinguishes "the executor blew up" from "the session was killed
         mid-roofline", which would otherwise both read as a dangling
         ``status="running"`` event.
-
-        Args:
-            exc (BaseException): The exception propagating out of the action.
         """
         if self._closed:
             return
@@ -893,12 +845,7 @@ class RooflineEventRecorder:
         )
 
     def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
-        """Record the action's terminal facts and, when it owns the event, close it.
-
-        Args:
-            status (str): The status the action ended on.
-            payload (Mapping[str, Any]): The terminal fields to record.
-        """
+        """Record the action's terminal facts and, when it owns the event, close it."""
         if self._closed:
             return
         self._closed = True
@@ -1040,11 +987,6 @@ def _kernel_roofline_block(
 ) -> dict[str, Any] | None:
     """Assemble the action's per-kernel roofline table.
 
-    Args:
-        action_row (Mapping[str, Any]): The action row, holding the table's
-            provenance header.
-        kernel_rows (list[dict[str, Any]]): The action's kernel rows, ranked.
-
     Returns:
         dict[str, Any] | None: The table, or ``None`` when the action recorded
             none -- a failed action, or one whose analyzer wrote no sidecar.
@@ -1064,11 +1006,6 @@ def assemble_roofline_ext(
     event: str,
 ) -> tuple[dict[str, Any], str]:
     """Assemble one roofline event's ``ext`` out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The roofline sections as
-            read back from the spool.
-        event (str): The event id to assemble.
 
     Returns:
         tuple[dict[str, Any], str]: The ``ext`` payload, holding one entry per

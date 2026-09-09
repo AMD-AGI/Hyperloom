@@ -102,9 +102,6 @@ def config_tally(breakdown: dict[str, Any]) -> FrameworkTally:
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        FrameworkTally: The tally over every measured configuration attempt.
     """
     tally = FrameworkTally()
     for attempt, _proposal in config_attempts(breakdown):

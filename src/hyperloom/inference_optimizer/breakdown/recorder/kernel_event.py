@@ -25,6 +25,8 @@ candidate was adopted -- is a join between a lane row and the rebench row that
 re-measured it, and neither exists yet when the other is written. The event
 status is read off what the rebenches measured, so it cannot be known before
 the last one lands. Both are computed once, from the rows, at the close.
+
+Every ``*_at`` argument in this module is an ISO timestamp.
 """
 
 from __future__ import annotations
@@ -234,9 +236,6 @@ def active_kernel_recorder() -> "KernelEventRecorder | None":
 def kernel_event_id(macro_cycle: Any) -> str:
     """Build the event id of the KERNEL entry in one macro cycle.
 
-    Args:
-        macro_cycle (Any): The macro cycle the entry belongs to.
-
     Returns:
         str: The event id, ``kernel_agent:{macro_cycle}:kernel``.
 
@@ -419,19 +418,7 @@ def _write_trace_analyze_run(
 ) -> None:
     """Write one analysis row and the kernel table it produced.
 
-    Args:
-        sink (Any): The sink to write the rows to.
-        run_id (str): Entry-stable identifier for this analysis.
-        trigger (str): What asked for the analysis.
-        status (str): ``ok`` or ``failed``.
-        result (Any): The analysis tool's result dict.
-        requested_by (str): The role that requested it.
-        request_msg_id (str): The bus request message id.
-        trace_input (str): The trace the run analysed.
-        top_k (Any): The requested ranking depth.
-        snapshot (dict[str, Any] | None): The ``last_trace_analyze`` cache the
-            run produced.
-        cache_hit (bool): Whether a cached result served the request.
+    ``status`` is ``ok`` or ``failed``.
     """
     produced = _as_dict(snapshot)
     sink.record(
@@ -485,17 +472,7 @@ def record_trace_analyze_request(
     account for it, and is written only when that event exists so a bus
     request never mints one.
 
-    Args:
-        macro_cycle (Any): The cycle whose visit was running.
-        run_id (str): Entry-stable identifier for this analysis.
-        status (str): ``ok`` or ``failed``.
-        result (Any): The analysis tool's result dict.
-        requested_by (str): The role that requested it.
-        request_msg_id (str): The bus request message id.
-        trace_input (str): The trace the run analysed.
-        top_k (Any): The requested ranking depth.
-        snapshot (dict[str, Any] | None): The analysis cache the run produced.
-        cache_hit (bool): Whether a cached result served the request.
+    ``status`` is ``ok`` or ``failed``.
     """
     if not str(run_id or ""):
         return
@@ -542,9 +519,6 @@ def _republish_closed_event(event: str) -> None:
     An event still running is left alone: its own close will assemble the row
     along with everything else, and publishing a half-finished event here
     would show it closed.
-
-    Args:
-        event (str): The event id to re-publish.
     """
     from ...session.sbd_v6 import timeline_sequence
 
@@ -574,9 +548,6 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     that stands: the last one to settle. The best gain is taken across all of
     them, because a fault that measured nothing does not un-measure what an
     earlier attempt did.
-
-    Args:
-        rows (list[dict[str, Any]]): One kernel's integrate rows.
 
     Returns:
         dict[str, Any] | None: The sub-result, or ``None`` when the kernel was
@@ -769,9 +740,6 @@ def _lane_row(
             output.
         rebench_ref (str | None): The rebench attempt id that re-measured it.
         failure_reason (str | None): Normalized failure reason.
-
-    Returns:
-        dict[str, Any]: The shared lane-row block.
     """
     return {
         "source_kind": str(source_kind),
@@ -828,9 +796,6 @@ def _rebench_row(
         status (str | None): The attempt's own lifecycle status.
         engagement (dict[str, Any] | None): Config / overlay verification
             booleans.
-
-    Returns:
-        dict[str, Any]: The rebench attempt row.
     """
     verified = _as_dict(engagement)
     base = _float_or_none(base_tput)
@@ -929,10 +894,6 @@ def _acceptance_rows(specs: Any) -> list[dict[str, Any]]:
 
 def _acceptance_identity(row: Mapping[str, Any], ordinal: int) -> str:
     """Name one acceptance stably enough to key its fragment.
-
-    Args:
-        row (Mapping[str, Any]): The acceptance row.
-        ordinal (int): Its position in GEAK's report.
 
     Returns:
         str: The kernel or selection the acceptance names, falling back to its
@@ -1100,9 +1061,6 @@ class KernelEventRecorder:
         This touches the fragment only. The timeline entry keeps the status it
         opened with until the phase ends, and a session killed before then is
         closed out of its fragments by finalize -- which reads this field.
-
-        Args:
-            stage (str): The stage the phase is entering.
         """
         self._stage = str(stage or "")
         self._sink.record(SECTION_EVENT, {"in_flight_stage": _text(stage)})
@@ -1265,30 +1223,6 @@ class KernelEventRecorder:
         projection had to guess the backend from a speedup plus an artifact path
         and to synthesize an identifier from ``kernel_id:backend:sequence``
         whenever the real attempt id had been lost.
-
-        Args:
-            run_id (str): The real attempt id for this rewrite.
-            kernel_id (str): The kernel the rewrite targeted.
-            status (str): How the rewrite's own run ended.
-            kernel_name (str): Human-readable kernel name.
-            dispatched (bool): Whether a backend was actually dispatched.
-            backends_tried (Any): The backends attempted.
-            adopted_backend (str): The backend whose output was taken.
-            skip_reason (str): Why dispatch was skipped, when it was.
-            task_group (str): The dispatch task group.
-            speedup (Any): Micro-benchmark speedup.
-            baseline_us (Any): Micro-benchmark baseline microseconds.
-            candidate_us (Any): Micro-benchmark candidate microseconds.
-            compile_status (str): Compilation outcome.
-            correctness (Any): Correctness verdict.
-            artifact_path (str): The produced artifact.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            trace_analyze_ref (str): The analysis that nominated this kernel.
-            started_at (str): ISO timestamp the rewrite started.
-            ended_at (str): ISO timestamp the rewrite ended.
-            duration_sec (Any): Wall-clock seconds the rewrite took.
-            failure_reason (str): Normalized failure reason.
         """
         self._record_lane_run(
             {
@@ -1337,23 +1271,7 @@ class KernelEventRecorder:
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one forge-fusion run.
-
-        Args:
-            run_id (str): Lane-stable identifier for this run.
-            status (str): How the run ended.
-            pattern (str): The fusion pattern attempted.
-            target_module (str): The module the fusion targeted.
-            applied (bool): Whether the fusion was applied.
-            gain_pct (Any): The gain the run claimed.
-            patch_path (str): The produced patch.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            started_at (str): ISO timestamp the run started.
-            ended_at (str): ISO timestamp the run ended.
-            duration_sec (Any): Wall-clock seconds the run took.
-            failure_reason (str): Normalized failure reason.
-        """
+        """Record one forge-fusion run."""
         self._record_lane_run(
             {
                 **_lane_row(
@@ -1392,23 +1310,7 @@ class KernelEventRecorder:
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one GEMM shape-table tuning run.
-
-        Args:
-            run_id (str): Lane-stable identifier for this run.
-            status (str): How the run ended.
-            shapes_total (Any): Shapes the run considered.
-            shapes_tuned (Any): Shapes the run tuned.
-            config_path (str): The produced shape-table.
-            gain_pct (Any): The gain the run claimed.
-            tuner (str): The tuner that ran.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            started_at (str): ISO timestamp the run started.
-            ended_at (str): ISO timestamp the run ended.
-            duration_sec (Any): Wall-clock seconds the run took.
-            failure_reason (str): Normalized failure reason.
-        """
+        """Record one GEMM shape-table tuning run."""
         self._record_lane_run(
             {
                 **_lane_row(
@@ -1449,25 +1351,7 @@ class KernelEventRecorder:
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one collective-tuning run.
-
-        Args:
-            run_id (str): Lane-stable identifier for this run.
-            status (str): How the run ended.
-            op (str): The collective operation tuned.
-            algo (str): The algorithm selected.
-            size_bytes (Any): The message size tuned for.
-            world_size (Any): The participating rank count.
-            gain_pct (Any): The gain the run claimed.
-            withheld (bool): Whether the candidate was withheld from adoption.
-            withhold_reason (str): Why it was withheld.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            started_at (str): ISO timestamp the run started.
-            ended_at (str): ISO timestamp the run ended.
-            duration_sec (Any): Wall-clock seconds the run took.
-            failure_reason (str): Normalized failure reason.
-        """
+        """Record one collective-tuning run."""
         self._record_lane_run(
             {
                 **_lane_row(
@@ -1524,10 +1408,6 @@ class KernelEventRecorder:
         because a single ``config`` block holding both under one key would be
         read backwards, and their difference is the configuration surface this
         delegation actually moved.
-
-        Args:
-            handoff (dict[str, Any] | None): The handoff dict written for the
-                runner.
         """
         payload = _as_dict(handoff)
         envs = payload.get("accepted_env")
@@ -1589,26 +1469,7 @@ class KernelEventRecorder:
         recovered_from_disk: bool = False,
         stages_reached: Any = None,
     ) -> None:
-        """Record how the delegated runner itself ended.
-
-        Args:
-            runner_status (str): The runner's own status.
-            started_at (str): ISO timestamp the runner started.
-            ended_at (str): ISO timestamp the runner ended.
-            duration_sec (Any): Wall-clock seconds the runner took.
-            error_class (str): The failure class, on a miss.
-            error (str): The failure message, on a miss.
-            returncode (Any): The runner's exit code.
-            runner_timeout_sec (Any): The runner's budget.
-            kill_timeout_sec (Any): The runner's hard kill budget.
-            exp_root (str): The runner's experiment root.
-            eval_dir (str): The macro-cycle-scoped eval dir.
-            report_path (str): The human report the runner wrote.
-            versions (dict[str, Any] | None): Tool version provenance.
-            recovered_from_disk (bool): Whether the result was reconstructed
-                on-disk.
-            stages_reached (Any): Stages a crashed run reached.
-        """
+        """Record how the delegated runner itself ended."""
         self._sink.record(
             SECTION_EVENT,
             {
@@ -1805,21 +1666,7 @@ class KernelEventRecorder:
         bench_script: str = "",
         final_patch: str = "",
     ) -> None:
-        """Record the reproducible configuration GEAK handed back.
-
-        Args:
-            accepted_flags (Any): Server flags GEAK accepted.
-            accepted_envs (dict[str, Any] | None): Environment variables GEAK
-                accepted.
-            accepted_config (dict[str, Any] | None): The runner's own
-                accepted-config block.
-            cfg_hash (str): Canonical fingerprint of the flags and envs.
-            final_overlay (str): The overlay PYTHONPATH GEAK produced.
-            final_overlay_digest (str): Digest of that overlay.
-            final_launch_script (str): The optimized launch script.
-            bench_script (str): The benchmark script GEAK measured with.
-            final_patch (str): The aggregate source patch.
-        """
+        """Record the reproducible configuration GEAK handed back."""
         flags = accepted_flags
         self._sink.record(
             SECTION_EVENT,
@@ -1866,14 +1713,7 @@ class KernelEventRecorder:
         final_error_class: str = "",
         final_error: str = "",
     ) -> None:
-        """Record the terminal revalidation state of the GEAK candidate.
-
-        Args:
-            final_status (str): The revalidation status the result was stamped
-                with.
-            final_error_class (str): The revalidation failure class.
-            final_error (str): The revalidation failure message.
-        """
+        """Record the terminal revalidation state of the GEAK candidate."""
         self._sink.record(
             SECTION_EVENT,
             {
@@ -1963,13 +1803,7 @@ class KernelEventRecorder:
         self._clear_active()
 
     def finish_failed(self, *, stage: str, error_class: str = "", message: Any = "") -> None:
-        """Close the event as failed, naming the stage that failed.
-
-        Args:
-            stage (str): The stage that failed.
-            error_class (str): The failure class.
-            message (Any): The failure message.
-        """
+        """Close the event as failed, naming the stage that failed."""
         self._sink.record(
             SECTION_EVENT,
             {
@@ -1983,11 +1817,7 @@ class KernelEventRecorder:
         self.finish(verdict="failed", status="failed", exit_reason=str(stage or ""))
 
     def finish_crashed(self, exc: BaseException) -> None:
-        """Close an event whose phase raised instead of returning.
-
-        Args:
-            exc (BaseException): The exception propagating out of the phase.
-        """
+        """Close an event whose phase raised instead of returning."""
         if self._closed:
             return
         self.finish_failed(
@@ -2098,13 +1928,6 @@ def _derive_status(attempts: list[dict[str, Any]], *, candidate_count: int) -> s
     entry ``degraded`` -- the work happened but nothing settled it -- while an
     entry that produced no candidate at all and measured nothing is ``skipped``
     rather than degraded, because there was nothing there to degrade.
-
-    Args:
-        attempts (list[dict[str, Any]]): Every rebench row of the event.
-        candidate_count (int): How many candidates the entry produced.
-
-    Returns:
-        str: The event status.
     """
     if any(_float_or_none(row.get("measured_tput")) is not None for row in attempts):
         return "succeeded"
@@ -2121,9 +1944,6 @@ def _geak_settlement(attempts: list[dict[str, Any]]) -> tuple[str, list[str]]:
     newest would let a KEEP after a REVERT read as an adoption; two settled
     verdicts that disagree is a fact worth seeing, so the candidate stays
     pending and neither verdict is honoured.
-
-    Args:
-        attempts (list[dict[str, Any]]): GEAK's rebench rows, in order.
 
     Returns:
         tuple[str, list[str]]: The attempt id to settle against -- ``""`` when
@@ -2359,14 +2179,7 @@ def assemble_kernel_ext(
 
 
 def _geak_counts(kernels: list[dict[str, Any]]) -> dict[str, int]:
-    """Count GEAK's campaign off the rows it left, rather than while replaying.
-
-    Args:
-        kernels (list[dict[str, Any]]): GEAK's per-kernel attempt rows.
-
-    Returns:
-        dict[str, int]: The per-campaign counters.
-    """
+    """Count GEAK's campaign off the rows it left, rather than while replaying."""
     counts = {
         "discovered": 0,
         "dispatched": 0,
@@ -2401,13 +2214,6 @@ def make_kernel_recorder(
     failures degrade to "no event" rather than propagating. An unbound session
     declines too: writing the timeline into whatever the working directory
     happens to be is worse than not recording.
-
-    Args:
-        macro_cycle (int): The macro cycle this entry belongs to.
-        route (str): The dispatch route the entry hook selected.
-        route_reason (str): Why that route was selected.
-        resumed (bool): Whether the phase was entered by a resume.
-        code_revision (str): Orchestration commit the entry ran.
 
     Returns:
         KernelEventRecorder | None: The recorder, or ``None`` when it could not

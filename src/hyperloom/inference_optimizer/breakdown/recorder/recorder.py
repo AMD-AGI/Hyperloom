@@ -202,9 +202,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
 def section_shape(section: str) -> SectionShape | None:
     """Return the declared shape for ``section`` (``None`` if unregistered).
 
-    Args:
-        section: The breakdown section name to look up.
-
     Returns:
         The declared section shape (``"item"`` / ``"singleton"``), or ``None``
         when the section is not registered.
@@ -231,9 +228,6 @@ _ENTITY_ID_FIELDS = (
 
 def _slug(value: str) -> str:
     """Filesystem-safe token; empty input collapses to ``unknown``.
-
-    Args:
-        value: The raw string to sanitise into a filesystem-safe token.
 
     Returns:
         The sanitised token, or ``"unknown"`` when the input is empty.
@@ -310,28 +304,16 @@ class Recorder:
 
     @property
     def producer(self) -> str:
-        """Return the sanitized producer slug owning this recorder's fragments.
-
-        Returns:
-            The sanitized producer slug.
-        """
+        """Return the sanitized producer slug owning this recorder's fragments."""
         return self._producer
 
     @property
     def parts_dir(self) -> Path:
-        """Return the spool directory fragments are written into.
-
-        Returns:
-            The spool directory path.
-        """
+        """Return the spool directory fragments are written into."""
         return self._dir
 
     def _next_seq(self) -> int:
-        """Return the next monotonically increasing per-recorder sequence number.
-
-        Returns:
-            int: the next sequence number (thread-safe).
-        """
+        """Return the next monotonically increasing per-recorder sequence number."""
         with self._lock:
             self._seq += 1
             return self._seq
@@ -347,9 +329,6 @@ class Recorder:
             section: The breakdown section name (must be declared
                 ``singleton``-shaped).
             payload: The final payload mapping for the section.
-
-        Returns:
-            The path of the written singleton fragment.
         """
         self._check_shape(section, "singleton")
         filename = f"{_slug(section)}__{self._producer}.json"
@@ -404,9 +383,6 @@ class Recorder:
             payload: The event fragment payload mapping.
             key: Optional stable per-item identity for idempotent rewrites;
                 when omitted a pid/sequence-unique filename is used.
-
-        Returns:
-            The path of the written item fragment.
         """
         self._check_shape(section, "item")
         seq: int | None = None
@@ -434,13 +410,6 @@ class Recorder:
         key survived sanitizing untouched -- otherwise the legacy file could
         belong to any of the keys that fold onto that name, and adopting it
         would merge two entities, which is the bug the digest exists to stop.
-
-        Args:
-            section (str): The breakdown section name.
-            key (str): The caller's stable item identity, unsanitized.
-
-        Returns:
-            str: The fragment filename to write within the spool directory.
         """
         slug = _slug(key)
         prefix = f"{_slug(section)}__{self._producer}__{slug}"
@@ -512,13 +481,6 @@ class Recorder:
         absent key does not fail, it mints a row holding the verdict and
         nothing else. Asking first turns that into recording nothing, which is
         what a fact with no row to belong to should do.
-
-        Args:
-            section (str): The section the row belongs to.
-            key (str): The row's fragment key.
-
-        Returns:
-            bool: Whether the fragment is already on disk.
         """
         if not key:
             return False
@@ -573,9 +535,6 @@ class Recorder:
             seq (int | None): a sequence number already drawn by the caller,
                 for callers that also spend it on the filename. ``None`` draws
                 a fresh one.
-
-        Returns:
-            Path: the path of the written fragment.
 
         Raises:
             Exception: re-raised if writing or replacing the file fails (the
@@ -644,9 +603,6 @@ def get_recorder(*, producer: str) -> Recorder:
     The entry point for recording: a call site needs to know what it is
     recording and nothing else. Which session it lands in was decided once, at
     startup, by :func:`~...session.session_binding.bind_session`.
-
-    Args:
-        producer: The producer name owning the written fragments.
 
     Returns:
         The process-cached :class:`Recorder` for the bound session and this

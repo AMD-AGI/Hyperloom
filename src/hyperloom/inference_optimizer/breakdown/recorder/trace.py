@@ -92,9 +92,6 @@ def enable_trace(enabled: bool = True) -> None:
     The level is set on this logger rather than the root so the trace can be
     read without lowering everything else, and so it survives a ``basicConfig``
     that floors the root level above it.
-
-    Args:
-        enabled (bool): whether to emit the write trace.
     """
     global _enabled
     _enabled = bool(enabled)
