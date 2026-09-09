@@ -54,13 +54,19 @@ The wrapper rejects tensor spans of 4 GiB or greater because relative offsets
 are 32-bit; complete base-pointer additions propagate carry across a 4-GiB
 absolute-address boundary. These are different constraints.
 
-FP32 reduction is followed by BF16 rounding before the weight multiply and at
-each native BF16 RoPE product/addition. DPP reductions and reciprocal-square-root
-instructions retain their required dependency spacing. Removing that spacing
-produced wrong results in an earlier candidate, despite successful assembly.
-FP32 reduction ordering can still change BF16 rounding near a boundary; exact
-generated-token equivalence is not promised. Keep production numerical and
-model-quality requirements in the driver when expanding this experiment.
+FP64 RMS reduction and normalization are converted through FP32 to BF16 before the
+weight multiply and at each native BF16 RoPE product/addition. Expanded testing
+found two out-of-tolerance Q elements in the earlier FP32 implementation at seed
+910, 2048 tokens, and input scale 0.5. The regression test preserves that input
+and the original `rtol=0.01, atol=0.01`; the precision change repairs the kernel
+rather than relaxing its oracle. Historical FP32 timings do not describe this
+repaired source.
+
+DPP reductions and reciprocal-square-root instructions retain their required
+dependency spacing. Removing that spacing produced wrong results in an earlier
+candidate, despite successful assembly. Exact generated-token equivalence is
+not promised. Keep production numerical and model-quality requirements in the
+driver when expanding this experiment.
 
 ```bash
 pytest src/kernelforge/tests/test_assembly_hip.py

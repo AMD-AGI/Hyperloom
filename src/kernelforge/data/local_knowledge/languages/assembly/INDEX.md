@@ -58,8 +58,11 @@ The [Qwen3 Q/K normalization and RoPE case](cases/qwen3_qk_rope_gfx950.md)
 connects a standalone handwritten kernel to an existing vLLM model through
 Forge's explicit-ABI HIP loader. It covers graph/worker dispatch verification,
 BF16 intermediate rounding, same-fusion attribution, and the distinction
-between decode throughput and first-token latency. This is a separate
-deterministic experiment, not a FlyDSL change or an agent-discovered KEEP.
+between decode throughput and first-token latency. It distinguishes the manual
+fusion/numerical repair from a real Forge agent's staged-VMEM scheduling KEEP,
+clean export replay, independent holdouts, and fault-injection REVERT. This is
+a standalone HIP integration, not a FlyDSL source change. A kernel KEEP alone
+does not establish an additional model-serving gain.
 
 ## Source and toolchain
 

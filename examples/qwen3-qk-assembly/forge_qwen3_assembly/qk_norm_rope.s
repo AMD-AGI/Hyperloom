@@ -45,38 +45,68 @@ s_add_u32 s8, s8, s24
 s_addc_u32 s9, s9, 0
 global_load_ushort v6, v1, s[8:9]
 global_load_ushort v7, v1, s[8:9] offset:128
-s_waitcnt vmcnt(0)
+s_waitcnt vmcnt(4)
 v_lshlrev_b32 v2, 16, v2
 v_lshlrev_b32 v3, 16, v3
+v_cvt_f64_f32 v[8:9], v2
+v_mul_f64 v[8:9], v[8:9], v[8:9]
+v_cvt_f64_f32 v[10:11], v3
+v_mul_f64 v[10:11], v[10:11], v[10:11]
+v_add_f64 v[8:9], v[8:9], v[10:11]
+s_waitcnt vmcnt(2)
 v_lshlrev_b32 v4, 16, v4
 v_lshlrev_b32 v5, 16, v5
+s_nop 2
+v_mov_b32 v10, v8 quad_perm:[1,0,3,2]
+v_mov_b32 v11, v9 quad_perm:[1,0,3,2]
+s_waitcnt vmcnt(0)
 v_lshlrev_b32 v6, 16, v6
 v_lshlrev_b32 v7, 16, v7
-v_mul_f32 v8, v2, v2
-v_mul_f32 v9, v3, v3
-v_add_f32 v8, v8, v9
+s_nop 2
+v_add_f64 v[8:9], v[8:9], v[10:11]
 s_nop 4
-v_add_f32 v8, v8, v8 quad_perm:[1,0,3,2]
+v_mov_b32 v10, v8 quad_perm:[2,3,0,1]
+v_mov_b32 v11, v9 quad_perm:[2,3,0,1]
 s_nop 4
-v_add_f32 v8, v8, v8 quad_perm:[2,3,0,1]
+v_add_f64 v[8:9], v[8:9], v[10:11]
 s_nop 4
-v_add_f32 v8, v8, v8 row_shr:4 row_mask:0xf bank_mask:0xf bound_ctrl:0
+v_mov_b32 v10, v8 row_shr:4 row_mask:0xf bank_mask:0xf bound_ctrl:0
+v_mov_b32 v11, v9 row_shr:4 row_mask:0xf bank_mask:0xf bound_ctrl:0
 s_nop 4
-v_add_f32 v8, v8, v8 row_shr:8 row_mask:0xf bank_mask:0xf bound_ctrl:0
+v_add_f64 v[8:9], v[8:9], v[10:11]
 s_nop 4
-v_add_f32 v8, v8, v8 row_bcast:15 row_mask:0xa bank_mask:0xf
+v_mov_b32 v10, v8 row_shr:8 row_mask:0xf bank_mask:0xf bound_ctrl:0
+v_mov_b32 v11, v9 row_shr:8 row_mask:0xf bank_mask:0xf bound_ctrl:0
 s_nop 4
-v_add_f32 v8, v8, v8 row_bcast:31 row_mask:0xc bank_mask:0xf
+v_add_f64 v[8:9], v[8:9], v[10:11]
+s_nop 4
+v_mov_b32 v10, v8 row_bcast:15 row_mask:0xa bank_mask:0xf
+v_mov_b32 v11, v9 row_bcast:15 row_mask:0xa bank_mask:0xf
+s_nop 4
+v_add_f64 v[8:9], v[8:9], v[10:11]
+s_nop 4
+v_mov_b32 v10, v8 row_bcast:31 row_mask:0xc bank_mask:0xf
+v_mov_b32 v11, v9 row_bcast:31 row_mask:0xc bank_mask:0xf
+s_nop 4
+v_add_f64 v[8:9], v[8:9], v[10:11]
 s_nop 4
 v_readlane_b32 s24, v8, 63
-s_nop 4
+v_readlane_b32 s25, v9, 63
 v_mov_b32 v8, s24
-v_mul_f32 v8, 0x3c000000, v8
-v_add_f32 v8, s18, v8
-v_rsq_f32 v8, v8
+v_mov_b32 v9, s25
+v_mov_b32 v10, 0
+v_mov_b32 v11, 0x3f800000
+v_mul_f64 v[8:9], v[8:9], v[10:11]
+v_cvt_f64_f32 v[10:11], s18
+v_add_f64 v[8:9], v[8:9], v[10:11]
+v_rsq_f64 v[8:9], v[8:9]
 s_nop 4
-v_mul_f32 v2, v2, v8
-v_mul_f32 v3, v3, v8
+v_cvt_f64_f32 v[10:11], v2
+v_mul_f64 v[10:11], v[10:11], v[8:9]
+v_cvt_f32_f64 v2, v[10:11]
+v_cvt_f64_f32 v[10:11], v3
+v_mul_f64 v[10:11], v[10:11], v[8:9]
+v_cvt_f32_f64 v3, v[10:11]
 v_cvt_pk_bf16_f32 v9, v2, v3
 v_lshlrev_b32 v2, 16, v9
 v_and_b32 v3, 0xffff0000, v9
