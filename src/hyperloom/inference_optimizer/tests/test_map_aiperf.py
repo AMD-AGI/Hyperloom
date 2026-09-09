@@ -206,3 +206,50 @@ def test_vendored_asset_fallback_matches_package(monkeypatch):
     spec.loader.exec_module(mod)
 
     assert mod.map_aiperf(_sample()) == map_aiperf(_sample())
+
+
+def test_map_corpus_shape_projects_the_measured_distributions():
+    """The shape the prompts render comes from the export, not from constants."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf(_sample()))
+    assert shape["corpus_loader"] == ""  # _sample() carries no dataset metadata
+    assert shape["isl"] == {"avg": 100}  # only avg present in the sample
+    assert shape["completed_requests"] == 42
+    assert shape["duration_s"] == pytest.approx(14.0)
+    assert shape["prefix_cache_hit"] == pytest.approx(0.73)
+    assert shape["source"] == "measured"
+
+
+def test_map_corpus_shape_carries_the_loader_and_the_percentiles():
+    s = _sample()
+    s["metadata"] = {"dataset": {"loader": "semianalysis_cc_traces_weka_062126"}}
+    s["input_sequence_length"] = {"avg": 113814.0, "p50": 94821.0, "p90": 163328.0, "p99": 506158.0}
+    s["output_sequence_length"] = {"avg": 806.0, "p50": 333.0, "p90": 1874.0, "p99": 6386.0}
+    s["request_error_rate"] = {"unit": "ratio", "avg": 0.007}
+
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf(s))
+    assert shape["corpus_loader"] == "semianalysis_cc_traces_weka_062126"
+    assert shape["isl"] == {"avg": 113814, "p50": 94821, "p90": 163328, "p99": 506158}
+    assert shape["osl"] == {"avg": 806, "p50": 333, "p90": 1874, "p99": 6386}
+    assert shape["request_error_rate"] == pytest.approx(0.007)
+
+
+def test_an_export_with_no_sequence_metrics_yields_empty_distributions():
+    """A synthetic result carries none of this; the record must not invent it."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf({"output_token_throughput": {"avg": 10.0}}))
+    assert shape["isl"] == {} and shape["osl"] == {}
+    assert shape["completed_requests"] == 0
+
+
+def test_a_non_list_invalid_reason_is_coerced_to_one():
+    """aiperf may stamp a bare string; the schema field is a list."""
+    export = {
+        "output_token_throughput": {"avg": 10.0},
+        "metadata": {"submission_valid": False, "submission_invalid_reasons": "unsafe_override"},
+    }
+    assert map_aiperf(export)["submission_invalid_reasons"] == ["unsafe_override"]

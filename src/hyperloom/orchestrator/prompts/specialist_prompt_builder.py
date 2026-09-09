@@ -2345,9 +2345,8 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         "decode MoE a2a backend.",
         f"- **KV transfer** (`{tb}`): watch bootstrap / transfer stalls; RDMA/IB "
         "device selection affects decode start latency.",
-        "- **Balance**: tune the prefill:decode node/TP ratio to the workload "
-        "shape — a saturated role caps end-to-end throughput. For AgentX the "
-        "true ratio is ~142:1 (ISL avg 114k / OSL avg 806), not 1:1.",
+        "- **Balance**: tune the prefill:decode node/TP ratio to the workload shape "
+        + "— a saturated role caps end-to-end throughput.",
         "",
         "Per-role GPU telemetry is in the benchmark report's "
         "`gpu_monitor_by_role` (prefill vs decode util / power / VRAM); use it to "
