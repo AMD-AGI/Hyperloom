@@ -47,7 +47,6 @@ def _task_and_worktree(tmp_path: Path):
     kernel.write_text("VALUE = 1\n", encoding="utf-8")
     task = parse_task_payload(
         {
-            "schema_version": 1,
             "identity": identity_mapping,
             "base_commit": "a" * 40,
             "repo_root": str(repo),

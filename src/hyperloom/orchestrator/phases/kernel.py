@@ -3315,6 +3315,28 @@ class KernelPhase(PhaseHandler):
             int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         )
         handoff_dir = attempt_dir / "handoff"
+        # Sealed before the handoff is written and before the controller starts,
+        # which is the last moment the serving trees stand still: reprofile,
+        # fusion and collective have all finished, and every uncommitted change
+        # they left is part of what the server is now running. Committing it is
+        # what lets a campaign name its own baseline -- the diff's starting
+        # point, and the state a borrowed repository is handed back at.
+        baselines: dict[str, object] = {}
+        try:
+            from ..kernel.campaign_baseline import seal_campaign_baseline
+
+            baselines = seal_campaign_baseline(
+                self.shared_state,
+                session_id=str(getattr(self.shared_state, "session_id", "") or self.session_dir.name),
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
+            if baselines:
+                log.info(
+                    "KERNEL entry: sealed campaign baselines %s",
+                    {repo: baseline.commit for repo, baseline in baselines.items()},
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
@@ -3328,13 +3350,19 @@ class KernelPhase(PhaseHandler):
                 self.shared_state,
                 env_spec=env_spec,
                 handoff_dir=handoff_dir,
+                baselines=baselines,
             )
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: Forge handoff generation failed")
-        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir)
+        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
-    async def _run_kernel_rewrite_controller(self, handoff_dir: Path, output_dir: Path) -> None:
+    async def _run_kernel_rewrite_controller(
+        self,
+        handoff_dir: Path,
+        output_dir: Path,
+        baselines: dict[str, object] | None = None,
+    ) -> None:
         """Run one Controller attempt without preselecting operators."""
         from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
 
@@ -3395,6 +3423,19 @@ class KernelPhase(PhaseHandler):
             # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
             # now that the child has exited.
             record_controller_llm_usage(result=result, session_dir=self.session_dir)
+            # Before integration reads any HEAD. A hard timeout kills the process
+            # tree, so a borrowed repository can still be sitting on a campaign
+            # branch, and integration refuses a publication whose base commit is
+            # not the HEAD it finds -- which would discard exactly the patches
+            # incremental publication saved from the kill.
+            try:
+                from ..kernel.campaign_baseline import reclaim_campaign_repositories
+
+                reclaimed = reclaim_campaign_repositories(baselines or {})
+                if reclaimed:
+                    result["reclaimed_repositories"] = reclaimed
+            except Exception:  # noqa: BLE001
+                log.exception("KERNEL entry: reclaiming the campaign repositories failed")
             if int(result.get("patch_count") or 0) > 0:
                 try:
                     from ..kernel.controller_patch_integration import (

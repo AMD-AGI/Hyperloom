@@ -27,6 +27,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _system_prompt,
     run_opportunity_analysis,
 )
+from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -69,7 +70,6 @@ def _write_staged_task(staging_root: Path, repo: Path) -> str:
     (task / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity,
                 "base_commit": "",
                 "repo_root": str(repo),
@@ -408,6 +408,52 @@ def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> Non
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def _refused_draft(staging_root: Path, name: str = "draft") -> Path:
+    draft = staging_root / name
+    draft.mkdir(parents=True)
+    (draft / REJECTION_FILENAME).write_text(
+        json.dumps({"draft": name, "reason": "identity.backend must be registered"}),
+        encoding="utf-8",
+    )
+    return draft
+
+
+def test_the_session_cannot_end_while_a_draft_stands_refused(tmp_path: Path) -> None:
+    """Validation is out of process, so stopping is the agent's last chance to hear."""
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging)
+
+    blocked = asyncio.run(protection._on_stop({}, "", None))
+
+    assert blocked["decision"] == "block"
+    assert "identity.backend must be registered" in blocked["reason"]
+    assert REJECTION_FILENAME in blocked["reason"]
+
+
+def test_a_session_with_nothing_refused_ends_normally(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+
+    assert asyncio.run(protection._on_stop({}, "", None)) == {}
+
+
+def test_stop_denials_are_capped_so_an_unfixable_draft_cannot_eat_the_budget(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging, max_stop_denials=2)
+
+    decisions = [asyncio.run(protection._on_stop({}, "", None)) for _ in range(3)]
+
+    assert [decision.get("decision") for decision in decisions] == ["block", "block", None]
+
+
+def test_the_prompt_names_the_file_refusals_are_written_to() -> None:
+    """The agent can only read the note if the contract tells it the name."""
+    assert REJECTION_FILENAME in _system_prompt()
+
+
 def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
     protection = _AnalysisToolGuard(tmp_path / "staging")
     matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
@@ -423,3 +469,47 @@ def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
     assert "Bash|Shell|Task.*|Agent" in matchers
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_the_analysis_records_what_it_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that publishes nothing still pays, and had been reporting zero."""
+
+    class _SpendingBackend(_Backend):
+        async def run(self, spec, usage=None):
+            self.spec = spec
+            self.callback(Path(spec.cwd))
+            if usage is not None:
+                usage.add_usage(
+                    {"input_tokens": 11, "output_tokens": 22},
+                    total_cost_usd=0.5,
+                )
+            return AgentRunResult(text="", end_reason="agent_stopped")
+
+    layout = ControllerLayout(tmp_path / "output")
+    handoff = _handoff(tmp_path)
+    agent = OpportunityAnalysisAgent(
+        backend=_SpendingBackend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=handoff, layout=layout))
+
+    assert outcome.llm_usage["calls"] == 1
+    assert outcome.llm_usage["input_tokens"] == 11
+    assert outcome.llm_usage["output_tokens"] == 22
+    assert outcome.agent_model == "fake"
+
+
+def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:
+    """``calls == 0`` is "not observed", which is not a claim of zero spend."""
+    layout = ControllerLayout(tmp_path / "output")
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert outcome.llm_usage == {}

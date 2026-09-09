@@ -44,7 +44,6 @@ def test_load_task_parses_identity_and_initializes_ready_state(
 @pytest.mark.parametrize(
     "field",
     [
-        "schema_version",
         "identity",
         "base_commit",
         "repo_root",
@@ -81,11 +80,16 @@ def test_invalid_json_is_recorded_as_skipped(task_dir: Path) -> None:
     assert TaskStateStore(task_dir).load().status == "skipped"  # type: ignore[union-attr]
 
 
-def test_unknown_task_field_is_rejected(task_dir: Path, task_payload: dict) -> None:
+def test_an_unknown_task_field_is_ignored_rather_than_refused(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """Every field the run acts on is required, so an extra one decides nothing."""
     task_payload["typo_field"] = True
 
-    with pytest.raises(ValueError, match="unknown fields"):
-        parse_task_payload(task_payload, task_dir=task_dir)
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.kernel_path == "sglang/kernels/fused_moe.py"
 
 
 def test_base_commit_mismatch_is_recorded_as_skipped(task_dir: Path) -> None:
@@ -124,18 +128,49 @@ def test_driver_must_exist_inside_task_directory(task_dir: Path, task_payload: d
         parse_task_payload(task_payload, task_dir=task_dir)
 
 
-def test_operator_name_must_match_identity(task_dir: Path, task_payload: dict) -> None:
-    task_payload["operator_name"] = "paged_attention"
+def test_kernel_name_is_derived_from_the_operator_name(task_dir: Path, task_payload: dict) -> None:
+    """One name in, one address out.
 
-    with pytest.raises(ValueError, match="does not normalize"):
-        parse_task_payload(task_payload, task_dir=task_dir)
+    forge-loop resolves its knowledge-base page from ``--operator-name`` alone,
+    so the dimension has to come from the same string the loop will see.
+    """
+    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+    assert task.operator_name == "backend::Fused.MoE-Kernel"
+    assert task.identity.kernel_name == "fused_moe"
 
 
-def test_identity_backend_must_be_registered(task_dir: Path, task_payload: dict) -> None:
-    task_payload["identity"]["backend"] = "rocm"
+def test_an_agent_supplied_kernel_name_is_replaced_rather_than_refused(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """The agent hears no refusal, so a stale draft is corrected, not thrown out."""
+    task_payload["identity"] = {**task_payload["identity"], "kernel_name": "paged_attention"}
 
-    with pytest.raises(ValueError, match="registered kernel backends"):
-        parse_task_payload(task_payload, task_dir=task_dir)
+    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+    assert task.identity.kernel_name == "fused_moe"
+
+
+def test_an_operator_name_that_normalizes_to_nothing_is_refused(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """Every unnameable operator would otherwise share one canonical id."""
+    task_payload["operator_name"] = "<<>>"
+
+    with pytest.raises(ValueError, match="no usable kernel name"):
+        parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+
+def test_an_unregistered_backend_is_accepted(task_dir: Path, task_payload: dict) -> None:
+    """It picks a prompt layer, and forge-loop answers an unknown one with none."""
+    task_payload["identity"]["backend"] = "tilelang"
+
+    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+    assert task.identity.backend == "tilelang"
+    assert task.operator_id.split(":")[5] == "tilelang"
 
 
 def test_bool_priority_is_rejected(task_dir: Path, task_payload: dict) -> None:
@@ -176,13 +211,11 @@ _DROP = object()
 @pytest.mark.parametrize(
     ("changes", "expected"),
     [
-        ({"schema_version": 99}, "unsupported task schema"),
         ({"identity": []}, "identity must be a JSON object"),
         ({"base_commit": "abc"}, "full 40- or 64-character hexadecimal"),
         ({"driver_path": "run.py"}, "driver_path must be exactly 'driver.py'"),
         ({"operator_name": ""}, "operator_name must be a non-empty string"),
         ({"repo_root": ""}, "repo_root must be a non-empty string"),
-        ({"shape_cases": [1]}, "shape_cases must be a list of JSON objects"),
         ({"evidence": {}}, "evidence must be a JSON list"),
         ({"reason": 7}, "reason must be a string"),
         ({"source_files": [""]}, "source_files must be a list of non-empty strings"),
@@ -210,13 +243,57 @@ def test_an_identity_missing_a_dimension_is_refused(task_dir: Path, task_payload
     assert "identity is missing fields: backend" in (outcome.reason or "")
 
 
-def test_an_identity_with_an_extra_dimension_is_refused(task_dir: Path, task_payload: dict) -> None:
-    """The six-tuple is closed: a seventh field would silently change the id."""
+def test_an_identity_with_an_extra_dimension_keeps_the_six_tuple(
+    task_dir: Path,
+    task_payload: dict,
+    operator_id: str,
+) -> None:
+    """A seventh field names no dimension, so it cannot move the address."""
     identity = {**task_payload["identity"], "vendor": "amd"}
     _write_payload(task_dir, {**task_payload, "identity": identity})
+
     outcome = load_task(task_dir, record_state=False)
-    assert outcome.task is None
-    assert "identity has unknown fields: vendor" in (outcome.reason or "")
+
+    assert outcome.task is not None
+    assert outcome.task.operator_id == operator_id
+
+
+@pytest.mark.parametrize("value", [15.3, "15.3%", None, {"decode": 15.3}])
+def test_gpu_pct_is_carried_in_any_shape_the_agent_wrote(
+    task_dir: Path,
+    task_payload: dict,
+    value: object,
+) -> None:
+    """Observational only: refusing over its formatting would cost an operator."""
+    task_payload["gpu_pct"] = value
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.gpu_pct == value
+
+
+def test_a_task_without_gpu_pct_is_still_valid(task_dir: Path, task_payload: dict) -> None:
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.gpu_pct is None
+
+
+def test_shape_cases_are_carried_verbatim(task_dir: Path, task_payload: dict) -> None:
+    """No code reads a case, so a shape the contract disagrees with still ships."""
+    task_payload["shape_cases"] = [1, {"name": "decode"}]
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.shape_cases == [1, {"name": "decode"}]
+
+
+def test_shape_cases_that_are_not_a_list_are_not_reshaped(task_dir: Path, task_payload: dict) -> None:
+    """Wrapping a value nothing reads decides as little as refusing it would."""
+    task_payload["shape_cases"] = {"name": "decode"}
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.shape_cases == {"name": "decode"}
 
 
 def test_a_producer_other_than_forge_loop_is_refused(task_dir: Path, task_payload: dict) -> None:

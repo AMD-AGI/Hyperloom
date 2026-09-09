@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import ast
-import fcntl
 import json
 import logging
 import math
@@ -15,7 +14,6 @@ import os
 import re
 import signal
 import shutil
-import site
 import subprocess
 import sys
 import tempfile
@@ -24,6 +22,24 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, NamedTuple
+
+# Aliased to the private names this module has always used, so the in-place
+# machinery below reads unchanged. The definitions moved because the rewrite
+# controller needs the same two answers, and a second opinion on either -- is
+# this repository editable, and who currently owns it -- is a defect rather
+# than a duplication.
+from kernelforge.loop.editable_repo import (
+    RepoLock as _RepoLock,
+)
+from kernelforge.loop.editable_repo import (
+    acquire_repo_lock as _acquire_repo_lock,
+)
+from kernelforge.loop.editable_repo import (
+    needs_inplace as _needs_inplace,
+)
+from kernelforge.loop.editable_repo import (
+    release_repo_lock as _release_repo_lock,
+)
 
 _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
@@ -811,136 +827,6 @@ def _prepare_worktree_nogit(
     scratch_kernel = str(scratch_dir / rel)
     log.info("forge: non-git scratch worktree ready at %s (kernel=%s)", scratch_dir, scratch_kernel)
     return str(scratch_dir), scratch_kernel, base_commit
-
-
-def _editable_roots() -> list[str]:
-    """Collect filesystem roots of PEP 660 editable-finder installs."""
-    roots: set[str] = set()
-    seen_dirs: set[str] = set()
-    scan_dirs = list(sys.path)
-    try:
-        scan_dirs.extend(site.getsitepackages())
-    except Exception:
-        pass
-    if hasattr(site, "getusersitepackages"):
-        try:
-            scan_dirs.append(site.getusersitepackages())
-        except Exception:
-            pass
-    # Venv / conda site-packages may not appear in sys.path; probe conventional locations for sys.prefix, VIRTUAL_ENV,
-    # CONDA_PREFIX, and the interpreter.
-    _pyver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
-    _prefixes = {sys.prefix, sys.exec_prefix, sys.base_prefix}
-    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
-        v = os.environ.get(var)
-        if v:
-            _prefixes.add(v)
-    # Derive the venv from the interpreter path.
-    _interp = os.path.realpath(sys.executable)
-    if os.sep + "bin" + os.sep in _interp:
-        _prefixes.add(_interp.rsplit(os.sep + "bin" + os.sep, 1)[0])
-    for prefix in _prefixes:
-        for sub in (f"lib/{_pyver}/site-packages", f"lib/{_pyver}/dist-packages"):
-            cand = os.path.join(prefix, sub)
-            if os.path.isdir(cand):
-                scan_dirs.append(cand)
-    for d in scan_dirs:
-        if not d or d in seen_dirs or not os.path.isdir(d):
-            continue
-        seen_dirs.add(d)
-        try:
-            names = os.listdir(d)
-        except OSError:
-            continue
-        for n in names:
-            if not n.startswith("__editable__"):
-                continue
-            if not (n.endswith(".pth") or n.endswith("_finder.py")):
-                continue
-            fpath = os.path.join(d, n)
-            try:
-                with open(fpath, errors="replace") as _fh:
-                    txt = _fh.read()
-            except OSError:
-                continue
-            # Layout 0: bare absolute path on a line (no quotes, no import).
-            for line in txt.splitlines():
-                line = line.strip()
-                if line.startswith("/") and not line.startswith("#") and "import" not in line and os.path.isdir(line):
-                    roots.add(os.path.realpath(line))
-            # Layout 1: quoted absolute paths directly in the file.
-            for m in re.findall(r"['\"](/[^'\"]+)['\"]", txt):
-                if os.path.isdir(m):
-                    roots.add(os.path.realpath(m))
-            # Layout 2: .pth imports a _finder.py; read its MAPPING dict for paths.
-            if n.endswith(".pth"):
-                fm = re.search(r"import\s+(__editable___\w+_finder)", txt)
-                if fm:
-                    finder_file = os.path.join(d, fm.group(1) + ".py")
-                    try:
-                        with open(finder_file, errors="replace") as _fh2:
-                            ftxt = _fh2.read()
-                    except OSError:
-                        continue
-                    for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
-                        if os.path.isdir(m):
-                            roots.add(os.path.realpath(m))
-    return sorted(roots)
-
-
-def _needs_inplace(kernel_repo: str) -> bool:
-    """True when kernel_repo is (or contains/sits under) an editable-finder root."""
-    if not kernel_repo:
-        return False
-    repo = os.path.realpath(kernel_repo)
-    for r in _editable_roots():
-        if r == repo or r.startswith(repo + os.sep) or repo.startswith(r + os.sep):
-            return True
-    return False
-
-
-class _RepoLock:
-    """Owned in-place repo lock; released explicitly after restore."""
-
-    def __init__(self, fh) -> None:
-        self._fh = fh
-
-    @property
-    def fd(self) -> int:
-        return self._fh.fileno()
-
-    def close(self) -> None:
-        self._fh.close()
-
-
-def _acquire_repo_lock(repo: str) -> _RepoLock | None:
-    """Take a non-blocking exclusive lock on the live repo for in-place editing."""
-    lock_path = os.path.join(repo, ".git", "forge_inplace.lock")
-    try:
-        fh = open(lock_path, "a+", encoding="utf-8")
-        os.chmod(lock_path, 0o600)
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return _RepoLock(fh)
-
-
-def _release_repo_lock(lock: _RepoLock | None) -> None:
-    """Release + close the in-place repo lock (best-effort)."""
-    if lock is None:
-        return
-    try:
-        fcntl.flock(lock.fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-    try:
-        lock.close()
-    except OSError:
-        pass
 
 
 def _prepare_inplace(

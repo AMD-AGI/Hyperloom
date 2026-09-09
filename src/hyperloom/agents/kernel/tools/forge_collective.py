@@ -37,19 +37,25 @@ sys.path.pop(0)
 sys.path.insert(0, str(Path(__file__).resolve().parent / "backends"))
 from _llm_stability_env import apply_llm_stability_env  # noqa: E402
 from forge_submit import (  # noqa: E402
-    _acquire_repo_lock,
     _export_best_artifacts,
-    _needs_inplace,
     _new_forge_branch,
     _prepare_inplace,
     _prepare_worktree,
     _read_forge_best_result,
-    _release_repo_lock,
     _remove_worktree,
     _restore_inplace,
     _terminate_forge_process,
     _untracked_paths,
     _validated_forge_best_result,
+)
+from kernelforge.loop.editable_repo import (  # noqa: E402
+    acquire_repo_lock as _acquire_repo_lock,
+)
+from kernelforge.loop.editable_repo import (  # noqa: E402
+    needs_inplace as _needs_inplace,
+)
+from kernelforge.loop.editable_repo import (  # noqa: E402
+    release_repo_lock as _release_repo_lock,
 )
 
 
