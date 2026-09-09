@@ -157,6 +157,51 @@ def test_a_driver_left_by_a_killed_run_is_reclaimed(staged) -> None:
     assert not abandoned.exists()
 
 
+def test_a_handed_back_repository_is_not_reported_as_a_barren_campaign(
+    staged,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Two different facts must not share one reason string.
+
+    forge-loop's best-result bundle lives inside the workspace, so a borrowed
+    repository takes it away when it is handed back. Saying "no trusted
+    forge-loop best result" about a directory that is gone states a verdict on
+    evidence nothing read, and reads as "the campaign produced nothing".
+    """
+    from kernelforge.kernel_rewrite_controller import recovery
+
+    task, workspace, _driver = staged
+    monkeypatch.setattr(recovery, "needs_inplace", lambda _repo: True)
+
+    reason = recovery._nothing_to_recover_reason(task, workspace)
+
+    assert "handed back" in reason
+    assert "no trusted forge-loop best result" not in reason
+
+
+def test_a_standing_workspace_with_no_result_still_says_so(staged, monkeypatch) -> None:
+    """The original verdict survives where it is the true one."""
+    from kernelforge.kernel_rewrite_controller import recovery
+    from kernelforge.kernel_rewrite_controller.worktree import FORGE_LOOP_OUTPUT_DIRNAME
+
+    task, workspace, _driver = staged
+    (workspace / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(recovery, "needs_inplace", lambda _repo: True)
+
+    assert recovery._nothing_to_recover_reason(task, workspace) == "no trusted forge-loop best result"
+
+
+def test_a_private_checkout_is_judged_on_its_bundle(staged, monkeypatch) -> None:
+    """A private checkout is left standing, so the sweep does read it."""
+    from kernelforge.kernel_rewrite_controller import recovery
+
+    task, workspace, _driver = staged
+    monkeypatch.setattr(recovery, "needs_inplace", lambda _repo: False)
+
+    assert recovery._nothing_to_recover_reason(task, workspace) == "no trusted forge-loop best result"
+
+
 def test_the_preparation_audit_is_kept_outside_the_workspace(tmp_path: Path) -> None:
     """Its home is deleted with the borrowed tree, and it is the only account
     of why a task that could not be prepared stopped."""

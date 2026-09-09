@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
@@ -20,11 +21,13 @@ from kernelforge.kernel_rewrite_controller.publisher import (
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import discover_task_dirs, load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
     changed_files_from_base,
     export_patch_from_base,
     operator_workspace,
 )
+from kernelforge.loop.editable_repo import needs_inplace
 from kernelforge.loop.reporting import BestResultPublisher
 
 log = logging.getLogger(__name__)
@@ -128,6 +131,29 @@ def _select_trusted_result(
     return manifest, "best manifest"
 
 
+def _nothing_to_recover_reason(task: KernelRewriteTask, workspace: Path) -> str:
+    """Say which of two different facts stopped a recovery.
+
+    A borrowed repository is handed back the moment its patch is exported, and
+    forge-loop's best-result bundle lives inside the workspace, so it goes with
+    it. Once that has happened there is nothing here to judge -- reporting "no
+    trusted forge-loop best result" would state a verdict on evidence that was
+    never read, which reads as "the campaign produced nothing" and is a
+    different claim entirely.
+
+    The dispatch recovers from the workspace before handing it back, and the
+    sidecar in the task directory outlives the borrow, so both views a
+    completed campaign leaves behind are still reachable. What is not is an
+    interim bundle from a campaign that never reported.
+    """
+    if needs_inplace(str(task.repo_root)) and not (workspace / FORGE_LOOP_OUTPUT_DIRNAME).is_dir():
+        return (
+            "the borrowed repository was handed back, so its forge-loop bundle is gone; "
+            "a completed campaign is recovered during dispatch or from the task's result sidecar"
+        )
+    return "no trusted forge-loop best result"
+
+
 def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
     metadata = _load_json(layout.patch_dir(operator_id) / PUBLICATION_FILENAME)
     return bool(metadata and str(metadata.get("best_commit") or "") == best_commit)
@@ -160,7 +186,7 @@ def recover_task_result(
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,
-            reason="no trusted forge-loop best result",
+            reason=_nothing_to_recover_reason(task, workspace),
         )
 
     best_commit = str(manifest.get("commit_hash") or "").strip().lower()

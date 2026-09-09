@@ -253,10 +253,16 @@ def dispatch_single_task(
     finally:
         # After the recovery above, never before it: the patch is what the
         # campaign was for, and this returns the tree the patch was built in.
-        # A private checkout is left standing instead, because the controller's
-        # closing sweep still reads results out of it.
-        if task is not None:
-            _keep_preparation_audit(layout, task, worktree)
+        #
+        # A borrowed repository takes forge-loop's best-result bundle with it,
+        # so the closing sweep cannot read one out of an in-place workspace --
+        # only a private checkout, which is left standing for exactly that
+        # reason. What a completed in-place campaign leaves reachable is the
+        # recovery above, which runs first, and the result sidecar in the task
+        # directory, which is outside the repository. The sweep says which of
+        # those it found rather than reporting a verdict on a bundle that is
+        # gone; see _nothing_to_recover_reason.
+        _keep_preparation_audit(layout, task, worktree)
         release_operator_worktree(worktree)
 
 
