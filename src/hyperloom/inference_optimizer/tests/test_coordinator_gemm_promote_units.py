@@ -2679,11 +2679,11 @@ class TestKernelE2EMeasurementPromotion:
             framework="sglang",
             benchmark_mode="agentx",
             baseline_tput=100.0,
-            baseline_perf={"total_throughput": 1000.0, "intvty_p90": 100.0},
+            baseline_perf={"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
             current_best={
                 "tput": 100.0,
                 "total_throughput": 1000.0,
-                "intvty_p90": 100.0,
+                "e2e_norm_intvty_p90": 100.0,
                 "extra_envs": {"BASE_ENV": "1"},
             },
         )
@@ -2691,13 +2691,14 @@ class TestKernelE2EMeasurementPromotion:
         return coord
 
     @staticmethod
-    def _bench(output=90.0, total=1200.0, *, name="first", intvty=100.0):
+    def _bench(output=90.0, total=1200.0, *, name="first", intvty=120.0):
         return {
             "status": "succeeded",
             "output_throughput": output,
             "total_token_throughput": total,
             "input_throughput": total - output,
-            "intvty_p90": intvty,
+            "e2e_norm_intvty_p90": intvty,
+            "intvty_p90": 100.0,
             "tpot_p90_ms": 10.0,
             "ttft_mean_ms": 12.0,
             "e2el_mean_ms": 23.0,
@@ -2721,7 +2722,7 @@ class TestKernelE2EMeasurementPromotion:
     @classmethod
     def _result(cls):
         return {
-            **cls._bench(9999.0, 99999.0, name="micro"),
+            **cls._bench(9999.0, 99999.0, name="micro", intvty=9999.0),
             "backend": "forge",
             "requires_e2e_validation": True,
             "recommended_env": {"GEMM_CONFIG": "/candidate.csv"},
@@ -2733,7 +2734,7 @@ class TestKernelE2EMeasurementPromotion:
     def _assert_measurement(coord, bench):
         cb = coord.shared_state.current_best
         assert cb["tput"] == bench["output_throughput"]
-        for key in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms", "workspace"):
+        for key in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms", "workspace", "e2e_norm_intvty_p90"):
             assert cb[key] == bench[key]
         measurement = coord.shared_state.current_best_measurement
         assert measurement["benchmark_workspace"] == bench["workspace"]
@@ -2743,8 +2744,8 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("outer_output", [90.0, 9000.0])
-    async def test_gemm_nested_total_keep_can_lower_output(self, coord, monkeypatch, outer_output):
-        bench = self._bench()
+    async def test_gemm_nested_intvty_keep_can_lower_output(self, coord, monkeypatch, outer_output):
+        bench = self._bench(total=1080.0)
         fake = _make_integrate(
             [{"decision": "KEEP", "new_tput": outer_output, "gain_pct": 20.0, "bench_result": bench}]
         )
@@ -2765,8 +2766,9 @@ class TestKernelE2EMeasurementPromotion:
         assert result["e2e_gain_pct"] == pytest.approx(20.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(20.0)
         assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-        assert coord.shared_state.current_best["total_throughput"] == 1200.0
-        assert coord.shared_state.current_best["input_throughput"] == 1110.0
+        assert coord.shared_state.current_best["total_throughput"] == 1080.0
+        assert coord.shared_state.current_best["input_throughput"] == 990.0
+        assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == 120.0
         assert coord.shared_state.current_best["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
         assert coord.shared_state.current_best["extra_server_args"] == ""
         assert result["tuned_file"] == "/candidate.csv"
@@ -2780,7 +2782,7 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("lane", ["gemm", "collective"])
-    @pytest.mark.parametrize("explicit_output", [False, True], ids=["total", "explicit_output"])
+    @pytest.mark.parametrize("explicit_output", [False, True], ids=["intvty", "explicit_output"])
     async def test_promotion_recorder_keeps_gain_objective_separate_from_output(
         self, coord, monkeypatch, lane, explicit_output
     ):
@@ -2788,7 +2790,7 @@ class TestKernelE2EMeasurementPromotion:
 
         if explicit_output:
             monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
-        bench = self._bench(150.0, 1200.0)
+        bench = self._bench(150.0, 1080.0)
         gain = 50.0 if explicit_output else 20.0
         integrate = {
             "status": "ok",
@@ -2825,7 +2827,7 @@ class TestKernelE2EMeasurementPromotion:
         assert measurements["final_throughput"]["value"] == 150.0
         assert measurements["final_throughput"]["metric_basis"] == "output"
         assert measurements["e2e_gain_pct"]["value"] == pytest.approx(gain)
-        assert measurements["e2e_gain_pct"]["metric_basis"] == ("output" if explicit_output else "total")
+        assert measurements["e2e_gain_pct"]["metric_basis"] == ("output" if explicit_output else "intvty")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):
@@ -2858,10 +2860,10 @@ class TestKernelE2EMeasurementPromotion:
     ):
         from hyperloom.orchestrator.state.shared_state import resolve_graded_comparison
 
-        first = self._bench(110.0, 1200.0)
-        last = self._bench(115.0, 1320.0, name="last")
+        first = self._bench(110.0, 1080.0)
+        last = self._bench(115.0, 1120.0, name="last", intvty=132.0)
         if not last_has_axes:
-            for key in ("input_throughput", "total_token_throughput", "intvty_p90", "tpot_p90_ms"):
+            for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
                 last.pop(key)
         fake = _make_integrate(
             [
@@ -2888,11 +2890,12 @@ class TestKernelE2EMeasurementPromotion:
         assert fake.calls[1]["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv", "SECOND_CONFIG": "/second.csv"}
         anchor, identity, reference = anchors[1]
         assert anchor["tput"] == 110.0
-        assert anchor["total_throughput"] == 1200.0
+        assert anchor["total_throughput"] == 1080.0
+        assert anchor["e2e_norm_intvty_p90"] == 120.0
         assert anchor["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
         assert identity["benchmark_workspace"] == first["workspace"]
         assert len(coord.shared_state.optimization_stack) == (2 if last_has_axes else 1)
-        assert reference == (1200.0 if last_has_axes else 110.0)
+        assert reference == (120.0 if last_has_axes else 110.0)
         assert [row["tput"] for row in result["e2e_results"]["kept"]] == ([110.0, 115.0] if last_has_axes else [110.0])
         assert result["tuned_file"] == ("/second.csv" if last_has_axes else "/candidate.csv")
         gain = 32.0 if last_has_axes else 20.0
@@ -2901,7 +2904,7 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated_stack_len == (2 if last_has_axes else 1)
         expected = last if last_has_axes else first
         assert coord.shared_state.current_best["total_throughput"] == expected["total_token_throughput"]
-        assert coord.shared_state.current_best["intvty_p90"] == expected["intvty_p90"]
+        assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == expected["e2e_norm_intvty_p90"]
         if last_has_axes:
             assert result["e2e_results"]["reverted"] == []
         else:
@@ -2960,18 +2963,23 @@ class TestKernelE2EMeasurementPromotion:
         state.current_best.update(
             tput=110.0,
             total_throughput=1100.0,
+            e2e_norm_intvty_p90=110.0,
             extra_server_args="--page-size 16",
             extra_envs=dict(entry_envs),
             final_overlay="/prior/overlay",
         )
         state.baseline_config_path = "/entry/base.yaml"
-        coord.writeback._stamp_current_best_measurement(self._bench(110.0, 1100.0, name="entry"))
+        coord.writeback._stamp_current_best_measurement(self._bench(110.0, 1100.0, name="entry", intvty=110.0))
         entry_reference = deepcopy(state.current_best)
         state.save(coord.session_dir)
         candidate = coord.session_dir / "candidate-fmoe.csv"
         candidate.write_text("token,model_dim\n1,2\n", encoding="utf-8")
-        first = self._bench(120.0, 1320.0)
-        last = self._bench(130.0, 1452.0, name="last") if second_keep else self._bench(110.0, 1100.0)
+        first = self._bench(120.0, 1150.0, intvty=132.0)
+        last = (
+            self._bench(130.0, 1200.0, name="last", intvty=145.2)
+            if second_keep
+            else self._bench(110.0, 1050.0, intvty=110.0)
+        )
         candidate_integrate = _make_integrate(
             [
                 {"decision": "KEEP", "new_tput": 120.0, "gain_pct": 20.0, "bench_result": first},
@@ -3016,7 +3024,8 @@ class TestKernelE2EMeasurementPromotion:
             disk_during_pairs.append(deepcopy(executor.shared_state.current_best))
             tuned = "AITER_CONFIG_FMOE" in params["extra_envs"]
             output = (130.0 if second_keep else 120.0) if tuned else 110.0
-            return {**self._bench(output, output * 10, name="paired"), "completed_requests": 2}
+            intvty = (145.2 if second_keep else 132.0) if tuned else 110.0
+            return {**self._bench(output, output * 10, name="paired", intvty=intvty), "completed_requests": 2}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", integrate)
         monkeypatch.setattr(BaselineExecutor, "__call__", measure)
@@ -3054,6 +3063,7 @@ class TestKernelE2EMeasurementPromotion:
             assert reference == entry_reference
             assert reference["tput"] == 110.0
             assert reference["total_throughput"] == 1100.0
+            assert reference["e2e_norm_intvty_p90"] == 110.0
             assert reference["measurement"]["benchmark_workspace"] == "/e2e/entry"
             assert live_during_pairs[index] == state.current_best
             # Disk still holds the first KEEP; B must explicitly carry the last KEEP.
@@ -3205,7 +3215,7 @@ class TestKernelE2EMeasurementPromotion:
 
         monkeypatch.setattr(phase, "_lift_to_current_best", capture_lift)
         result = self._result()
-        result["intvty_p90"] = 50.0
+        result["e2e_norm_intvty_p90"] = 50.0
         anchor = dict(coord.shared_state.current_best)
         await phase._validate_gemm_tuning_e2e(result)
 
@@ -3251,7 +3261,7 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == 0.0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("explicit_output", [False, True], ids=["required_total", "explicit_output"])
+    @pytest.mark.parametrize("explicit_output", [False, True], ids=["required_intvty", "explicit_output"])
     async def test_gemm_legacy_measurement_does_not_borrow_micro_axes(self, coord, monkeypatch, explicit_output):
         if explicit_output:
             monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
@@ -3267,7 +3277,7 @@ class TestKernelE2EMeasurementPromotion:
             assert coord.shared_state.cumulative_gain_validated == pytest.approx(10.0)
             assert coord.shared_state.current_best["tput"] == 110.0
             assert "total_throughput" not in coord.shared_state.current_best
-            assert "intvty_p90" not in coord.shared_state.current_best
+            assert "e2e_norm_intvty_p90" not in coord.shared_state.current_best
             assert coord.shared_state.current_best_measurement["benchmark_workspace"] == ""
         else:
             assert result["e2e_results"]["kept"] == []
@@ -3286,15 +3296,15 @@ class TestKernelE2EMeasurementPromotion:
         from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
         coord.shared_state.baseline_tput = 80.0
-        coord.shared_state.baseline_perf = {"total_throughput": 800.0, "intvty_p90": 100.0}
+        coord.shared_state.baseline_perf = {"total_throughput": 800.0, "e2e_norm_intvty_p90": 80.0}
         integrate = {
             "status": "ok",
             "decision": "KEEP",
             "base_tput": 100.0,
             "new_tput": 150.0,
             "gain_pct": 20.0,
-            "graded_objective": "total_throughput",
-            "bench_result": self._bench(150.0, 1200.0),
+            "graded_objective": "e2e_norm_intvty_p90",
+            "bench_result": self._bench(150.0, 1080.0),
             "apply_result": {"status": "ok", "manifest_path": "/candidate/manifest.json"},
         }
 
@@ -3309,12 +3319,12 @@ class TestKernelE2EMeasurementPromotion:
         assert measurements["baseline_throughput"]["value"] == 100.0
         assert measurements["baseline_throughput"]["metric_basis"] == "output"
         assert measurements["e2e_gain_pct"]["value"] == 20.0
-        assert measurements["e2e_gain_pct"]["metric_basis"] == "total"
+        assert measurements["e2e_gain_pct"]["metric_basis"] == "intvty"
 
     def test_collective_nested_measurement_drives_lift_and_cumulative(self, coord):
         bench = self._bench()
         integrate = {
-            **self._bench(9000.0, 99999.0, name="outer"),
+            **self._bench(9000.0, 99999.0, name="outer", intvty=9000.0),
             "status": "ok",
             "decision": "KEEP",
             "new_tput": 9000.0,

@@ -1160,7 +1160,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "output_throughput": 120.0,
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
-                "intvty_p90": 40.0,
+                "e2e_norm_intvty_p90": 40.0,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1176,7 +1176,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 30.0,
+        "e2e_norm_intvty_p90": 30.0,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1191,7 +1191,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
     assert state.current_best["tput"] == 120.0
     assert state.current_best["total_throughput"] == 1320.0
     assert state.current_best["input_throughput"] == 1200.0
-    assert state.current_best["intvty_p90"] == 40.0
+    assert state.current_best["e2e_norm_intvty_p90"] == 40.0
     assert state.current_best["ttft_mean_ms"] == 55.0
     entry = state.optimization_stack[-1]
     assert entry["scope"] == "source_patch"
@@ -1207,11 +1207,10 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
 ) -> None:
     """An agentic session's realized gain is the one its objective grades.
 
-    Output tokens are about 1% of this workload's token budget, so the same
-    KEEP reads as +20% on the output axis and +32% on the total axis the
-    session actually grades. Deriving the session figure from the output ratio
-    reports a number the objective never graded -- and leaves the timestamp and
-    stack length that would let anything cross-check it unstamped.
+    The same KEEP reads as +20% on output, +32% on the throughput guard,
+    and +40% on normalized interactivity. Only the interactivity gain belongs
+    in the session figure, with the timestamp and stack length that let the
+    ledger cross-check it.
     """
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
@@ -1228,12 +1227,12 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         return {
             "decision": "KEEP",
             "new_tput": 120.0,
-            "gain_pct": 20.0,
+            "gain_pct": 40.0,
             "bench_result": {
                 "output_throughput": 120.0,
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
-                "intvty_p90": 30.0,
+                "e2e_norm_intvty_p90": 42.0,
             },
         }
 
@@ -1246,7 +1245,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 30.0,
+        "e2e_norm_intvty_p90": 30.0,
     }
     state.current_best = {
         "action": "baseline",
@@ -1254,7 +1253,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 30.0,
+        "e2e_norm_intvty_p90": 30.0,
     }
 
     summary = await _integrate(
@@ -1266,7 +1265,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
 
     assert summary.kept_count == 1
     assert len(state.optimization_stack) == 1
-    assert state.cumulative_gain_validated == pytest.approx(32.0)
+    assert state.cumulative_gain_validated == pytest.approx(40.0)
     assert state.cumulative_gain_validated_ts
     assert state.cumulative_gain_validated_stack_len == 1
     assert len(state.gain_per_stack_entry) == 1
@@ -1307,7 +1306,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "output_throughput": 120.0,
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
-                "intvty_p90": 30.0,
+                "e2e_norm_intvty_p90": 30.0,
             },
         }
 
@@ -1322,7 +1321,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "output_throughput": 150.0,
         "input_throughput": 1300.0,
         "total_throughput": 1450.0,
-        "intvty_p90": 30.0,
+        "e2e_norm_intvty_p90": 40.0,
     }
 
     summary = await _integrate(
