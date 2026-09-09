@@ -499,6 +499,32 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #                        /v1/models id is more robust when a server is reused.
 #   --max-context-length omitted (see the replay-context note above).
 AIPERF_PROGRESS_ARGS=()
+AIPERF_PROGRESS_PORT=""
+PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
+
+# Enable AIPerf's progress API on every round, not just trace-capture ones. It
+# is the only authoritative source of phase timing: `phases.<name>.start_ns` is
+# stamped by aiperf when the phase actually begins, whereas the human-readable
+# log line the KV collector otherwise greps for is written afterwards and read
+# on the next watchdog poll, so warmup traffic lands in the measured window.
+#
+# The endpoint costs nothing when nobody polls it, and the address is published
+# as a file because the reader -- Hyperloom's watchdog -- is a different process
+# that only sees this round's result directory.
+if [ -f "$PHASE_GATE" ]; then
+  if AIPERF_PROGRESS_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
+    AIPERF_PROGRESS_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_PROGRESS_PORT")
+    printf '{"url": "http://127.0.0.1:%s", "schema_version": 1}\n' \
+      "$AIPERF_PROGRESS_PORT" > "${ART}/progress_api.json" 2>/dev/null \
+      || log "WARN could not publish the AIPerf progress API address"
+  else
+    AIPERF_PROGRESS_PORT=""
+    log "WARN failed to allocate an AIPerf progress API port; phase timing falls back to log markers"
+  fi
+else
+  log "WARN missing AIPerf phase gate ${PHASE_GATE}; phase timing falls back to log markers"
+fi
+
 run_aiperf() {
   "${AIPERF_CMD[@]}" profile \
     --scenario inferencex-agentx-mvp \
@@ -540,12 +566,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
   : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
-  PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
   PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
   _require_uint AGENTX_PHASE_WAIT_TIMEOUT_S "$PHASE_WAIT_TIMEOUT"
   CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
   rm -f "$CAPTURE_STATUS_FILE"
-  AIPERF_PROGRESS_PORT=""
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
   _write_profile_capture_status() {
     _status="$1"
@@ -570,15 +594,13 @@ if [ "${PROFILE:-0}" = "1" ]; then
   if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
     log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
   fi
-  if [ -f "$PHASE_GATE" ]; then
-    if AIPERF_PROGRESS_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
-      AIPERF_PROGRESS_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_PROGRESS_PORT")
-    else
-      PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
-      log "WARN failed to allocate an AIPerf progress API port; the measurement will run without trace capture"
-    fi
-  else
+  # The progress API is brought up for every round further above; capture only
+  # needs to know whether that succeeded, since it cannot gate a window without it.
+  if [ ! -f "$PHASE_GATE" ]; then
     log "WARN missing AIPerf phase gate ${PHASE_GATE}; the measurement will run without trace capture"
+  elif [ -z "$AIPERF_PROGRESS_PORT" ]; then
+    PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
+    log "WARN no AIPerf progress API port; the measurement will run without trace capture"
   fi
   # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
   # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the

@@ -634,3 +634,251 @@ def test_artifact_is_in_the_package_globs():
     from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_GLOBS
 
     assert "runs/**/kv_metrics.json" in PACKAGE_GLOBS
+
+
+# ---------------------------------------------------------------------------
+# authoritative phase boundaries
+# ---------------------------------------------------------------------------
+class _StubProgress:
+    """Serves canned ``/api/progress`` phase payloads."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def poll(self):
+        self.calls += 1
+        return self._responses.pop(0) if self._responses else None
+
+
+def _ns(unix_seconds: float) -> int:
+    """Unix seconds as the nanosecond stamp aiperf reports."""
+    return int(unix_seconds * 1e9)
+
+
+def _now() -> float:
+    """A base near the real wall clock, which the epoch sanity check requires."""
+    import time
+
+    return time.time()
+
+
+def test_progress_address_is_read_from_the_round_directory(tmp_path):
+    """The client publishes it; the watchdog is a different process."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+
+    artifacts = tmp_path / "aiperf_artifacts"
+    artifacts.mkdir()
+    (artifacts / "progress_api.json").write_text(json.dumps({"url": "http://127.0.0.1:19090"}), encoding="utf-8")
+
+    assert AiperfProgressPoller(tmp_path)._resolve_url() == "http://127.0.0.1:19090"
+
+
+def test_progress_address_is_found_in_a_nested_benchmark_directory(tmp_path):
+    """An AgentX round nests its artifacts one level below the server log."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+
+    artifacts = tmp_path / "benchmark_agentx_1" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "progress_api.json").write_text(json.dumps({"url": "http://127.0.0.1:20001"}), encoding="utf-8")
+
+    assert AiperfProgressPoller(tmp_path)._resolve_url() == "http://127.0.0.1:20001"
+
+
+def test_missing_progress_address_is_not_an_error(tmp_path):
+    """Every non-AgentX round is this case."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+
+    poller = AiperfProgressPoller(tmp_path)
+    assert poller._resolve_url() is None
+    assert poller.poll() is None
+
+
+def test_authoritative_boundary_moves_rows_the_log_marker_mislabelled():
+    """The correction this exists for.
+
+    aiperf starts profiling at T, but writes the line the watchdog greps for
+    afterwards, and the watchdog reads it on its next pass. Samples taken in
+    that lag are stamped ``warmup`` while the measured phase is already running.
+    """
+    now = _now()
+    progress = _StubProgress(
+        [
+            {"warmup": {"start_ns": _ns(now), "requests_end_ns": None}},
+            {
+                "warmup": {"start_ns": _ns(now), "requests_end_ns": _ns(now + 10)},
+                "profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None},
+            },
+            {"profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None}},
+        ]
+    )
+    rec = KvMetricsRecorder(
+        poller=_StubPoller(
+            [
+                _sample(ts=now + 1),
+                _sample(ts=now + 12),  # after the real boundary, before the marker was read
+                _sample(ts=now + 20),
+            ]
+        ),
+        progress=progress,
+        min_interval_sec=0,
+    )
+    # No note_phase call: every row is stamped "boot", so the phases below come
+    # entirely from the authoritative timeline.
+    rec.tick(1.0)
+    rec.tick(2.0)
+    rec.tick(3.0)
+    payload = rec.summary()
+
+    assert payload["phase_source"] == "aiperf_progress_api"
+    phases = [row["phase"] for row in payload["samples"]]
+    assert phases[0] == "warmup"
+    # Both later samples belong to the measured window, whatever the watchdog believed.
+    assert phases[1] == "measured"
+    assert phases[2] == "measured"
+    assert payload["rows_reattributed"] == 3
+
+
+def test_counter_totals_follow_the_authoritative_boundary():
+    """Re-labelling the rows alone would leave the phase totals wrong.
+
+    The retract that happened after the real transition has to be booked to the
+    measured phase, not to the warmup window the watchdog had not yet closed.
+    """
+    now = _now()
+    progress = _StubProgress(
+        [
+            {"warmup": {"start_ns": _ns(now), "requests_end_ns": None}},
+            {
+                "warmup": {"start_ns": _ns(now), "requests_end_ns": _ns(now + 10)},
+                "profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None},
+            },
+            {"profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None}},
+        ]
+    )
+    rec = KvMetricsRecorder(
+        poller=_StubPoller(
+            [
+                _sample(ts=now + 1, retract_total=_grouped(a=1.0)),
+                _sample(ts=now + 12, retract_total=_grouped(a=5.0)),
+                _sample(ts=now + 20, retract_total=_grouped(a=9.0)),
+            ]
+        ),
+        progress=progress,
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    rec.tick(2.0)
+    rec.tick(3.0)
+    payload = rec.summary()
+
+    # Warmup opened at 1 and is closed by the first measured reading (5): 4.
+    assert payload["retract_delta_by_phase"]["warmup"] == 4.0
+    # Measured runs 5 -> 9, and shares the boundary reading rather than starting after it.
+    assert payload["retract_delta"] == 4.0
+
+
+def test_a_non_epoch_timestamp_is_rejected_rather_than_trusted():
+    """A monotonic ``start_ns`` would place every boundary in 1970 and sweep the
+    whole round into one phase. Fall back to the markers instead."""
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=_now()), _sample(ts=_now())]),
+        progress=_StubProgress(
+            [
+                {"profiling": {"start_ns": 12_345_678, "requests_end_ns": None}},
+                {"profiling": {"start_ns": 12_345_678, "requests_end_ns": None}},
+            ]
+        ),
+        min_interval_sec=0,
+    )
+    rec.note_phase("warmup", 1.0)  # consumes the boundary reading
+    rec.tick(2.0)
+    payload = rec.summary()
+
+    assert payload["phase_source"] == "log_markers"
+    assert payload["samples"][-1]["phase"] == "warmup"
+
+
+def test_eval_is_never_overwritten_by_the_workload_timeline():
+    """The accuracy run is not aiperf's traffic and it has no opinion about it."""
+    now = _now()
+    snapshot = {"profiling": {"start_ns": _ns(now), "requests_end_ns": None}}
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=now + 30), _sample(ts=now + 31)]),
+        progress=_StubProgress([snapshot, snapshot]),
+        min_interval_sec=0,
+    )
+    rec.note_phase("eval", 1.0)  # consumes the boundary reading
+    rec.tick(2.0)
+    payload = rec.summary()
+
+    assert payload["phase_source"] == "aiperf_progress_api"
+    assert payload["samples"][-1]["phase"] == "eval"
+
+
+def test_rows_carry_scrape_start_and_end_not_just_a_duration():
+    """A gauge read across a 300ms window describes some instant inside it, and
+    a single stamp would invite an alignment precision nobody measured."""
+    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), min_interval_sec=0)
+    rec.tick(1.0)
+    row = rec.summary()["samples"][0]
+
+    for key in ("scrape_start_unix", "scrape_end_unix", "scrape_start_mono", "scrape_end_mono", "scrape_sec"):
+        assert key in row, key
+    assert row["scrape_end_mono"] >= row["scrape_start_mono"]
+    assert row["scrape_end_unix"] >= row["scrape_start_unix"]
+
+
+def test_rows_carry_the_workload_in_flight_at_the_scrape():
+    """The correlation the timeline supports: engine-wide KV against the active
+    phase's own counters, at the granularity aiperf actually exposes."""
+    now = _now()
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=now + 1)]),
+        progress=_StubProgress(
+            [{"profiling": {"start_ns": _ns(now), "requests_end_ns": None, "sent": 12, "completed": 7}}]
+        ),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    row = rec.summary()["samples"][0]
+
+    assert row["workload"]["aiperf_phase"] == "profiling"
+    assert row["workload"]["stats"] == {"sent": 12, "completed": 7}
+
+
+def test_timeline_survives_a_phase_aiperf_stops_reporting():
+    """aiperf drops a finished phase from its report; keeping only the latest
+    response would lose the warmup boundary the moment profiling starts."""
+    now = _now()
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=now + 1), _sample(ts=now + 12)]),
+        progress=_StubProgress(
+            [
+                {"warmup": {"start_ns": _ns(now), "requests_end_ns": None}},
+                {"profiling": {"start_ns": _ns(now + 10), "requests_end_ns": None}},
+            ]
+        ),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    rec.tick(2.0)
+    payload = rec.summary()
+
+    assert set(payload["phase_timeline"]) == {"warmup", "profiling"}
+    assert payload["phase_bounds_unix"]["warmup"]["start"] == pytest.approx(now, abs=1e-3)
+
+
+def test_progress_failures_never_reach_the_round():
+    """Collection is observational; a broken endpoint costs nothing."""
+
+    class _Exploding:
+        def poll(self):
+            raise RuntimeError("progress API on fire")
+
+    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), progress=_Exploding(), min_interval_sec=0)
+    rec.tick(1.0)
+    payload = rec.summary()
+
+    assert payload["phase_source"] == "log_markers"
+    assert payload["sample_count"] == 1

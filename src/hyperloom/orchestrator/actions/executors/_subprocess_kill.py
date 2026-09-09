@@ -664,11 +664,14 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     if os.environ.get(_KV_METRICS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return None
     try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, KvMetricsPoller, KvMetricsRecorder
+        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder
 
         workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
             poller=KvMetricsPoller(config_envs=dict(env or {})),
+            # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
+            # publishes a progress address and the poller then never resolves a URL.
+            progress=AiperfProgressPoller(workspace),
             output_path=str(workspace / KV_ARTIFACT_NAME),
             scope={
                 "server_log_path": str(server_log_path),

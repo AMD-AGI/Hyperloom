@@ -11,6 +11,18 @@ float precision instead of the log's two decimals, stable metric names instead o
 type, explicit units, and ``kv_evictable_tokens``, which the log cannot express at all and which is the only way to
 separate the two occupancy readings this module reports (see :class:`KvSample`).
 
+Phase attribution has two sources, and the artifact always says which one it used. Preferred is aiperf's progress API,
+whose ``phases.<name>.start_ns`` is stamped when the phase actually begins; the fallback is the ``aiperf.log`` line the
+watchdog greps for, which is written after the transition and read on the next poll. Both lags land on the boundary, so
+under the fallback the samples either side of it are systematically credited to the phase that just ended. When the
+authoritative stamps are available the rows are re-labelled and the counter windows re-bracketed from them at close --
+which is why every row carries its raw per-series counters, and not just a phase-level first/last pair.
+
+What this does not do is stop the workload at a boundary. An exact counter total needs the client to quiesce, take one
+snapshot, and resume, and aiperf exposes no such control: the boundary here is exact to aiperf's own stamp, and the
+counter attribution to the scrape interval either side of it. Per-trajectory, per-turn and per-request timelines are
+likewise not available -- the progress API reports per phase, so that is the granularity a row records.
+
 Two rules run through everything below:
 
 * **Never raise.** This samples a benchmark that is being measured; a scrape failure must cost the run nothing. Every
@@ -22,6 +34,7 @@ Two rules run through everything below:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -29,6 +42,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -39,6 +53,7 @@ __all__ = [
     "DEFAULT_METRICS_PORT",
     "KV_ARTIFACT_NAME",
     "PHASES",
+    "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvMetricsRecorder",
     "KvSample",
@@ -515,6 +530,97 @@ class KvMetricsPoller:
         return sample if sample.has_readings() else None
 
 
+#: Address file ``aiperf_client.sh`` publishes so this process can find the progress API. Searched under the round's own
+#: directory first, then one level down, matching how the watchdog resolves a nested benchmark's logs.
+_PROGRESS_ADDRESS_RELPATHS = ("aiperf_artifacts/progress_api.json", "*/aiperf_artifacts/progress_api.json")
+
+#: aiperf's phase names, mapped onto ours. It has no notion of the accuracy eval, which is why ``eval`` is not here and
+#: stays owned by the log markers.
+_AIPERF_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
+
+#: How far an authoritative timestamp may sit from this process's clock before it is rejected. Wide, because it is only
+#: meant to catch a clock domain that is not the Unix epoch at all -- a monotonic ``start_ns`` is off by decades, not by
+#: hours -- rather than to police skew.
+_PROGRESS_CLOCK_SANITY_SEC = 86400.0
+
+
+def _number(raw: Any) -> float | None:
+    """Coerce a JSON value to a float, or ``None`` when it is not one.
+
+    ``bool`` is excluded on purpose: it is a subclass of ``int``, and a ``True`` where a timestamp belongs would
+    otherwise become 1.0 -- a Unix time in 1970 that the sanity check would then reject for the wrong reason.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw) if math.isfinite(raw) else None
+
+
+class AiperfProgressPoller:
+    """Reads AIPerf's phase timeline from its local progress API.
+
+    This is the authority on when a phase actually began. The alternative -- and what the recorder falls back to -- is
+    grepping ``aiperf.log`` for a human-readable line, which aiperf writes after the transition and the watchdog then
+    reads on its next pass. Those two lags land squarely on the boundary, so warmup traffic gets counted as measured.
+
+    Everything here degrades to ``None``: the endpoint only exists when the round is an AgentX one whose client managed
+    to publish an address, and a round that cannot reach it must still produce KV metrics.
+    """
+
+    def __init__(self, workspace: Any, *, timeout_sec: float = _SCRAPE_TIMEOUT_SEC) -> None:
+        """Bind to a round's directory without reading anything from it."""
+        self._workspace = workspace
+        self.timeout_sec = float(timeout_sec)
+        self.url: str | None = None
+        self._resolved = False
+        self._failures = 0
+        self._succeeded = False
+        self._gave_up = False
+
+    def _resolve_url(self) -> str | None:
+        """Find the published address, once the client has written it.
+
+        Resolution is retried until it succeeds because the address file appears when the benchmark client starts, which
+        is after the server is up and therefore after the first scrapes have already happened.
+        """
+        if self.url is not None:
+            return self.url
+        try:
+            root = Path(self._workspace)
+            for pattern in _PROGRESS_ADDRESS_RELPATHS:
+                for candidate in sorted(root.glob(pattern)):
+                    payload = json.loads(candidate.read_text(encoding="utf-8"))
+                    url = payload.get("url") if isinstance(payload, dict) else None
+                    if isinstance(url, str) and url.startswith("http"):
+                        self.url = url
+                        return url
+        except (OSError, ValueError, TypeError):
+            return None
+        return None
+
+    def poll(self) -> dict[str, Any] | None:
+        """Return the raw ``phases`` mapping, or ``None`` when it cannot be read."""
+        if self._gave_up:
+            return None
+        url = self._resolve_url()
+        if url is None:
+            return None
+        try:
+            with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=self.timeout_sec) as response:
+                payload = json.loads(response.read().decode("utf-8", "ignore"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._failures += 1
+            # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
+            # that has exited, and the timeline already collected is still the authority for this round.
+            if self._failures >= _MAX_CONSECUTIVE_FAILURES and not self._succeeded:
+                self._gave_up = True
+                log.debug("kv_metrics: aiperf progress API unreachable at %s (%s)", url, exc)
+            return None
+        self._failures = 0
+        self._succeeded = True
+        phases = payload.get("phases") if isinstance(payload, dict) else None
+        return phases if isinstance(phases, dict) else None
+
+
 #: Artifact the recorder writes, alongside the round's ``server.log``.
 KV_ARTIFACT_NAME = "kv_metrics.json"
 
@@ -591,12 +697,15 @@ class KvMetricsRecorder:
         output_path: str | None = None,
         scope: dict[str, Any] | None = None,
         min_interval_sec: float | None = None,
+        progress: AiperfProgressPoller | None = None,
     ) -> None:
         """Prepare a recorder without contacting anything."""
         self._poller = poller
         self._output_path = output_path
         self._scope = dict(scope or {})
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
+        self._progress = progress
+        self._phase_timeline: dict[str, dict[str, Any]] = {}
         self._phase = "boot"
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
@@ -641,23 +750,76 @@ class KvMetricsRecorder:
     def _scrape(self, mono: float) -> KvSample | None:
         """Take one reading unconditionally, timing the round trip.
 
-        The duration is recorded per sample because a scrape is a synchronous HTTP call inside a watchdog loop: if it
-        ever starts costing real time, that has to be visible in the artifact rather than inferred from a benchmark that
-        mysteriously slowed down.
+        Both ends of the round trip are recorded, not just the duration. A gauge read over a 300 ms scrape describes
+        some instant inside that window and the consumer cannot say which, so a bracket is the honest representation;
+        a single stamp would invite lining KV samples up against a workload timeline to a precision that was never
+        measured.
         """
         self._last_scrape_mono = mono
-        started = time.monotonic()
+        # Polled first, and regardless of whether the engine answers: the phase timeline is what makes any of the rows
+        # comparable, and an engine that is briefly unreachable must not cost us the boundary.
+        workload = self._poll_progress()
+        start_mono = time.monotonic()
+        start_unix = time.time()
         try:
             sample = self._poller.sample()
         except Exception:  # noqa: BLE001 - collection must never fail a round
             log.debug("kv_metrics: sample failed", exc_info=True)
             return None
+        end_mono = time.monotonic()
         if sample is None:
             return None
-        self._absorb(sample, scrape_sec=time.monotonic() - started)
+        self._absorb(
+            sample,
+            timing={
+                "scrape_start_unix": round(start_unix, 3),
+                "scrape_end_unix": round(start_unix + (end_mono - start_mono), 3),
+                "scrape_start_mono": round(start_mono, 3),
+                "scrape_end_mono": round(end_mono, 3),
+                "scrape_sec": round(end_mono - start_mono, 4),
+            },
+            workload=workload,
+        )
         return sample
 
-    def _absorb(self, sample: KvSample, *, scrape_sec: float = 0.0) -> None:
+    def _poll_progress(self) -> dict[str, Any] | None:
+        """Fold one progress reading into the timeline and return the phase in flight.
+
+        The timeline accumulates rather than replaces: aiperf drops a phase from its report once the next one begins, so
+        keeping only the latest response would lose the warmup boundary the moment profiling starts.
+        """
+        if self._progress is None:
+            return None
+        try:
+            phases = self._progress.poll()
+        except Exception:  # noqa: BLE001 - collection must never fail a round
+            log.debug("kv_metrics: progress poll failed", exc_info=True)
+            return None
+        if not phases:
+            return None
+        active: dict[str, Any] | None = None
+        active_start = -1.0
+        for name, stats in phases.items():
+            if not isinstance(stats, dict):
+                continue
+            self._phase_timeline.setdefault(name, {}).update(stats)
+            start_ns = _number(stats.get("start_ns"))
+            if start_ns is None or stats.get("requests_end_ns") is not None:
+                continue
+            if start_ns > active_start:
+                active_start = start_ns
+                # Timestamps live in the timeline; a row only needs to say which phase it fell in and how much work was
+                # in flight, which is the granularity aiperf actually exposes.
+                active = {"aiperf_phase": name, "stats": {k: v for k, v in stats.items() if not k.endswith("_ns")}}
+        return active
+
+    def _absorb(
+        self,
+        sample: KvSample,
+        *,
+        timing: dict[str, float] | None = None,
+        workload: dict[str, Any] | None = None,
+    ) -> None:
         """Fold one sample into the row buffer and the counter windows."""
         # Pool capacity is only observable while the engine is up; latch the first non-null reading so the artifact
         # still carries it after a round that ended with the server gone.
@@ -679,12 +841,17 @@ class KvMetricsRecorder:
         # retracted steadily produce the same phase total, and an engine restart mid-phase is invisible without the
         # series. With the raw maps present a consumer can difference any two adjacent rows and does not have to trust
         # this module's aggregation to do it.
+        row = {
+            "phase": self._phase,
+            "ts": round(sample.ts, 3),
+            "mono": round(sample.mono, 3),
+            **(timing or {"scrape_sec": 0.0}),
+        }
+        if workload is not None:
+            row["workload"] = workload
         self._rows.append(
             {
-                "phase": self._phase,
-                "ts": round(sample.ts, 3),
-                "mono": round(sample.mono, 3),
-                "scrape_sec": round(scrape_sec, 4),
+                **row,
                 "active_pool_usage": sample.active_pool_usage,
                 "physical_pool_usage": sample.physical_pool_usage,
                 "used_tokens": sample.used_tokens,
@@ -746,6 +913,106 @@ class KvMetricsRecorder:
             window[f"{name}_delta_by_phase"] = by_phase
         return window
 
+    def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
+        """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
+
+        ``start_ns`` is rejected rather than trusted blindly when it does not land near this process's wall clock. The
+        API reports nanoseconds but does not say from which epoch, and a monotonic reading would silently place every
+        boundary in 1970 and re-attribute the whole round to one phase.
+        """
+        if not self._phase_timeline:
+            return None
+        now = time.time()
+        bounds: dict[str, tuple[float, float | None]] = {}
+        for name, stats in self._phase_timeline.items():
+            phase = _AIPERF_PHASE_NAMES.get(name)
+            start_ns = _number(stats.get("start_ns"))
+            if phase is None or start_ns is None or start_ns <= 0:
+                continue
+            start = start_ns / 1e9
+            if abs(start - now) > _PROGRESS_CLOCK_SANITY_SEC:
+                return None
+            end_ns = _number(stats.get("requests_end_ns"))
+            end = end_ns / 1e9 if end_ns and end_ns > 0 else None
+            if end is not None and end < start:
+                return None
+            bounds[phase] = (start, end)
+        return bounds or None
+
+    def _reattribute_phases(self) -> dict[str, Any]:
+        """Re-label rows from the authoritative timeline, reporting what was used.
+
+        Re-labelling after the fact is what makes the boundary exact. A row is stamped with whatever phase the watchdog
+        believed at the time, and the watchdog only learns of a transition once aiperf has written a log line and the
+        next poll has read it -- so the rows straddling a boundary are systematically attributed to the phase that just
+        ended. The stamps say when the phase actually began, so the correction is applied to the stored rows.
+
+        ``eval`` is never overwritten. It is the accuracy run, which aiperf has no part in and no opinion about.
+        """
+        bounds = self._authoritative_bounds()
+        if bounds is None:
+            return {"phase_source": "log_markers", "phase_timeline": self._phase_timeline or None}
+        # Latest-starting window wins, so a row inside profiling is not also claimed by warmup, whose end the API leaves
+        # null until its requests drain.
+        ordered = sorted(bounds.items(), key=lambda item: item[1][0], reverse=True)
+        moved = 0
+        for row in self._rows:
+            if row.get("phase") == "eval":
+                continue
+            ts = _number(row.get("ts"))
+            if ts is None:
+                continue
+            for phase, (start, end) in ordered:
+                if ts >= start and (end is None or ts <= end):
+                    if row["phase"] != phase:
+                        row["phase"] = phase
+                        moved += 1
+                    break
+        self._rebuild_counter_windows()
+        return {
+            "phase_source": "aiperf_progress_api",
+            "phase_timeline": self._phase_timeline,
+            "phase_bounds_unix": {p: {"start": s, "requests_end": e} for p, (s, e) in bounds.items()},
+            "rows_reattributed": moved,
+        }
+
+    def _rebuild_counter_windows(self) -> None:
+        """Re-bracket every counter from the re-attributed rows.
+
+        Re-labelling the rows alone would leave the phase totals wrong, which is the whole point of the exercise: the
+        windows were closed when the watchdog *noticed* a transition, so the increments earned in the lag were already
+        booked to the phase that had ended. Every row carries its raw per-series counters precisely so the windows can
+        be rebuilt from them once the true boundary is known.
+
+        Adjacent phases share the snapshot at their boundary -- the reading that closes one opens the next -- so this
+        keeps the gap-free property the boundary scrapes give, rather than trading it for accuracy.
+        """
+        ordered = [r for r in self._rows if isinstance(r.get("counters_by_series"), dict)]
+        if not ordered:
+            return
+        first: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
+        last: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
+
+        def _apply(phase: str, row: dict[str, Any], *, opening: bool) -> None:
+            """Record one row's counters as a window edge for ``phase``."""
+            for name, series in (row.get("counters_by_series") or {}).items():
+                if not series:
+                    continue
+                snapshot = {g: dict(s) for g, s in series.items()}
+                if opening:
+                    first.setdefault(phase, {}).setdefault(name, snapshot)
+                else:
+                    last.setdefault(phase, {})[name] = snapshot
+
+        _apply(ordered[0]["phase"], ordered[0], opening=True)
+        for previous, row in zip(ordered, ordered[1:]):
+            if row["phase"] != previous["phase"]:
+                _apply(previous["phase"], row, opening=False)
+                _apply(row["phase"], row, opening=True)
+            _apply(row["phase"], row, opening=False)
+        self._first_counters = first
+        self._last_counters = last
+
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap."""
         if len(self._rows) <= _MAX_STORED_ROWS:
@@ -757,9 +1024,13 @@ class KvMetricsRecorder:
 
     def summary(self, *, aborted: bool = False) -> dict[str, Any]:
         """Build the artifact payload."""
+        # First: it re-labels rows and re-brackets the counter windows the deltas below are read from, so the rows, the
+        # phase totals and the timeline in one artifact cannot disagree with each other.
+        attribution = self._reattribute_phases()
         retract_measured, retract_by_phase = self._counter_deltas("retract")
         preempt_measured, preempt_by_phase = self._counter_deltas("preempt")
         return {
+            **attribution,
             "schema_version": 1,
             "source": "metrics",
             "url": self._poller.url,
