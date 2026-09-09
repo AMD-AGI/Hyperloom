@@ -156,7 +156,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-TRACELENS_REF="384c362cb0e174ddf4e533e67ae74df30a849dc6"
+TRACELENS_REF="210fb5c8aebb386e4e90bc9422dcf1b6821c6809"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
