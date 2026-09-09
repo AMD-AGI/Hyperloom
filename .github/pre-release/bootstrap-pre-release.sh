@@ -87,7 +87,7 @@ leg_idle_s() {
 
 # 0 once the leg has a live run: `optimize` creates a NESTED per-run dir under the
 # session and writes state.json into it. Scoped to this leg's own session tree, so it
-# stays correct on the shared docker host where four legs run side by side.
+# stays correct on the shared docker host where several legs run side by side.
 # Args: session_dir
 leg_run_started() {
   [ -n "$(find "$1" -mindepth 2 -type f -name state.json -print -quit 2>/dev/null)" ]
@@ -120,7 +120,7 @@ DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize b
 # Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {
   case "$1" in
-    target_reached|global_converged|time_exhausted|max_ticks|sweep_done)
+    target_reached|global_converged|time_exhausted|max_ticks|sweep_done|robustness_escalated)
       return 0 ;;
     *) return 1 ;;
   esac
@@ -196,6 +196,13 @@ run_leg() {
   ( umask 077
     {
       echo "ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_API_KEY_B64" | base64 -d)"
+      # One warm cache for every leg, read offline: the eval dataset resolves from
+      # disk instead of the hub, whose per-IP quota all the legs share.
+      if [ -n "${HF_HOME:-}" ]; then
+        echo "HF_HOME=${HF_HOME}"
+        echo "HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}"
+        echo "HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}"
+      fi
       [ -n "${ANTHROPIC_BASE_URL:-}" ] && echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
       # Gateways like AMD's APIM (llm-api.amd.com) reject the bearer key alone with
       # "401 Access denied due to missing subscription key" -- they need an
@@ -234,21 +241,31 @@ run_leg() {
         #   $root/.claude/skills/<demo-skill-name>/SKILL.md
         # (empirically verified). The demo skill is chosen by leg duration:
         #   *-3h  -> hyperloom-qwen3-8b-3h ; *-12h -> hyperloom-qwen3-14b-fp8-12h.
+        # The forge branches must stay FIRST: `docker-sglang-forge-12h` also matches
+        # `*-12h`, and the GEAK skill there would silently duplicate the plain 12h leg.
         local demo_skill=""
         case "$leg" in
-          *-3h)  demo_skill="hyperloom-qwen3-8b-3h" ;;
-          *-12h) demo_skill="hyperloom-qwen3-14b-fp8-12h" ;;
+          *-forge-3h)  log "ERROR: leg '$leg' -- the 3h demo is --no-kernel; forge has no phase to run"; return 1 ;;
+          *-forge-12h) demo_skill="hyperloom-qwen3-14b-fp8-12h-forge" ;;
+          *-3h)        demo_skill="hyperloom-qwen3-8b-3h" ;;
+          *-12h)       demo_skill="hyperloom-qwen3-14b-fp8-12h" ;;
+          *)           log "ERROR: leg '$leg' -- no demo skill for this leg name"; return 1 ;;
         esac
         echo "HYPERLOOM_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
+        # The setup backend rewrites HYPERLOOM_SKILL_PATH to the optimizer skill, so the
+        # image-extraction grep in the setup prompts needs its own key it will not touch.
+        echo "E2E_DEMO_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
         local leg_mem leg_shm
+        # Fallbacks must match the dispatch defaults: the nested limits sum against
+        # one host pod, so a stale value here oversubscribes it and OOM-kills them all.
         case "$leg" in
           *-3h)
             leg_mem="${DOCKER_LEG_MEM_3H:-256g}"
             leg_shm="${DOCKER_LEG_SHM_3H:-64g}"
             ;;
           *-12h)
-            leg_mem="${DOCKER_LEG_MEM_12H:-512g}"
+            leg_mem="${DOCKER_LEG_MEM_12H:-352g}"
             leg_shm="${DOCKER_LEG_SHM_12H:-64g}"
             ;;
           *)
@@ -281,7 +298,12 @@ run_leg() {
   export PYTHONPATH="${root}:${PYTHONPATH:-}"
 
   local setup_prompt="${PROMPTS_DIR}/setup-${run_mode}-${backend}.md"
-  local demo_prompt;   demo_prompt="${PROMPTS_DIR}/demo-${hours}h.md"
+  # Keyed by duration, plus the kernel backend when the leg names one.
+  local demo_prompt
+  case "$leg" in
+    *-forge-*) demo_prompt="${PROMPTS_DIR}/demo-${hours}h-forge.md" ;;
+    *)         demo_prompt="${PROMPTS_DIR}/demo-${hours}h.md" ;;
+  esac
   [ -f "$setup_prompt" ] || { log "ERROR: missing $setup_prompt"; return 1; }
   [ -f "$demo_prompt" ]  || { log "ERROR: missing $demo_prompt"; return 1; }
 
@@ -458,13 +480,19 @@ run_leg() {
       if [ -f "$state_json" ]; then
         publish_state_for_poll "$state_json" "$real_sdir" "$session"
       fi
-      if [ -f "$final_json" ]; then
-        log "leg $leg final.json present after ${elapsed}s; demo complete"
+      # stop_reason is stamped on the transition INTO close and final.json by its
+      # first step, so neither means the run is over. close_sequence_done is set
+      # once the sequence ends; exiting before it kills the pod mid-closeout.
+      local stop="" close_done="false"
+      if [ -f "$state_json" ]; then
+        stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
+        close_done="$(jq -r '.close_sequence_done // false' "$state_json" 2>/dev/null || echo "false")"
+      fi
+      if [ -f "$final_json" ] && [ "$close_done" = "true" ]; then
+        log "leg $leg final.json present and close sequence done after ${elapsed}s; demo complete"
         return 0
       fi
-      local stop=""
-      [ -f "$state_json" ] && stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
-      if [ -n "$stop" ]; then
+      if [ -n "$stop" ] && [ "$close_done" = "true" ]; then
         if is_clean_stop_reason "$stop"; then
           log "leg $leg state.json stop_reason='$stop' after ${elapsed}s; demo complete"
           return 0
@@ -490,13 +518,29 @@ run_leg() {
 # cannot get a deduplicating driver must fail loudly instead.
 DOCKER_DRIVERS="${DOCKER_DRIVERS:-overlay2 fuse-overlayfs}"
 
+# dockerd defaults docker0 (and every container on it) to MTU 1500, but the pod's
+# uplink is a k8s overlay at 1450. The mismatch is a PMTU blackhole: small HTTPS
+# requests succeed while bulk wheel downloads from files.pythonhosted.org stall until
+# they time out (observed 2026-09-07 on every docker leg; the baremetal legs, which
+# use the pod netns directly, saw zero timeouts). Derive it from the uplink rather
+# than pinning a constant, so a cluster on a different overlay stays correct.
+# Every probe here is `|| true`: this runs at module scope under `set -euo
+# pipefail`, so a missing `ip` or an unroutable probe address would abort the
+# whole bootstrap before a leg starts.
+if [ -z "${DOCKER_MTU:-}" ]; then
+  _docker_uplink="$(ip -o route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}' || true)"
+  DOCKER_MTU="$(ip -o link show "${_docker_uplink:-eth0}" 2>/dev/null \
+    | awk '{for (i = 1; i < NF; i++) if ($i == "mtu") print $(i + 1)}' || true)"
+fi
+DOCKER_MTU="${DOCKER_MTU:-1450}"
+
 # Start a detached dockerd on one driver; 0 when the socket answers. Cleans up the
 # failed daemon so the next driver starts from a clean socket.
 start_dockerd_with_driver() {
   local driver="$1" data_root="$2" dlog="/var/log/dockerd-${1}.log" i
   mkdir -p "$data_root" || return 1
-  log "starting pod-local dockerd (driver=$driver, data-root=$data_root)"
-  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver='$driver' --data-root='$data_root' >'$dlog' 2>&1" \
+  log "starting pod-local dockerd (driver=$driver, data-root=$data_root, mtu=$DOCKER_MTU)"
+  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver='$driver' --data-root='$data_root' --mtu='$DOCKER_MTU' >'$dlog' 2>&1" \
     </dev/null >/dev/null 2>&1 &
   for i in $(seq 1 60); do
     docker info >/dev/null 2>&1 && { log "dockerd up after ${i}s (driver=$driver)"; return 0; }

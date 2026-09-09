@@ -1,11 +1,51 @@
 ---
-name: hyperloom-qwen3-14b-fp8-12h
-description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
+name: hyperloom-qwen3-14b-fp8-12h-forge
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session with the per-kernel KernelForge backend instead of GEAK. Use when the user wants the medium-length Hyperloom demo and has asked for the forge kernel backend.
 ---
 
-# Hyperloom Qwen3-14B-FP8 12h Run
+# Hyperloom Qwen3-14B-FP8 12h Run (Forge Kernel Backend)
 
 Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
+
+This is the [`hyperloom-qwen3-14b-fp8-12h`](../hyperloom-qwen3-14b-fp8-12h/SKILL.md)
+demo with **one** difference: the KERNEL_AGENT phase runs the per-kernel
+KernelForge backend instead of GEAK. The workload, budget, and phase split are
+identical on purpose, so the two runs stay directly comparable.
+
+## Kernel Backend
+
+Set `KERNEL_OPT_BACKEND_ORDER=forge` in the environment that launches
+`optimize`. This is the only switch: the opt-in is an **exact** match on
+`forge`, and every other value (including unset) leaves GEAK owning the whole
+kernel phase.
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+```
+
+Nothing else has to be installed or configured for this:
+
+- KernelForge is vendored into Hyperloom. There is no repository to clone and
+  no `FORGE_PATH` to point anywhere.
+- The runtime installer already installs the `claude` CLI that the forge
+  backend drives, unconditionally — the backend is chosen per session, later.
+- Forge reuses the LLM credentials setup already wrote. `FORGE_CLAUDE_MODEL`
+  falls back to `CLAUDE_MODEL`, so no separate key or model id is needed.
+- `rocprof-compute` profiling deps are installed unconditionally too.
+
+Do **not** set the other `FORGE_*` variables. They are internal tuning knobs
+with working defaults; overriding them is not part of this demo.
+
+Write the value into `.env` as well when the user wants it to persist across
+runs, so a `--resume-from` relaunch keeps the same backend:
+
+```bash
+KERNEL_OPT_BACKEND_ORDER=forge
+```
+
+Before launch, confirm the value is actually set in the launching shell and
+report it. Launching without it silently runs GEAK and produces a run that
+looks like this demo but is not.
 
 ## Run Mode
 
@@ -24,6 +64,9 @@ In docker mode:
   the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
   the container environment.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- `KERNEL_OPT_BACKEND_ORDER=forge` must be set **inside the container**, in the
+  same `docker exec` that launches `optimize`. Exporting it only on the host
+  does not reach the optimizer.
 
 ### Prior workload cleanup (required)
 
@@ -75,6 +118,8 @@ docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 - `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-14B-FP8 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
+- `KERNEL_OPT_BACKEND_ORDER=forge` (required by this demo; see [Kernel Backend](#kernel-backend))
+
 Required optimize CLI flags:
 
 - `--tp 1`
@@ -86,6 +131,9 @@ Required optimize CLI flags:
 - `--max-hours 12`
 - `--max-minutes-framework-pct 0.43`
 - `--max-minutes-kernel-pct 0.42`
+
+There is no CLI flag for the kernel backend — it is selected by the environment
+variable only. Do not invent one.
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
@@ -153,6 +201,16 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
 checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
 
+Sourcing `.env` in the block above sets `KERNEL_OPT_BACKEND_ORDER` to whatever
+the file carries, and `eval "$_dotenv_prev"` then replays the caller's
+pre-existing exports on top of it. Either value can win, so export `forge`
+**after** this block, and verify it right before launching:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+echo "kernel backend: ${KERNEL_OPT_BACKEND_ORDER}"
+```
+
 ## User-visible Progress
 
 Keep the user informed with concise status updates throughout the demo. Do not
@@ -165,6 +223,7 @@ Before launch, report the launch plan:
 - run mode (`baremetal` or `docker`) and target host/container when applicable;
 - framework, TP, concurrency, ISL, OSL, precision, max hours, and required demo
   flags;
+- the resolved kernel backend (`KERNEL_OPT_BACKEND_ORDER`);
 - `USER_DATA_PATH` and where runtime artifacts will be written.
 
 After the runtime install, report whether it succeeded and the path to
@@ -176,6 +235,18 @@ After the runtime install, report whether it succeeded and the path to
 - resolved session directory;
 - `state.json` path;
 - initial health check result.
+
+Confirm the backend actually took effect rather than assuming it did. The
+optimizer records the resolved choice as `kernel_optimizer` in the session
+`state.json`, which is `geak` unless the env var opted in:
+
+```bash
+grep -o '"kernel_optimizer": *"[^"]*"' "$SESSION_DIR/state.json"
+```
+
+Check this right after launch and report the value. If it is `geak`, stop and
+tell the user the environment variable did not reach the optimizer, instead of
+letting a 12-hour run continue as an unlabelled GEAK run.
 
 During monitoring, print a short summary at each 300-second check:
 
@@ -192,14 +263,18 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
+2. Export `KERNEL_OPT_BACKEND_ORDER=forge` in the launching shell, after
+   sourcing `kernel-agent.env.sh`, and confirm the value before launch. In
+   docker mode, set it inside the same `docker exec` that runs `optimize`.
+3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
-3. Run in background with `setsid nohup`.
-4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
+4. Run in background with `setsid nohup`.
+5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
-   this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT).
-6. Report the session ID, log path, PID, and initial health check result.
-7. Monitor the process every 300 seconds until work is done.
-8. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-9. If `stop_reason` in the current session `state.json` is final, stop and exit.
+   this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT), and
+   `--no-kernel` would skip the very phase this demo exists to exercise.
+7. Report the session ID, log path, PID, and initial health check result.
+8. Monitor the process every 300 seconds until work is done.
+9. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `KERNEL_OPT_BACKEND_ORDER=forge` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+10. If `stop_reason` in the current session `state.json` is final, stop and exit.
