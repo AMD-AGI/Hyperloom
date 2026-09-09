@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.io import safe_mtime
+from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
 
@@ -621,22 +622,27 @@ def quality_gate_passed(
 def parse_eval_results(
     workspace: Path | str,
     framework: str | None = None,
+    benchmark_mode: str = "",
 ) -> dict[str, Any]:
     """Extract accuracy score from Magpie workspace's eval output.
 
-    Scriptable (server-less) workloads take precedence: when a
-    ``benchmark_report.json`` carries a ``quality_gate`` block, that gate is
-    mapped onto the accuracy contract (``1.0`` pass / ``0.0`` fail). Otherwise
-    this searches ``results*.json`` recursively for the GSM8K-primary
-    ``exact_match,strict-match`` metric. For scriptable frameworks the
-    image-quality gate is the only correctness signal, so a missing/invalid
-    gate fails closed (``accuracy=0.0``).
+    An AgentX workload takes precedence: it runs no lm-eval, so its correctness
+    signal is the request error rate upstream gates a submission on. Scriptable
+    (server-less) workloads come next: when a ``benchmark_report.json`` carries
+    a ``quality_gate`` block, that gate is mapped onto the accuracy contract
+    (``1.0`` pass / ``0.0`` fail). Otherwise this searches ``results*.json``
+    recursively for the GSM8K-primary ``exact_match,strict-match`` metric. For
+    scriptable frameworks the image-quality gate is the only correctness signal,
+    so a missing/invalid gate fails closed (``accuracy=0.0``).
 
     Args:
         workspace (Path | str): The benchmark workspace to search recursively
             for ``benchmark_report.json`` / ``results*.json``.
         framework (str | None): Framework name, used to decide whether the
             quality gate is required. Defaults to serving semantics.
+        benchmark_mode (str): The session's ``benchmark_mode``. Passed rather
+            than read from the environment because this module is a leaf every
+            arm imports at module scope, and the mode lives in SharedState.
 
     Returns:
         dict[str, Any]: ``{"accuracy": float, "task": str, "metric": str,
@@ -653,10 +659,7 @@ def parse_eval_results(
     # gates a submission on. Fails closed like the scriptable gate below: a run
     # that reported no rate is not comparable, and treating that as a pass is
     # how an incomparable measurement reaches the leaderboard set.
-    # Function-local: _workload_envs imports this module at load time.
-    from ._workload_envs import agentx_active
-
-    if agentx_active():
+    if is_agentx_mode(benchmark_mode):
         rate = parse_agentx_error_rate(workspace)
         passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD
         log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)

@@ -182,6 +182,8 @@ def resolve_graded_comparison(
     *,
     against_baseline: bool = False,
     keep_threshold_pct: float = 0.0,
+    anchor_perf: Any = None,
+    anchor_tput: float | None = None,
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades, and the verdict on that pair.
 
@@ -203,6 +205,11 @@ def resolve_graded_comparison(
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
         keep_threshold_pct: Minimum gain to KEEP.
+        anchor_perf: Explicit anchor snapshot for the interactivity axis.
+        anchor_tput: Explicit anchor for the output axis. Both default to the
+            session anchor. ``explore`` passes its own because variants stack
+            within a round: each is graded against the anchor the previous
+            KEEP advanced, not against the anchor the round opened on.
 
     Returns:
         A :class:`GradedComparison` whose ``candidate`` and ``reference`` are
@@ -232,7 +239,9 @@ def resolve_graded_comparison(
         scriptable=framework_is_scriptable(getattr(state, "framework", None)),
         benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
     ):
-        if against_baseline:
+        if anchor_perf is not None:
+            ref_perf, reason = anchor_perf, ""
+        elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
             reason = "" if ref_perf else "baseline_axes_missing"
         else:
@@ -265,9 +274,12 @@ def resolve_graded_comparison(
             )
         degrade_reason = reason or "candidate_axes_missing"
 
-    reference = (
-        float(getattr(state, "baseline_tput", 0.0) or 0.0) if against_baseline else resolve_grading_anchor_tput(state)
-    )
+    if anchor_tput is not None:
+        reference = float(anchor_tput)
+    elif against_baseline:
+        reference = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    else:
+        reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
     return GradedComparison(

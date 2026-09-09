@@ -42,6 +42,9 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     VERDICT_RECORDED,
     VERDICT_REVERT,
+    intvty_serving_grading_enabled,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -53,6 +56,7 @@ from ...state.failure_evidence import (
 )
 from ...state.shared_state import (
     first_positive_tput,
+    framework_is_scriptable,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
     stack_base_params,
@@ -1100,6 +1104,16 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
+        # Round-local grading anchor. Variants stack within a round, so a KEEP
+        # advances the figure the next variant is graded against; the session
+        # anchor would grade every variant against the round's opening state.
+        grade_on_intvty = intvty_serving_grading_enabled(
+            scriptable=framework_is_scriptable(framework),
+            benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+        )
+        running_base_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_intvty else (None, "")
+        if grade_on_intvty and _anchor_reason:
+            log.info("explore: grading this round on output throughput (%s)", _anchor_reason)
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a cold decision round instead of
@@ -1533,7 +1547,13 @@ class ExploreExecutor:
                         GRADED_INTVTY: r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                     }
-                    graded = resolve_graded_comparison(ss, variant_meas, keep_threshold_pct=keep_threshold_pct)
+                    graded = resolve_graded_comparison(
+                        ss,
+                        variant_meas,
+                        keep_threshold_pct=keep_threshold_pct,
+                        anchor_perf=running_base_perf,
+                        anchor_tput=running_base_tput,
+                    )
                     _graded_on_intvty = graded.graded_on_intvty
                     if graded.degrade_reason:
                         log.info(
@@ -1582,7 +1602,11 @@ class ExploreExecutor:
                         # Serving still needs a measured baseline to compare
                         # against; scriptable compares against a fixed 1.0.
                         if scriptable or baseline_accuracy > 0:
-                            eval_out = parse_eval_results(slot, framework=framework)
+                            eval_out = parse_eval_results(
+                                slot,
+                                framework=framework,
+                                benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+                            )
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
                                 # Scriptable maps gate pass→1.0 / fail→0.0, so
@@ -1737,6 +1761,18 @@ class ExploreExecutor:
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
+                        if grade_on_intvty:
+                            # The KEEP's own axes become the next variant's
+                            # anchor. A KEEP that could not supply them clears
+                            # the anchor so the rest of the round grades on
+                            # output too, rather than against a stale pair.
+                            running_base_perf = perf_snapshot_from_mapping(variant_meas)
+                            if running_base_perf is None:
+                                log.info(
+                                    "explore: KEEP %r had no graded axes; grading the rest of "
+                                    "this round on output throughput",
+                                    gv.name,
+                                )
 
                         winners.append(keep_entry)
                         winners_history_update.append(
