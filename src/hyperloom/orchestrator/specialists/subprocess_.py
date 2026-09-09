@@ -650,7 +650,7 @@ class SpecialistSubprocessResult:
 
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
-_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", "scratch", ".hyperloom")
+_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
 
 
 def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:

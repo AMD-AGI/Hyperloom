@@ -361,7 +361,7 @@ def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target,
     en = EnablementRound()
     en.framework_root = result["framework_root"]
     en.setup_commands = result["setup_commands_applied"]
-    en.kept_rounds = [_round(*result["patches_applied"])]
+    en.kept_rounds = [_round(result["specialist_task_id"], *result["patches_applied"])]
 
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
 
@@ -369,7 +369,7 @@ def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target,
     assert setup[0] in text
     assert "apply_patch" not in text
     assert "install -D" not in text
-    assert en.kept_rounds == [{"patches": [], "artifacts": []}]
+    assert en.kept_rounds == [{"task_id": result["specialist_task_id"], "patches": [], "artifacts": []}]
     assert not (tmp_path / "reports" / "enablement" / "patches").exists()
     assert patch.is_file()
 
@@ -389,12 +389,13 @@ def test_vetted_source_and_config_patches_survive_snapshot_and_replay(tmp_path, 
     assert dropped == []
     _git("-C", str(worktree), "apply", str(patch))
 
-    archive = snapshot_round(tmp_path, _res(patches_applied=kept, framework_root=str(worktree)))
+    result = _res(patches_applied=kept, framework_root=str(worktree))
+    archive = snapshot_round(tmp_path, result)
     archived_patch = archive.path_for(ROLE_PATCH)
     assert (tmp_path / archived_patch).read_bytes() == patch.read_bytes()
     en = EnablementRound()
     en.framework_root = str(worktree)
-    en.kept_rounds = [_round(*kept)]
+    en.kept_rounds = [_round(result["specialist_task_id"], *kept)]
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
     text = (tmp_path / rel).read_text(encoding="utf-8")
     assert "apply_patch patches/001_manual.patch" in text
@@ -403,9 +404,15 @@ def test_vetted_source_and_config_patches_survive_snapshot_and_replay(tmp_path, 
 
 def test_whole_file_artifact_is_replayed_without_claiming_a_patch(tmp_path):
     source = Path(_patch(tmp_path, "runs/runtime.yaml", "block_size: 128\n"))
+    content = source.read_bytes()
     target = tmp_path / "framework" / "configs" / "runtime.yaml"
+    result = _res(artifacts_applied=[{"source": str(source), "target": str(target)}])
+    archive = snapshot_round(tmp_path, result)
+    assert archive.path_for(ROLE_ARTIFACT_SOURCE)
+    assert archive.paths_for(ROLE_PATCH) == ()
+    source.unlink()
     en = EnablementRound()
-    en.kept_rounds = [_round(artifacts=[{"source": str(source), "target": str(target)}])]
+    en.kept_rounds = [_round(result["specialist_task_id"], artifacts=result["artifacts_applied"])]
 
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
 
@@ -413,7 +420,7 @@ def test_whole_file_artifact_is_replayed_without_claiming_a_patch(tmp_path):
     assert "install -D" in text
     assert "apply_patch" not in text
     assert en.kept_rounds[0]["patches"] == []
-    assert (tmp_path / "reports" / "enablement" / "artifacts" / "001_runtime.yaml").read_bytes() == source.read_bytes()
+    assert (tmp_path / "reports" / "enablement" / "artifacts" / "001_runtime.yaml").read_bytes() == content
 
 
 def test_write_setting_script_produces_executable(tmp_path):

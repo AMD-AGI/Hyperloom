@@ -198,6 +198,8 @@ def _write_harvest_work_artifacts(wt: Path) -> dict[str, bytes]:
         "scratch/rebench/probe.py": b"print('one-off probe')\n",
         "scratch/rebench/specialist_rebench.with_envs.yaml": b"server_port: 31000\n",
         "scratch/rebench/process.log": b"probe completed\n",
+        "artifacts/runtime.yaml": b"block_size: 128\n",
+        ".hyperloom/state.json": b'{"status": "probing"}\n',
         "__pycache__/runtime.cpython-312.pyc": b"\x00\x00cached bytecode\n",
     }
     for rel, content in artifacts.items():
@@ -214,6 +216,7 @@ def test_collect_patches_excludes_work_artifacts_from_mixed_source_harvest(tmp_p
         "runtime.py": "# Runtime selection.\nBLOCK_SIZE = 128\n",
         "kernels/new_kernel.py": "def block_size():\n    return 128\n",
         "configs/runtime.json": '{"block_size": 128}\n',
+        "scratch/runtime.json": '{"block_size": 128}\n',
         "docs/runtime.md": "# Runtime configuration\nThe tuned block size is 128.\n",
     }
     for rel, content in installable.items():
