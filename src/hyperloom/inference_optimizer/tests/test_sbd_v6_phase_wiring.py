@@ -19,6 +19,7 @@ pinned below.
 from __future__ import annotations
 
 import asyncio
+import re
 import types
 from pathlib import Path
 from typing import Any
@@ -272,19 +273,20 @@ def test_the_runner_is_the_only_path_an_action_takes(tmp_path):
     ``run_task_registered`` holds the tree's sole call to ``sub.run_task``. A
     second one would be an action that runs without being recorded, and the
     hook would silently cover less than the catalogue.
-    """
-    import subprocess
 
+    Scanned in-process rather than by shelling out to a grep: a missing binary
+    would otherwise read as "no call sites found", which is the one answer this
+    assertion must never accept quietly.
+    """
+    pattern = re.compile(r"\bsub\.run_task\(")
     root = Path(__file__).resolve().parents[3] / "hyperloom"
-    found = (
-        subprocess.run(
-            ["rg", "-n", "--glob", "!**/tests/**", r"\bsub\.run_task\(", str(root)],
-            capture_output=True,
-            text=True,
-        )
-        .stdout.strip()
-        .splitlines()
-    )
+    found = [
+        f"{path}:{lineno}"
+        for path in sorted(root.rglob("*.py"))
+        if "tests" not in path.parts
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
     assert len(found) == 1, f"sub.run_task is called from more than one place: {found}"
     assert "loop/dispatcher.py" in found[0]
 
