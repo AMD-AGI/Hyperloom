@@ -214,11 +214,8 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
 
-    # Peak concurrency (from overlapping entry/exit intervals) is the
-    # authoritative, deterministic proof of parallel dispatch: if the 4 tasks
-    # serialised, peak would be 1. A wall-clock elapsed budget is intentionally
-    # NOT asserted here — it is redundant with this check and flaky under CI
-    # load (matches the peak-only assertions in the sibling tests below).
+    # Peak concurrency (from overlapping entry/exit intervals) is the authoritative, deterministic proof of parallel
+    # dispatch: if the 4 tasks serialised, peak would be 1.
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 4, f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
 
@@ -227,9 +224,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
 async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     tmp_path: Path,
 ):
-    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak
-    concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees.
-    """
+    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=2)
     probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=2)
     coord.sub.register_executor("specialist", probe)
@@ -259,9 +254,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
 @pytest.mark.asyncio
 async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
-    """capacity=1 serialises execution (peak concurrency 1) while still draining
-    the whole queue across re-scans within a single pump.
-    """
+    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue across re-scans within a single pump."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=1)
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -290,9 +283,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     tmp_path: Path,
     monkeypatch,
 ):
-    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the
-    research_lane has headroom; both tasks drain serially, reusing GPU id 0.
-    """
+    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the research_lane has headroom; both tasks drain serially, reusing GPU id 0."""
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=2,

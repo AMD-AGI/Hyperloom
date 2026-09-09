@@ -26,12 +26,7 @@ _IDENTITY_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9._+-]*$")
 
 @dataclass(frozen=True)
 class KernelRecipeIdentity:
-    """Identity of one producer's recipe for a final kernel implementation.
-
-    ``producer`` names the system that authored and owns the candidate stream;
-    ``backend`` names the final implementation type (for example FlyDSL,
-    Triton, or HIP). They are intentionally independent dimensions.
-    """
+    """Identity of one producer's recipe for a final kernel implementation."""
 
     producer: str
     kernel_name: str

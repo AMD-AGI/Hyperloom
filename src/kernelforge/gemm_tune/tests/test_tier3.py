@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the generated-tuner tier.
-
-Three pieces, each guarding something that produced a wrong answer on real
-hardware before it existed:
-
-* ``coverage`` decides whether a generated tuner has a target at all, which was
-  previously settled by argument rather than by the fleet;
-* ``contract`` rejects output whose own numbers contradict each other;
-* ``referee`` is what makes the whole tier safe -- the generated tuner proposes,
-  and only these timings decide.
-"""
+"""Tests for the generated-tuner tier."""
 
 from __future__ import annotations
 
@@ -56,10 +46,8 @@ class TestCoverageGaps:
         assert gap.warrants_generated_tuner
 
     def test_a_tuner_that_exists_but_was_not_selected_is_a_routing_gap(self):
-        # A real vLLM log missed 122 bf16 keys while sglang_dense_bf16 -- the
-        # tuner that owns that exact table -- simply was not selected by the
-        # framework branch. The answer is to route better, not to write a tuner,
-        # and conflating the two manufactures demand for the generated tier.
+        # A real vLLM log missed 122 bf16 keys while sglang_dense_bf16 -- the tuner that owns that exact table --
+        # simply was not selected by the framework branch.
         (gap,) = coverage_gaps(_demand(tuner="sglang_dense_bf16"), [TunerSpec("a8w8")])
         assert gap.kind == "not_selected"
         assert not gap.warrants_generated_tuner
@@ -87,8 +75,7 @@ class TestCoverageGaps:
         assert coverage_gaps(_demand(tuner="sglang_dense_bf16"), specs) == []
 
     def test_a_skip_that_is_an_answer_is_not_a_gap(self):
-        # The capability exists and said no. A generated tuner would not change
-        # any of these, so calling them coverage gaps would manufacture demand.
+        # The capability exists and said no.
         for reason in (
             "FP4 GEMM is not supported on gfx942",
             "No GEMM shapes available: needs --untuned-csv",
@@ -149,8 +136,8 @@ class TestMandate:
 
     def test_the_brief_carries_the_constraints_that_were_learned_the_hard_way(self):
         text = self._mandate().render()
-        # A single correctness check passes an intermittently wrong kernel at
-        # random; a Python-loop timer cannot rank kernels this small.
+        # A single correctness check passes an intermittently wrong kernel at random; a Python-loop timer cannot rank
+        # kernels this small.
         assert "8 times" in text or "{} times".format(8) in text
         assert "fresh inputs" in text
         assert "captured graph" in text
@@ -169,10 +156,8 @@ class TestMandate:
         assert d["correctness_trials"] == 8
 
     def test_the_brief_says_how_the_error_is_measured(self):
-        # Left to interpretation, the obvious element-wise ratio makes any
-        # output element near zero dominate -- and by that measure the
-        # unmodified torch.matmul scores 1.375, so the gate rejects the
-        # default path. The rule is unusable without its definition.
+        # Left to interpretation, the obvious element-wise ratio makes any output element near zero dominate -- and by
+        # that measure the unmodified torch.matmul scores 1.375, so the gate rejects the default path.
         text = self._mandate().render()
         assert "mean|ref|" in text
         assert "1.375" in text, "the reason has to travel with the rule"
@@ -203,8 +188,7 @@ class TestContract:
         assert v.where == "header"
 
     def test_improved_must_agree_with_its_own_numbers(self, tmp_path):
-        # The cheapest possible tell that a script is not measuring what it
-        # reports.
+        # The cheapest possible tell that a script is not measuring what it reports.
         p = self._write(tmp_path, self._HDR, ["16,1536,7168,x,c=1,8.0,11.0,True"])
         problems = [str(v) for v in validate_output_csv(p, self._mandate())]
         assert any("contradicts" in s for s in problems)
@@ -299,18 +283,14 @@ class TestReferee:
         assert t.usable and t.speedup == pytest.approx(0.5)
 
     def test_interference_on_one_side_only_is_refused(self, clock):
-        # One clean baseline window and four disturbed ones. The best case then
-        # says the baseline is faster and the typical case says the candidate
-        # is; the two sides were not measured under one machine state, so there
-        # is no number to report.
+        # One clean baseline window and four disturbed ones.
         from kernelforge.gemm_tune.tier3 import referee
 
         calls = {"n": 0}
 
         def noisy_baseline():
             calls["n"] += 1
-            # Warmup runs first and is not measured; the first *sampled* window
-            # is the quiet one.
+            # Warmup runs first and is not measured; the first *sampled* window is the quiet one.
             if calls["n"] <= referee.WARMUP_CALLS:
                 return 1e-6
             sample = (calls["n"] - referee.WARMUP_CALLS - 1) // referee.CALLS_PER_SAMPLE
@@ -403,14 +383,7 @@ class TestReferee:
 
 @pytest.mark.parametrize("bad", ["", "16x1536", "16x1536x7168x4", "16xNx7168", "not-a-shape"])
 def test_shape_key_rejects_a_shape_it_cannot_turn_into_m_n_k(bad: str) -> None:
-    """It used to answer ``()`` here, which helped nobody.
-
-    Every caller unpacks the result into three names, so the empty tuple only
-    moved the failure a few frames out and stripped the shape from the message
-    -- and ``"16x1536"`` did not even fail here, it returned a 2-tuple that blew
-    up the same way. The adapter's caller already treats a raised error as
-    "tier3 attempt failed; tuning continues", so this loses no tolerance.
-    """
+    """It used to answer ``()`` here, which helped nobody."""
     from kernelforge.gemm_tune.tier3.dispatch import shape_key
 
     with pytest.raises(ValueError, match="MxNxK"):

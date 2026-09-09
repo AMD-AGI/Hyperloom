@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Off-loop targeted-build runner.
-
-Spawns a build command as a subprocess in its own process group, so tearing a
-build down reaches the compiler's own children. The wall-clock budget and the
-teardown belong to the coroutine that owns the build
-(``actions/executors/targeted_build_executor.py``); this module spawns it,
-classifies how it exited, and can make sure it is dead.
-
-The build command is argv-only (never a shell string). Each build gets a
-per-attempt ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` so it never shares the
-node-global aiter JIT cache.
-
-Alongside the spawn/poll/kill supervisor, this module holds the three build
-recipes -- :func:`run_aiter_build`, :func:`run_sgl_kernel_build`,
-:func:`run_vllm_source_build` -- plus ``_driver_main``. When an action carries
-no explicit ``build_command``, the detached subprocess re-enters this module as
-``__main__`` and the driver dispatches to the matching recipe.
-"""
+"""Off-loop targeted-build runner."""
 
 from __future__ import annotations
 
@@ -56,13 +39,7 @@ def default_budget_sec(component: str) -> int:
 
 @dataclass
 class BuildHandle:
-    """In-memory handle for one in-flight detached build.
-
-    The wall-clock budget is enforced by the coroutine that owns the build, so
-    the handle carries no deadline of its own. Not persisted directly; the
-    durable copy is ``pending_targeted_build`` in shared state, which exists so
-    a resume after a hard crash can still reach the process group.
-    """
+    """In-memory handle for one in-flight detached build."""
 
     action: TargetedBuildAction
     attempt_root: str
@@ -98,28 +75,7 @@ def spawn_build(
     command: list[str] | None = None,
     run: Callable[..., Any] = subprocess.Popen,
 ) -> BuildHandle:
-    """Spawn a targeted build as a detached process group.
-
-    Creates ``attempt_root`` and a per-attempt ``aiter_jit`` dir, exports
-    ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` for it, and starts the argv command in
-    a new session (own process group) with output redirected to ``build.log``.
-
-    Args:
-        action: The build to run.
-        attempt_root: Directory anchoring this attempt's logs and JIT cache.
-        command: Explicit argv to spawn; overrides ``action.build_command`` when
-            not None. The production caller
-            (``build_lifecycle._driver_command``) always passes this, using the
-            off-loop driver entrypoint when ``action.build_command`` is empty.
-        run: Injectable process spawner (defaults to ``subprocess.Popen``).
-
-    Returns:
-        BuildHandle: The in-flight handle (pid/pgid/log path).
-
-    Raises:
-        ValueError: If neither ``command`` nor ``action.build_command`` yields a
-            non-empty argv.
-    """
+    """Spawn a targeted build as a detached process group."""
     argv = command if command is not None else list(action.build_command)
     if not argv:
         raise ValueError("targeted_build: build_command must be a non-empty argv (or pass command=)")
@@ -207,18 +163,7 @@ def _finalize(handle: BuildHandle, *, ok: bool, failure_class: str, summary: str
 
 
 def classify_build_exit(handle: BuildHandle, rc: int) -> BuildResult:
-    """Turn an exited build into a :class:`BuildResult`.
-
-    Prefers the rich ``result.json`` the driver writes; falls back to the exit
-    code when the file is absent.
-
-    Args:
-        handle: The handle for the build that just exited.
-        rc: The process exit code.
-
-    Returns:
-        BuildResult: The classified outcome.
-    """
+    """Turn an exited build into a :class:`BuildResult`."""
     rich = _load_result_json(handle.attempt_root)
     if rich is not None:
         return rich
@@ -233,18 +178,7 @@ def classify_build_exit(handle: BuildHandle, rc: int) -> BuildResult:
 
 
 def ensure_build_dead(handle: BuildHandle) -> bool:
-    """SIGKILL the build's process group unless it already exited.
-
-    No SIGTERM grace: a half-finished build tree is discarded either way, so
-    there is nothing a graceful stop would preserve.
-
-    Args:
-        handle: The build to make sure is not still running.
-
-    Returns:
-        bool: True when the process is known to be gone, so the caller may drop
-            the durable sentinel. False leaves it for a resume to reclaim.
-    """
+    """SIGKILL the build's process group unless it already exited."""
     if handle.proc.poll() is not None:
         return True
     kill_build_pgroup(handle.pgid, sig=signal.SIGKILL)
@@ -272,15 +206,7 @@ def _load_result_json(attempt_root: str) -> BuildResult | None:
 
 
 def _read_build_system_requires(worktree_dir: Any) -> list[str]:
-    """Return a checkout's PEP 518 ``[build-system].requires`` for pre-install.
-
-    Used before a ``--no-build-isolation`` editable install so the attempt venv
-    carries the backend deps (setuptools-scm / setuptools-rust / packaging /
-    cmake / ninja / wheel / jinja2 / ...) the checkout pins. Any ``torch``
-    requirement is dropped so the venv's ROCm torch is never clobbered by an
-    upstream CUDA torch pin. Missing / unparseable pyproject → empty list
-    (caller degrades to the plain editable install).
-    """
+    """Return a checkout's PEP 518 ``[build-system].requires`` for pre-install."""
     try:
         import tomllib  # py3.11+
     except Exception:  # noqa: BLE001
@@ -303,9 +229,7 @@ def _read_build_system_requires(worktree_dir: Any) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # AITER real-build recipe
-# ---------------------------------------------------------------------------
 
 # Default AITER upstream; overridable via TargetedBuildAction.repo_url.
 _AITER_DEFAULT_REPO = "https://github.com/ROCm/aiter"
@@ -323,12 +247,7 @@ def run_aiter_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run a full isolated AITER targeted build.
-
-    Executes entirely in-process (call it from the detached driver subprocess
-    so the coordinator tick loop is never blocked).  All subprocess calls go
-    through the injectable ``run`` shim for testability.
-    """
+    """Run a full isolated AITER targeted build."""
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
@@ -388,7 +307,6 @@ def run_aiter_build(
         return _fail("preflight_toolchain", tc_msg)
 
     # Choose the Python interpreter in the attempt venv (created below).
-    # For preflight we use the host interpreter for the ABI probe.
     import sys as _sys
 
     host_py = _sys.executable
@@ -563,9 +481,7 @@ def run_aiter_build(
     )
 
 
-# ---------------------------------------------------------------------------
 # sgl-kernel recipe
-# ---------------------------------------------------------------------------
 
 _SGLANG_DEFAULT_REPO = "https://github.com/sgl-project/sglang"
 _SGLANG_DISK_PER_CANDIDATE_GB = 8.0
@@ -580,12 +496,7 @@ def run_sgl_kernel_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run an isolated sgl-kernel targeted build.
-
-    Clones SGLang into an isolated worktree/venv, builds the ROCm sgl-kernel
-    extension for the explicit gpu_arch (AMDGPU_TARGET), then installs the
-    Python package and verifies a fresh compiled artifact.
-    """
+    """Run an isolated sgl-kernel targeted build."""
     import os as _os
     import sys as _sys
 
@@ -772,9 +683,7 @@ def run_sgl_kernel_build(
     )
 
 
-# ---------------------------------------------------------------------------
 # vLLM from source recipe
-# ---------------------------------------------------------------------------
 
 _VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
 _VLLM_DISK_PER_CANDIDATE_GB = 20.0
@@ -811,16 +720,7 @@ def run_vllm_source_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run an isolated vLLM-from-source targeted build.
-
-    Clones ROCm/vllm into an isolated worktree, runs ``pip install -e``
-    which triggers the CMake ``build_ext`` pass, then verifies ROCm platform
-    and fresh compiled artefacts. A non-ROCm torch build is a hard failure
-    (``abi_mismatch``, raised by ``write_rocm_torch_constraints``); a Python
-    major.minor mismatch between the torch ABI and the launcher is logged as an
-    advisory only, and ``runtime_python_exe`` is set to the attempt-venv
-    interpreter so the server launches with the right Python.
-    """
+    """Run an isolated vLLM-from-source targeted build."""
     import os as _os
     import sys as _sys
 
@@ -879,9 +779,8 @@ def run_vllm_source_build(
     if not gpu_arch:
         return _fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
 
-    # ABI-match guard: log an advisory when the torch ABI reports a different Python
-    # version; the build continues and runtime_python_exe points to the attempt venv
-    # python so the server uses the correct interpreter.
+    # ABI-match guard: log an advisory when the torch ABI reports a different Python version; the build continues and
+    # runtime_python_exe points to the attempt venv python so the server uses the correct interpreter.
     host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
     abi_pyver = str(abi.get("python_version") or "").strip()
     if abi_pyver and not abi_pyver.startswith(host_pyver):
@@ -930,9 +829,7 @@ def run_vllm_source_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
 
-    # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the
-    # toolchain root even on ROCm. The pip build-env overlay does not inherit an
-    # unset CUDA_HOME/ROCM_HOME, so derive the ROCm root and export it explicitly.
+    # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
     _rocm_root = (
         _os.environ.get("ROCM_HOME")
         or _os.environ.get("CUDA_HOME")
@@ -950,12 +847,8 @@ def run_vllm_source_build(
         "HIP_HOME": _rocm_root,
     }
 
-    # ``--no-build-isolation`` (below) means pip will NOT install the checkout's
-    # [build-system].requires — they must already be in the attempt venv. Pre-
-    # install them (minus any ``torch`` pin, which would clobber the ROCm torch
-    # the venv was built against). Without this, a checkout that pins e.g.
-    # setuptools-scm / setuptools-rust / a different torch fails PEP517 metadata
-    # prep with the cryptic ``OSError ... output.json: No such file or directory``.
+    # ``--no-build-isolation`` (below) means pip will NOT install the checkout's [build-system].requires — they must
+    # already be in the attempt venv.
     try:
         build_requires = _read_build_system_requires(worktree_dir)
         if build_requires:
@@ -971,9 +864,7 @@ def run_vllm_source_build(
 
         _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
 
-    # pip install -e triggers CMake build_ext. ``--no-build-isolation`` keeps the
-    # build in the attempt venv (which has the pinned ROCm torch + numpy) so
-    # setup.py sees torch/numpy and the exported CUDA_HOME/ROCM_HOME.
+    # pip install -e triggers CMake build_ext.
     pip_cmd = [
         attempt_py,
         "-m",
@@ -1058,9 +949,7 @@ def run_vllm_source_build(
     )
 
 
-# ---------------------------------------------------------------------------
 # Off-loop driver entrypoint
-# ---------------------------------------------------------------------------
 
 
 def _driver_main(argv: list[str] | None = None) -> int:

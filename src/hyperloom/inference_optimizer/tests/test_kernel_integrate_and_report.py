@@ -1348,11 +1348,7 @@ async def test_integrate_handler_keeps_when_accuracy_holds(session_dir, tmp_path
 
 @pytest.mark.asyncio
 async def test_integrate_handler_reverts_on_accuracy_regression(session_dir, tmp_path):
-    """A throughput win that loses accuracy beyond tolerance must REVERT.
-
-    This is the gate the kernel path was missing: the patch is faster, so the
-    throughput-only decision would have KEEPed it.
-    """
+    """A throughput win that loses accuracy beyond tolerance must REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     _seed_baseline_accuracy(session_dir, 0.80)
@@ -1755,12 +1751,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     session_dir,
     tmp_path,
 ):
-    """A failed re-baseline must route through the fault retry budget.
-
-    An invalid re-baseline yields ``status=failed`` + ``decision=REVERT`` with a
-    top-level fault ``error_class``; ``record_kernel_integrate_result`` must mark
-    it retryable rather than discarding it as a genuine REVERT.
-    """
+    """A failed re-baseline must route through the fault retry budget."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
@@ -1788,8 +1779,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    # error_class here is deliberately NOT in the fault whitelist, proving the
-    # status-based check saves the patch.
+    # error_class here is deliberately NOT in the fault whitelist, proving the status-based check saves the patch.
     assert res["status"] == "failed"
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
@@ -2210,8 +2200,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     tmp_path,
     monkeypatch,
 ):
-    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts)
-    # by opting out of the honest-E2E path, which widens the cap.
+    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts) by opting out of the honest-E2E
+    # path, which widens the cap.
     monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -2317,8 +2307,8 @@ async def test_report_executor_writes_md_and_json(session_dir):
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore
-        # requires baseline_tput > 0 (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
+        # (execution_order) to be proposable next.
         c.shared_state.baseline_tput = 800.0
         await c._handle_intent(
             "orchestration",

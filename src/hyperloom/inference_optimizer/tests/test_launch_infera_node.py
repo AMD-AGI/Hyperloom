@@ -23,9 +23,7 @@ def _load_module():
 
 
 def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
-    # The pod-side copy must mirror server_args_safety: exempt the flag by name,
-    # but still constrain its value. Divergence silently blocks the sandbox-side
-    # exemption at the pod boundary.
+    # The pod-side copy must mirror server_args_safety: exempt the flag by name, but still constrain its value.
     mod = _load_module()
     assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
     assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
@@ -62,8 +60,8 @@ def test_build_vllm_cmd_uses_infera_engine():
 
 
 def test_build_sglang_cmd_autofills_dp_size_for_dp_attention():
-    # --enable-dp-attention without --dp-size => sglang would disable it at
-    # dp_size==1; the launcher must inject --dp-size=tp so it takes effect.
+    # --enable-dp-attention without --dp-size => sglang would disable it at dp_size==1; the launcher must inject
+    # --dp-size=tp so it takes effect.
     mod = _load_module()
     ns = type(
         "NS",
@@ -103,8 +101,7 @@ def test_build_sglang_cmd_respects_explicit_dp_size():
 
 
 def test_build_sglang_cmd_injects_skip_server_warmup_for_pd_leg():
-    # PD warmup can hang until SGLANG_WARMUP_TIMEOUT; the launcher skips it for
-    # PD-disaggregated legs. Aggregated keeps warmup ON (single-node parity).
+    # PD warmup can hang until SGLANG_WARMUP_TIMEOUT; the launcher skips it for PD-disaggregated legs.
     mod = _load_module()
     pd_ns = type(
         "NS",

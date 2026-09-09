@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -27,20 +21,7 @@ def collect_roofline(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Shape ``state.roofline_snapshots`` into the per-session roofline comparison the renderer expects.
-
-    Returns ``[]`` when no snapshots exist or on parse failure
-    (best-effort; errors recorded in ``warnings``).
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place on build
-            failure).
-
-    Returns:
-        list[dict[str, Any]]: A single-element comparison list (baseline /
-        latest / optional delta), or ``[]`` when no snapshots or on failure.
-    """
+    """Shape ``state.roofline_snapshots`` into the per-session roofline comparison the renderer expects."""
     snapshots = state.get("roofline_snapshots")
     if not isinstance(snapshots, list) or not snapshots:
         return []
@@ -76,8 +57,6 @@ _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 
 
 # Roofline — optimization-progress curve.
-# Conservative achievable fraction of vendor-peak bandwidth Hyperloom
-# targets (vendor specs are theoretical maxima).
 DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
 
 
@@ -87,24 +66,7 @@ def collect_roofline_progress(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Build the ``roofline_progress`` section feeding the optimization-progress chart; never raises.
-
-    Pure over ``state`` + ``manifest``. Output: ``trajectory[]`` (baseline +
-    KEEPs, ts-sorted), ceiling/target reference lines from the latest snapshot,
-    headline current-best numbers, and a ``snapshots[]`` passthrough.
-
-    Args:
-        session_dir (Path): Absolute session root (kept for a uniform collector
-            signature; the body is pure over state/manifest).
-        state (dict[str, Any]): Parsed ``state.json``.
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (mutated in place on a
-            trajectory / current-best mismatch).
-
-    Returns:
-        dict[str, Any]: The ``roofline_progress`` section (trajectory, ceiling
-        / target reference lines, headline numbers, and normalized snapshots).
-    """
+    """Build the ``roofline_progress`` section feeding the optimization-progress chart; never raises."""
     # Trajectory: baseline + each KEEP.
     baseline_tput = _to_float(state.get("baseline_tput")) or 0.0
     trajectory: list[dict[str, Any]] = []
@@ -171,9 +133,8 @@ def collect_roofline_progress(
         else None
     )
 
-    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling;
-    # their roofline lives in the latency domain (ideal per-image compute floor
-    # vs measured e2e latency), surfaced through dedicated ms fields and a
+    # Scriptable/diffusion (xDiT) image models have no tok/s decode ceiling; their roofline lives in the latency
+    # domain (ideal per-image compute floor vs measured e2e latency), surfaced through dedicated ms fields and a
     # ``ceiling_kind`` discriminator while the tok/s fields stay null.
     ceiling_kind = "throughput" if ceiling_available else "none"
     latency_ceiling_ms: float | None = None
@@ -220,8 +181,8 @@ def collect_roofline_progress(
         if gap is not None:
             out["snapshot_gap_to_roofline_pct"] = gap
 
-    # Sanity check: trajectory tail vs state.current_best.tput; divergence
-    # means the stack wasn't fully promoted (resume mid-promotion).
+    # Sanity check: trajectory tail vs state.current_best.tput; divergence means the stack wasn't fully promoted
+    # (resume mid-promotion).
     cb_tput = _to_float((state.get("current_best") or {}).get("tput"))
     if (
         cb_tput is not None
@@ -238,15 +199,7 @@ def collect_roofline_progress(
 
 
 def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one ``state.roofline_snapshots[]`` entry to the schema.
-
-    Args:
-        snap (dict[str, Any]): A raw roofline snapshot from state.
-
-    Returns:
-        dict[str, Any]: The snapshot with stable types and a normalized
-        ``top_kernel`` sub-dict.
-    """
+    """Coerce one ``state.roofline_snapshots[]`` entry to the schema."""
     top_kernel_raw = snap.get("top_kernel") or {}
     top_kernel: dict[str, Any] = {}
     if isinstance(top_kernel_raw, dict):
@@ -263,13 +216,12 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
         "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
         "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
-        # ``within`` is capped at 100; the uncapped ratio and its flag carry the
-        # overshoot, which says the modelled ceiling is wrong rather than that
-        # the run beat physics.
+        # ``within`` is capped at 100; the uncapped ratio and its flag carry the overshoot, which says the modelled
+        # ceiling is wrong rather than that the run beat physics.
         "within_roofline_pct_uncapped": _to_float(snap.get("within_roofline_pct_uncapped")),
         "roofline_ceiling_exceeded": bool(snap.get("roofline_ceiling_exceeded")),
-        # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of
-        # the tok/s ceiling, used for an independent image-model latency ceiling.
+        # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of the tok/s ceiling, used for an
+        # independent image-model latency ceiling.
         "e2e_mean_ms": _to_float(snap.get("e2e_mean_ms")),
         "roofline_ideal_ms": _to_float(snap.get("roofline_ideal_ms")),
         "roofline_bound_kind": str(snap.get("roofline_bound_kind") or "unknown"),
@@ -290,21 +242,7 @@ def collect_kernel_roofline(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/kernel_roofline.json`` into the ``kernel_roofline`` section.
-
-    Missing file → ``{}`` (quiet); malformed → ``{}`` + warning; non-list
-    ``kernels`` → ``[]``. Entries are type-coerced so upstream drift
-    doesn't break consumers.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on
-            malformed input).
-
-    Returns:
-        dict[str, Any]: The ``kernel_roofline`` section, or ``{}`` when the
-        file is absent / not a JSON object.
-    """
+    """Mirror ``reports/kernel_roofline.json`` into the ``kernel_roofline`` section."""
     path = session_dir / _KERNEL_ROOFLINE_REL_PATH
     if not path.exists():
         # Quiet on absence; most sessions never run the roofline pipeline.
@@ -336,14 +274,7 @@ def collect_kernel_roofline(
 
 
 def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one kernel roofline entry to the schema shape with stable types.
-
-    Args:
-        raw (dict[str, Any]): A raw kernel entry from ``kernel_roofline.json``.
-
-    Returns:
-        dict[str, Any]: The entry with all fields coerced to stable types.
-    """
+    """Coerce one kernel roofline entry to the schema shape with stable types."""
     return {
         "kernel_id": str(raw.get("kernel_id") or ""),
         "name": str(raw.get("name") or ""),

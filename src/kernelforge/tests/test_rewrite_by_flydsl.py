@@ -1,10 +1,4 @@
-"""Unit tests for the operator-agnostic (BYOD) forge-rewrite-by-flydsl layer.
-
-These are pure-Python (no GPU, no LLM, no FlyDSL): they pin the rewrite spec,
-the source-entry discovery heuristic, the unresolved-entry path, the generic
-seed skeleton, and the speedup math. GPU/agent behavior (and driver measurement
-primitives) is covered by the L1/L2/L3 integration ladder, not here.
-"""
+"""Unit tests for the operator-agnostic (BYOD) forge-rewrite-by-flydsl layer."""
 
 from __future__ import annotations
 
@@ -61,8 +55,8 @@ def test_discover_source_entry_unparseable_returns_empty(tmp_path):
 
 
 def test_discover_source_entry_plain_call_and_bare_name(tmp_path):
-    # `wrap` launches the kernel via a plain call; `alias` references it as a bare
-    # name — exercises both the Call and Name discovery branches.
+    # `wrap` launches the kernel via a plain call; `alias` references it as a bare name — exercises both the Call and
+    # Name discovery branches.
     src = tmp_path / "s.py"
     src.write_text(
         "def k(x):\n    return x\ndef alias():\n    fn = k\n    return fn\ndef wrap(x):\n    k(x)\n    return x\n"
@@ -148,8 +142,8 @@ _HIP_SRC = textwrap.dedent("""
 @pytest.mark.parametrize(
     ("declared", "filename", "expected"),
     [
-        # A caller's declaration wins: it came from a profiler that saw the kernel
-        # run, which the file itself cannot tell us.
+        # A caller's declaration wins: it came from a profiler that saw the kernel run, which the file itself cannot
+        # tell us.
         ("triton", "kernel.py", "triton"),
         # A curated kind naming a language this producer reads is mapped onto it.
         ("hip_cpp", "kernel.cpp", "hip"),
@@ -175,11 +169,7 @@ def test_a_python_file_without_triton_is_not_assumed_to_be_triton(tmp_path):
 
 
 def test_entry_discovery_reads_a_c_like_source_instead_of_parsing_it(tmp_path):
-    """``ast.parse`` only raises ``SyntaxError`` on HIP.
-
-    Left on the Python path, every C-like kernel reported no entry at all and the
-    port prompt silently lost the one hint it had about how to call the source.
-    """
+    """``ast.parse`` only raises ``SyntaxError`` on HIP."""
     src = tmp_path / "attention.hip"
     src.write_text(_HIP_SRC)
 
@@ -263,8 +253,8 @@ def test_flydsl_gate_rejects_triton_reimplementation(tmp_path):
 
 
 def test_flydsl_gate_bans_triton_whatever_the_source_language_was(tmp_path):
-    # Triton ships alongside FlyDSL, so deriving the ban from the source language
-    # would hand a HIP port a free pass to reimplement the op in Triton.
+    # Triton ships alongside FlyDSL, so deriving the ban from the source language would hand a HIP port a free pass to
+    # reimplement the op in Triton.
     s = _spec_with_kernel(tmp_path, "import flydsl\nimport triton\ndef build_softmax_module(*a): ...\n")
     s.source_language = "hip"
 

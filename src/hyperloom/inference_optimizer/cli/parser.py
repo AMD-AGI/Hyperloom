@@ -20,10 +20,7 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
-# Workload knob fallbacks applied when the operator passes neither the CLI flag
-# nor an inherited value. Flags default to ``None`` so "omitted" is
-# distinguishable from "typed the default"; the resolver in ``cli`` applies
-# these constants only for genuinely-unset knobs (issue #903).
+# Workload knob fallbacks applied when the operator passes neither the CLI flag nor an inherited value.
 DEFAULT_ISL = 1024
 DEFAULT_OSL = 1024
 DEFAULT_CONC = 64
@@ -33,8 +30,6 @@ DEFAULT_PRECISION = "bf16"
 
 
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
-# Deliberately broad: over-redacting a pod env var costs nothing, while missing
-# one writes a live token into a log the platform ships elsewhere.
 _SECRET_NAME_HINTS = (
     "token",
     "secret",
@@ -48,33 +43,13 @@ _REDACTED = "***"
 
 
 def _is_secret_name(name: str) -> bool:
-    """Report whether a flag or variable name suggests a credential.
-
-    Args:
-        name: A flag (leading dashes tolerated) or a ``NAME=VALUE`` name.
-
-    Returns:
-        bool: ``True`` when the name matches any known credential hint.
-    """
+    """Report whether a flag or variable name suggests a credential."""
     lowered = name.lstrip("-").lower()
     return any(hint in lowered for hint in _SECRET_NAME_HINTS)
 
 
 def _redact_unknown_args(tokens: list[str]) -> str:
-    """Render unrecognised CLI tokens for logging with credential values masked.
-
-    Names are always kept and only values are dropped, so a misspelled real flag
-    stays as diagnosable as before. A value is masked when its own flag looks
-    sensitive (``--api-key foo``) or when it is a ``NAME=VALUE`` pair with a
-    sensitive name (``--extra-env HF_TOKEN=foo``), which is how credentials
-    normally reach the pods.
-
-    Args:
-        tokens: The leftover argv entries argparse could not place.
-
-    Returns:
-        str: A space-joined, log-safe rendering of ``tokens``.
-    """
+    """Render unrecognised CLI tokens for logging with credential values masked."""
 
     def _mask(value: str, flag_is_secret: bool) -> str:
         name, sep, _ = value.partition("=")
@@ -101,24 +76,12 @@ def _redact_unknown_args(tokens: list[str]) -> str:
 
 
 class RedactingArgumentParser(argparse.ArgumentParser):
-    """Parser whose unrecognised-argument error cannot print a credential.
-
-    argparse renders the offending tokens verbatim. The platform hands its whole
-    prompt FLAGS block to this CLI, pod credentials included, so an argument
-    this parser does not know -- a flag the platform added before Hyperloom
-    declared it, or a plain typo -- would otherwise write a live token into a
-    log shipped elsewhere. Only the values are masked; every name survives, so
-    the message still says exactly which argument was rejected.
-    """
+    """Parser whose unrecognised-argument error cannot print a credential."""
 
     _UNRECOGNIZED_PREFIX = "unrecognized arguments: "
 
     def error(self, message: str) -> NoReturn:
-        """Exit 2 like argparse, with credential values masked.
-
-        Args:
-            message: The argparse-generated error message.
-        """
+        """Exit 2 like argparse, with credential values masked."""
         if message.startswith(self._UNRECOGNIZED_PREFIX):
             tail = message[len(self._UNRECOGNIZED_PREFIX) :]
             message = self._UNRECOGNIZED_PREFIX + _redact_unknown_args(tail.split())
@@ -137,12 +100,7 @@ def _positive_int_arg(value: str) -> int:
 
 
 def _default_claude_model_env() -> str:
-    """Resolve the default Claude model from env.
-
-    Runs before ``_preflight`` normalizes the environment, so it consults
-    :func:`provider_model_defaults` itself: a gateway that only serves its own
-    models must not be handed the AMD Claude default.
-    """
+    """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
@@ -159,14 +117,7 @@ def _default_claude_model_env() -> str:
 
 
 def _default_codex_model_env() -> str:
-    """Resolve the default Codex-style model from env.
-
-    When the operator only configured the Anthropic side, Codex-style JSON
-    roles run through the unified gateway with the same Claude model as
-    orchestration. This also overrides generated default ``CODEX_MODEL`` values
-    from setup env files. Explicit ``CODEX_MODEL`` keeps the historical
-    OpenAI-compatible behavior when an OpenAI base URL is configured.
-    """
+    """Resolve the default Codex-style model from env."""
     anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
     openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
     if anthropic_url and not openai_url:
@@ -181,36 +132,21 @@ def _default_codex_model_env() -> str:
 
 
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity`` to the GPU ceiling (2×GPU).
-
-    Returns:
-        int: The policy GPU ceiling.
-    """
+    """Default ``--research-lane-capacity`` to the GPU ceiling (2×GPU)."""
     from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     return research_lane_ceiling()
 
 
 def _default_gpu_specialist_capacity() -> int:
-    """Default ``--gpu-specialist-capacity`` to the whole visible machine.
-
-    WS2 turns GPU specialists on by default at whole-machine capacity. When the
-    operator needs a different value, pass ``--gpu-specialist-capacity``.
-
-    Returns:
-        int: The detected whole-machine GPU count, or ``0`` when nothing can be probed.
-    """
+    """Default ``--gpu-specialist-capacity`` to the whole visible machine."""
     from hyperloom.orchestrator.policy.gate import detect_gpu_count
 
     return detect_gpu_count()
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the top-level CLI argument parser and subcommands.
-
-    Returns:
-        The configured :class:`argparse.ArgumentParser`.
-    """
+    """Build the top-level CLI argument parser and subcommands."""
     from hyperloom.orchestrator.specialists.domains import (
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
@@ -259,8 +195,8 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to
-        # the identities table is accepted here without a second edit.
+        # Sorted for a stable --help listing, and derived so a board added to the identities table is accepted here
+        # without a second edit.
         choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
@@ -292,8 +228,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--streams-per-partition",
         type=int,
-        # None, not 2, so a resume can tell "not passed" from "passed 2" and
-        # let the persisted value stand. The 2 is applied where it is resolved.
+        # None, not 2, so a resume can tell "not passed" from "passed 2" and let the persisted value stand.
         default=None,
         metavar="N",
         help="Concurrent streams to place on each partition when the card is "
@@ -374,16 +309,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
         "head+workers). Defaults to 8 when omitted.",
     )
-    # Platform-owned, inert here. Primus-Claw parses ONE prompt FLAGS block for
-    # both itself and this CLI, and these configure the cluster it provisions
-    # (pod image, per-pod cpu/mem, pod env) before the optimizer ever starts.
-    # Nothing reads them; they are declared so strict parsing accepts a real
-    # platform prompt.
-    #
-    # Declared individually rather than tolerating unknown arguments wholesale,
-    # so a misspelled Hyperloom flag still fails fast instead of running for
-    # hours on a default. No similarity heuristic could stand in for this list:
-    # ``--cpus-per-node`` and ``--gpus-per-node`` are one character apart.
+    # Platform-owned, inert here.
     opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)
     opt.add_argument("--cpus-per-node", type=int, default=None, help=argparse.SUPPRESS)
     opt.add_argument("--mem-per-node", type=int, default=None, help=argparse.SUPPRESS)
@@ -599,8 +525,8 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
-    # Outside the group: it measures a different axis, so it ORs with whichever
-    # of the three above is set rather than competing with them.
+    # Outside the group: it measures a different axis, so it ORs with whichever of the three above is set rather than
+    # competing with them.
     opt.add_argument(
         "--target-roofline",
         type=float,
@@ -694,11 +620,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired with the kernel LLM role; accepted as no-ops so a launcher or
-    # operator template that still passes them does not exit 2. Nothing reads
-    # the dests. ``--kernel-prompt`` took a path, so it has to keep consuming
-    # one: as a store_true its value would land as a stray positional and
-    # argparse would exit 2 anyway, which is the failure this exists to avoid.
+    # Retired with the kernel LLM role; accepted as no-ops so a launcher or operator template that still passes them
+    # does not exit 2.
     for _retired in ("--kernel-codex", "--kernel-claude"):
         opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
     opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
@@ -952,8 +875,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "``status=drift`` and continue with the regular optimisation "
         "flow without inheriting the warm config.",
     )
-    # PR Monitor REST + MCP are co-hosted by KB Store and derived from
-    # $KB_STORE_URL. There are deliberately no independent endpoint flags.
+    # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
         "--degraded-pr",
         dest="degraded_pr",
@@ -999,8 +921,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "comma-separated GPU id pool when the specialist pool should "
         "not use device ids 0..N-1. Locked at session start.",
     )
-    # Advisory specialist-proposal scorer (ProposalScorer): scores each
-    # proposal_set with gateway models as a reference for Orchestration; never gates.
+    # Advisory specialist-proposal scorer (ProposalScorer): scores each proposal_set with gateway models as a
+    # reference for Orchestration; never gates.
     opt.add_argument(
         "--proposal-scorer-models",
         dest="proposal_scorer_models",
@@ -1077,8 +999,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "servers into private task-local config. Default: None.",
     )
 
-    # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE
-    # and every 10% cumulative_gain_validated crossing).
+    # Integration toggles.
     opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
@@ -1151,8 +1072,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized
-    # Magpie grid across CONC values (see orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py).
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
@@ -1198,8 +1119,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action.",
     )
-    # Per-variant explore overtime kill ratio (mirrored to
-    # SharedState.explore_overtime_kill_ratio). 0 disables.
+    # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
     opt.add_argument(
         "--explore-overtime-kill-ratio",
         dest="explore_overtime_kill_ratio",
@@ -1217,9 +1137,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "distinguish it from a hard timeout / crash. Default 2.0 (kill "
         "at +100%% over the warm client anchor). Pass 0 to disable.",
     )
-    # Explore variant hard timeout — operator override for the auto-derived cap.
-    # 0 (default) keeps auto-derive; mirrored to
-    # SharedState.explore_variant_timeout_sec_override.
+    # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;
+    # mirrored to SharedState.explore_variant_timeout_sec_override.
     opt.add_argument(
         "--explore-variant-timeout-sec",
         dest="explore_variant_timeout_sec",
@@ -1316,9 +1235,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # phase budget percentages: each phase claims a fraction of the wall-clock
-    # budget (caps; may exit earlier). Both ``--max-minutes-*-pct`` and
-    # ``--phase-budget-*-pct`` spellings are accepted.
+    # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
         "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",
@@ -1330,9 +1247,8 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
-        # The EXPLORE spellings land on the same option: configuration search
-        # and source landing are two arms of one phase with one budget, so a
-        # separate share for either would be a number nothing reads.
+        # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
+        # phase with one budget, so a separate share for either would be a number nothing reads.
         "--max-minutes-explore-pct",
         "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",

@@ -14,38 +14,25 @@ if TYPE_CHECKING:
 
 LEGACY_GEAK_REVALIDATE_PLACEHOLDER = "geak-revalidate"
 
-#: ``_validate_geak_via_geak_harness`` outcome for a workload its replay cannot
-#: measure at all. Shared with the writeback that persists it so producer and
-#: consumer name the refusal with one token.
 INCOMPARABLE_REVALIDATION = "incomparable"
 
-# Keys the revalidation stamps onto GEAK's own result. They record the verdict,
-# not the product, so candidate identity is taken with them removed.
+# Verdict annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {"revalidation_status", "revalidation_error", "revalidation_error_class", "revalidation_blocked_overlay"}
 )
 
-# Verdicts that a replay of the same candidate cannot change. ``failed`` is
-# absent deliberately: a rebench that never produced a measurement leaves the
-# candidate unjudged, so it stays retryable.
+# Failed measurements remain retryable.
 _TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({"no_material", "no_promote"})
 
-# ``geak_pending.status`` values that record a closed verdict. A result arriving
-# against one of these is late or orphaned and must not reopen the slot.
+# ``geak_pending.status`` values that record a closed verdict.
 SETTLED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
-# Fresh keys a single macro-cycle may mint. Each cancelled attempt burns one, so
-# this bounds how often a prune/cancel loop can re-dispatch the same rebench.
+# Fresh keys a single macro-cycle may mint.
 MAX_REBENCH_ATTEMPTS_PER_CYCLE = 4
 
 
 def geak_revalidate_idempotency_key(macro_cycle: int, attempt: int = 0) -> str:
-    """Return the idempotency key for a GEAK 2b rebench task.
-
-    ``attempt`` distinguishes retries within one macro-cycle: reusing the key of
-    a settled row would hand that row back from
-    ``create_or_return_existing`` and be read as ``rebench_unavailable``.
-    """
+    """Return the idempotency key for a GEAK 2b rebench task."""
     base = f"geak-revalidate-c{macro_cycle}"
     return base if attempt <= 0 else f"{base}-r{attempt}"
 
@@ -141,20 +128,7 @@ def is_geak_same_harness_rebench_task(kind: str, params: dict[str, Any] | None) 
 
 
 def spare_geak_rebench_on_phase_transition(*, target_phase: str, kind: str, params: dict[str, Any]) -> bool:
-    """Return True to leave a queued GEAK rebench alive across a phase boundary.
-
-    Deny-list rather than allow-list: only ``CLOSE`` kills the rebench, every
-    other target spares it. The window that actually matters is KERNEL through
-    SWEEP (plus the SWEEP re-loop back into FRAMEWORK_AGENT), so an allow-list would be
-    tighter — but the phase set changes over time and a missing entry silently
-    reintroduces the audit-only bug this whole path exists to prevent, whereas a
-    surplus entry costs at most one wasted bench.
-
-    Correctness of the surplus is owned elsewhere: a rebench that outlives its
-    macro-cycle is refused by :func:`geak_rebench_should_apply_result`, because
-    the slot it would have to be tracked in has moved on. So this predicate only
-    decides whether the task keeps running, never whether its result counts.
-    """
+    """Return True to leave a queued GEAK rebench alive across a phase boundary."""
     if (target_phase or "").strip().upper() == PHASE_CLOSE:
         return False
     return is_geak_same_harness_rebench_task(kind, params)
@@ -166,15 +140,7 @@ def geak_rebench_tracks_pending_task(
     *,
     macro_cycle: int,
 ) -> bool:
-    """True when ``geak_pending.revalidation_task_id`` tracks this rebench task.
-
-    The slot normally holds a task id. It holds a key instead only inside the
-    reservation window — the slot is published before the task row exists so the
-    phase guard can see a pending revalidation — and, on state written before
-    keys were cycle-scoped, the bare legacy key. Both are matched through
-    :func:`geak_revalidation_placeholder_keys`, which requires the task to carry
-    that same key, so a rebench from another macro-cycle cannot claim the slot.
-    """
+    """True when ``geak_pending.revalidation_task_id`` tracks this rebench task."""
     tracked = str(pending_task_id or "").strip()
     if not tracked:
         return False
@@ -186,17 +152,7 @@ def geak_rebench_tracks_pending_task(
 
 
 def geak_rebench_should_apply_result(state: Any, task: Task, *, macro_cycle: int) -> bool:
-    """True when a finished 2b task may mutate ``geak_pending`` / ``geak_result``.
-
-    Ordered so the closed verdicts win first:
-
-    * a settled slot rejects everything — the verdict is already recorded;
-    * a slot naming a task accepts only that task, so orphans are ignored;
-    * ``awaiting_rebench`` with no id yet is the window between recording the
-      candidate and publishing the task id, so it accepts;
-    * an empty slot accepts only while ``resume_pending_revalidation`` marks a
-      resume revalidation, which owns no candidate slot of its own.
-    """
+    """True when a finished 2b task may mutate ``geak_pending`` / ``geak_result``."""
     pending = getattr(state, "geak_pending", None) or {}
     if not isinstance(pending, dict):
         pending = {}
@@ -230,19 +186,7 @@ async def cancel_geak_rebench_tasks(
     reason: str,
     include_running: bool = False,
 ) -> list[str]:
-    """Cancel in-flight GEAK 2b rebench tasks.
-
-    Args:
-        tasks: The task registry.
-        reason: Stamped onto each cancellation's history evidence.
-        include_running: Also cancel a rebench already executing. CLOSE sets
-            this: the phase only writes reports, so a running rebench holds the
-            GPU lane against post-opt roofline and its result can no longer be
-            consumed. A backlog drain (prune) leaves running work alone.
-
-    Returns:
-        The cancelled task ids.
-    """
+    """Cancel in-flight GEAK 2b rebench tasks."""
     queued_fn = getattr(tasks, "queued", None)
     running_fn = getattr(tasks, "running", None)
     if not callable(queued_fn):
@@ -261,12 +205,7 @@ async def cancel_geak_rebench_tasks(
 
 
 async def resolve_geak_revalidate_idempotency_key(tasks: TaskRegistry, macro_cycle: int) -> str:
-    """Pick the key for the next 2b rebench in ``macro_cycle``.
-
-    Steps past attempts whose row already settled, because reusing their key
-    returns that terminal row instead of dispatching. Stops at
-    ``MAX_REBENCH_ATTEMPTS_PER_CYCLE`` so a cancel loop cannot dispatch forever.
-    """
+    """Pick the key for the next 2b rebench in ``macro_cycle``."""
     lookup = getattr(tasks, "find_by_idempotency_key", None)
     if not callable(lookup):
         return geak_revalidate_idempotency_key(macro_cycle)
@@ -280,17 +219,7 @@ async def resolve_geak_revalidate_idempotency_key(tasks: TaskRegistry, macro_cyc
 
 
 async def settle_dangling_geak_pending(tasks: TaskRegistry, state: Any, *, reason: str) -> bool:
-    """Settle ``geak_pending`` once no rebench can still land.
-
-    Driven by state rather than by what a caller just cancelled: the phase
-    boundary into CLOSE already cancels the queued rebench, so the CLOSE
-    sequencer finds nothing left to cancel yet still has to close the slot. A
-    rebench still in flight is left alone so its result can arrive.
-
-    Only the verdict fields change. The candidate's self-reported numbers are
-    what the report uses to say *what* was dropped, so they are kept; the id of
-    a task that will never land is not.
-    """
+    """Settle ``geak_pending`` once no rebench can still land."""
     pending = getattr(state, "geak_pending", None) or {}
     if not isinstance(pending, dict):
         return False

@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the ``--max-hours`` guard on the forge-loop command.
-
-A run shorter than MIN_MAX_HOURS can't complete a productive campaign (the time
-reserve would block iterations, or the budget exhausts immediately), so the CLI
-rejects it up front. These tests require no LLM / GPU / gateway."""
+"""Unit tests for the ``--max-hours`` guard on the forge-loop command."""
 
 from __future__ import annotations
 
@@ -39,10 +35,8 @@ def test_validate_max_hours_accepts_minimum_and_above():
 
 
 def test_validate_max_hours_floor_is_not_env_overridable(monkeypatch):
-    # The floor exists because the loop won't start an iteration once less than
-    # budget_reserve_sec (900s) of the budget remains: below the floor a campaign
-    # finalizes having done little or nothing and still exits 0. No env escape
-    # hatch may weaken it, otherwise CI can go green on an empty campaign.
+    # The floor exists because the loop won't start an iteration once less than budget_reserve_sec (900s) of the
+    # budget remains: below the floor a campaign finalizes having done little or nothing and still exits 0.
     monkeypatch.setenv("KF_CI_SMOKE", "1")
     with pytest.raises(click.BadParameter):
         _validate_max_hours(None, None, 0.1)
@@ -107,9 +101,7 @@ def test_max_hours_help_describes_long_horizon_agents():
 
 
 def test_forge_loop_rejects_an_unregistered_producer():
-    # A producer names an index in the KB identity scheme. Accepting a free
-    # string here would publish under an address nothing ever reads back,
-    # and the failure would only surface as a permanently cold warm start.
+    # A producer names an index in the KB identity scheme.
     result = CliRunner().invoke(
         main,
         [

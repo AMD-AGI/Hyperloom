@@ -74,12 +74,7 @@ def test_policy_denies_integrate_patch_naming_no_review_subject():
 
 
 def test_policy_reviews_an_upstream_pr_candidate_under_its_candidate_id():
-    """The pre-screen is reviewed before any specialist exists.
-
-    Its dispatched task carries a candidate id and no specialist task id, so a
-    gate that only knew the latter denied the whole upstream-PR arm at
-    dispatch as if the row had been forged.
-    """
+    """The pre-screen is reviewed before any specialist exists."""
     s = SharedState()
     gate = _make_gate(s)
     intent = _make_intent({"framework_agent_candidate_id": "vllm/vllm#1015"})
@@ -202,8 +197,8 @@ async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
     assert result["status"] in ("rejected_by_critic", "apply_failed")
     assert result["patches_applied"] == []
     if result["status"] == "rejected_by_critic":
-        # The gate now requires a permissive verdict; a recorded 'reject' is
-        # surfaced in the reason (wording generalized in SWSPLAT-42420 fix).
+        # The gate now requires a permissive verdict; a recorded 'reject' is surfaced in the reason (wording
+        # generalized in SWSPLAT-42420 fix).
         assert "verdict 'reject'" in result["reason"]
 
 

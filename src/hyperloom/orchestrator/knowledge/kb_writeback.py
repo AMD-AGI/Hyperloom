@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KB writeback adapters for specialist outcomes.
-
-Appends structured records as JSON-Lines to ``<KB_ROOT>/lessons.jsonl``
-(the ``fa`` CLI reads them to skip already-integrated PRs). The root comes
-from :func:`hyperloom.agents.framework.kb.mutable_kb_root`, the same owner the
-reader uses, so both halves move together; resolving it here independently is
-what left written lessons unreadable by the next session. Local append only.
-"""
+"""KB writeback adapters for specialist outcomes."""
 
 from __future__ import annotations
 
@@ -21,16 +14,7 @@ from hyperloom.common.io import append_jsonl
 
 
 def _default_kb_root() -> Path:
-    """Resolve the framework-PR lessons directory.
-
-    Delegates the root to the reader's owner so a deployment that redirects
-    the KB redirects both halves. Resolved per call rather than at import,
-    because the environment is not fully settled at import time.
-
-    Returns:
-        Path: The ``framework_optimization`` directory under the resolved
-            KB root.
-    """
+    """Resolve the framework-PR lessons directory."""
     from hyperloom.agents.framework.kb import framework_optimization_root
 
     return framework_optimization_root()
@@ -46,14 +30,10 @@ OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
 # Candidate skipped: semantic audit found it already in the live tree.
 OUTCOME_ALREADY_PRESENT: str = "already_present"
-# An env-gated rewrite whose switch-off parity leg measured a behavioural change:
-# with every switch unset the patch did not reproduce the base. A property of the
-# patch, and a genuine lesson for later sessions.
+# An env-gated rewrite whose switch-off parity leg measured a behavioural change: with every switch unset the patch
+# did not reproduce the base.
 OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
 # The parity leg produced no usable measurement, so the invariant was never tested.
-# Kept separate from the verdict above on purpose: recording an unmeasured run as a
-# parity violation would teach every later session that a rewrite breaks when
-# disabled on the strength of a failed measurement.
 OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {
@@ -93,35 +73,7 @@ def _record(
     source_framework: str = "",
     target_framework: str = "",
 ) -> dict:
-    """Build the canonical framework-PR outcome record dict.
-
-    Sync helper kept separate from the async writer for testability.
-
-    Args:
-        pr_url (str): URL of the upstream PR the patch came from.
-        pr_sha (str): Commit SHA of the PR head (cross-session dedup key).
-        patch_path (str): Local snapshot path of the applied patch.
-        outcome (str): One of :data:`ALLOWED_OUTCOMES`.
-        tps_delta_pct (float): %-throughput delta vs. the pre-integrate
-            baseline.
-        session_id (str): Orchestrator session id (audit hook).
-        framework (str): Source framework of the PR (rating prior signal).
-        gap_canonical_id (str): Canonical gap id (rating prior exact match key).
-        gap_keywords (list[str] | None): Gap keywords for fuzzy association.
-        model_class (str): Model class or family for parameter-PR association.
-        gpu_type (str): GPU type for workload-aware ranking.
-        precision (str): Precision mode for workload-aware ranking.
-        applicability (str): Audit/apply route classification.
-        provenance (str): Source path of the record.
-        accuracy_delta_pct (float): Accuracy delta when available.
-        changed_files (list[str] | None): PR changed files used for ranking.
-        source_framework (str): Cross-framework source framework, when known.
-        target_framework (str): Cross-framework target framework, when known.
-
-    Returns:
-        dict: The record with a ``ts`` timestamp plus the stringified /
-            coerced input fields.
-    """
+    """Build the canonical framework-PR outcome record dict."""
     return {
         "ts": time.time(),
         "session_id": str(session_id or ""),
@@ -146,17 +98,7 @@ def _record(
 
 
 def _append_record_sync(record: dict) -> Path:
-    """Append a single JSONL record under the resolved KB root.
-
-    Creates the KB root directory if needed, then appends one JSON line.
-
-    Args:
-        record (dict): The record dict to serialise (see :func:`_record`).
-
-    Returns:
-        Path: The on-disk path of the ``lessons.jsonl`` file so callers
-            can log / surface it.
-    """
+    """Append a single JSONL record under the resolved KB root."""
     path = _default_kb_root() / LESSONS_FILE
     append_jsonl(path, record, make_parents=True, sort_keys=True)
     return path
@@ -184,33 +126,7 @@ async def write_framework_record(
     target_framework: str = "",
     session_dir: Path | str | None = None,
 ) -> Path:
-    """Append a framework-PR outcome record to ``lessons.jsonl``.
-
-    Parameters:
-
-    * ``pr_url`` / ``pr_sha`` — cross-session dedup keys.
-    * ``patch_path`` — local snapshot path.
-    * ``outcome`` — must be one of :data:`ALLOWED_OUTCOMES`.
-    * ``tps_delta_pct`` — %-throughput delta vs. pre-integrate baseline.
-    * ``session_id`` — orchestrator session id.
-    * ``framework`` — source framework of the PR (rating prior signal).
-    * ``gap_canonical_id`` — canonical gap id (rating prior exact match key).
-    * ``gap_keywords`` — gap keywords (rating prior fuzzy Jaccard match).
-    * ``model_class`` / ``gpu_type`` / ``precision`` — workload parameters.
-    * ``applicability`` / ``provenance`` — apply route and source context.
-    * ``accuracy_delta_pct`` — optional accuracy delta.
-    * ``changed_files`` — PR file paths used for fuzzy association.
-    * ``source_framework`` / ``target_framework`` — cross-framework context.
-    * ``session_dir`` — when set, the KB write is additionally instrumented
-      into the session breakdown; telemetry failures are swallowed and never
-      fail the write.
-
-    Returns:
-        Path: The ``lessons.jsonl`` file the record was appended to.
-
-    Raises:
-        ValueError: If ``outcome`` is not in :data:`ALLOWED_OUTCOMES`.
-    """
+    """Append a framework-PR outcome record to ``lessons.jsonl``."""
     if outcome not in ALLOWED_OUTCOMES:
         raise ValueError(f"write_framework_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
     record = _record(

@@ -398,12 +398,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
 async def test_handoff_hashes_observed_identity_from_server_args_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ServerArgs line proves observation even without an argv trace.
-
-    The two come from different writers, so a log can carry
-    ``server_args=ServerArgs(...)`` and no ``+ python -m sglang.launch_server``
-    line; the observed identity hash must still be published as proof.
-    """
+    """A ServerArgs line proves observation even without an argv trace."""
     state = _verified_current_best(tmp_path)
     measurement = state.current_best["measurement"]
     measurement["resolved_server_launch_flags"] = ""

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the static-recon specialist.
-
-Covers seed checklist lookup/rendering, domain registration, and the
-Coordinator-side ``_consume_static_recon`` gap-seeding, without spinning up a
-full Coordinator.
-"""
+"""Unit tests for the static-recon specialist."""
 
 from __future__ import annotations
 

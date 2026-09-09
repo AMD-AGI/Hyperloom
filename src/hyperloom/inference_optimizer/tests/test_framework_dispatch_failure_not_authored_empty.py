@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A specialist that never ran is not a specialist that found nothing.
-
-The FRAMEWORK plateau counts every terminal non-KEEP row, which is right for
-real outcomes: a batch of dead candidates should trip the plateau rather than
-grind on. It is wrong for a specialist the dispatcher never got to run — that
-row is an infrastructure failure, not a search result, and counting it lets a
-transient fault spend the whole session budget.
-
-That is not hypothetical. A gate rule cancelled 13 of 20 specialists in a 24h
-session; each was stamped ``author_empty``, five in a row tripped the plateau,
-and the run reached ``global_converged`` after 1h42m having done no work.
-"""
+"""A specialist that never ran is not a specialist that found nothing."""
 
 from __future__ import annotations
 

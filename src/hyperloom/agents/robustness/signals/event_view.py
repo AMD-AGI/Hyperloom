@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unified, sorted, deduplicated view over coordinator events and inbox items.
-
-Detectors call :func:`build_event_view` once per tick instead of merging the
-two sources themselves.
-"""
+"""Unified, sorted, deduplicated view over coordinator events and inbox items."""
 
 from __future__ import annotations
 
@@ -17,16 +13,7 @@ from ..role.prompt_inputs import InboxItem
 
 @dataclass(frozen=True)
 class EventRow:
-    """One bus event, from the coordinator DB or the rendered inbox.
-
-    Attributes:
-        seq: ``events.seq`` primary key, or ``None`` when the source supplied
-            none.
-        agent: Name of the agent that emitted the event.
-        topic: Message topic string.
-        payload: Decoded payload dict.
-        ts: Timestamp, or ``None`` when the source carried none.
-    """
+    """One bus event, from the coordinator DB or the rendered inbox."""
 
     seq: int | None
     agent: str
@@ -39,23 +26,7 @@ def build_event_view(
     inbox: list[InboxItem],
     coordinator_events: list[dict[str, Any]],
 ) -> list[EventRow]:
-    """Merge both event sources into one chronological, deduplicated list.
-
-    An inbox item is dropped when a coordinator row already carries its seq:
-    both render the same ``events`` row, but the coordinator payload is the
-    stored JSON while the inbox payload is re-parsed from prompt text.
-
-    Rows with a seq sort ascending ahead of rows without one, which keep their
-    input order so a caller supplying no seq still gets coordinator events
-    before inbox items.
-
-    Args:
-        inbox: Parsed inbox items from the reactor context.
-        coordinator_events: Coordinator event dicts in ascending seq order.
-
-    Returns:
-        The merged rows, oldest first.
-    """
+    """Merge both event sources into one chronological, deduplicated list."""
     rows: list[EventRow] = []
     seen: set[int] = set()
 
@@ -95,14 +66,7 @@ def build_event_view(
 
 
 def family_of(payload: dict[str, Any]) -> str:
-    """Resolve an event payload's action family, falling back to ``kind``.
-
-    Args:
-        payload: An event payload dict.
-
-    Returns:
-        The family, or ``""`` when neither key carries one.
-    """
+    """Resolve an event payload's action family, falling back to ``kind``."""
     for key in ("family", "kind"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():

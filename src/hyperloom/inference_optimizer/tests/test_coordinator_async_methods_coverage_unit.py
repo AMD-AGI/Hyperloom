@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for Coordinator async/stateful methods invoked directly against a
-real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt
-composition per agent, advisory blocks, research-scout harvest, the
-orchestration checkpoint guard, strategy-change escalation, specialist
-autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
+"""Coverage for Coordinator async/stateful methods invoked directly against a real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt composition per agent, advisory blocks, research-scout harvest, the orchestration checkpoint guard, strategy-change escalation, specialist autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
 
 from __future__ import annotations
 
@@ -89,12 +85,7 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
 
 @pytest.mark.asyncio
 async def test_promote_baseline_carries_the_boot_and_benchmark_split(coord: Coordinator) -> None:
-    """The two figures that let later work be priced on what it will spend.
-
-    The whole round and the part of it that ran after the server was ready; the
-    difference between them is what booting this workload costs, and every
-    variant boots again.
-    """
+    """The two figures that let later work be priced on what it will spend."""
     await coord._promote_to_shared_state(
         "baseline",
         {
@@ -132,13 +123,7 @@ async def test_promote_baseline_clears_a_split_a_later_round_did_not_report(
 async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
     coord: Coordinator,
 ) -> None:
-    """The marker drives a session-level decision, so it has to reach the session.
-
-    PRELUDE routes to CLOSE on it rather than optimizing against a denominator
-    that was never the baseline, and it is cleared by the next baseline that does
-    land a hot figure -- otherwise a session resumed with a fresh clock stays
-    condemned by the earlier leg's shortfall.
-    """
+    """The marker drives a session-level decision, so it has to reach the session."""
     await coord._promote_to_shared_state(
         "baseline",
         {
@@ -163,16 +148,7 @@ async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
 
 
 class TestAHotPassCorrectsAColdAnchor:
-    """The escape from the marker, without which PRELUDE cannot finish.
-
-    A cold anchor holds the phase open until a hot pass replaces it. The rule
-    that keeps a later, lower re-baseline from displacing the anchor would reject
-    that replacement whenever the cold figure reads higher -- which it does
-    whenever the "cold" pass was not really cold, its weights already in page
-    cache and its kernels already compiled by an earlier run. The session would
-    then re-measure whole baseline rounds until the clock killed it, each one
-    landing the very measurement that was supposed to release it.
-    """
+    """The escape from the marker, without which PRELUDE cannot finish."""
 
     @pytest.mark.asyncio
     async def test_a_lower_hot_figure_replaces_a_marked_cold_one(self, coord: Coordinator) -> None:
@@ -198,12 +174,7 @@ class TestAHotPassCorrectsAColdAnchor:
         self,
         coord: Coordinator,
     ) -> None:
-        """Only a hot pass corrects the anchor; another cold one is just noisier.
-
-        Two cold figures are comparable to each other, so the ordinary rule
-        applies and the better one stands. Nothing has been corrected, so the
-        marker stays and the phase stays open.
-        """
+        """Only a hot pass corrects the anchor; another cold one is just noisier."""
         coord.shared_state.baseline_tput = 1000.0
         coord.shared_state.baseline_measure_round_dropped = True
 
@@ -274,18 +245,7 @@ async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
 async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
     coord: Coordinator,
 ) -> None:
-    """A missing AgentX client is a supply gap, not a code gap.
-
-    AgentX declares aiperf for itself, this repository owns its install, and the
-    runtime already tried it. Reaching the writeback means the environment
-    cannot supply it -- nothing downstream can author its way out of that.
-
-    Measured: filed as an ordinary launch failure, this opened an enablement
-    round. The specialist could not tell a supply gap from a framework bug,
-    re-derived the install from scratch, had its commands rejected by the setup
-    allowlist, and PolicyGate's enablement_round_in_flight then blocked the
-    baseline for the rest of the run. Stop on the first occurrence instead.
-    """
+    """A missing AgentX client is a supply gap, not a code gap."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_ERROR_CLASS,
     )
@@ -307,8 +267,8 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
     await coord._handle_unpromotable_result(task, result)
 
     assert coord.shared_state.stop_reason == AGENTX_PREFLIGHT_STOP_REASON
-    # No launch log is stashed: the FRAMEWORK pump reads a non-blank log as
-    # "there is something here to author against", and there is not.
+    # No launch log is stashed: the FRAMEWORK pump reads a non-blank log as "there is something here to author
+    # against", and there is not.
     assert not (coord.shared_state.enablement.launch_log or "").strip()
     # The slow-baseline retry budget is untouched -- retrying cannot help.
     assert coord.shared_state.baseline_failure_streak == 0
@@ -318,9 +278,7 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
 async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     coord: Coordinator,
 ) -> None:
-    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
-    fast-fail once 3 total baseline failures accrue, even though neither
-    per-class streak reaches its own threshold."""
+    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still fast-fail once 3 total baseline failures accrue, even though neither per-class streak reaches its own threshold."""
 
     def _task() -> Task:
         return Task(
@@ -526,14 +484,7 @@ async def test_harvest_research_scout_empty_and_populated(
 
 @pytest.mark.asyncio
 async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
-    """LLM-authored competitor numbers must never be persisted as a consumable
-    competitor target.
-
-    Previously the scout could emit ``competitor_target`` numbers that were
-    written to ``competitor_target.json`` and then consumed by the advisory
-    gap block, masquerading as InferenceX-measured data. The scout is now a
-    text-hints-only collector, so no competitor target must be persisted.
-    """
+    """LLM-authored competitor numbers must never be persisted as a consumable competitor target."""
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 
@@ -703,10 +654,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator) -> None:
-    """A specialist with NO source patch but a non-diff tuned artifact
-    (``artifacts_written`` with a real file in its worktree) is a routable
-    deliverable: autosubmit must create an integrate_patch proposal so the
-    artifact-install channel runs."""
+    """A specialist with NO source patch but a non-diff tuned artifact (``artifacts_written`` with a real file in its worktree) is a routable deliverable: autosubmit must create an integrate_patch proposal so the artifact-install channel runs."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -735,10 +683,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Coordinator, tmp_path) -> None:
-    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path
-    OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would
-    reject it as ``source_outside_workspace``, so autosubmit must not create a
-    proposal for it."""
+    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would reject it as ``source_outside_workspace``, so autosubmit must not create a proposal for it."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     outside = tmp_path / "outside.csv"
@@ -772,10 +717,7 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
 async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     coord: Coordinator,
 ) -> None:
-    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via
-    ``..`` must NOT be routable, even though it resolves to a real file:
-    integrate_patch rejects it as ``source_outside_workspace``, so autosubmit
-    must not route it."""
+    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via ``..`` must NOT be routable, even though it resolves to a real file: integrate_patch rejects it as ``source_outside_workspace``, so autosubmit must not route it."""
     import os
 
     from hyperloom.orchestrator.state.task_registry import Task
@@ -802,10 +744,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
 
 @pytest.mark.asyncio
 async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
-    """A relative artifact ``source`` that climbs out of ``worktree`` via ``..``
-    but lands INSIDE the workspace is still contained, so it MUST remain
-    routable: the sandbox check must not reject a legitimate ``../file`` source
-    that resolves within an allowed base."""
+    """A relative artifact ``source`` that climbs out of ``worktree`` via ``..`` but lands INSIDE the workspace is still contained, so it MUST remain routable: the sandbox check must not reject a legitimate ``../file`` source that resolves within an allowed base."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -846,9 +785,7 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
 
 
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
-    """A reverted integrate_patch reaches the fact hook with kept=True
-    (``status != failed`` is promotable), yet the journal must record REVERT
-    with the REAL measured delta (from delta_pct)."""
+    """A reverted integrate_patch reaches the fact hook with kept=True (``status != failed`` is promotable), yet the journal must record REVERT with the REAL measured delta (from delta_pct)."""
     from hyperloom.orchestrator.state.optimization_journal import (
         OUTCOME_REVERT,
     )
@@ -902,8 +839,7 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
 
 
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
-    """A reverted integrate_patch stays promotable so it still runs the
-    pending_integrate cleanup in _promote_to_shared_state."""
+    """A reverted integrate_patch stays promotable so it still runs the pending_integrate cleanup in _promote_to_shared_state."""
     assert coord._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
     assert coord._is_promotable_result("integrate_patch", {"status": "failed"}) is False
 
@@ -919,11 +855,7 @@ async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinator) -> None:
-    """The first SEED must carry the live gap, not the value left from a prior tick.
-
-    The stale value has to be absent as well as the live one present: the bug was
-    a shared-state dump assembled before the recompute, which renders both.
-    """
+    """The first SEED must carry the live gap, not the value left from a prior tick."""
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
     text = await coord._compose_prompt("orchestration")

@@ -88,8 +88,8 @@ def test_forge_loop_output_is_invisible_to_the_workspace_guard(tmp_path: Path) -
 
     worktree = create_operator_worktree(task, ControllerLayout(tmp_path / "output"))
 
-    # The JIT cache reaches this depth, and the guard asks git for new paths with
-    # exactly this command, so a shallower assertion would not cover the failure.
+    # The JIT cache reaches this depth, and the guard asks git for new paths with exactly this command, so a shallower
+    # assertion would not cover the failure.
     jit_artifact = worktree.workspace / "forge_experiments" / "aiter_cache" / "sources" / "abc" / "launch_moe"
     jit_artifact.parent.mkdir(parents=True)
     jit_artifact.write_text("compiled\n", encoding="utf-8")

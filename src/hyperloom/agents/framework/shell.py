@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shell helpers for trusted framework exploration commands.
-
-Pure subprocess + template rendering, no external deps. The renderer's
-optional ``shell_quote`` flag wraps each substituted value in ``shlex.quote``
-so a candidate ref/path seeded with shell metacharacters can't break out of
-the command string. Callers rendering paths (not commands) keep it False.
-"""
+"""Shell helpers for trusted framework exploration commands."""
 
 from __future__ import annotations
 
@@ -28,19 +22,7 @@ def run_command(
     cwd: Path,
     timeout_sec: int,
 ) -> CommandResult:
-    """Run a shell command with timeout, capture stdout/stderr tails.
-
-    Args:
-        name (str): Logical name for the command, echoed back in the result.
-        command (str): The shell command line to execute.
-        cwd (Path): Working directory the command runs in.
-        timeout_sec (int): Hard timeout in seconds before the command is killed.
-
-    Returns:
-        CommandResult: Outcome holding the return code and the last 4000
-            characters of stdout/stderr. On timeout, ``returncode`` is 124 and
-            ``timed_out`` is True.
-    """
+    """Run a shell command with timeout, capture stdout/stderr tails."""
     try:
         proc = subprocess.run(  # nosec B602 - framework commands are explicit operator/test configuration.
             command,
@@ -74,24 +56,7 @@ def render_template(
     *,
     shell_quote: bool = False,
 ) -> str:
-    """Render known ``{var}`` placeholders, raise on unknown placeholders.
-
-    Each placeholder is replaced exactly once; substituted values are never
-    re-scanned, so a value containing ``{x}`` is left as-is. Braces that
-    don't match the identifier pattern are left untouched.
-
-    Args:
-        template: Template string with ``{var}`` placeholders.
-        variables: Mapping of placeholder names to replacement values.
-        shell_quote: When True, wrap each value in :func:`shlex.quote` for
-            shell-bound strings.
-
-    Returns:
-        The rendered string.
-
-    Raises:
-        ValueError: If any ``{identifier}`` placeholder is left unresolved.
-    """
+    """Render known ``{var}`` placeholders, raise on unknown placeholders."""
     unknown: list[str] = []
 
     def _replace(m: re.Match[str]) -> str:

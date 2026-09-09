@@ -1,11 +1,4 @@
-"""KB integrity: rank on measured evidence and write measurements back.
-
-Reproduces the MI355X kernel-arena regression on ``vllm-kimi-k3-kda-attn``: a
-record claiming 6.7608x ranked first, warm start adopted it because it was the
-first candidate whose patch applied, and it measured 5.106x once applied. The
-verified 5.8452x result sat at rank 2 and was never tried, and the inflated
-claim was never corrected, so the same wrong candidate kept winning.
-"""
+"""KB integrity: rank on measured evidence and write measurements back."""
 
 from __future__ import annotations
 
@@ -204,13 +197,7 @@ def _install_suite_driver_doubles(
     monkeypatch: pytest.MonkeyPatch,
     kernel: Path,
 ) -> list[float]:
-    """Report a two-case suite whose total can disagree with its case mean.
-
-    ``median_ms`` is the suite's total wall time, the aggregate a real driver
-    prints for the whole run, while ``case_times`` carries the per-case timings
-    the mean case speedup is computed from. Returns the list of suite totals the
-    double reported, in call order.
-    """
+    """Report a two-case suite whose total can disagree with its case mean."""
     measured: list[float] = []
 
     def benchmark(_driver: str, *_args, **_kwargs) -> dict:
@@ -394,15 +381,7 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
     tmp_path,
     monkeypatch,
 ):
-    """The refusal reason is persisted, so it may not carry a credential.
-
-    ``record_measured_speedup`` reports a refusal instead of raising, and that
-    reason travels through ``measured_writebacks`` and
-    ``measured_writeback_failures`` into the run's result JSON. A KB Store
-    exception can quote the bearer token the client authenticated with, a
-    credentialed URL and an unbounded response body, so this path sanitizes and
-    bounds its text at 240 characters exactly like every read path beside it.
-    """
+    """The refusal reason is persisted, so it may not carry a credential."""
     token = "kb-store-secret-9f3c"
     store = MergingKBStore()
     monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
@@ -555,13 +534,7 @@ def test_warm_start_evaluates_a_later_record_that_outclaims_the_leader(
     monkeypatch,
     tmp_path,
 ):
-    """A measured leader must not freeze out records published after it.
-
-    Ranking puts every measured candidate ahead of every merely claimed one, and
-    a record only earns a measurement by being adopted, so every solution
-    published later starts behind. Ending the search on a confirmed leader alone
-    would pin warm start to the first record ever measured.
-    """
+    """A measured leader must not freeze out records published after it."""
     _publish_candidate(
         tmp_path,
         "producer-honest",
@@ -647,8 +620,8 @@ def test_warm_start_evaluates_no_more_candidates_than_the_bound(
     assert warm["num_references"] == 4
     assert integration._WARMSTART_MAX_MEASURED_CANDIDATES == 3
     assert len(warm["measured_writebacks"]) == 3
-    # Three measured candidates, then the field is closed: the fourth is never
-    # built or benchmarked even though no claim was confirmed.
+    # Three measured candidates, then the field is closed: the fourth is never built or benchmarked even though no
+    # claim was confirmed.
     assert measured == [10.0] * 3 + [6.0] * 3 + [7.0] * 3 + [8.0] * 3
     assert warm["applied"] is True
     assert warm["applied_rank"] == 1
@@ -730,20 +703,15 @@ def test_warm_start_restores_the_worktree_when_no_candidate_is_adoptable(
 
 
 def test_the_lopsided_suite_clears_the_keep_threshold_it_regresses_against():
-    """Pin the arithmetic the aggregate rejection below depends on.
-
-    The lopsided revision has to clear the keep gate, otherwise the rejection
-    proves nothing new: the mean beats the pristine baseline by the required
-    margin and the suite total still rises.
-    """
+    """Pin the arithmetic the aggregate rejection below depends on."""
     pristine = _DRIVER_CASE_MS["BLOCK_SIZE = 32"]
     lopsided = _DRIVER_CASE_MS["BLOCK_SIZE = 8"]
     case_speedups = [pristine[case_id] / lopsided[case_id] for case_id in pristine]
     mean_case_speedup = sum(case_speedups) / len(case_speedups)
 
     assert min(case_speedups) < 1.0
-    # Three identical measurements carry no spread, so the gate falls back to
-    # its floor -- the weakest bar this revision could be asked to clear.
+    # Three identical measurements carry no spread, so the gate falls back to its floor -- the weakest bar this
+    # revision could be asked to clear.
     assert passes_keep_threshold([mean_case_speedup] * 3, best_mean_case_speedup=1.0)
     assert sum(lopsided.values()) > sum(pristine.values())
 
@@ -752,13 +720,7 @@ def test_warm_start_refuses_a_candidate_that_is_slower_over_the_whole_suite(
     monkeypatch,
     tmp_path,
 ):
-    """An adopted warm start becomes the run's incumbent and iteration-0 best.
-
-    The per-case mean is unbounded above and bounded at 0 below, so one cheap
-    case improving fourfold outvotes one expensive case collapsing and the mean
-    reads 2.4x while the suite takes 125.25 ms against a pristine 101.0 ms.
-    Starting there hands the run a worse baseline than doing nothing.
-    """
+    """An adopted warm start becomes the run's incumbent and iteration-0 best."""
     lopsided = _publish_candidate(
         tmp_path,
         "producer-lopsided",
@@ -774,8 +736,8 @@ def test_warm_start_refuses_a_candidate_that_is_slower_over_the_whole_suite(
     # Named apart from performance_failed: this candidate cleared the threshold.
     assert warm["reference_reason"] == "aggregate_regression"
     assert _index_status(consumer, 1) == ("rejected:aggregate_regression (measured 2.400000x recorded)")
-    # The suite was benchmarked, so the record is amended even though the
-    # candidate lost: it claimed 3.0x and this consumer measured 2.4x.
+    # The suite was benchmarked, so the record is amended even though the candidate lost: it claimed 3.0x and this
+    # consumer measured 2.4x.
     assert warm["measured_writebacks"] == [
         {
             "rank": 1,
@@ -801,11 +763,7 @@ def test_warm_start_tries_the_next_rank_after_an_aggregate_regression(
     monkeypatch,
     tmp_path,
 ):
-    """Rejecting the leader falls through to the field, it does not end warm start.
-
-    This is the incident's shape: rank 1 carries the higher claim and loses over
-    the suite, rank 2 is faster on both measures and was never tried.
-    """
+    """Rejecting the leader falls through to the field, it does not end warm start."""
     lopsided = _publish_candidate(
         tmp_path,
         "producer-lopsided",
@@ -833,16 +791,12 @@ def test_warm_start_tries_the_next_rank_after_an_aggregate_regression(
     assert _index_status(consumer, 1) == ("rejected:aggregate_regression (measured 2.400000x recorded)")
     assert _index_status(consumer, 2) == "applied"
     assert measured == [101.0] * 3 + [125.25] * 3 + [50.5] * 3
-    # Both candidates were benchmarked, so both records are amended in rank
-    # order. The leader's inflated 3.0x claim is corrected to the 2.4x this
-    # consumer measured even though it was rejected, which is what stops it
-    # winning rank 1 and being re-measured on every later run.
+    # Both candidates were benchmarked, so both records are amended in rank order.
     assert [item["rank"] for item in warm["measured_writebacks"]] == [1, 2]
     assert _stored()[_session_id(lopsided)].measured_speedup == 2.4
     assert _stored()[_session_id(balanced)].measured_speedup == 2.0
-    # Writing that measurement back must not make the leader adoptable: 2.4x is
-    # the higher measurement of the two, so a rejected candidate leaking into the
-    # adoption field would win it and rank 1 would be the incumbent above.
+    # Writing that measurement back must not make the leader adoptable: 2.4x is the higher measurement of the two, so
+    # a rejected candidate leaking into the adoption field would win it and rank 1 would be the incumbent above.
     assert kernel.read_text() == BALANCED_SOURCE
     assert warm["applied_commit"] == _git(consumer, "rev-parse", "HEAD")
     assert warm["applied_commit"] != base
@@ -853,14 +807,7 @@ def test_warm_start_writes_back_a_candidate_that_missed_the_keep_threshold(
     monkeypatch,
     tmp_path,
 ):
-    """A candidate can be measured and rejected without an aggregate regression.
-
-    performance_failed means the patch applied, correctness passed and the whole
-    driver suite was benchmarked; the candidate simply came out slower. That
-    measurement is exactly as valid as an adopted one, and the record claiming
-    2.0x for something this consumer measures at 0.8x is the record the KB most
-    needs corrected.
-    """
+    """A candidate can be measured and rejected without an aggregate regression."""
     slower = _publish_candidate(
         tmp_path,
         "producer-slower",
@@ -878,9 +825,8 @@ def test_warm_start_writes_back_a_candidate_that_missed_the_keep_threshold(
     [writeback] = warm["measured_writebacks"]
     assert writeback["rank"] == 1
     assert writeback["solution_slug"] == slower["solution"]
-    # The published figure is now the mean of the measurements rather than their
-    # minimum, so it carries the mean's rounding rather than a sample's exact
-    # value.
+    # The published figure is now the mean of the measurements rather than their minimum, so it carries the mean's
+    # rounding rather than a sample's exact value.
     assert writeback["measured_mean_case_speedup"] == pytest.approx(0.8)
     assert writeback["recorded"] is True
     assert writeback["reason"] == ""
@@ -899,13 +845,7 @@ def test_warm_start_reports_a_rejected_candidate_write_back_the_store_refused(
     monkeypatch,
     tmp_path,
 ):
-    """A refusal has to be as visible for a rejected candidate as an adopted one.
-
-    The refusal leaves the KB ranking a claim this consumer just contradicted,
-    so it travels the same route: into measured_writebacks, out of
-    kb_read_status as a measured_writeback_failure, and onto the reference index
-    the operator reads.
-    """
+    """A refusal has to be as visible for a rejected candidate as an adopted one."""
     lopsided = _publish_candidate(
         tmp_path,
         "producer-lopsided",

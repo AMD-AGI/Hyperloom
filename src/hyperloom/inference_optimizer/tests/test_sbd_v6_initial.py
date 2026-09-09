@@ -29,13 +29,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _framework_events(timeline: list[dict]) -> list[dict]:
-    """Keep only the ``framework_agent`` events.
-
-    A state that walks the macro loop also produces ``kernel`` events (and a
-    baseline throughput produces a ``baseline`` one). The tests below are
-    scoped to the Framework Agent projection, so they filter rather than
-    assert over the whole timeline.
-    """
+    """Keep only the ``framework_agent`` events."""
     return [event for event in timeline if event["type"] == "framework_agent"]
 
 
@@ -167,9 +161,7 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
-    # Only the durable events. ``state.baseline_tput`` is a real measurement,
-    # but baseline is recorded by the action that runs it rather than projected
-    # from the section, and this session recorded none.
+    # Only the durable events.
     assert [event["type"] for event in after["timeline"]] == ["install", "model_gate"]
     # No CLOSE step was ever recorded, so the close-out has no evidence.
     assert after["close"]["status"] == "failed"

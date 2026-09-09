@@ -474,15 +474,11 @@ def test_classifier_runs_all_default_rules():
     assert "repeated_policy_denied" in names
 
 
-# ---------------------------------------------------------------------------
 # Signal registry — order + config coverage invariants
-# ---------------------------------------------------------------------------
 
 
 def test_signal_registry_order_is_pinned():
-    """The registry order is part of the contract: ``classify`` appends in this
-    order and ``_dedup`` keeps the first-inserted symptom on an equal-severity
-    tie. Pin it so a reorder is a conscious, reviewed change."""
+    """The registry order is part of the contract: ``classify`` appends in this order and ``_dedup`` keeps the first-inserted symptom on an equal-severity tie."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     assert [spec.name for spec in _SIGNAL_REGISTRY] == [
@@ -510,8 +506,7 @@ def test_signal_registry_order_is_pinned():
 
 
 def test_context_only_signal_rows():
-    """Signals that read only ReactorContext (no SourceData) are enumerated here.
-    Update this set deliberately when adding context-only signals."""
+    """Signals that read only ReactorContext (no SourceData) are enumerated here."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     no_data = {spec.name for spec in _SIGNAL_REGISTRY if spec.evaluator is not None and not spec.needs_source_data}
@@ -519,8 +514,7 @@ def test_context_only_signal_rows():
 
 
 def test_kernel_pipeline_config_slot_feeds_two_rows():
-    """One KernelPipelineConfig slot drives the stateful RayPendingDetector and
-    the stateless kernel-pipeline evaluator."""
+    """One KernelPipelineConfig slot drives the stateful RayPendingDetector and the stateless kernel-pipeline evaluator."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     rows = [spec for spec in _SIGNAL_REGISTRY if spec.config_attr == "kernel_pipeline"]

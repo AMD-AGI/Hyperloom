@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Test tool — run the kernel's SNR correctness pre-filter.
-
-Passing this is necessary but not sufficient: forge accepts a candidate -- a
-kept iteration or an adopted warm start alike -- only after the task's own
-``correctness_command`` also passes.
-"""
+"""Test tool — run the kernel's SNR correctness pre-filter."""
 
 from __future__ import annotations
 
@@ -24,24 +19,7 @@ async def test_correctness(
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     timeout_sec: int = 120,
 ) -> dict:
-    """Run a kernel test driver and extract its SNR pre-filter verdict.
-
-    The driver script MUST print at least one of:
-      - "SNR: XX.XX dB"  (preferred)
-      - "allclose: True/False"
-      - "max_diff: X.XXe-XX"
-
-    Args:
-        driver_script: Path to Python test driver.
-        driver_args: Additional arguments to pass to the driver.
-        snr_threshold: Minimum SNR in dB to pass (default 30.0).
-        timeout_sec: Maximum runtime before killing (default 120s).
-
-    Returns:
-        Dict with: passed, outcome, snr_db, max_diff, allclose, output.
-        ``outcome`` is one of ``pass``, ``correctness_failure``, ``timeout``,
-        ``driver_error``, or ``invalid_result``.
-    """
+    """Run a kernel test driver and extract its SNR pre-filter verdict."""
     cmd = [sys.executable, driver_script] + (driver_args or [])
 
     proc = await asyncio.create_subprocess_exec(
@@ -114,9 +92,8 @@ async def test_correctness(
         "allclose": allclose,
         "message": f"{'PASS' if passed else 'FAIL'}: {verdict}",
     }
-    # On PASS, SNR/max_diff/allclose already carry the signal — the raw tail
-    # is dead weight against the next turn's input budget. Keep on FAIL so
-    # the agent can inspect warnings / numerical context.
+    # On PASS, SNR/max_diff/allclose already carry the signal — the raw tail is dead weight against the next turn's
+    # input budget.
     if not passed:
         result["output"] = full_output[-1500:]
     return result

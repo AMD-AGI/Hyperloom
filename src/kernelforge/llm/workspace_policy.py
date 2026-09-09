@@ -90,16 +90,7 @@ def protected_path_inventory(
     exact_paths: Iterable[str | Path] = (),
     extra_globs: Iterable[str] = (),
 ) -> tuple[Path, ...]:
-    """Return every protected filesystem entry under ``workspace`` recursively.
-
-    Exact paths are included even when they are absent so callers can detect a
-    protected file created during a session. Every discovered entry is classified
-    by :func:`is_protected_path`; inventory and write-policy rules therefore cannot
-    drift on nested basename globs, path globs, or protected directories.
-
-    Traversal and metadata errors are intentionally propagated. An integrity
-    checker cannot treat an unreadable part of the measurement surface as absent.
-    """
+    """Return every protected filesystem entry under ``workspace`` recursively."""
 
     root = Path(workspace).expanduser().resolve()
     if not root.is_dir():
@@ -125,12 +116,8 @@ def protected_path_inventory(
         followlinks=False,
         onerror=raise_walk_error,
     ):
-        # The repository's own bookkeeping is not part of the measurement
-        # surface, and it moves on its own: git rewrites the index whenever a
-        # stat cache goes cold, which a build alone is enough to cause. A guard
-        # holding its bytes would reject the session for git's housekeeping.
-        # What the repository state must not do is checked semantically instead
-        # -- HEAD, the active branch, the refs, and the index entries.
+        # The repository's own bookkeeping is not part of the measurement surface, and it moves on its own: git
+        # rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
         dirnames[:] = [name for name in dirnames if name != ".git"]
         parent = Path(directory)
         entries = [*filenames]

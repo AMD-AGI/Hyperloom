@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long-run resilience and periodic soft restart acceptance tests.
-
-Covers:
-* ``TaskRegistry.reclaim_expired_running`` (lease-expiry watchdog): orphaned
-  running tasks → failed, idempotent, fresh / no-ttl tasks untouched.
-* the cycle-boundary soft restart runs at the SWEEP reloop (to FRAMEWORK_AGENT,
-  else EXPLORE): resets the orchestration conversation, reclaims orphaned tasks,
-  and PRESERVES the global best + negative ledger (no data loss, no duplicate
-  tasks).
-* the soft restart honours its opt-out env flag.
-
-All deterministic + offline.
-"""
+"""Long-run resilience and periodic soft restart acceptance tests."""
 
 from __future__ import annotations
 

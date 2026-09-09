@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SWEEP phase auto-dispatch tests.
-
-SWEEP entry dispatches ``conc_sweep`` directly; the full-workload ``sweep``
-helper is covered as a manual compatibility path.
-"""
+"""SWEEP phase auto-dispatch tests."""
 
 from __future__ import annotations
 
@@ -287,12 +283,7 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
     tmp_path: Path,
     monkeypatch,
 ):
-    """Stack worse than current_best (110) but above baseline (100) must REVERT.
-
-    The KEEP decision is incremental over current_best, not total over baseline:
-    new_tput=109 is +9% vs baseline yet -0.9% vs current_best, so the stack adds
-    no value and must be reverted.
-    """
+    """Stack worse than current_best (110) but above baseline (100) must REVERT."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
@@ -310,13 +301,7 @@ async def test_stack_validation_partial_revert_becomes_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A partial inner revert means the patch may still be on a remote pod.
-
-    Under the new patch lifecycle contract, partial non-KEEP reverts are not
-    treated as successful: the top-level status becomes "failed" and
-    patch_cleanup_status becomes "recovery_required" so the coordinator knows
-    the tree may be in an unknown state.
-    """
+    """A partial inner revert means the patch may still be on a remote pod."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
@@ -856,12 +841,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
 
 @pytest.mark.asyncio
 async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
-    """An unseeded ladder must reach the engine as "unset", not as "none wanted".
-
-    The executor reads an empty list as a deliberate choice and skips the whole
-    sweep, so collapsing None into [] here would silently drop it for any state
-    the CLI did not seed.
-    """
+    """An unseeded ladder must reach the engine as \"unset\", not as \"none wanted\"."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -946,12 +926,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 
 @pytest.mark.asyncio
 async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
-    """The lease must bound the task that runs, not the configured value.
-
-    With no configured budget and a long session the clamp produces a budget
-    larger than the old 9000 s default, and the watchdog would have failed a
-    sweep that was still making progress.
-    """
+    """The lease must bound the task that runs, not the configured value."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -1249,21 +1224,12 @@ def test_the_retired_action_is_off_every_surface_it_was_on():
     assert "conc_sweep" in PHASE_ALLOWED_ACTIONS["SWEEP"]
 
 
-# 7. conc_sweep is Coordinator-internal — dispatch re-validation must not
-# collide the sole auto-enqueued conc_sweep with its own singleton evidence.
+# 7. conc_sweep is Coordinator-internal — dispatch re-validation must not collide the sole auto-enqueued conc_sweep
+# with its own singleton evidence.
 
 
 def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
-    """Regression: the SWEEP-entry auto-enqueued conc_sweep must pass dispatch re-validation.
-
-    Before the fix, ``validate_dispatched_task`` fell through to the
-    delegate-body sweep-family singleton guard, which keys on
-    ``auto_conc_sweep_task_id`` — the auto-enqueued task's OWN id — and denied
-    the sole conc_sweep against itself, surfacing as a spurious
-    ``sweep_failed`` that closed the session at 0% gain. Now conc_sweep is
-    a Coordinator-internal action, so it receives path checks only and is not
-    re-validated against the singleton guard.
-    """
+    """Regression: the SWEEP-entry auto-enqueued conc_sweep must pass dispatch re-validation."""
     state = _SweepPhaseState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="conc-sweep-self-id")],
     )
@@ -1275,9 +1241,8 @@ def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Patch lifecycle convergence — new tests (P1-19 fix verification)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────── Patch lifecycle convergence — new
+# tests (P1-19 fix verification) ──────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -1285,12 +1250,7 @@ async def test_stack_validation_failed_revert_sets_status_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A completely failed stack revert must set top-level status='failed'.
-
-    Previously _stack_revert_status mapped {"status": "failed"} -> "ok",
-    causing a silent false success. The new contract surfaces it as top-level
-    failure so the coordinator does not promote a patch that may still be live.
-    """
+    """A completely failed stack revert must set top-level status='failed'."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
@@ -1310,12 +1270,7 @@ async def test_stack_validation_keep_calls_finalize(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch.
-
-    Previously the KEEP path never called finalize because the synthetic
-    apply_result had no manifest_path. The new contract calls it explicitly and
-    records patch_cleanup_status.
-    """
+    """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     finalize_calls: list[dict] = []
@@ -1353,12 +1308,7 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
     tmp_path: Path,
     monkeypatch,
 ):
-    """KEEP + partial finalize must ask for recovery, not report cleanup complete.
-
-    finalize returns "partial" when a backup could not be deleted, a backup path
-    failed containment, or a remote pod's finalize failed. The patch itself is
-    correctly on tree, so the top status stays "ok".
-    """
+    """KEEP + partial finalize must ask for recovery, not report cleanup complete."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     monkeypatch.setattr(
@@ -1393,18 +1343,14 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     tmp_path: Path,
     monkeypatch,
 ):
-    """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW.
-
-    The eval already runs (RUN_EVAL=true by default, no defer_accuracy set for
-    this lane), so calling the gate is zero extra GPU cost.
-    """
+    """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     seen: dict[str, object] = {}
 
     def _fake_accuracy_gate(bench_result, *, session_dir, workspace, server_args=""):
-        # The lane must hand the gate the args the bench server ran under, or a
-        # context too small to host an eval reads as a broken eval.
+        # The lane must hand the gate the args the bench server ran under, or a context too small to host an eval
+        # reads as a broken eval.
         seen["server_args"] = server_args
         return {
             "blocked": True,
@@ -1437,11 +1383,7 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """Non-KEEP + partial revert must set top-level status='failed'.
-
-    A partial revert hides a multinode failure where the patch stayed live on a
-    remote pod, so it is not a completed lifecycle.
-    """
+    """Non-KEEP + partial revert must set top-level status='failed'."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br

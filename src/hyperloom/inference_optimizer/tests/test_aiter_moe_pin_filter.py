@@ -34,9 +34,8 @@ def test_noop_when_aiter_not_pinned(monkeypatch):
 
 
 def test_drops_aiter_moe_variants_when_pinned_off(monkeypatch):
-    # Operator pinned SGLANG_USE_AITER=0 -> variants re-enabling the aiter MoE
-    # runner (master switch or explicit --moe-runner-backend aiter) are dropped,
-    # while aiter *attention* (MoE stays triton) is kept.
+    # Operator pinned SGLANG_USE_AITER=0 -> variants re-enabling the aiter MoE runner (master switch or explicit
+    # --moe-runner-backend aiter) are dropped, while aiter *attention* (MoE stays triton) is kept.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"SGLANG_USE_AITER": "0"}')
     grid = [
         _v("attn-aiter", args="--moe-runner-backend triton --attention-backend aiter"),

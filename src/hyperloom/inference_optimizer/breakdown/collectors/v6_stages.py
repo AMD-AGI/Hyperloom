@@ -1,33 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Measurement timeline projections for SBD V6.
-
-``install`` and ``model_gate`` need the durable on-disk event stream because
-they run before ``session_dir`` exists or before the state machine starts. So
-do ``kernel``, ``roofline`` and ``baseline``: each records its own event
-through the recorder as it runs, which is why nothing here projects them.
-``baseline`` was the last to move, and why is worth keeping: V5 stamps its
-action row and its attempt summary when the measurement *completes* and
-nothing recorded when it began, so the projected window collapsed onto its own
-end and the event sorted onto the timeline at the moment it finished.
-Everything projected here happens inside the Coordinator, so its evidence is
-already in ``state.json``, the recorder fragments and ``reports/``: these are
-pure projections over V5 sections the exporter has already built, and add no
-writer call sites anywhere in ``orchestrator/``.
-
-Each projector follows the collector contract in :mod:`._common` — pure over
-its inputs, never mutating them, never raising, recording problems in
-``warnings`` and returning a best-effort partial. A stage the session has no
-evidence for returns ``None`` so it stays out of the timeline entirely; an
-empty shell with ``status: skipped`` would claim the stage was considered and
-declined, which is a different fact.
-
-Fields the V6 design names but that nothing in V5 persists are emitted as
-``None`` rather than back-filled from a plausible neighbour. Each such case
-carries a comment saying what is missing and why the nearest value would be
-wrong.
-"""
+"""Measurement timeline projections for SBD V6."""
 
 from __future__ import annotations
 
@@ -44,9 +18,7 @@ from ._common import (
 )
 
 
-# Statuses a producer writes for work that ran and did not succeed. Checked
-# case-insensitively; ``skipped`` is deliberately absent because a skip is not
-# a failure.
+# Statuses a producer writes for work that ran and did not succeed.
 _FAILED_STATUSES = frozenset({"failed", "error", "failure", "timeout", "aborted"})
 _OK_STATUSES = frozenset({"ok", "succeeded", "success", "complete", "completed", "done"})
 _PARTIAL_STATUSES = frozenset({"partial", "partial_success", "degraded"})
@@ -55,11 +27,7 @@ _STOP_REASONS_SWEEP = frozenset({"sweep_failed", "sweep_unusable", "sweep_timeou
 
 
 def _text(value: Any) -> str | None:
-    """Return ``value`` as a non-empty stripped string, or ``None``.
-
-    V6 distinguishes "not recorded" from "recorded as empty", so a blank
-    string never survives into the payload as ``""``.
-    """
+    """Return ``value`` as a non-empty stripped string, or ``None``."""
     if value is None:
         return None
     text = str(value).strip()
@@ -71,18 +39,7 @@ def _lower(value: Any) -> str:
 
 
 def _lane_status(raw: Any, *, where: str, warnings: list[str], allow_partial: bool = False) -> str:
-    """Map a producer's status spelling onto the V6 enum for the field.
-
-    Producers write their own vocabulary — a backend attempt succeeds as
-    ``completed``, forge-fusion as ``ok`` — while these V6 fields are closed
-    enums. Passing the raw value through hands a strict consumer a payload it
-    has to reject over an ordinary success, which is the opposite of what the
-    field is for.
-
-    A spelling nothing here recognizes is read as ``failed``, matching how the
-    other lanes already treat an unknown status, and warned about so an
-    unlisted vocabulary surfaces rather than being quietly filed as a defeat.
-    """
+    """Map a producer's status spelling onto the V6 enum for the field."""
     status = _lower(raw)
     if not status or status in _SKIPPED_STATUSES:
         return "skipped"
@@ -103,13 +60,7 @@ def _action_rows(phase_timeline: Any, actions: frozenset[str]) -> list[dict[str,
 
 
 def _time_window(*row_groups: list[dict[str, Any]]) -> tuple[str, str]:
-    """Return ``(start_time, end_time)`` spanning every timestamped row given.
-
-    Rows arrive from several producers that stamp their time under different
-    keys, so all the conventional ones are consulted. Both ends are ``""``
-    when nothing in the groups carries a parseable timestamp; the V6 sorter
-    treats that as "place last" rather than "happened at epoch".
-    """
+    """Return ``(start_time, end_time)`` spanning every timestamped row given."""
     stamps: list[tuple[float, str]] = []
     for rows in row_groups:
         for row in rows:
@@ -124,13 +75,7 @@ def _time_window(*row_groups: list[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _sequence(value: Any) -> list[Any]:
-    """Read a recorded field that should be a sequence, whatever it turned out to be.
-
-    A corrupt or hand-edited ``state.json`` that stored a bare scalar where a
-    list belongs would otherwise raise out of the projector, and a raise here
-    costs the whole timeline rather than one field. A string is wrapped rather
-    than iterated: its characters are never the intended elements.
-    """
+    """Read a recorded field that should be a sequence, whatever it turned out to be."""
     if value is None:
         return []
     if isinstance(value, (list, tuple, set)):
@@ -143,9 +88,7 @@ def _int_list(value: Any) -> list[int]:
     return [number for number in (_to_int(item) for item in _sequence(value)) if number is not None]
 
 
-# ---------------------------------------------------------------------------
 # conc_sweep
-# ---------------------------------------------------------------------------
 def _conc_point(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     return {
         "conc": _to_int(point.get("conc")),
@@ -162,21 +105,15 @@ def _conc_point(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
 def _conc_arm(arm: Any, warnings: list[str]) -> dict[str, Any]:
     mapping = _mapping(arm)
     return {
-        # Non-nullable: the baseline arm's defining property is that it adds
-        # no server args, and ``""`` says that where ``None`` would not.
+        # Non-nullable: the baseline arm's defining property is that it adds no server args, and ``""`` says that
+        # where ``None`` would not.
         "extra_server_args": str(mapping.get("extra_server_args") or ""),
         "points": [_conc_point(point, warnings) for point in _dict_rows(mapping.get("points"))],
     }
 
 
 def _conc_pair_error(row: dict[str, Any], points_by_arm: dict[str, dict[int | None, dict[str, Any]]]) -> str | None:
-    """Explain why a concurrency pair produced no speedup.
-
-    The pairing is an outer join, so a pair fails when an arm errored, or when
-    an arm has no point at that concurrency at all. Only the arm that did not
-    succeed can say why — reporting the first status of the two hands back
-    ``"succeeded"`` as the error whenever it is the optimized arm that broke.
-    """
+    """Explain why a concurrency pair produced no speedup."""
     if _to_float(row.get("speedup")) is not None:
         return None
     conc = _to_int(row.get("conc"))
@@ -197,23 +134,7 @@ def project_conc_sweep_event(
     phase_timeline: Any,
     warnings: list[str],
 ) -> dict[str, Any] | None:
-    """Project the baseline-vs-optimized concurrency curve into a V6 event.
-
-    ``conc_sweep_summary`` mirrors ``reports/conc_sweep_summary.json`` and is
-    already all but field-aligned with the V6 ``ext``; the work here is
-    renaming the paired-comparison columns and splitting the flat summary into
-    ``result`` / ``runtime`` / ``artifacts``.
-
-    Args:
-        conc_sweep_summary (Any): The V5 ``conc_sweep_summary`` section.
-        state (Any): The V5 ``state.json`` mapping.
-        phase_timeline (Any): The V5 ``phase_timeline`` rows.
-        warnings (list[str]): V6 warning sink (mutated in place).
-
-    Returns:
-        dict[str, Any] | None: The timeline event, or ``None`` when the
-        session never ran a concurrency sweep.
-    """
+    """Project the baseline-vs-optimized concurrency curve into a V6 event."""
     summary = _mapping(conc_sweep_summary)
     state = _mapping(state)
     last = _mapping(state.get("last_conc_sweep"))
@@ -223,14 +144,11 @@ def project_conc_sweep_event(
 
     reported = _lower(_first(summary.get("status"), last.get("status")))
     budget_exhausted = _optional_bool(_first(summary.get("budget_exhausted"), last.get("budget_exhausted")))
-    # One normalization feeds both the event status and ``result.status``, so a
-    # producer's spelling cannot make the two disagree. An unrecognized word
-    # lands on ``failed`` with a warning, as it does in every other lane,
-    # rather than on a silent ``degraded`` that reads like a real measurement.
+    # One normalization feeds both the event status and ``result.status``, so a producer's spelling cannot make the
+    # two disagree.
     result_status = _lane_status(reported, where="conc_sweep", warnings=warnings)
     if result_status == "succeeded":
-        # A curve cut short by the time budget still produced usable pairs,
-        # but not the ladder that was asked for.
+        # A curve cut short by the time budget still produced usable pairs, but not the ladder that was asked for.
         status = "degraded" if budget_exhausted else "succeeded"
     else:
         status = result_status
@@ -251,10 +169,7 @@ def project_conc_sweep_event(
     ]
     result_summary = _mapping(summary.get("summary"))
     stop_reason = _lower(state.get("stop_reason"))
-    # ``last_conc_sweep.ts`` is stamped when the sweep finishes, and nothing
-    # records when it started. It closes the window rather than collapsing it
-    # to a point; ``elapsed_sec`` carries the duration for a reader who wants
-    # the span, and back-dating the start from it would invent a timestamp.
+    # ``last_conc_sweep.ts`` is stamped when the sweep finishes, and nothing records when it started.
     start_time, end_time = _time_window(rows)
     end_time = _first(str(last.get("ts") or ""), end_time) or ""
     return {
@@ -265,14 +180,13 @@ def project_conc_sweep_event(
         "end_time": end_time,
         "ext": {
             "trigger": {
-                # The conc sweep is dispatched as an action, not as a phase,
-                # so nothing records which path reached it.
+                # The conc sweep is dispatched as an action, not as a phase, so nothing records which path reached it.
                 "kind": None,
                 "source_task_id": None,
             },
             "input_anchor": {
-                # The optimized arm is defined by its server args, which the
-                # arm itself carries; no variant or task id is stamped on it.
+                # The optimized arm is defined by its server args, which the arm itself carries; no variant or task id
+                # is stamped on it.
                 "base_variant_id": None,
                 "base_task_id": None,
                 "input_throughput_tok_s_per_gpu": None,

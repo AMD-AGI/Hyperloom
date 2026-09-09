@@ -31,12 +31,8 @@ from kernelforge.loop.scoring import (
 from kernelforge.tracker.usage import UsageAccumulator
 from kernelforge import rtk
 
-# Repository / image_kernel tasks ship the correctness reference + tests INSIDE
-# the repo tree (e.g. AITER's op_tests/.../test_<op>.py), which the in-session
-# gate's default protected globs do not catch. These extra globs stop the agent
-# from editing the reference to game the correctness gate. Applied ONLY for
-# repository/image_kernel tasks so single-file tasks are unaffected. A target
-# source file always stays editable (the gate short-circuits target files).
+# Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
+# op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
 _REPO_EXTRA_PROTECTED_GLOBS = [
     "test_*.py",
     "*_test.py",
@@ -45,19 +41,24 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "conftest.py",
 ]
 
+# Ignore only named tool outputs; undeclared files remain safety violations.
+# Exported so tests exercise the exact list used by agent sessions.
+TOOL_OWNED_UNTRACKED_GLOBS = [
+    # rocprof runs below the git root, so cover root and nested directories.
+    ".rocprofv3/*",
+    "*/.rocprofv3/*",
+    "*_results.db",
+    # AITER may create JIT shards during a turn; its configured root always ends
+    # in ``aiter_cache``, regardless of the experiments directory.
+    "aiter_cache/*",
+    "*/aiter_cache/*",
+]
+
 # task_type values that mean "a full source tree, not a self-contained snippet".
 _REPO_TASK_TYPES = {"repository", "image_kernel"}
 
-# Wall-clock fallback for a session that never sized its own budget (every
-# make_agent_fn caller except the forge-loop, e.g. the PORT loop). The claude
-# backend used to IGNORE the run spec's timeout, so these callers were bounded
-# only by the turn cap; now that it HONOURS it, falling back to the provider's
-# 30-minute runtime default would truncate a legitimate correctness/PORT
-# session mid-work -- a cold CK build alone can take ~26 minutes. Fall back to
-# the same 90-minute floor the forge budget uses as "enough to read + edit +
-# build + bench", so honouring the timeout does not silently shorten sessions
-# that pre-date the change. A caller that wants a tighter or looser bound passes
-# session_timeout_sec explicitly.
+# Wall-clock fallback for a session that never sized its own budget (every make_agent_fn caller except the forge-loop,
+# e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
 
 # PR KB settings forwarded to the MCP child.
@@ -86,29 +87,15 @@ def make_agent_fn(
     pr_kb_repo: str = "",
     usage: "UsageAccumulator | None" = None,
     insession_gate: bool = False,
-    # Whether an enabled gate also installs its Stop hook, which runs canonical
-    # correctness and a benchmark before the session may end. False installs the
-    # gate's protection hooks alone, for a caller whose sessions run at the same
-    # time as each other: the device times one thing at a time, so such a
-    # session must not benchmark itself. Ignored when the gate is off.
+    # Whether an enabled gate also installs its Stop hook, which runs canonical correctness and a benchmark before the
+    # session may end.
     insession_gate_stop_check: bool = True,
     driver_script: str | None = None,
-    # The wrapper script the session is told to run the driver through, when
-    # that is not the driver itself. A concurrent lane is given one that takes
-    # the shared device lock first, and the lock only works if the session runs
-    # it: the driver sitting beside it stays readable and runnable, so naming
-    # the wrapper here rather than in a per-invocation note is what keeps the
-    # instruction from contradicting itself. The driver named by
-    # ``driver_script`` remains the protected file and the one to read.
+    # The wrapper script the session is told to run the driver through, when that is not the driver itself.
     interposed_driver_path: str | None = None,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     max_blocks: int = 10,
     # One implementer session's wall-clock budget (see cli._forge_session_timeout_sec).
-    # None falls back to the backend runtime's own timeout: the same value is used
-    # for the run spec AND the deadline the session is told, so the two never
-    # disagree. This is what the claude backend now enforces -- a turn cap never
-    # bounded time (it fired on 2.2% of sessions), so a long session ran until
-    # something outside killed it.
     session_timeout_sec: int | None = None,
     validation_timeout_sec: int = 1800,
     bench_timeout_sec: int = 300,
@@ -123,21 +110,7 @@ def make_agent_fn(
     extra_protected_paths: list[str] | None = None,
     correctness_only: bool = False,
 ) -> Callable[..., Awaitable[str]]:
-    """Create an agent_fn callback for the autonomous iteration loop.
-
-    Returns an async function with signature:
-        async fn(kernel_path: str, experiment_history_json: str) -> str
-
-    Each call runs one implementer session through the configured backend that:
-      1. Reads the kernel file
-      2. Reviews experiment history (last 5 iterations)
-      3. Proposes one or more modifications to the kernel
-      4. Returns the rationale for the change
-
-    When a :class:`~kernelforge.tracker.usage.UsageAccumulator` is supplied
-    via ``usage``, terminal provider usage is folded into it so the loop can
-    persist the run's total LLM cost.
-    """
+    """Create an agent_fn callback for the autonomous iteration loop."""
     runtime = config.agent_runtime()
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
@@ -172,8 +145,7 @@ def make_agent_fn(
         )
     backend_model = backend.runtime.model
 
-    # Multi-file / repository awareness. For a single-file task these stay empty
-    # and every branch below collapses to the original single-file behavior.
+    # Multi-file / repository awareness.
     source_files = [f for f in (source_files or []) if f]
     target_functions = [f for f in (target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
@@ -181,9 +153,8 @@ def make_agent_fn(
     def _bullets(items: list[str]) -> str:
         return "\n".join(f"  - {i}" for i in items)
 
-    # Load the kernel backend's prompt as extra domain context; without it the agent
-    # gets only the generic instructions below and misses backend discipline
-    # (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
+    # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
+    # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
     kernel_backend_context = ""
     try:
         from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
@@ -198,13 +169,11 @@ def make_agent_fn(
         )
 
     # Kernel-backend prompts name build/test/bench/pmc/registers as if they were tools.
-    # This agent has Bash instead, so frame those names as shell steps it runs
-    # and verifies itself, rather than forbidding them.
     kernel_backend_section = ""
     if kernel_backend_context:
-        # Drop the profile/pmc mentions from this framing when profiling is
-        # disabled, so the implementer prompt carries no profiling guidance. (The
-        # loaded kernel_backend_context is backend domain knowledge and is left as-is.)
+        # Drop the profile/pmc mentions from this framing when profiling is disabled, so the implementer prompt
+        # carries no profiling guidance. (The loaded kernel_backend_context is backend domain knowledge and is left
+        # as-is.)
         _self_verbs = (
             "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
             if profiling_enabled
@@ -224,10 +193,8 @@ def make_agent_fn(
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
-    # `rtk` (token filter) is advertised to the agent ONLY when it's actually on
-    # PATH; otherwise the agent would prefix every shell command with a missing
-    # binary (command not found). Mirrors kernelforge.rtk.wrap_command, which
-    # no-ops the same way. When rtk is absent the whole paragraph is dropped.
+    # `rtk` (token filter) is advertised to the agent ONLY when it's actually on PATH; otherwise the agent would
+    # prefix every shell command with a missing binary (command not found).
     if rtk.is_available():
         _rtk_guidance = (
             "Always prefix shell commands with `rtk` — it filters verbose output (ninja,\n"
@@ -253,19 +220,12 @@ def make_agent_fn(
         "under forge_experiments/ and remove it before ending the turn."
     )
 
-    # Stable across every iteration of a loop — placed in system_prompt so the
-    # underlying CLI's prompt cache reuses it instead of re-billing each call.
-    # On-demand self-profiling affordance: point the agent at the canonical
-    # profiling script + docs so it profiles its OWN kernel when it needs data,
-    # instead of guessing rocprof-compute's CLI or tripping its dependency gate.
+    # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
+    # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
-    # What the session is told to execute. Identical to the driver unless the
-    # caller interposed a wrapper, so the ordinary session's prompt is unchanged.
+    # What the session is told to execute.
     driver_run = interposed_driver_path or driver_base
-    # Empty unless a wrapper was interposed, so a session without one carries a
-    # byte-identical prompt. It belongs in the system prompt rather than in a
-    # per-invocation note because it is a hard requirement for the measurement
-    # to mean anything, and a long session drifts away from its first message.
+    # Empty unless a wrapper was interposed, so a session without one carries a byte-identical prompt.
     driver_interposition_section = (
         ""
         if driver_run == driver_base
@@ -280,8 +240,7 @@ both numbers, including the ones this session is judged on.
 """
     )
     profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
-    # Suppressed when profiling is disabled so the implementer prompt carries no
-    # profiling affordance/hint at all.
+    # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
     self_profiling_section = (
         ""
         if not profiling_enabled
@@ -367,16 +326,10 @@ Every Bash invocation's stdout/stderr is billed back to you on the next turn.
 {_rtk_guidance}Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
 """
 
-    # In-session self-correction mode: the agent may build/test/fix itself inside
-    # ONE session. Claude gates on a Stop hook while Codex runs the same canonical
-    # gate between explicit resume turns; the outer loop stays the only canonical
-    # validation authority.
+    # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
     gate_enabled = bool(insession_gate and driver_script)
-    # Without the stop check the gate is protection only: its hooks deny an edit
-    # or a shell write to the measurement surface while the session runs, and
-    # nothing decides when the session may end. The self-correcting prompt below
-    # describes a gate that rejects a stop, so a session that has no such gate
-    # keeps the ordinary prompt instead of being told about one.
+    # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
+    # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and insession_gate_stop_check
     gate_system_prompt = f"""\
 You are a GPU kernel optimization agent working in ONE self-correcting session.
@@ -488,21 +441,15 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
     ) -> str:
-        # Mark the session before entering the provider. If the backend raises
-        # before returning an AgentRunResult (turn cap, cancellation, transport
-        # failure), the outer loop still knows an agent actually ran and can
-        # persist an outcome-only lesson instead of treating it as a baseline.
+        # Mark the session before entering the provider.
         progress_log: list[str] = []
         if session_sink is not None:
-            # IterationLoop sets this before invoking arbitrary agent callbacks;
-            # setdefault provides the same contract when make_agent_fn is used
-            # standalone without obscuring the outer loop's earlier marker.
+            # IterationLoop sets this before invoking arbitrary agent callbacks; setdefault provides the same contract
+            # when make_agent_fn is used standalone without obscuring the outer loop's earlier marker.
             session_sink.setdefault("session_started", True)
             session_sink["progress_log"] = progress_log
 
-        # Repository tasks: declared source files and target functions are
-        # orientation hints, never the edit boundary. The hard boundary is the
-        # protected measurement surface enforced by the gate/backend.
+        # Repository tasks: declared source files and target functions are orientation hints, never the edit boundary.
         if is_repo_task and (source_files or target_functions):
             files_for_prompt = source_files or [kernel_path]
             target_section = (
@@ -529,12 +476,8 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
         else:
             target_section = f"## Target kernel\n{kernel_path}\n"
 
-        # One value drives both the run spec's hard deadline and the deadline
-        # the session is told, so the enforced cut and the stated cut can never
-        # disagree. A caller that never sized a session budget falls back to a
-        # sane 90-minute floor (see _DEFAULT_SESSION_TIMEOUT_SEC), never the
-        # provider's 30-minute runtime default, which the claude backend now
-        # honours and would otherwise use to truncate a legitimate PORT session.
+        # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
+        # and the stated cut can never disagree.
         session_deadline_sec = (
             session_timeout_sec
             if session_timeout_sec is not None
@@ -542,11 +485,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
         )
         session_deadline_min = max(1, round(session_deadline_sec / 60))
 
-        # Tell the session its own wall-clock bound. The claude backend now cuts
-        # a session at this deadline; a session that only learns of it by being
-        # killed mid-turn hands off nothing, so ask it to land the best candidate
-        # it actually has through the clean handoff (candidate_submitted) before
-        # the clock runs out rather than chasing a larger gain it cannot finish.
+        # Tell the session its own wall-clock bound.
         deadline_section = (
             "## Session deadline\n"
             f"You have about {session_deadline_min} minutes of wall-clock for "
@@ -566,8 +505,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 Make your change(s) now.
 """
 
-        # One fixed interaction budget per candidate Session. Campaign duration
-        # controls how many Sessions are admitted; turns bound each Session.
+        # One fixed interaction budget per candidate Session.
         turn_cap = config.max_turns
         cwd = str(Path(kernel_path).parent)
         run_cwd = cwd
@@ -594,30 +532,24 @@ Make your change(s) now.
                 stage_timeout_sec=validation_timeout_sec,
                 bench_timeout_sec=bench_timeout_sec,
                 bench_repeat=bench_repeat,
-                # Declared sources seed profiling/JIT orientation. Edit counting
-                # covers every non-protected implementation file.
+                # Declared sources seed profiling/JIT orientation.
                 target_files=(source_files or None),
-                # Combine repo reference/test globs (repo tasks) with any
-                # caller-supplied protected globs (e.g. the rewrite port loop
-                # protects the source kernel it ports FROM, which is also the
-                # correctness oracle). Both are additive; None keeps prior behavior.
+                # Combine repo reference/test globs (repo tasks) with any caller-supplied protected globs (e.g. the
+                # rewrite port loop protects the source kernel it ports FROM, which is also the correctness oracle).
                 extra_protected_globs=(
                     (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])
                 )
                 or None,
-                # Exact-path measurement files (e.g. the PORT phase's source kernel,
-                # which the driver imports as the oracle). Same tier as the driver.
+                # Exact-path measurement files (e.g. the PORT phase's source kernel, which the driver imports as the
+                # oracle).
                 extra_protected_paths=extra_protected_paths,
-                # PORT (and any correctness-only phase): require only correctness;
-                # the gate skips the perf benchmark entirely.
+                # PORT (and any correctness-only phase): require only correctness; the gate skips the perf benchmark
+                # entirely.
                 correctness_only=correctness_only,
-                # The interposed command, so the hooks refuse a driver run that
-                # goes around it. Naming it in the prompt above states the
-                # requirement; this is what holds it.
+                # The interposed command, so the hooks refuse a driver run that goes around it.
                 interposed_driver_path=interposed_driver_path,
-                # The declared tree, not one guessed from the driver's location:
-                # forge-fuse keeps its driver in the run's output dir, which is
-                # outside the workspace and is not a repository.
+                # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
+                # run's output dir, which is outside the workspace and is not a repository.
                 workspace=configured_workspace,
             )
             if gate_stop_check:
@@ -659,28 +591,10 @@ Make your change(s) now.
             target_files=(source_files or [kernel_path]),
             driver_script=driver_script or "",
             protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
-            # The loop writes its own ledger into the workspace it hands the
-            # implementer, and the kernel's runtime leaves a JIT cache there, so
-            # every iteration starts from a worktree the caller already
-            # dirtied. Judging the turn against HEAD refuses it for that
-            # inherited state before the agent is asked anything; judge it
-            # against what it inherited instead.
+            # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
+            # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
             allow_dirty_baseline=True,
-            # A profiler writes where it is run, and it is run here. rocprofv3
-            # drops these two next to the driver; a session was failed for them
-            # rather than for anything it did. Named rather than forgiven
-            # wholesale (``allow_untracked``), so every path nobody declared is
-            # still refused.
-            ignored_untracked_globs=[
-                # Both entries must reach any depth: the profiler runs in
-                # ``run_cwd``, which is the kernel file's parent (see above),
-                # while the guard reports paths relative to the git toplevel.
-                # ``fnmatch`` crosses "/", so the ``*_results.db`` form already
-                # does; ``.rocprofv3/`` has to be spelled out twice.
-                ".rocprofv3/*",
-                "*/.rocprofv3/*",
-                "*_results.db",
-            ],
+            ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
             hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
             mcp_servers=pr_mcp_servers,
@@ -705,11 +619,8 @@ Make your change(s) now.
                 session_sink["integrity_reason"] = gate.integrity_reason
                 session_sink["integrity_restore"] = gate.restore_protected_files
 
-        # A candidate Session is expensive: by the time the gateway drops it,
-        # the agent has usually already read the kernel, edited it, and paid for
-        # a build+bench. Resume the SAME session on an API failure so that work
-        # survives; a turn cap or a deadline is left alone, because those mean
-        # the agent answered.
+        # A candidate Session is expensive: by the time the gateway drops it, the agent has usually already read the
+        # kernel, edited it, and paid for a build+bench.
         try:
             run_result = await run_session_with_api_resume(
                 backend,
@@ -721,10 +632,8 @@ Make your change(s) now.
             raise
         continuation_turns = 1
         integrity_error: BaseException | None = None
-        # A backend that does not run our hooks gets the same Stop decision
-        # driven from out here, between explicit resume turns. Only the mode that
-        # asked for that decision gets it: without the stop check there is no
-        # Stop hook to stand in for, and running one here would benchmark.
+        # A backend that does not run our hooks gets the same Stop decision driven from out here, between explicit
+        # resume turns.
         uses_outer_gate = gate_stop_check and not backend.capabilities.stop_hooks
         if uses_outer_gate:
 
@@ -788,18 +697,16 @@ Make your change(s) now.
                     *run_result.findings,
                     *resumed.findings,
                 ]
-                # A turn that left a benchmark running poisons every turn after
-                # it: resuming the session does not free the device, so the
-                # contention has to outlive the turn that reported it.
+                # A turn that left a benchmark running poisons every turn after it: resuming the session does not free
+                # the device, so the contention has to outlive the turn that reported it.
                 if not resumed.workspace_contention:
                     resumed.workspace_contention = run_result.workspace_contention
                 if not resumed.session_id:
                     resumed.session_id = run_result.session_id
                 run_result = resumed
 
-        # Stop hooks are not guaranteed to run: turn caps, SDK failures, and
-        # cancellation can all terminate a session first. This final scan is the
-        # authoritative protected-integrity state for the outer runner.
+        # Stop hooks are not guaranteed to run: turn caps, SDK failures, and cancellation can all terminate a session
+        # first.
         _finalize_integrity(integrity_error)
 
         full = run_result.text
@@ -807,14 +714,8 @@ Make your change(s) now.
         num_turns = continuation_turns if uses_outer_gate else run_result.num_turns
 
         def _parse_tag(tag: str, cap: int, *, last: bool = False) -> str:
-            """Pull a `TAG: ...` one-liner out of the agent output, sanitized:
-            cut any trailing injected control text and cap the length.
-
-            With ``last=True`` return the LAST occurrence rather than the first.
-            An in-session gate session can emit the tag on several turns (the
-            agent edits, the gate rejects the stop, it edits again…); the final
-            occurrence is written after the kernel has converged, so it is the
-            one that matches the code actually committed and benchmarked.
+            """Pull a `TAG: ...` one-liner out of the agent output, sanitized: cut any trailing injected control text
+            and cap the length.
             """
             found = ""
             for ln in full.splitlines():
@@ -836,19 +737,13 @@ Make your change(s) now.
             return found
 
         # PLAN — one-sentence description of THIS iteration's FINAL modification.
-        # Take the LAST occurrence: after any in-session edit/fix cycles, the
-        # agent's closing PLAN describes the change that is now in the file (the
-        # net change that gets committed + benchmarked), not an abandoned attempt.
         plan = _parse_tag("PLAN:", 160, last=True)
 
         submitted = any(line.strip().upper() == "SUBMIT_CANDIDATE" for line in full.splitlines())
 
-        # Explain WHY this session ended, for per-iteration analysis:
-        #   * gate allowed a safe candidate handoff -> candidate_submitted;
-        #   * else the SDK ended the query — turn cap (subtype mentions
-        #     max_turns), another SDK error, or the agent voluntarily stopped
-        #     ("success"). A gate-enabled session that hits the turn cap never
-        #     runs a Stop hook, so gate.end_reason stays "" and we land here.
+        # Explain WHY this session ended, for per-iteration analysis: * gate allowed a safe candidate handoff ->
+        # candidate_submitted; * else the SDK ended the query — turn cap (subtype mentions max_turns), another SDK
+        # error, or the agent voluntarily stopped ("success").
         if submitted:
             end_reason = "candidate_submitted"
         elif gate is not None and gate.end_reason:
@@ -862,8 +757,8 @@ Make your change(s) now.
         else:
             end_reason = "agent_stopped"
 
-        # One structured line per session (stdout is captured by the caller's
-        # logs) so a run's end-reason distribution is analyzable without the LLM.
+        # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
+        # is analyzable without the LLM.
         edit_count = gate.edit_count if gate is not None else run_result.edit_count
         print(
             f"  [session-end] backend={backend.name} reason={end_reason} "
@@ -875,8 +770,8 @@ Make your change(s) now.
 
         text = full or "no rationale provided"
         if gate is not None:
-            # Surface the gate outcome so the outer loop's commit message / log
-            # records whether the session self-converged.
+            # Surface the gate outcome so the outer loop's commit message / log records whether the session
+            # self-converged.
             tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
             if num_turns is not None:
                 tag += f" turns={num_turns}"
@@ -887,9 +782,8 @@ Make your change(s) now.
             tag += "]"
             text = f"{tag} {text}"
 
-        # Hand back structured session info so the runner can feed the
-        # ExperienceLedger with the gate's objective findings, and (via
-        # ``summarize``) ask this exact session to record what it explored.
+        # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
+        # findings, and (via ``summarize``) ask this exact session to record what it explored.
         if session_sink is not None:
             session_sink["plan"] = plan
             session_sink["session_id"] = run_result.session_id
@@ -901,9 +795,8 @@ Make your change(s) now.
             )
             session_sink["end_reason"] = end_reason
             session_sink["turns"] = num_turns
-            # The runner never sees the AgentRunResult, so this is the only
-            # place a workspace the reaper could not clear can reach the code
-            # that decides whether to run the canonical measurement.
+            # The runner never sees the AgentRunResult, so this is the only place a workspace the reaper could not
+            # clear can reach the code that decides whether to run the canonical measurement.
             session_sink["workspace_contention"] = run_result.workspace_contention
             if gate is not None:
                 session_sink["findings"] = gate.findings_blob()
@@ -931,26 +824,7 @@ def _make_session_summarizer(
     session_id: str,
     usage=None,
 ) -> Callable[[str], Awaitable[str]] | None:
-    """Build an async callable that resumes ONE finished implementer session.
-
-    The returned callable replays the session's full conversation and asks it a
-    follow-up question, so the answer is grounded in everything the agent
-    actually tried — including directions it abandoned, which exist in no other
-    record. The resumed turn runs under a deliberately different policy than the
-    session it continues:
-
-      * ``hooks=None`` — the implementer session carries the in-session gate's Stop
-        hook. Left attached, that hook would run correctness+bench and BLOCK the
-        summarizing turn, pushing the agent back into editing the kernel.
-      * read-only tools — the caller, not the model, persists the reply, so the
-        session needs no write access (mirrors ``profile_analyst``).
-      * ``read_only_resume`` — providers that guard the worktree may inspect any
-        pre-existing Git-visible state, but must verify that the read-only turn
-        leaves that state byte-for-byte unchanged.
-
-    Returns ``None`` when the provider cannot resume, so the caller degrades to
-    a lesson document carrying only the loop's machine-written outcome.
-    """
+    """Build an async callable that resumes ONE finished implementer session."""
     if not session_id or not getattr(backend.capabilities, "resumable", False):
         return None
     if not hasattr(backend, "resume"):
@@ -968,16 +842,14 @@ def _make_session_summarizer(
         read_only_resume=True,
         protected_globs=["*"],
         reasoning_effort="high",
-        # Preserve the implementer's progress log as a stable fallback record. The
-        # summarizer turn has no reason to append its own activity to that list.
+        # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
             write=False,
             shell=False,
-            # Enough turns to check a path or a number it half-remembers, not
-            # enough to start exploring the workspace.
+            # Enough turns to check a path or a number it half-remembers, not enough to start exploring the workspace.
             max_turns=4,
         ),
     )

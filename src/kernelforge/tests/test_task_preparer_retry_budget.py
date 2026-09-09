@@ -1,11 +1,4 @@
-"""A retry that cannot plausibly finish must not be started.
-
-Measured over 25 recorded prep attempts: successful ones ran 350-896s, and every
-retry that began with less than that (150s, 298s, 300s, 325s) burned its entire
-budget without writing a byte, then reported "FAILED after 2 attempt(s)" — which
-reads like the agent tried twice and failed, not like the second try never had a
-chance. A first attempt still always runs, however little time is left.
-"""
+"""A retry that cannot plausibly finish must not be started."""
 
 from __future__ import annotations
 

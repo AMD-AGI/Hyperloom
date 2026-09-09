@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shared lane budget has to fund compile-pass claims before authoring.
-
-``rank_recipes`` puts a ``compile_pass`` first because it is a deterministic
-one-line flip that hands the work to a vendor-tuned kernel -- the cheapest
-certain win in the round. A budget that funds the LLM authoring loop first
-spends the whole lane ceiling on the expensive half and withholds every claim,
-which is the ordering ``rank_recipes`` exists to prevent.
-
-Both pipelines are faked: what is pinned is which targets each was handed, and
-what the round reports about the targets it withheld.
-"""
+"""The shared lane budget has to fund compile-pass claims before authoring."""
 
 from __future__ import annotations
 

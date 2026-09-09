@@ -211,8 +211,8 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
     assert projected["kernel_contract"]["kind"] == "collective"
     assert projected["is_multigpu"] is True
     assert untried_hot_reusable_kernels(state) == []
-    # The prompt offers this list as the kernel_opt target set, so a collective
-    # left in it would dispatch an empty batch on every pick.
+    # The prompt offers this list as the kernel_opt target set, so a collective left in it would dispatch an empty
+    # batch on every pick.
     assert state.last_trace_analyze["reusable_native_kernel_ids"] == []
     codes = {w.get("code") for w in state.last_trace_analyze["trace_health_warnings"]}
     assert "collective_lane_withheld_kernels" in codes
@@ -248,12 +248,7 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
     ],
 )
 def test_a_kernel_the_collective_lane_cannot_admit_stays_routable(tmp_path, entry, reason):
-    """The contract's ``collective`` kind is a heuristic, not lane ownership.
-
-    It also fires on a plain ``block_reduce`` and on any source under ``dist/``.
-    The lane is opt-in and admits none of these, so withholding them from
-    kernel_opt would leave them with no lane at all.
-    """
+    """The contract's ``collective`` kind is a heuristic, not lane ownership."""
     state = SharedState.load_or_init(tmp_path)
     state.record_trace_analyze(
         {"trace_input": "/trace"},
@@ -384,11 +379,7 @@ def test_gate_closed_without_a_roofline_snapshot():
 
 
 def test_gate_falls_back_to_the_candidate_share_without_a_roofline(monkeypatch):
-    """The roofline comm bucket needs a TraceLens extension a public checkout lacks.
-
-    Without a fallback the whole lane would disappear behind a log line on any
-    such checkout, so the hottest resolved collective's own GPU share stands in.
-    """
+    """The roofline comm bucket needs a TraceLens extension a public checkout lacks."""
     monkeypatch.setattr(
         krh,
         "select_collective_candidate",
@@ -410,12 +401,7 @@ def test_candidate_fallback_still_respects_the_floor(monkeypatch):
 
 
 def test_the_fallback_share_is_judged_on_its_own_floor(monkeypatch):
-    """The two shares are not the same measurement.
-
-    The roofline value is the exposed part of all communication; the fallback is
-    one kernel's whole GPU time, which a compute overlap can hide entirely. A
-    share that clears the roofline floor must not therefore clear the fallback's.
-    """
+    """The two shares are not the same measurement."""
     between = (KernelPhase.COLLECTIVE_COMM_PCT_FLOOR + KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR) / 2
     monkeypatch.setattr(
         krh,
@@ -476,8 +462,7 @@ def test_skip_is_terminal_for_the_analysis_that_produced_it():
 
 
 def test_skip_does_not_block_a_later_analysis():
-    """Nothing clears last_collective, so an unscoped skip would lock the lane
-    out for the whole session even after a new trace exposes a collective."""
+    """Nothing clears last_collective, so an unscoped skip would lock the lane out for the whole session even after a new trace exposes a collective."""
     assert (
         _gate_with_analysis(
             "/run/b/kernel_candidates.json", {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}
@@ -491,8 +476,7 @@ def test_skip_without_an_analysis_key_does_not_block():
 
 
 def test_gate_closed_before_any_trace_analysis():
-    """Candidate selection reads the analysis, so a skip recorded before one
-    exists would wrongly become terminal."""
+    """Candidate selection reads the analysis, so a skip recorded before one exists would wrongly become terminal."""
     assert _gate(analysis=False) is False
 
 
@@ -556,12 +540,7 @@ def test_lane_is_not_exposed_to_the_llm():
 
 
 def test_resume_compat_old_integration_status_accepted(tmp_path):
-    """A state.json written before the patch_cleanup_status migration must load cleanly.
-
-    The validator and classifiers fall back to the legacy 'integration_status'
-    field so a --resume of a session that was mid-collective-integration when
-    the binary was updated does not raise.
-    """
+    """A state.json written before the patch_cleanup_status migration must load cleanly."""
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.kernel.attempt_summary import (
         _classify_collective_attempt,
@@ -583,8 +562,7 @@ def test_resume_compat_old_integration_status_accepted(tmp_path):
     }
     state.record_collective(campaign, tmp_path)
 
-    # Simulate a state.json written by old code: integration_status instead of
-    # patch_cleanup_status.
+    # Simulate a state.json written by old code: integration_status instead of patch_cleanup_status.
     old_style_result = {
         "status": "ok",
         "decision": "KEEP",

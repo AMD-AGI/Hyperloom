@@ -1,10 +1,4 @@
-"""Claude backend session continuation + the read-only lesson summarizer.
-
-GPU-free and SDK-free: the SDK's ``query`` and options type are replaced with
-fakes, so these tests pin the contract the lesson summarizer depends on —
-capturing a session id, passing ``resume`` through to the SDK, and resuming
-under a policy that differs from the session being continued.
-"""
+"""Claude backend session continuation + the read-only lesson summarizer."""
 
 from __future__ import annotations
 
@@ -355,16 +349,16 @@ def test_summarizer_resumes_read_only_and_without_hooks():
     assert session_id == "sess-1"
     assert feedback == "record your lesson"
     assert usage == "usage-obj"
-    # The in-session gate's Stop hook would otherwise block the summarizing turn
-    # and push the agent back into editing the kernel.
+    # The in-session gate's Stop hook would otherwise block the summarizing turn and push the agent back into editing
+    # the kernel.
     assert spec.hooks is None
     assert spec.writable is False
     assert spec.reasoning_effort == "high"
     assert spec.tool_policy.write is False
     assert spec.tool_policy.shell is False
     assert spec.protected_globs == ["*"]
-    # Providers that guard the worktree before resuming must not refuse to start
-    # over the pending candidate diff or leftover build artifacts.
+    # Providers that guard the worktree before resuming must not refuse to start over the pending candidate diff or
+    # leftover build artifacts.
     assert spec.allow_dirty_targets is True
     assert spec.allow_untracked is True
     assert spec.read_only_resume is True

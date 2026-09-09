@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Copy enablement round deliverables into ``reports/enablement/<task_id>/``.
-
-The archive collector drops ``runs/`` wholesale and retains ``reports/``, so a
-patch, launch config or server log left in the specialist workspace never
-reaches the archive and the fix cannot be replayed by a later session.
-"""
+"""Copy enablement round deliverables into ``reports/enablement/<task_id>/``."""
 
 from __future__ import annotations
 
@@ -24,13 +19,11 @@ from hyperloom.inference_optimizer.session.session_paths import (
 if TYPE_CHECKING:
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
-# A patch is a few KB; anything this large is a stray build output and would
-# eat into the archive's per-session budget.
+# A patch is a few KB; anything this large is a stray build output and would eat into the archive's per-session
+# budget.
 _FILE_SIZE_LIMIT = 2 * 1024 * 1024
 
-# Server logs routinely exceed _FILE_SIZE_LIMIT, so they are truncated rather
-# than skipped. Half the patch ceiling still holds tens of thousands of lines of
-# a crash while bounding what a many-round session adds to the archive.
+# Server logs routinely exceed _FILE_SIZE_LIMIT, so they are truncated rather than skipped.
 _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
 
 _LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
@@ -39,11 +32,7 @@ _LAUNCH_LOG_EXCERPT_CHARS = 1200
 
 
 def _copy(src: Path, dest: Path) -> bool:
-    """Copy ``src`` to ``dest`` when it exists and is under the size limit.
-
-    Returns:
-        ``True`` when the file landed at ``dest``.
-    """
+    """Copy ``src`` to ``dest`` when it exists and is under the size limit."""
     if not src.is_file() or src.stat().st_size > _FILE_SIZE_LIMIT:
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -52,26 +41,16 @@ def _copy(src: Path, dest: Path) -> bool:
 
 
 def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -> bool:
-    """Copy at most the last ``limit`` bytes of ``src`` to ``dest``.
-
-    The tail and not the head: a launch failure writes its traceback at the end
-    of the log. What lands never exceeds ``limit`` plus the truncation note.
-
-    Returns:
-        ``True`` when the file landed at ``dest``.
-    """
+    """Copy at most the last ``limit`` bytes of ``src`` to ``dest``."""
     if not src.is_file():
         return False
     dropped = max(0, src.stat().st_size - limit)
     with src.open("rb") as fh:
         if dropped:
             fh.seek(dropped)
-        # Bounded here and not by EOF: the stat above can under-report a log
-        # that is still being appended to.
+        # Bounded here and not by EOF: the stat above can under-report a log that is still being appended to.
         raw = fh.read(limit)
-    # The seek lands mid-codepoint, so the decode has to be lenient. It ignores
-    # rather than replaces: U+FFFD is three bytes, so a tail of binary noise
-    # would otherwise write three times ``limit``.
+    # The seek lands mid-codepoint, so the decode has to be lenient.
     text = raw.decode("utf-8", errors="ignore")
     if dropped:
         text = _LOG_TRUNCATION_NOTE.format(dropped=dropped) + text
@@ -80,31 +59,12 @@ def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -
 
 
 def role_path(files: list[dict[str, str]], role: str) -> str:
-    """The session-relative path recorded for ``role``, or ``""`` when absent.
-
-    For single-valued roles; ``patch`` and ``patch_evidence`` need the list itself.
-    """
+    """The session-relative path recorded for ``role``, or ``\"\"`` when absent."""
     return next((entry["path"] for entry in files if entry["role"] == role), "")
 
 
 def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[str, str]]:
-    """Archive one enablement round's patches, specialist result and launch config.
-
-    Rounds the phase synthesises carry no task id and no deliverables, and are
-    skipped rather than colliding on a shared directory.
-
-    Args:
-        session_dir: The session root directory.
-        res: The ``integrate_patch`` result for an enablement round.
-
-    Returns:
-        One ``{"path", "role"}`` entry per deliverable that landed, ``path``
-        session-relative POSIX. Roles: ``patch`` for applied patches,
-        ``patch_evidence`` for unapplied attempts (both repeat),
-        ``specialist_result``, ``prompt``, ``launch_config``, ``server_log``.
-        Evidence preserves specialist output without claiming integration accepted
-        it. A copy the size ceiling refused is absent rather than listed.
-    """
+    """Archive one enablement round's patches, specialist result and launch config."""
     task_id = str(res.get("specialist_task_id") or "").strip()
     if not task_id:
         return []
@@ -149,8 +109,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         if _copy(Path(accepted_config), dest):
             _record("launch_config", dest)
 
-    # Only a round that reached a bench has one: a rejected patch or a broken
-    # build never started a server, so an absent log is normal.
+    # Only a round that reached a bench has one: a rejected patch or a broken build never started a server, so an
+    # absent log is normal.
     bench = res.get("bench_result")
     server_log = str(bench.get("server_log_path") or "").strip() if isinstance(bench, dict) else ""
     if server_log:
@@ -159,8 +119,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
             _record("server_log", dest)
 
     launch_log = str(res.get("enablement_launch_log") or "")
-    # Written last so the config path it names is the copy that just landed
-    # under ``reports/``, not the ``runs/`` original the collector drops.
+    # Written last so the config path it names is the copy that just landed under ``reports/``, not the ``runs/``
+    # original the collector drops.
     atomic_write_json(
         round_dir / "round.json",
         {
@@ -171,14 +131,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
             "extra_envs_applied": res.get("extra_envs_applied") or {},
             "dropped_env_overrides": res.get("dropped_env_overrides") or [],
             "extra_server_args_applied": res.get("extra_server_args_applied") or "",
-            # Redacted HERE and not where the list is built: the same field is
-            # the replay channel -- ``lane.py`` stacks it into
-            # ``state.enablement.setup_commands`` and the next round EXECUTES
-            # what it finds there. The allowlist admits
-            # ``pip install --index-url https://user:token@host/simple foo``,
-            # so the command that has to stay runnable is also the one that must
-            # not be written down verbatim. Sanitising at the source would send
-            # a redacted string to pip; sanitising here separates the two.
+            # Redacted HERE and not where the list is built: the same field is the replay channel -- ``lane.py``
+            # stacks it into ``state.enablement.setup_commands`` and the next round EXECUTES what it finds there.
             "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
             "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
@@ -200,34 +154,7 @@ def write_setting_script(
     max_model_len: int | None = None,
     gpu_type: str | None = None,
 ) -> str:
-    """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
-
-    Idempotently rewritten on every ``kept`` or ``advanced`` verdict. Deliverables
-    are emitted round by round from ``kept_rounds`` so the replay order matches the
-    order integrate_patch applied them in; a round's patches precede its artifacts,
-    which is what lets a round both patch and whole-file-replace the same file.
-
-    Patches are copied to ``reports/enablement/patches/`` under a stack-ordered
-    name, since specialists across rounds pick colliding file names, and are
-    referenced only once the copy lands. Patches are dropped entirely without a
-    framework root, because ``git apply`` would have no target to run against.
-
-    Whole-file artifacts are copied to ``reports/enablement/artifacts/`` and
-    become ``install -D`` lines. Each one's pre-image is copied alongside as
-    ``.orig``, which is what an upstream PR has to be written against.
-
-    Args:
-        session_dir: The session root directory.
-        enablement: The current ``EnablementRound`` state object.
-        framework: Framework identifier for the server entrypoint.
-        model: Model path emitted as ``export MODEL=``.
-        tp: Tensor-parallel degree.
-        max_model_len: Context length cap.
-        gpu_type: GPU type string.
-
-    Returns:
-        Session-relative path of the written script.
-    """
+    """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state."""
     from hyperloom.inference_optimizer.reference_script import render_reference_script
 
     framework_root = str(enablement.framework_root or "").strip()

@@ -2,18 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for credential precedence in kernel-agent runtime env.
-
-Context: every documented launch path sources ``.env`` first and the generated
-``kernel-agent.env.sh`` second, and only the first install runs ``install.sh``.
-A credential the file re-exports unconditionally therefore outranks the one the
-operator just rotated in ``.env``, on every launch, until the installer is run
-again -- so rotating a key does not actually rotate it (#1169).
-
-Credentials are runtime input owned by ``.env``/the caller; the paths this file
-also carries are install-time results owned by the installer. These tests pin
-both halves: credentials fall back, paths still win.
-"""
+"""Regression tests for credential precedence in kernel-agent runtime env."""
 
 from __future__ import annotations
 
@@ -36,13 +25,7 @@ _ROTATED_TOKEN = "sk-ant-oat01-rotated-token"
 
 
 def _sourceable_installer(dest_dir: Path) -> Path:
-    """Write a copy of install.sh with the top-level ``main "$@"`` call removed.
-
-    The installer ends with an unguarded ``main "$@"``; sourcing it directly
-    would run the whole install. Strip that single trailing invocation so the
-    copy only defines functions and top-level variables, letting a test source
-    it and call an individual function (``write_env_file``) in isolation.
-    """
+    """Write a copy of install.sh with the top-level ``main \"$@\"`` call removed."""
     text = INSTALL_SCRIPT.read_text(encoding="utf-8")
     patched = re.sub(r"(?m)^main \"\$@\"\s*$", "", text)
     copy = dest_dir / "install_sourceable.sh"
@@ -54,15 +37,11 @@ class KernelAgentEnvCredentialPrecedenceTest(unittest.TestCase):
     """``kernel-agent.env.sh`` must not outrank a rotated ``.env`` credential."""
 
     def _write_env_file(self, workdir: Path, repo_root: Path) -> Path:
-        """Generate ``kernel-agent.env.sh`` with the install-time credentials.
-
-        Returns:
-            Path: The generated env file.
-        """
+        """Generate ``kernel-agent.env.sh`` with the install-time credentials."""
         sourceable = _sourceable_installer(workdir)
         kernel_agent_env = workdir / "runtime" / "kernel-agent.env.sh"
-        # GEAK_ROOT preset: an unset one makes the installer resolve GEAK_REF
-        # through ``git ls-remote``, which would put this test on the network.
+        # GEAK_ROOT preset: an unset one makes the installer resolve GEAK_REF through ``git ls-remote``, which would
+        # put this test on the network.
         script = f"""
 set -euo pipefail
 export ANTHROPIC_API_KEY={_INSTALL_KEY}
@@ -93,12 +72,7 @@ write_env_file
         return kernel_agent_env
 
     def _source_and_report(self, env_file: Path, exported: dict[str, str]) -> tuple[dict[str, str], str]:
-        """Source ``env_file`` after exporting ``exported``, like a real launch.
-
-        Returns:
-            tuple[dict[str, str], str]: The resulting values of the reported
-            variables, and the file's stderr output.
-        """
+        """Source ``env_file`` after exporting ``exported``, like a real launch."""
         reported = (
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
@@ -144,8 +118,8 @@ write_env_file
         )
         self.assertEqual(values["ANTHROPIC_BASE_URL"], _ROTATED_URL)
         self.assertEqual(values["CLAUDE_CODE_OAUTH_TOKEN"], _ROTATED_TOKEN)
-        # A silent override is what made #1169 expensive to diagnose, so the
-        # mismatch must be announced -- without disclosing either value.
+        # A silent override is what made #1169 expensive to diagnose, so the mismatch must be announced -- without
+        # disclosing either value.
         self.assertIn("ANTHROPIC_API_KEY", stderr)
         self.assertNotIn(_INSTALL_KEY, stderr)
         self.assertNotIn(_ROTATED_KEY, stderr)
@@ -176,11 +150,7 @@ write_env_file
         self.assertEqual(stderr, "")
 
     def test_install_resolved_paths_still_win(self) -> None:
-        """Paths are install-time results, not runtime input: the file owns them.
-
-        Losing this would reintroduce the workspace mixup that made the
-        installer-written path vars authoritative in the first place.
-        """
+        """Paths are install-time results, not runtime input: the file owns them."""
         with tempfile.TemporaryDirectory() as td:
             work = Path(td)
             repo_root = work / "repo"

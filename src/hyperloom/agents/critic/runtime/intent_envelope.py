@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Build and validate Coordinator-compatible intent envelopes.
-
-The Coordinator accepts intent envelopes of the form
-
-```
-{"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}
-```
-
-The Critic normally produces two intent types: ``review_verdict``
-(per proposal) and ``send_message`` (heartbeat / ``advice``). Raw
-envelope validation delegates to the inference-optimizer protocol
-validator so the Coordinator and standalone critic runtime share one
-payload schema.
-"""
+"""Build and validate Coordinator-compatible intent envelopes."""
 
 from __future__ import annotations
 
@@ -83,12 +70,7 @@ class Intent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the intent as a plain JSON-serialisable dict.
-
-        Returns:
-            dict[str, Any]: ``{"intent_type": ..., "payload": ...}`` with the
-            payload copied.
-        """
+        """Return the intent as a plain JSON-serialisable dict."""
         return {"intent_type": self.intent_type, "payload": dict(self.payload)}
 
 
@@ -99,37 +81,16 @@ class IntentEnvelope:
     intents: list[Intent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the envelope as the Coordinator-compatible dict form.
-
-        Returns:
-            dict[str, Any]: ``{"intents": [...]}`` with each intent converted
-            via :meth:`Intent.to_dict`.
-        """
+        """Return the envelope as the Coordinator-compatible dict form."""
         return {"intents": [i.to_dict() for i in self.intents]}
 
     def append(self, intent: Intent) -> None:
-        """Append one intent to the envelope.
-
-        Args:
-            intent (Intent): The intent to add.
-        """
+        """Append one intent to the envelope."""
         self.intents.append(intent)
 
 
 def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
-    """Validate the dict form and return a typed :class:`IntentEnvelope`.
-
-    Args:
-        envelope (dict[str, Any]): The raw envelope dict to validate.
-
-    Returns:
-        IntentEnvelope: The validated, typed envelope.
-
-    Raises:
-        IntentEnvelopeValidationError: If the envelope shape is invalid, an
-            intent type is not Critic-permitted, or a payload fails
-            validation.
-    """
+    """Validate the dict form and return a typed :class:`IntentEnvelope`."""
     if isinstance(envelope, dict) and envelope.get("intents") == []:
         raise IntentEnvelopeValidationError("envelope.intents must be a non-empty list")
     try:
@@ -167,34 +128,7 @@ def build_review_verdict_intent(
     notes: Iterable[str] | None = None,
     failure_reason_code: str = "",
 ) -> Intent:
-    """Build a validated ``review_verdict`` intent.
-
-    Args:
-        target_proposal_msg_id (str): The proposal ``msg_id`` being reviewed.
-        verdict (str): One of :data:`ALLOWED_VERDICTS`.
-        reasoning (str): Free-text justification for the verdict.
-        source (str): Verdict source; one of :data:`ALLOWED_VERDICT_SOURCES`.
-        confidence (str | None): Optional confidence label; omitted when
-            ``None``.
-        predicted_gain_pct (float | None): Optional predicted gain percent.
-        kb_evidence (Iterable[str] | None): KB evidence references.
-        packet_evidence (Iterable[str] | None): Packet evidence references.
-        risks (list[dict[str, Any]] | None): Structured risk entries.
-        required_evidence (Iterable[str] | None): Evidence still required.
-        alternative_action (str | None): Suggested alternative action.
-        advice_text (str): Devil's-advocate advice text.
-        notes (Iterable[str] | None): Additional free-text notes.
-        failure_reason_code (str): The ``failure_reason_code`` of the review
-            rule this verdict rests on, as declared in the judge bundle's
-            ``review_constraints``. Empty when the verdict cites no rule.
-
-    Returns:
-        Intent: The constructed ``review_verdict`` intent.
-
-    Raises:
-        IntentEnvelopeValidationError: If ``verdict`` or ``source`` is not in
-            the allowed set, or ``target_proposal_msg_id`` is empty.
-    """
+    """Build a validated ``review_verdict`` intent."""
     if verdict not in ALLOWED_VERDICTS:
         raise IntentEnvelopeValidationError(f"verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}")
     if source not in ALLOWED_VERDICT_SOURCES:
@@ -222,14 +156,7 @@ def build_review_verdict_intent(
 
 
 def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
-    """Build the heartbeat ``send_message`` intent.
-
-    Args:
-        body_md (str): Message body; defaults to :data:`DEFAULT_HEARTBEAT_BODY`.
-
-    Returns:
-        Intent: A ``send_message`` intent on the heartbeat topic.
-    """
+    """Build the heartbeat ``send_message`` intent."""
     return Intent(
         intent_type="send_message",
         payload={"topic": DEFAULT_HEARTBEAT_TOPIC, "body_md": body_md},
@@ -237,16 +164,7 @@ def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
 
 
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
-    """Build a devil's-advocate ``advice`` ``send_message`` intent.
-
-    Args:
-        body_md (str): The advice message body.
-        target_proposal_msg_id (str | None): Optional proposal the advice is
-            about; added as ``about_proposal_msg_id`` when provided.
-
-    Returns:
-        Intent: A ``send_message`` intent on the advice topic.
-    """
+    """Build a devil's-advocate ``advice`` ``send_message`` intent."""
     payload: dict[str, Any] = {"topic": DEFAULT_ADVICE_TOPIC, "body_md": body_md}
     if target_proposal_msg_id:
         payload["about_proposal_msg_id"] = target_proposal_msg_id
@@ -254,22 +172,7 @@ def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = No
 
 
 def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
-    """Wrap a non-empty iterable of intents into an envelope.
-
-    Empty input falls back to a single heartbeat so the Coordinator never
-    times out on an empty envelope; this matches MockCriticBackend.
-
-    Args:
-        intents (Iterable[Intent]): The intents to wrap.
-
-    Returns:
-        IntentEnvelope: The validated envelope (heartbeat-only if ``intents``
-        was empty).
-
-    Raises:
-        IntentEnvelopeValidationError: If the resulting envelope fails the
-            self-check in :func:`validate_envelope`.
-    """
+    """Wrap a non-empty iterable of intents into an envelope."""
     materialised = list(intents)
     if not materialised:
         materialised = [build_heartbeat_intent()]

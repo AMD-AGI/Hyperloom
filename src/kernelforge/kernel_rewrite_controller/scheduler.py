@@ -86,12 +86,7 @@ def dispatch_prepared_tasks(
     clock: Callable[[], float] = time.time,
     on_progress: Callable[[ScheduleResult], None] | None = None,
 ) -> ScheduleResult:
-    """Validate and run all published tasks sequentially by priority.
-
-    ``on_progress`` receives the schedule so far after every task reaches a
-    terminal state, so a caller can persist what a campaign has accounted for
-    before it is killed rather than only when it returns.
-    """
+    """Validate and run all published tasks sequentially by priority."""
     task_dirs = discover_task_dirs(layout)
     parsed_by_id: dict[str, tuple[Path, KernelRewriteTask]] = {}
     results: list[SingleTaskResult] = []
@@ -105,10 +100,7 @@ def dispatch_prepared_tasks(
         if incumbent is None:
             parsed_by_id[parsed.task.operator_id] = (task_dir, parsed.task)
         elif parsed.task.priority < incumbent[1].priority:
-            # The displaced incumbent needs the same skip record its rival would
-            # have got. Without one it stays `ready` and produces no result row,
-            # while ``task_count`` still counts its directory -- so the run would
-            # report one more task than it accounts for.
+            # The displaced incumbent needs the same skip record its rival would have got.
             results.append(
                 _skip_task(
                     incumbent[0],
@@ -135,11 +127,6 @@ def dispatch_prepared_tasks(
 
     task_dirs_by_id = {task.operator_id: task_dir for task_dir, task in parsed_by_id.values()}
     # One base commit per repository rather than one repository per campaign.
-    # Every patch is a diff from its own repository's pinned commit and is
-    # applied to that repository alone, so two independent repositories cannot
-    # conflict; only a second base within one repository can. The pin comes from
-    # the highest-priority task naming that repository, which makes it a function
-    # of the agent's own ranking rather than of publication order.
     pinned_bases: dict[Path, str] = {}
     stopped_for_budget = False
 
@@ -154,12 +141,7 @@ def dispatch_prepared_tasks(
     def _report() -> None:
         if on_progress is None:
             return
-        # Suppressed on purpose. The callback exists so a campaign's accounting
-        # survives being killed, and its own work -- scanning the patch directory
-        # and rewriting two files on a shared filesystem -- can fail on its own.
-        # Letting that failure out would abort a campaign that is making progress
-        # and may already hold published patches, which is the opposite of what
-        # recording the accounting is for.
+        # Suppressed on purpose.
         with contextlib.suppress(Exception):
             on_progress(_snapshot())
 

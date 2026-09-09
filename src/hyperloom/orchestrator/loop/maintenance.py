@@ -19,19 +19,7 @@ async def run_lease_and_db_reclaim(
     *,
     reason: str,
 ) -> None:
-    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
-
-    Shared by the periodic maintenance tick and the cycle soft-restart. The
-    task reclaim is the R6 watchdog: a running task whose execution lease
-    expired is failed so a dead worker never wedges a lane indefinitely. Every
-    step is individually best-effort — maintenance never aborts the run loop.
-
-    Args:
-        host: Anything exposing the Coordinator's ``locks``,
-            ``gpu_specialist_pool``, ``tasks`` and ``db``.
-        summary: Mutated in place with the per-step counts.
-        reason: Reclaim reason recorded on the tasks and used as the log prefix.
-    """
+    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB."""
     try:
         reaped = await host.locks.reap_expired()
         summary["leases_reaped"] = len(reaped or [])
@@ -70,22 +58,7 @@ class MaintenanceCollaborator:
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Periodic in-process maintenance (R5 reaper + R4 DB retention).
-
-        On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
-        and prune the events/tasks DB so a multi-day single-session run never
-        leaks capacity or grows the DB unbounded. Best-effort — every step is
-        independently guarded so one failure never aborts the run loop. Returns
-        a summary dict when it ran, else ``None``.
-
-        Args:
-            tick: The current coordinator tick; maintenance only runs when it
-                is positive and a multiple of the configured cadence.
-
-        Returns:
-            A summary dict of work performed (leases reaped, tasks reclaimed,
-            rows pruned, disk status) when the cadence fired, else ``None``.
-        """
+        """Periodic in-process maintenance (R5 reaper + R4 DB retention)."""
         every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
         if every <= 0 or tick <= 0 or (tick % every) != 0:
             return None
@@ -101,16 +74,7 @@ class MaintenanceCollaborator:
         return summary
 
     def _maybe_prune_runs_for_disk(self) -> dict[str, Any] | None:
-        """LRU-trim per-task ``runs/`` workspaces when disk is low.
-
-        No-op unless the session partition is below the free-space floor or
-        above the used-fraction ceiling. When triggered, keeps only the most
-        recently modified N task dirs per action and deletes the rest. Also
-        warns (only) when ``state.json`` grows past a soft size cap.
-
-        Returns:
-            dict | None: A summary when the check ran, else ``None``.
-        """
+        """LRU-trim per-task ``runs/`` workspaces when disk is low."""
         import shutil
 
         from hyperloom.inference_optimizer.session.session_paths import runs_root as _runs_root
@@ -134,8 +98,8 @@ class MaintenanceCollaborator:
                     self._STATE_JSON_WARN_BYTES / (1024.0**2),
                 )
         except OSError:
-            # Best-effort disk/size warning only; never block on a stat() that
-            # races a concurrent prune or a transient filesystem error.
+            # Best-effort disk/size warning only; never block on a stat() that races a concurrent prune or a transient
+            # filesystem error.
             pass
 
         if free_gb >= self._DISK_FREE_MIN_GB and used_frac <= self._DISK_USED_MAX_FRAC:
@@ -175,23 +139,7 @@ class MaintenanceCollaborator:
         phase_changed: bool = False,
         force: bool = False,
     ) -> bool:
-        """Compact the orchestration conversation into durable memory.
-
-        Returns True when a checkpoint was taken. Best-effort. ``force`` bypasses
-        the throttle policy (used by the R6 cycle-boundary soft restart) but
-        still requires a seeded conversational backend.
-
-        Args:
-            tick: The current coordinator tick, recorded on the checkpoint
-                tracker and emitted in the observation.
-            phase_changed: Whether the phase changed this tick; influences the
-                throttle policy's decision to checkpoint.
-            force: Bypass the throttle policy and checkpoint regardless of
-                cadence (still requires a seeded conversational backend).
-
-        Returns:
-            ``True`` if a checkpoint was taken, else ``False``.
-        """
+        """Compact the orchestration conversation into durable memory."""
         if not self._checkpoint_enabled:
             return False
         if not self._orchestration_conversational():
@@ -211,8 +159,8 @@ class MaintenanceCollaborator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Growth signal is the context-token water level; char count is the
-        # fallback for backends that don't report token usage.
+        # Growth signal is the context-token water level; char count is the fallback for backends that don't report
+        # token usage.
         if not force and not self._checkpoint_policy.should_checkpoint(
             ticks_since_last=ticks_since,
             minutes_since_last=minutes_since,
@@ -236,8 +184,8 @@ class MaintenanceCollaborator:
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
             degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
             cur_phase = str(getattr(self.shared_state, "phase", "") or "")
-            # Degenerate reply: skip compaction, preserve the live conversation +
-            # prior memory, but reset the tracker to avoid a checkpoint storm.
+            # Degenerate reply: skip compaction, preserve the live conversation + prior memory, but reset the tracker
+            # to avoid a checkpoint storm.
             if degenerate:
                 self._coord._consec_degenerate_ckpt += 1
                 tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
@@ -251,8 +199,7 @@ class MaintenanceCollaborator:
                         "parse_error": str(parsed.get("parse_error", "") or ""),
                     },
                 )
-                # Repeated degeneracy: raise the observation's severity
-                # (advisory only).
+                # Repeated degeneracy: raise the observation's severity (advisory only).
                 if self._consec_degenerate_ckpt >= 3:
                     await self._record_observation(
                         "coordinator",
@@ -281,8 +228,8 @@ class MaintenanceCollaborator:
                 previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
-            # Append to the bounded rollback ring so a later bad compaction can
-            # be recovered from a prior good snapshot.
+            # Append to the bounded rollback ring so a later bad compaction can be recovered from a prior good
+            # snapshot.
             try:
                 hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
                 hist.append(record)
@@ -318,8 +265,8 @@ class MaintenanceCollaborator:
             return True
         except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
             log.exception("Coordinator: orchestration checkpoint failed")
-            # Reset the tracker even on failure so a transient backend error
-            # (e.g. gateway 401) can't trigger a checkpoint storm next tick.
+            # Reset the tracker even on failure so a transient backend error (e.g. gateway 401) can't trigger a
+            # checkpoint storm next tick.
             try:
                 tracker.reset(
                     tick=tick,

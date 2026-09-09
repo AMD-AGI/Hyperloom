@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for machine_state pure helpers: escalate hints, budget normalization,
-time/budget remaining math, post-prelude target, and history-row builder."""
+"""Coverage for machine_state pure helpers: escalate hints, budget normalization, time/budget remaining math,
+post-prelude target, and history-row builder.
+"""
 
 from __future__ import annotations
 
@@ -32,8 +33,8 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     )
     assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
-    # A dropped entry falls back to its default rather than vanishing: a phase
-    # with no share would run to whatever it costs.
+    # A dropped entry falls back to its default rather than vanishing: a phase with no share would run to whatever it
+    # costs.
     assert set(out) == set(ps.PHASE_NAMES)
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
@@ -173,13 +174,7 @@ def test_make_history_row() -> None:
 
 
 def test_phase_budget_help_quotes_the_real_default() -> None:
-    """``--help`` must quote the default the run will actually use.
-
-    These flags default to None and fall through to DEFAULT_PHASE_BUDGET_PCT,
-    so the number in the help text is the only place a user can read the real
-    value, and nothing recomputes it. Both the KERNEL_AGENT and SWEEP shares
-    had been retuned without the help text following.
-    """
+    """``--help`` must quote the default the run will actually use."""
     import re
 
     from hyperloom.inference_optimizer.cli.parser import _build_parser

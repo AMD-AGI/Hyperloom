@@ -92,13 +92,7 @@ def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
 
 
 def test_fingerprint_value_swap_differs() -> None:
-    """Swapping values across different flags must produce distinct fingerprints.
-
-    The flat-token sort bug caused --max-num-seqs 128 --max-model-len 4096 to
-    collide with --max-num-seqs 4096 --max-model-len 128 because both produce
-    the same sorted token list. Pair-aware hashing preserves the flag->value
-    binding.
-    """
+    """Swapping values across different flags must produce distinct fingerprints."""
     fp_a = canonical_fingerprint("--max-num-seqs 128 --max-model-len 4096", {})
     fp_b = canonical_fingerprint("--max-num-seqs 4096 --max-model-len 128", {})
     assert fp_a != fp_b
@@ -142,8 +136,7 @@ def test_variant_result_to_dict_carries_fingerprint() -> None:
 
 
 def test_shared_state_normalizes_explore_search_tested() -> None:
-    """SharedState.from_dict shapes the ``explore_search`` ledger with
-    defensive defaults and preserves fingerprint-keyed ``tested``."""
+    """SharedState.from_dict shapes the ``explore_search`` ledger with defensive defaults and preserves fingerprint-keyed ``tested``."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     fp_a = canonical_fingerprint("--A", {})

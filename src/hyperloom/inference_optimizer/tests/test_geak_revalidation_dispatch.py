@@ -201,8 +201,8 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
     first = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
     row0 = await c.tasks.get(str(first["task_id"]))
     assert row0.idempotency_key == "geak-revalidate-c0"
-    # GEAK's revalidation is a plain explore over the stack: it names no
-    # protocol of its own and takes the executor's grading as it stands.
+    # GEAK's revalidation is a plain explore over the stack: it names no protocol of its own and takes the executor's
+    # grading as it stands.
     assert {
         "rebench_required",
         "revalidation_protocol",
@@ -417,14 +417,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     coordinator, with_removal_controls: bool
 ) -> None:
-    """The pinned hash must describe the config the grid executor actually runs.
-
-    ``accepted_config`` carries PATH so the benchmark resolves its own
-    interpreter, but ``GridVariant`` drops shell/loader keys before it
-    fingerprints. Hashing the unfiltered mapping made the 2b identity check miss
-    on every GEAK win that shipped one, replaying a measured gain as
-    inconclusive.
-    """
+    """The pinned hash must describe the config the grid executor actually runs."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -468,13 +461,7 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
 
 
 def test_material_check_ignores_untrusted_env_names() -> None:
-    """An untrusted key on one side only must not read as a config difference.
-
-    ``accepted_config`` is a harness snapshot and carries PATH; ``current_best``
-    holds the executor-filtered mapping. Comparing them raw made every echoed
-    config look material, which is exactly the passthrough noise the gate exists
-    to reject.
-    """
+    """An untrusted key on one side only must not read as a config difference."""
     from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
 
     echoed = {
@@ -646,12 +633,7 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
 
 @pytest.mark.asyncio
 async def test_rebench_can_be_rebuilt_after_cancel_within_same_cycle(coordinator) -> None:
-    """A cancelled rebench must not block a fresh one in the same macro-cycle.
-
-    ``create_or_return_existing`` hands back the cancelled row for a reused key,
-    which KERNEL then reads as ``rebench_unavailable`` and the GEAK win stays
-    audit-only for the rest of the cycle.
-    """
+    """A cancelled rebench must not block a fresh one in the same macro-cycle."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -808,12 +790,7 @@ async def test_settle_preserves_candidate_audit_fields(coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_wall_clock_closing_stops_rebench_and_settles(coordinator) -> None:
-    """The wall-clock closing path never reaches ``_on_enter_close``.
-
-    It cancels queued work but left the slot at ``awaiting_rebench`` and a
-    running rebench alive, so the report claimed a rebench was still coming
-    while the task had already been cancelled.
-    """
+    """The wall-clock closing path never reaches ``_on_enter_close``."""
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"
@@ -1591,11 +1568,7 @@ async def test_orphan_geak_rebench_success_does_not_promote(coordinator) -> None
 
 @pytest.mark.asyncio
 async def test_orphan_geak_rebench_inconclusive_does_not_run_2a(coordinator) -> None:
-    """An untracked rebench must not trigger the GEAK-harness 2a fallback.
-
-    A successful 2a writes the stack entry; a failed 2a clears the pending slot
-    of the genuinely tracked rebench. Both bypass the orphan gate.
-    """
+    """An untracked rebench must not trigger the GEAK-harness 2a fallback."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -1646,11 +1619,7 @@ async def test_orphan_geak_rebench_inconclusive_does_not_run_2a(coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_close_entry_settles_pending_after_phase_boundary_cancel(coordinator) -> None:
-    """CLOSE must settle a dangling ``awaiting_rebench`` slot.
-
-    The SWEEP->CLOSE transition already cancels the queued rebench, so the CLOSE
-    sequencer finds nothing left to cancel and must still settle the slot.
-    """
+    """CLOSE must settle a dangling ``awaiting_rebench`` slot."""
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"
@@ -1735,11 +1704,7 @@ async def test_settle_waits_while_rebench_still_running(coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_close_drain_cancels_running_rebench_and_settles(coordinator) -> None:
-    """CLOSE writes reports only, so a running rebench is stopped, not awaited.
-
-    Leaving it running would hold the GPU lane against the post-opt roofline and
-    could still rewrite current_best after the report was generated.
-    """
+    """CLOSE writes reports only, so a running rebench is stopped, not awaited."""
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"

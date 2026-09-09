@@ -224,12 +224,7 @@ def write_forge_handoff(
     env_spec: Mapping[str, Any] | None = None,
     handoff_dir: Path | None = None,
 ) -> Path:
-    """Atomically write one Forge handoff and return its directory.
-
-    ``handoff_dir`` lets the caller keep the handoff beside the controller output
-    that consumed it, so a second attempt within one macro cycle does not
-    overwrite the evidence the first one was given.
-    """
+    """Atomically write one Forge handoff and return its directory."""
     if handoff_dir is None:
         handoff_dir = forge_handoff_dir(
             Path(session_dir),

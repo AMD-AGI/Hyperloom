@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Already-applied patches must be a satisfied no-op, not an apply failure.
-
-A specialist commonly writes both a superset patch and the subset it contains
-(e.g. an FLA state-layout revert, plus that same revert bundled with a config
-fix). Whichever lands first makes the other's hunks a no-op, and both POSIX
-``patch`` and ``git apply --check`` reject that with a non-zero exit that looks
-exactly like "does not apply". Treating it as a hard failure aborted the whole
-enablement combo and reverted a correctly-applied fix.
-
-Both apply channels resolve the ambiguity with a *reverse* dry-run, which
-succeeds only when every hunk's post-state is already present. These tests pin
-the three outcomes that matter: no-op on full overlap, real failure on no
-overlap, and real failure on *partial* overlap (where a no-op would be wrong).
-"""
+"""Already-applied patches must be a satisfied no-op, not an apply failure."""
 
 from __future__ import annotations
 
@@ -102,8 +89,7 @@ def test_nogit_superset_then_subset_is_a_noop(workspace):
     ok2, err2, recs2, fb2 = _apply_patch_no_git(src, sub, backups, seq_offset=len(recs))
     assert ok2, err2
     assert fb2 is None
-    # The no-op owns no backups — the patch that made the edits owns them, so a
-    # revert restores the tree exactly once.
+    # The no-op owns no backups — the patch that made the edits owns them, so a revert restores the tree exactly once.
     assert recs2 == []
 
     assert "new_alpha" in (src / "mod" / "alpha.py").read_text(encoding="utf-8")
@@ -111,14 +97,7 @@ def test_nogit_superset_then_subset_is_a_noop(workspace):
 
 
 def test_nogit_subset_then_superset_fails_closed(workspace):
-    """The reverse order is only *partly* satisfied, so it must fail, not no-op.
-
-    Applying the subset first leaves the superset's extra ``beta`` hunk still
-    outstanding. Reporting a no-op there would silently drop a real edit, so the
-    reverse probe rejects it and the apply fails closed — the executor reverts
-    and hands the specialist ``retry_feedback`` to reauthor from. The narrow
-    no-op is deliberately limited to a *fully* satisfied patch.
-    """
+    """The reverse order is only *partly* satisfied, so it must fail, not no-op."""
     src, patches, backups = workspace
     sup = _patch(patches, "superset.patch", _SUPERSET)
     sub = _patch(patches, "subset.patch", _SUBSET)
@@ -134,11 +113,7 @@ def test_nogit_subset_then_superset_fails_closed(workspace):
 
 
 def test_nogit_partial_overlap_still_fails(workspace):
-    """A patch only *partly* present is a real failure, not a no-op.
-
-    The superset's beta hunk has not been applied, so silently reporting success
-    would drop a real edit.
-    """
+    """A patch only *partly* present is a real failure, not a no-op."""
     src, patches, backups = workspace
     sup = _patch(patches, "superset.patch", _SUPERSET)
     ok, _, recs, _ = _apply_patch_no_git(src, sup, backups, seq_offset=0)

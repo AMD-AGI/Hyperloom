@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""sglang ``--moe-runner-backend`` injection tests.
-
-Hyperloom injects ``--moe-runner-backend triton`` for MoE sglang models on AMD
-unless the operator already pinned one. Exercised at both the pure-helper and
-``materialize_config_with_envs`` layers.
-"""
+"""sglang ``--moe-runner-backend`` injection tests."""
 
 from __future__ import annotations
 
@@ -189,8 +184,8 @@ def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
         },
         # fp4 with a non-MX group size.
         {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size=16))},
-        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer
-        # 32, so a string value is not a valid MX-FP4 config either.
+        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer 32, so a string value is not a valid
+        # MX-FP4 config either.
         {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size="32"))},
         # Statically quantized activations are not the W4A4 dynamic scheme.
         {
@@ -270,8 +265,8 @@ def test_inject_noop_for_dense_model(dense_model):
 
 
 def test_inject_noop_for_quark_mxfp4_moe(quark_mxfp4_moe_model):
-    # sglang's QuarkW4A4MXFp4MoE only initialises its runner on the aiter path;
-    # forcing triton crashes the server on the first forward pass.
+    # sglang's QuarkW4A4MXFp4MoE only initialises its runner on the aiter path; forcing triton crashes the server on
+    # the first forward pass.
     assert inject_sglang_moe_runner_backend("--foo", "sglang", quark_mxfp4_moe_model, _AMD) == "--foo"
     assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
 
@@ -295,8 +290,8 @@ def test_inject_noop_for_online_int4fp8_moe(moe_model, args):
 
 
 def test_inject_noop_for_online_mxfp4_dynamic_quant(moe_model):
-    # An unserialized checkpoint + --quantization mxfp4 routes to sglang's
-    # dynamic-quant MoE method, which only builds an aiter runner.
+    # An unserialized checkpoint + --quantization mxfp4 routes to sglang's dynamic-quant MoE method, which only builds
+    # an aiter runner.
     args = "--quantization mxfp4"
     assert inject_sglang_moe_runner_backend(args, "sglang", moe_model, _AMD) == args
 

@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster.
-
-The cluster is NOT created here. The platform provisions the RayJob or
-InferaDeployment and hands it over through ``HYPERLOOM_MN_EXT_*``; this CLI only
-drives what is already running and never creates or releases it.
-
-Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
-``bootstrap``, ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
-idempotent), ``kill-inference``, ``apply-patch``, ``revert-patch``,
-``apply-tracelens-patch``, ``kernel-bench``, ``install-geak``.
-
-State lives in ``$MULTI_NODE_STATE_FILE``, or
-``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
-when the session is pinned. There is no default; one of the two must be set.
-HTTP polls under the sandbox's 120s ceiling and surface progress on stderr.
-Credentials must already be in sandbox env; this module never invents URLs or
-keys.
-"""
+"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster."""
 
 from __future__ import annotations
 
@@ -54,12 +37,7 @@ _DEFAULT_POLL_TIMEOUT_S = 110
 
 
 def _resolve_poll_timeout_s() -> int:
-    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``.
-
-    Returns:
-        int: The poll timeout in seconds (at least 1); falls back to the
-        default when the env var is unset or invalid.
-    """
+    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``."""
     raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
     if raw:
         try:
@@ -70,18 +48,7 @@ def _resolve_poll_timeout_s() -> int:
 
 
 def _poll_timeout_from_args(args: argparse.Namespace) -> int:
-    """Resolve the poll timeout for a subcommand.
-
-    The ``--poll-timeout`` CLI flag wins; otherwise falls back to the
-    env/default from :func:`_resolve_poll_timeout_s`.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (may carry
-            ``poll_timeout``).
-
-    Returns:
-        int: The poll budget in seconds (at least 1).
-    """
+    """Resolve the poll timeout for a subcommand."""
     pt = getattr(args, "poll_timeout", None)
     if pt is not None:
         return max(1, int(pt))
@@ -92,25 +59,14 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
 _TERMINAL_FAIL_STATUSES = {"FAILED", "STOPPED"}
 _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 
-# Overall budget for the HTTP serving probe, spanning every request it makes:
-# one /health per leg, /v1/models, then a /v1/completions that has to generate
-# real tokens. Short, because it decides an optimization rather than waiting for
-# readiness, but not per-request-short -- token generation on a loaded server is
-# the slow step, and undershooting it just spends the liveness fan-out instead.
+# Overall budget for the HTTP serving probe, spanning every request it makes: one /health per leg, /v1/models, then a
+# /v1/completions that has to generate real tokens.
 _RESUME_PROBE_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S"
 _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
 
 def _normalize_extra_args(s: str | None) -> str:
-    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters).
-
-    Args:
-        s (str | None): The raw extra-args string, or ``None``.
-
-    Returns:
-        str: The string with runs of whitespace collapsed to single spaces
-        (token order preserved). Empty for ``None``.
-    """
+    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters)."""
     return " ".join((s or "").split())
 
 
@@ -126,14 +82,7 @@ class WorkloadTerminalFailure(RuntimeError):
     """Raised when the polled job reports a terminal failure state; carries the diag snapshot. Exit code -> 2."""
 
     def __init__(self, label: str, phase: str, diag: str, snapshot: dict[str, Any]) -> None:
-        """Initialize the terminal-failure error.
-
-        Args:
-            label (str): The poll label that detected the failure.
-            phase (str): The terminal state reported by the poll.
-            diag (str): One-line human-readable diagnostic.
-            snapshot (dict[str, Any]): Structured failure snapshot.
-        """
+        """Initialize the terminal-failure error."""
         super().__init__(f"{label} terminal phase={phase}: {diag}")
         self.label = label
         self.phase = phase
@@ -146,55 +95,22 @@ class TransientFailure(RuntimeError):
 
 
 class ConfigurationError(RuntimeError):
-    """Raised when the environment is wrong in a way retrying cannot fix. Exit code -> EXIT_CONFIG_ERROR.
-
-    Subclasses ``RuntimeError`` so existing handlers keep catching it; ``main``
-    matches on the type rather than on the message, which the substring list
-    below cannot do reliably for new errors.
-    """
+    """Raised when the environment is wrong in a way retrying cannot fix. Exit code -> EXIT_CONFIG_ERROR."""
 
 
 # State file
 def _state_file() -> Path:
-    """Return the active multi-node state file path.
-
-    Returns:
-        Path: The state file path to read or write.
-    """
+    """Return the active multi-node state file path."""
     return resolve_state_file()
 
 
 def _infera_ssh_dir() -> Path:
-    """Session-scoped directory for the ephemeral multi-node SSH keypair.
-
-    Returns:
-        Path: Directory adjacent to the state file (``.../runtime/mn_ssh``).
-    """
+    """Session-scoped directory for the ephemeral multi-node SSH keypair."""
     return _state_file().parent / "mn_ssh"
 
 
 def _multinode_server_log_dir() -> str:
-    """Resolve a cross-node-visible directory for the per-rank server logs.
-
-    RayJob spawns the prefill/decode legs on different pods than the launch
-    driver, so a node-local ``/tmp`` log dir hides the decode leg's log from the
-    driver's health-wait: its fatal-log fast-fail never fires (a crash burns the
-    full probe timeout before returning "unconfirmed") and its failure-path tail
-    only ever reads ``bytes=0``. Mirror infera and write the logs to a shared
-    filesystem every node mounts so ``{role}_0.log`` is readable from the driver.
-
-    Resolution:
-        1. ``HYPERLOOM_MN_SERVER_LOG_DIR`` (``$VAR`` expanded), when absolute --
-           the same operator override infera honors.
-        2. Otherwise the session runtime dir (``.../runtime/server_logs``), which
-           is on the shared FS and unique per run, so concurrent runs' rank logs
-           cannot collide (infera's ``$USER_DATA_PATH/server_logs`` default can).
-        3. Otherwise a node-local ``/tmp`` dir -- a last resort for a dev/single
-           box where no shared FS is configured.
-
-    Returns:
-        str: The directory the launch driver passes as ``--log-dir``.
-    """
+    """Resolve a cross-node-visible directory for the per-rank server logs."""
     explicit = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
     if explicit.startswith("/") and "$" not in explicit:
         return explicit
@@ -205,23 +121,7 @@ def _multinode_server_log_dir() -> str:
 
 
 def _load_state() -> dict[str, Any]:
-    """Load the CLI state file as a dict.
-
-    Every subcommand here drives a running cluster, so a multi-node state that
-    did not come from the platform's hand-off is refused rather than used: its
-    pod IPs and frontend URL describe a cluster this process cannot confirm
-    exists, and acting on them means SSHing into dead addresses. Callers that
-    merely ask about multi-node configuration read the state directly instead.
-
-    Returns:
-        dict[str, Any]: The parsed state, or an empty dict if the file is
-        missing, unreadable, or fails the ownership/permission check.
-
-    Raises:
-        ConfigurationError: When the run is multi-node, or the state file
-            describes a handed-over cluster, but no hand-off is present in the
-            environment.
-    """
+    """Load the CLI state file as a dict."""
     state = load_multi_node_state()
     if not external_service_url():
         try:
@@ -240,11 +140,7 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    """Write the CLI state dict to the state file as pretty JSON.
-
-    Args:
-        state (dict[str, Any]): The state to persist.
-    """
+    """Write the CLI state dict to the state file as pretty JSON."""
     path = _state_file()
     runtime_dir = path.parent
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -260,17 +156,7 @@ def _save_state(state: dict[str, Any]) -> None:
 
 
 def _require_state(*keys: str) -> dict[str, Any]:
-    """Load state and assert all required keys are present.
-
-    Args:
-        *keys (str): State keys that must be present and truthy.
-
-    Returns:
-        dict[str, Any]: The loaded state.
-
-    Raises:
-        RuntimeError: If any required key is missing or falsy.
-    """
+    """Load state and assert all required keys are present."""
     state = _load_state()
     missing = [k for k in keys if not state.get(k)]
     if missing:
@@ -282,17 +168,7 @@ def _require_state(*keys: str) -> dict[str, Any]:
 
 
 def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.RayDashboardClient:
-    """Open a Ray Dashboard client using ``head_pod_ip`` and optional token from state.
-
-    Args:
-        state: Multi-node state dict; loads from disk when omitted.
-
-    Returns:
-        ray_dashboard.RayDashboardClient: Client bound to the head pod.
-
-    Raises:
-        RuntimeError: When ``head_pod_ip`` is missing from state.
-    """
+    """Open a Ray Dashboard client using ``head_pod_ip`` and optional token from state."""
     st = state if state is not None else _load_state()
     head = str(st.get("head_pod_ip") or "").strip()
     if not head:
@@ -302,14 +178,7 @@ def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.
 
 
 def _infera_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
-    """Resolve the session known_hosts file for Infera SSH.
-
-    Args:
-        state: Optional loaded multi-node state; when omitted, reads state.
-
-    Returns:
-        Path: The known_hosts file used by :mod:`ssh_client`.
-    """
+    """Resolve the session known_hosts file for Infera SSH."""
     st = state if state is not None else _load_state()
     raw = str(st.get("ssh_known_hosts") or "").strip()
     if raw:
@@ -322,15 +191,7 @@ def _refresh_infera_known_hosts(
     *,
     state: dict[str, Any] | None = None,
 ) -> Path:
-    """Run ssh-keyscan for Infera GPU pods and persist the path in state.
-
-    Args:
-        targets: ``(pod_ip, ssh_port)`` pairs to scan.
-        state: Optional state dict to update with ``ssh_known_hosts``.
-
-    Returns:
-        Path: The refreshed known_hosts file.
-    """
+    """Run ssh-keyscan for Infera GPU pods and persist the path in state."""
     kh = ssh_known_hosts.refresh_known_hosts(
         [(ip, int(port)) for ip, port in targets if (ip or "").strip()],
         _infera_known_hosts_path(state),
@@ -341,14 +202,7 @@ def _refresh_infera_known_hosts(
 
 
 def _infera_default_ssh_port(state: dict[str, Any]) -> int:
-    """Return the session default SSH port from state.
-
-    Args:
-        state: The infera multi-node state.
-
-    Returns:
-        int: ``state['ssh_port']`` or the image default.
-    """
+    """Return the session default SSH port from state."""
     return int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
 
 
@@ -364,22 +218,7 @@ def _infera_ssh_run_script(
     remote_path: str | None = None,
     port: int | None = None,
 ):
-    """Run a script on an Infera pod over SSH with host-key retry.
-
-    Args:
-        state: Infera multi-node state (ssh key / port / known_hosts).
-        ip: Target pod IP.
-        script: Script body to ship.
-        interpreter: Remote interpreter (e.g. ``python3``).
-        script_args: Arguments appended after the script path.
-        timeout: SSH timeout in seconds.
-        env: Optional env assignments prepended before the interpreter.
-        remote_path: Remote path for the decoded script; defaults under the remote temp dir.
-        port: Per-pod sshd port; defaults to ``state['ssh_port']``.
-
-    Returns:
-        subprocess.CompletedProcess: The SSH subprocess result.
-    """
+    """Run a script on an Infera pod over SSH with host-key retry."""
     key_path = state["ssh_key_path"]
     ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
     known_hosts = _infera_known_hosts_path(state)
@@ -421,19 +260,7 @@ def _infera_ssh_bash_with_env(
     timeout: int,
     port: int | None = None,
 ):
-    """Run a bash script on an Infera pod via SSH stdin with host-key retry.
-
-    Args:
-        state: Infera multi-node state.
-        ip: Target pod IP.
-        script: Script body for ``bash -s``.
-        env: Environment exports prepended to the script.
-        timeout: SSH timeout in seconds.
-        port: Per-pod sshd port; defaults to ``state['ssh_port']``.
-
-    Returns:
-        subprocess.CompletedProcess: The SSH subprocess result.
-    """
+    """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
     key_path = state["ssh_key_path"]
     ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
     known_hosts = _infera_known_hosts_path(state)
@@ -474,37 +301,7 @@ def _short_poll(
     quiet_fetch_error_grace_s: float = 0.0,
     is_quiet_fetch_error: Callable[[BaseException], bool] | None = None,
 ) -> Any:
-    """Run many short polls within one CLI invocation budget; returns the state_obj on success.
-
-    ``fetch()`` returns ``(state_obj, summary_str)``; each poll is logged.
-    A ``quiet_fetch_error`` within the grace window logs at INFO (a freshly
-    submitted job can 404 briefly). Terminal failure raises
-    :class:`WorkloadTerminalFailure` (exit 2); timeout raises
-    :class:`TransientFailure` (exit 1, safe to rerun).
-
-    Args:
-        label (str): Human-readable label used in log lines.
-        fetch (callable): Returns ``(state_obj, summary_str)`` each poll.
-        is_ok (callable): Predicate marking a successful terminal state.
-        is_fail (callable): Predicate marking a terminal failure state.
-        interval_s (int): Seconds to sleep between polls.
-        timeout_s (int): Total poll budget before giving up.
-        failure_diag (callable | None): Optional ``state_obj -> (diag,
-            snapshot)`` used to enrich a terminal failure. Defaults to ``None``.
-        quiet_fetch_error_grace_s (float): Window during which a quiet fetch
-            error is logged at INFO rather than WARN. Defaults to ``0.0``.
-        is_quiet_fetch_error (Callable[[BaseException], bool] | None): Predicate
-            classifying a fetch exception as quiet. Defaults to ``None``.
-
-    Returns:
-        Any: The ``state_obj`` once ``is_ok`` is satisfied.
-
-    Raises:
-        WorkloadTerminalFailure: When ``is_fail`` matches and a
-            ``failure_diag`` is supplied.
-        RuntimeError: When ``is_fail`` matches without a ``failure_diag``.
-        TransientFailure: When the poll budget elapses before a terminal state.
-    """
+    """Run many short polls within one CLI invocation budget; returns the state_obj on success."""
     started = time.monotonic()
     attempt = 0
     while True:
@@ -556,26 +353,11 @@ def _short_poll(
         time.sleep(interval_s)
 
 
-# ---------------------------------------------------------------------------
 # Infera idle-pod backend helpers
-#
-# The platform deploys the InferaDeployment with idle worker pods (mn-idle.sh)
-# and an SSH control plane instead of a RayJob with the Ray Dashboard, so these
-# reach the pods over SSH. The benchmark entry point is the Infera frontend,
-# NOT sglang rank-0 :8888.
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Best-effort GEAK install on the Infera GPU pods (provisioner hook).
-
-    No-op (returns 0) for non-infera state. Failures are logged but do not
-    abort provisioning — the kernel phase will surface a clear pod-side
-    ``geak CLI not found`` error if install genuinely failed.
-
-    Returns:
-        int: The install return code, or ``0`` for non-infera state / on a
-        swallowed error.
-    """
+    """Best-effort GEAK install on the Infera GPU pods (provisioner hook)."""
     if _load_state().get("backend") != "infera":
         return 0
     ns = argparse.Namespace(
@@ -591,24 +373,11 @@ def install_geak_on_pods_best_effort() -> int:
         return 0
 
 
-# ---------------------------------------------------------------------------
 # Subcommand: bootstrap
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST.
-
-    Streams the sandbox-side ``scripts/bootstrap.sh`` into the head pod via a
-    heredoc entrypoint (``--script PATH`` overrides with a pod-visible script).
-
-    Args:
-        args (argparse.Namespace): Parsed ``bootstrap`` arguments.
-
-    Returns:
-        int: ``0`` on success.
-    """
-    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly,
-    # and rayjob_id no longer has a writer now that the platform owns creation --
-    # requiring it rejected every handed-over cluster. Matches verify /
-    # restart-server / kill-inference, which have always asked for head_pod_ip.
+    """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
+    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and rayjob_id no longer has a writer
+    # now that the platform owns creation -- requiring it rejected every handed-over cluster.
     state = _require_state("head_pod_ip")
 
     if args.script:
@@ -632,11 +401,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id}")
 
         def _fetch():
-            """Fetch the bootstrap job and summarize its status.
-
-            Returns:
-                tuple: ``(job_dict, summary_str)`` for the poll loop.
-            """
+            """Fetch the bootstrap job and summarize its status."""
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -661,14 +426,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 # Subcommand: verify
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Sanity-check the toolchain bootstrap installed inside the RayJob.
-
-    Args:
-        args (argparse.Namespace): Parsed ``verify`` arguments.
-
-    Returns:
-        int: ``0`` on success.
-    """
+    """Sanity-check the toolchain bootstrap installed inside the RayJob."""
     state = _require_state("head_pod_ip")
 
     # Source the env file, then verify ``ray`` is on PATH.
@@ -689,11 +447,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id}")
 
         def _fetch():
-            """Fetch the verify job and summarize its status.
-
-            Returns:
-                tuple: ``(job_dict, summary_str)`` for the poll loop.
-            """
+            """Fetch the verify job and summarize its status."""
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -720,17 +474,7 @@ _SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
 
 def _read_pod_script(name: str) -> str:
-    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time).
-
-    Args:
-        name (str): The script filename under ``multi_node/scripts/``.
-
-    Returns:
-        str: The script's text contents.
-
-    Raises:
-        RuntimeError: If the named script is missing.
-    """
+    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time)."""
     p = _SCRIPTS_DIR / name
     if not p.is_file():
         raise RuntimeError(f"missing pod-side script: {p}. Did you trim the multi_node/scripts/ directory?")
@@ -751,18 +495,7 @@ def _read_bundled_pod_python_script(
     *,
     deps: tuple[str, ...] = ("patch_path_safety.py",),
 ) -> str:
-    """Read a pod Python script with stdlib-only dependencies inlined.
-
-    Infera SSH ships a single decoded file per invocation, so dependency modules
-    are prepended into one executable script body.
-
-    Args:
-        main: Primary script filename under ``multi_node/scripts/``.
-        deps: Dependency scripts to prepend (shebangs stripped).
-
-    Returns:
-        str: Combined script text with one shebang header.
-    """
+    """Read a pod Python script with stdlib-only dependencies inlined."""
     chunks = [_strip_pod_script_header(_read_pod_script(dep)) for dep in deps]
     main_body = _strip_pod_script_header(_read_pod_script(main))
     return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
@@ -773,27 +506,12 @@ def _build_restart_entrypoint(
     pid_file: str,
     log_file: str,
 ) -> str:
-    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill).
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-        pid_file (str): PID-file path the kill / launch scripts use.
-        log_file (str): Server log path on the head pod.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-
-    Raises:
-        RuntimeError: For an unsupported framework.
-    """
+    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill)."""
     framework = args.framework.lower()
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
 
-    # extra_args is spliced after ``--`` into a shell entrypoint and word-split
-    # by launch_server.sh into argv. Denylist path/model flags, then re-quote
-    # each token so a value like ``--foo 1; touch x`` cannot inject a second
-    # shell command (metacharacters stay inside a single quoted token).
+    # extra_args is spliced after ``--`` into a shell entrypoint and word-split by launch_server.sh into argv.
     try:
         safe_extra_args = prepare_shell_safe_extra_args(
             args.extra_args or "",
@@ -816,8 +534,8 @@ def _build_restart_entrypoint(
         f"{launch_sh}__MN_LAUNCH_EOF__\n"
         'chmod +x "$WORK_DIR/kill_server.sh" "$WORK_DIR/launch_server.sh"; '
         f'"$WORK_DIR/kill_server.sh" {shlex.quote(str(pid_file))}; '
-        # shlex.quote every interpolated value so a path/arg carrying shell
-        # metacharacters is a single argv token, never shell control syntax.
+        # shlex.quote every interpolated value so a path/arg carrying shell metacharacters is a single argv token,
+        # never shell control syntax.
         f'"$WORK_DIR/launch_server.sh" {shlex.quote(str(framework))} '
         f"{shlex.quote(str(args.model))} {shlex.quote(str(args.tp))} "
         f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
@@ -826,8 +544,8 @@ def _build_restart_entrypoint(
     return entrypoint
 
 
-# Common entrypoint preamble: sources the bootstrap env file so PATH points
-# at /opt/venv/bin (no-op when bootstrap was skipped).
+# Common entrypoint preamble: sources the bootstrap env file so PATH points at /opt/venv/bin (no-op when bootstrap was
+# skipped).
 _MN_ENTRYPOINT_PREAMBLE = (
     "set -euo pipefail; "
     "if [ -f /etc/profile.d/hyperloom-env.sh ]; then "
@@ -838,16 +556,7 @@ _MN_ENTRYPOINT_PREAMBLE = (
 
 
 def _build_kill_single_entrypoint(pid_file: str) -> str:
-    """Compose a head-pod entrypoint that runs only kill_server.sh.
-
-    Uses the IR-5 PID-file kill (no ``pkill -f``).
-
-    Args:
-        pid_file (str): Path to the PID file the kill script reads.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose a head-pod entrypoint that runs only kill_server.sh."""
     kill_sh = _read_pod_script("kill_server.sh")
     return (
         "set -euo pipefail; "
@@ -866,28 +575,13 @@ def _exec_kill_submission(
     label: str,
     args: argparse.Namespace,
 ) -> str:
-    """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED.
-
-    Args:
-        state: Multi-node state (head IP + dashboard token).
-        entrypoint (str): The kill entrypoint shell command to submit.
-        label (str): Human-readable label used in log lines and polling.
-        args (argparse.Namespace): Parsed CLI args (poll interval/timeout,
-            print_logs).
-
-    Returns:
-        str: The Ray Dashboard submission id of the kill job.
-    """
+    """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED."""
     with _ray_dashboard_client(state) as ray:
         kill_sub = ray.submit_job(entrypoint)
         info(f"{label} submission_id={kill_sub}")
 
         def _fetch_kill():
-            """Fetch the kill job status for the poll loop.
-
-            Returns:
-                tuple[dict, str]: The job dict and a short status message.
-            """
+            """Fetch the kill job status for the poll loop."""
             j = ray.get_job(kill_sub)
             return j, f"kill status={j.get('status', '?')}"
 
@@ -906,15 +600,7 @@ def _exec_kill_submission(
 
 
 def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
-    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors).
-
-    Args:
-        pid_dir (str): Directory of per-rank PID files.
-        grace_sec (int): Grace period before a hard kill. Defaults to ``5``.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors)."""
     py = _read_pod_script("kill_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -926,14 +612,7 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
 
 
 def _extract_launcher_summary(launch_logs: str) -> dict:
-    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure.
-
-    Args:
-        launch_logs (str): The interleaved launcher stdout / logs.
-
-    Returns:
-        dict: The parsed summary object, or ``{}`` when none can be parsed.
-    """
+    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure."""
     if not launch_logs:
         return {}
     text = launch_logs.rstrip()
@@ -965,20 +644,7 @@ def _build_multinode_launch_entrypoint(
     pid_dir: str,
     log_dir: str,
 ) -> str:
-    """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py.
-
-    Killed ranks MUST be cleared before this runs (sequenced by
-    cmd_restart_server) or rank 0's old process still holds :8888.
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-        nnodes (int): Number of nodes (ranks) to launch.
-        pid_dir (str): Directory for per-rank PID files.
-        log_dir (str): Directory for per-rank logs.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
@@ -988,8 +654,8 @@ def _build_multinode_launch_entrypoint(
         )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
-    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive
-    # from state.json's rayjob_id; empty => skip the flag.
+    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive from state.json's rayjob_id; empty =>
+    # skip the flag.
     profiler_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if not profiler_dir:
         _st = _load_state()
@@ -1042,8 +708,8 @@ def _build_multinode_launch_entrypoint(
         f"cat > \"$WORK_DIR/launch_multinode.py\" <<'__MN_LAUNCH_PY_EOF__'\n"
         f"{py}__MN_LAUNCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/launch_multinode.py" '
-        # shlex.quote framework/model so a value with shell metacharacters
-        # stays a single argv token (tp/nnodes are int-coerced above).
+        # shlex.quote framework/model so a value with shell metacharacters stays a single argv token (tp/nnodes are
+        # int-coerced above).
         f"--framework {shlex.quote(str(args.framework))} "
         f"--model {shlex.quote(str(args.model))} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
@@ -1059,18 +725,7 @@ def _build_multinode_router_entrypoint(
     pid_dir: str,
     log_dir: str,
 ) -> str:
-    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py.
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-        prefill_url (str): The prefill group's server URL.
-        decode_url (str): The decode group's server URL.
-        pid_dir (str): Directory for the router PID file.
-        log_dir (str): Directory for the router log.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py."""
     py = _read_pod_script("launch_router.py")
     public_port = 8888
     pid_file = f"{pid_dir.rstrip('/')}/router.pid"
@@ -1098,18 +753,7 @@ def _build_multinode_apply_patch_entrypoint(
     timeout_sec: int,
     jit_build_dir: str = "",
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py.
-
-    Args:
-        target_path (str): The pod-side file path to patch.
-        patch_b64 (str): Base64-encoded unified diff to apply.
-        backup_dir (str): Directory where pre-patch backups are written.
-        kernel_id (str): Identifier tying the patch to a kernel.
-        timeout_sec (int): Per-pod apply timeout in seconds.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
     pps = _read_pod_script("patch_path_safety.py")
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
@@ -1136,17 +780,7 @@ def _build_multinode_revert_patch_entrypoint(
     timeout_sec: int,
     records_json: str = "",
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply).
-
-    Args:
-        target_path (str): The pod-side file path to revert.
-        backup_map_json (str): JSON map of per-pod backups from the matching
-            apply.
-        timeout_sec (int): Per-pod revert timeout in seconds.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply)."""
     pps = _read_pod_script("patch_path_safety.py")
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
@@ -1190,20 +824,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     tracelens_root: str,
     sglang_version_pin: str,
 ) -> str:
-    """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py.
-
-    Forwards only ``$TRACELENS_ROOT`` (patches are read on the pods'
-    wekafs mount); the in-pod script is idempotent.
-
-    Args:
-        tracelens_root (str): Pod-visible TraceLens root forwarded as
-            ``--tracelens-root``.
-        sglang_version_pin (str): Optional SGLang version pin; omitted from the
-            command when empty.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
     pin_arg = ""
     if sglang_version_pin:
@@ -1226,18 +847,7 @@ def _build_multinode_kernel_bench_entrypoint(
     result_glob: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py.
-
-    Args:
-        workspace (str): Pod-side workspace dir for the benchmark.
-        bench_command (str): The benchmark command to run.
-        files_b64_json (str): JSON map of base64-encoded files to materialize.
-        result_glob (str): Glob matching the result files to collect.
-        timeout_sec (int): Benchmark timeout in seconds.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
+    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py."""
     py = _read_pod_script("kernel_bench_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -1254,15 +864,7 @@ def _build_multinode_kernel_bench_entrypoint(
 
 
 def _extract_pod_json(logs: str) -> dict | None:
-    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one).
-
-    Args:
-        logs (str): The interleaved Ray Dashboard ``job_logs`` text.
-
-    Returns:
-        dict | None: The parsed JSON object, or ``None`` when none can be
-        parsed.
-    """
+    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
     if not logs:
         return None
     text = logs.rstrip()
@@ -1299,25 +901,7 @@ def _extract_pod_json(logs: str) -> dict | None:
 
 
 def _forward_runtime_env() -> dict[str, Any] | None:
-    """Build the Ray runtime_env carrying per-round env overrides to every rank.
-
-    The RayJob path spawns one node-pinned actor per rank, so ``_subprocess_env``
-    in ``launch_multinode.py`` inherits the ray worker environment (from the pod
-    spec), not the entrypoint shell. A shell ``export`` in the entrypoint would
-    therefore reach no rank; job-level ``runtime_env.env_vars`` is the only
-    channel Ray propagates to the driver and every actor it creates.
-
-    Reads the same ``HYPERLOOM_MN_EXTRA_FWD_ENV`` control var the infera SSH
-    path consumes so both multi-node backends honour ``extra_env`` identically.
-    ``HYPERLOOM_MN_UNSET_FWD_ENV`` needs no handling here: it exists to drop
-    keys the infera path picks up by prefix from the controller environment,
-    while this path forwards only the explicit per-round overrides, and each
-    submission carries a fresh env, so a previous round's var is already gone.
-
-    Returns:
-        dict[str, Any] | None: A ``{"env_vars": {...}}`` payload, or None when
-        there is nothing to forward (keeps the submission unchanged).
-    """
+    """Build the Ray runtime_env carrying per-round env overrides to every rank."""
     raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
     if not raw:
         return None
@@ -1347,32 +931,13 @@ def _submit_and_collect_pod_json(
     runtime_env: dict | None = None,
     success_statuses: frozenset[str] | None = None,
 ) -> tuple[int, dict | None, str]:
-    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``.
-
-    Args:
-        state: Multi-node state (head IP + dashboard token).
-        entrypoint (str): The entrypoint shell command to submit.
-        label (str): Human-readable label used in log lines and polling.
-        poll_interval (int): Seconds between status polls.
-        poll_timeout (int): Overall poll budget in seconds.
-        runtime_env: Optional Ray runtime environment payload.
-        success_statuses: Parsed JSON ``status`` values treated as success
-            (default: ``{"ok"}``).
-
-    Returns:
-        tuple[int, dict | None, str]: The job return code, the parsed per-pod
-        JSON (or ``None``), and the raw logs.
-    """
+    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
     with _ray_dashboard_client(state) as ray:
         sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
-            """Fetch the submission status for the poll loop.
-
-            Returns:
-                tuple[dict, str]: The job dict and a short status message.
-            """
+            """Fetch the submission status for the poll loop."""
             j = ray.get_job(sub_id)
             return j, f"{label} status={j.get('status', '?')}"
 
@@ -1399,9 +964,8 @@ def _submit_and_collect_pod_json(
         return (EXIT_OK if sub_status in ok_statuses else EXIT_TRANSIENT), parsed, logs
 
 
-# Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
-# Cohesive rayjob/infera clusters live in commands/{rayjob,infera}.py. Bind
-# only the command hooks used below.
+# Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only) Cohesive rayjob/infera clusters live in
+# commands/{rayjob,infera}.py.
 from .commands.infera import (
     _infera_restart_server as _infera_restart_server,
     _infera_kill_inference as _infera_kill_inference,
@@ -1415,30 +979,7 @@ from .commands.infera import (
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
-    """Fan out a kernel patch to every pod (head + workers).
-
-    Read the patch file from sandbox, base64-encode it, submit a Ray
-    Dashboard entrypoint that runs kernel_patch_multinode.py apply on
-    the head pod; that script spawns per-node actors to write the same
-    patch to ``--target-path`` on each pod.
-
-    Multi-node only. Single-node falls back to ``apply_kernel_patch.py``
-    in the sandbox (no Ray dispatch needed).
-
-    Stdout: the same JSON document kernel_patch_multinode.py emits,
-    re-printed verbatim so sandbox-side callers (apply_kernel_patch.py
-    multi-node dispatch) can parse it deterministically.
-
-    Args:
-        args (argparse.Namespace): Parsed ``apply-patch`` arguments
-            (``patch_file``, ``target_path``, ``kernel_id``, ``backup_dir``,
-            ``timeout_sec``, poll knobs).
-
-    Returns:
-        int: ``EXIT_OK`` on a successful fan-out, ``EXIT_CONFIG_ERROR`` for
-        missing state / unreadable patch, ``EXIT_TRANSIENT`` when the JSON
-        can't be parsed or the fan-out failed.
-    """
+    """Fan out a kernel patch to every pod (head + workers)."""
     if _load_state().get("backend") == "infera":
         return _infera_apply_patch(args)
     state = _load_state()
@@ -1488,20 +1029,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_revert_patch(args: argparse.Namespace) -> int:
-    """Fan out a kernel patch revert across the pods that originally
-    received it. ``--backup-map-json`` is the per-host map returned by
-    the matching ``apply-patch`` call; callers MUST pass it through
-    unchanged so the right backups are read on each pod.
-
-    Args:
-        args (argparse.Namespace): Parsed ``revert-patch`` arguments
-            (``target_path``, ``backup_map_json``, ``timeout_sec``, poll
-            knobs).
-
-    Returns:
-        int: ``EXIT_OK`` on success, ``EXIT_CONFIG_ERROR`` for missing state /
-        invalid backup map, ``EXIT_TRANSIENT`` when the JSON can't be parsed.
-    """
+    """Fan out a kernel patch revert across the pods that originally received it."""
     if _load_state().get("backend") == "infera":
         return _infera_revert_patch(args)
     state = _load_state()
@@ -1576,21 +1104,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
-    """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only.
-
-    Needed because the sandbox can't ``import sglang`` to run the local
-    patcher. Idempotent (already-patched pods return ``status=skipped``).
-    Re-prints the script's JSON (``status`` + ``per_pod``) verbatim.
-
-    Args:
-        args (argparse.Namespace): Parsed ``apply-tracelens-patch`` arguments
-            (``tracelens_root``, ``sglang_version_pin``, poll knobs).
-
-    Returns:
-        int: ``EXIT_OK`` when the patch was applied or skipped,
-        ``EXIT_CONFIG_ERROR`` for missing state / TraceLens root,
-        ``EXIT_TRANSIENT`` otherwise.
-    """
+    """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only."""
     if _load_state().get("backend") == "infera":
         return _infera_apply_tracelens_patch(args)
     state = _load_state()
@@ -1636,27 +1150,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_kernel_bench(args: argparse.Namespace) -> int:
-    """Run a kernel micro-benchmark on a GPU-bearing pod.
-
-    Stages an optional bundle of helper files into ``--workspace``,
-    invokes ``--bench-command`` under that workspace with GPU
-    acceleration, and reads back result artifacts matching
-    ``--result-glob``.
-
-    The sandbox calls this when ``is_multi_node()`` is True and the
-    kernel-agent micro-benchmark step would otherwise try to compile +
-    run on the sandbox (which lacks GPUs in multi-node mode).
-
-    Args:
-        args (argparse.Namespace): Parsed ``kernel-bench`` arguments
-            (``workspace``, ``bench_command``, ``files_b64_json``,
-            ``result_glob``, ``timeout_sec``, poll knobs).
-
-    Returns:
-        int: ``EXIT_OK`` on a successful benchmark, ``EXIT_CONFIG_ERROR`` for
-        missing state / invalid files JSON, ``EXIT_TRANSIENT`` when the JSON
-        can't be parsed.
-    """
+    """Run a kernel micro-benchmark on a GPU-bearing pod."""
     if _load_state().get("backend") == "infera":
         return _infera_kernel_bench(args)
     state = _load_state()
@@ -1699,11 +1193,7 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
 
 
 def _resume_probe_timeout_s() -> int:
-    """Overall budget for the HTTP serving probe, across all of its requests.
-
-    Returns:
-        int: Seconds, from ``$HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S`` or the default.
-    """
+    """Overall budget for the HTTP serving probe, across all of its requests."""
     try:
         return max(1, int(os.environ.get(_RESUME_PROBE_TIMEOUT_ENV, "") or _DEFAULT_RESUME_PROBE_TIMEOUT_S))
     except ValueError:
@@ -1711,28 +1201,7 @@ def _resume_probe_timeout_s() -> int:
 
 
 def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[str, Any]:
-    """Every field that changes what the RayJob launcher spawns, as one record.
-
-    The resume fast path compares this record as a whole, so any field that
-    reaches the launcher belongs here: one left out lets a round that changed
-    it resume the previous launch and benchmark the previous topology under
-    this round's config.
-
-    ``--pd-prefill-ep`` / ``--pd-decode-ep`` and the per-role extra-args are
-    deliberately absent: ``_build_multinode_launch_entrypoint`` does not
-    forward them, so on this backend they change nothing that gets spawned.
-    Infera compares them (``_infera_restart_config_matches``) because its
-    launch path does serve them. Forwarding any of them here means adding it
-    to this record in the same change, or a round that changed only that flag
-    resumes the previous launch again.
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-        nnodes (int): Node count this launch targets.
-
-    Returns:
-        dict[str, Any]: The comparable topology record.
-    """
+    """Every field that changes what the RayJob launcher spawns, as one record."""
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     fingerprint: dict[str, Any] = {
         "framework": str(args.framework),
@@ -1744,8 +1213,8 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
         "extra_args": _normalize_extra_args(getattr(args, "extra_args", "")),
     }
     if pd_mode == "disaggregated":
-        # Only meaningful under PD; leaving them out when aggregated keeps a
-        # stale value from an earlier PD run out of the comparison.
+        # Only meaningful under PD; leaving them out when aggregated keeps a stale value from an earlier PD run out of
+        # the comparison.
         fingerprint.update(
             {
                 "pd_prefill_nodes": int(getattr(args, "pd_prefill_nodes", 0) or 0),
@@ -1761,32 +1230,7 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
 
 
 def cmd_restart_server(args: argparse.Namespace) -> int:
-    """Kill any prior vllm/sglang server and launch a new one.
-
-    Two paths, picked from state.json's ``nodes`` field (synthesized from the
-    platform's hand-off):
-
-    * ``nodes <= 1`` (single-pod) — submit a bash entrypoint that runs
-      kill_server.sh + launch_server.sh on the head pod. Same as the
-      pre-multinode behaviour; nothing changes for single-pod sessions.
-    * ``nodes >= 2`` (multi-pod) — submit a Python entrypoint
-      that uses ray actors to fan out kill_multinode.py + launch_multinode.py
-      across every node, wiring sglang/vllm with --nnodes / --node-rank /
-      --dist-init-addr per upstream multi-node docs. The agent runs ONE
-      restart-server invocation; the driver inside the pod handles the rest.
-
-    Infera backend (state.backend == 'infera') routes to the SSH fan-out path
-    instead of the Ray Dashboard.
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments
-            (``framework``, ``model``, ``tp``, ``ep``, PD knobs, ``pid_file``,
-            ``log_file``, poll knobs).
-
-    Returns:
-        int: ``EXIT_OK`` once the server is healthy, ``EXIT_CONFIG_ERROR`` for
-        missing state, or a transient exit code on launch / poll failure.
-    """
+    """Kill any prior vllm/sglang server and launch a new one."""
     if _load_state().get("backend") == "infera":
         return _infera_restart_server(args)
     try:
@@ -1811,12 +1255,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
 
-        # Resume fast path: if the prior launch had identical
-        # framework/model/tp/ep/pd_mode and is still RUNNING, skip KILL+LAUNCH
-        # and resume polling. Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0.
+        # Resume fast path: if the prior launch had identical framework/model/tp/ep/pd_mode and is still RUNNING, skip
+        # KILL+LAUNCH and resume polling.
         launch_sub: str = ""
-        # Set only when a resume was granted because the cluster is serving,
-        # which in PD means its router is already up and must not be rebuilt.
+        # Set only when a resume was granted because the cluster is serving, which in PD means its router is already
+        # up and must not be rebuilt.
         resumed_serving = False
         resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
             "0",
@@ -1825,10 +1268,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             "off",
         )
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
-        # The whole topology record must match. extra_args is normalized on both
-        # sides so whitespace alone does not miss the fast path, and it is part
-        # of the record because it carries every variant flag. A state file
-        # holding no record does not match and takes the full KILL+LAUNCH.
+        # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
+        # miss the fast path, and it is part of the record because it carries every variant flag.
         topology = _rayjob_topology_fingerprint(args, nnodes)
         prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
         if resume_enabled and prev_match:
@@ -1848,12 +1289,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 )
                 launch_sub = prev_sub
             elif _prev_status in _TERMINAL_OK_STATUSES and not getattr(args, "no_wait_health", False):
-                # The driver waits for the servers it spawned before exiting, so
-                # a terminal-OK status means this cluster served once. Silence
-                # now is therefore news -- it died since -- rather than a boot
-                # still in progress, which is what a RUNNING status reports.
-                # --no-wait-health opts out of that guarantee, so it never
-                # resumes here.
+                # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
+                # cluster served once.
                 if cluster_is_serving(
                     state,
                     pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
@@ -1882,14 +1319,12 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         with _ray_dashboard_client(state) as ray:
             # Launch new servers (skipped when resuming a RUNNING launch).
-            # Driver returns once every rank spawned its launcher.
             if not launch_sub:
                 launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
-            # Early checkpoint: persist the launch identity + config before the
-            # (potentially long) _short_poll, so a poll-timeout retry can hit the
-            # resume fast path instead of restarting the bootstrap from zero.
+            # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
+            # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
             state["last_server_pid_dir"] = pid_dir
             state["last_server_log_dir"] = log_dir
             if kill_sub:
@@ -1901,18 +1336,13 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
             state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
             state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
-            # A poll-timeout retry resumes from this checkpoint, so it carries
-            # the topology record as well; the per-field pd_* keys below are
-            # written only once the poll returns.
+            # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
+            # per-field pd_* keys below are written only once the poll returns.
             state["last_restart_topology"] = topology
             _save_state(state)
 
             def _fetch_launch():
-                """Fetch the launch job status for the poll loop.
-
-                Returns:
-                    tuple[dict, str]: The job dict and a short status message.
-                """
+                """Fetch the launch job status for the poll loop."""
                 j = ray.get_job(launch_sub)
                 return j, f"launch status={j.get('status', '?')}"
 
@@ -1938,16 +1368,14 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-            # PD disaggregated: read prefill/decode URLs and submit a separate
-            # router entrypoint binding 8888 (fatal if it fails).
+            # PD disaggregated: read prefill/decode URLs and submit a separate router entrypoint binding 8888 (fatal
+            # if it fails).
             pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
             router_sub = ""
             router_state: dict = {}
             if pd_mode == "disaggregated" and resumed_serving:
-                # The serving probe just drove a completion through this
-                # cluster's public port, which in PD is the router: it is up and
-                # routing. Submitting another would replace the very process
-                # that answered, for nothing.
+                # The serving probe just drove a completion through this cluster's public port, which in PD is the
+                # router: it is up and routing.
                 router_sub = str(state.get("last_router_submission_id") or "")
                 router_state = {
                     "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
@@ -1981,11 +1409,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 )
 
                 def _fetch_router():
-                    """Fetch the router job status for the poll loop.
-
-                    Returns:
-                        tuple[dict, str]: The job dict and a short status message.
-                    """
+                    """Fetch the router job status for the poll loop."""
                     j = ray.get_job(router_sub)
                     return j, f"router status={j.get('status', '?')}"
 
@@ -2013,10 +1437,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_tp"] = args.tp
         state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
         state["last_restart_topology"] = topology
-        # Persist PD state so later invocations can fall back when a flag is
-        # omitted. The orchestrator's PD arg resolution
-        # (_multi_node_server_lifecycle) reads these per-field keys, so they are
-        # kept alongside the topology record rather than folded into it.
+        # Persist PD state so later invocations can fall back when a flag is omitted.
         pd_mode_persist = (getattr(args, "pd_mode", "") or "aggregated").lower()
         state["last_restart_pd_mode"] = pd_mode_persist
         if pd_mode_persist == "disaggregated":
@@ -2062,11 +1483,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id} (entrypoint will exit after launch; server keeps running via nohup)")
 
         def _fetch():
-            """Fetch the restart job status for the poll loop.
-
-            Returns:
-                tuple[dict, str]: The job dict and a short status message.
-            """
+            """Fetch the restart job status for the poll loop."""
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -2094,45 +1511,14 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
 
 def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
-    """Persist a kill submission and drop the launch identity it terminated.
-
-    ``last_restart_submission_id`` names the launch *driver*, which exits as soon
-    as every rank has spawned its server, so the job reaches ``SUCCEEDED`` while
-    the servers keep running detached. A kill ends exactly the launch that id
-    refers to, so keeping it would leave the state claiming a launch this cluster
-    no longer has.
-
-    :func:`cmd_restart_server` no longer trusts that id on its own -- it probes
-    the served endpoint before resuming -- so this is state hygiene rather than
-    the safety property, and it spares the next restart a probe whose answer is
-    already known.
-
-    Args:
-        state (dict): The multi-node state to mutate and persist.
-        kill_sub (str): The kill submission id to record.
-    """
+    """Persist a kill submission and drop the launch identity it terminated."""
     state["last_kill_submission_id"] = kill_sub
     state.pop("last_restart_submission_id", None)
     _save_state(state)
 
 
 def cmd_kill_inference(args: argparse.Namespace) -> int:
-    """Kill vllm/sglang on the RayJob without starting replacements.
-
-    Frees the GPUs (single- or multi-node aware) without launching a new
-    server. Used before kernel-agent GPU tasks.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (pid_file, polling,
-            print_logs).
-
-    Returns:
-        int: ``EXIT_OK`` once the kill fan-out was submitted, or ``1`` when at
-            least one pod's kill failed (infera path only).
-
-    Raises:
-        RuntimeError: If required state keys are missing.
-    """
+    """Kill vllm/sglang on the RayJob without starting replacements."""
     if _load_state().get("backend") == "infera":
         return _infera_kill_inference(args)
     state = _require_state("head_pod_ip")
@@ -2183,11 +1569,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
 
 
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
-    """Register the shared ``--poll-interval`` / ``--poll-timeout`` flags.
-
-    Args:
-        p (argparse.ArgumentParser): The (sub)parser to add the flags to.
-    """
+    """Register the shared ``--poll-interval`` / ``--poll-timeout`` flags."""
     p.add_argument(
         "--poll-interval",
         type=int,
@@ -2208,15 +1590,7 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argparse parser with every subcommand.
-
-    Registers the ``bootstrap`` / ``verify`` / ``restart-server`` / ``kill-
-    inference`` / ``apply-patch`` / ``revert-patch`` / ``apply-tracelens-
-    patch`` / ``kernel-bench`` / ``install-geak`` subparsers and their flags.
-
-    Returns:
-        argparse.ArgumentParser: The fully-configured argument parser.
-    """
+    """Build the top-level argparse parser with every subcommand."""
     p = argparse.ArgumentParser(
         prog="python3 -m hyperloom.inference_optimizer.multi_node",
         description=(
@@ -2265,9 +1639,8 @@ def build_parser() -> argparse.ArgumentParser:
         "`--enable-expert-parallel`. EP > TP is rejected by the "
         "orchestrator helper before this CLI is invoked.",
     )
-    # Prefill-Decode disaggregation: aggregated (default) keeps a single server
-    # group; disaggregated splits into prefill + decode groups fronted by a
-    # router on the head pod that binds the public 8888 port.
+    # Prefill-Decode disaggregation: aggregated (default) keeps a single server group; disaggregated splits into
+    # prefill + decode groups fronted by a router on the head pod that binds the public 8888 port.
     sp.add_argument(
         "--pd-mode",
         choices=("aggregated", "disaggregated"),
@@ -2298,9 +1671,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="TP for decode group (disaggregated only); default = --tp",
     )
-    # Per-role EP / extra server args (disaggregated only), so prefill and decode
-    # can use different MoE topologies. Default 0 / "" falls back to the shared
-    # --ep / --extra-args, and $PD_*_EP / $PD_*_EXTRA_ARGS env supply defaults.
+    # Per-role EP / extra server args (disaggregated only), so prefill and decode can use different MoE topologies.
     sp.add_argument(
         "--pd-prefill-ep",
         type=int,
@@ -2499,16 +1870,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse; ``None`` uses
-            ``sys.argv``.
-
-    Returns:
-        int: The process exit code mapped from the subcommand result or the
-        caught exception type.
-    """
+    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

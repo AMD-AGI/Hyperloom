@@ -59,19 +59,7 @@ _now_iso = now_iso
 
 @dataclass
 class Message:
-    """One bus message persisted in the ``events`` table.
-
-    Attributes:
-        msg_id (str): Unique message identifier.
-        from_agent (str): Sending agent id.
-        to_agent (str): Recipient agent id (``"*"`` for broadcast).
-        topic (str): Topic (validated against :data:`TOPIC_ALLOWLIST`).
-        payload (dict[str, Any]): The message payload.
-        priority (int): Priority in ``0..3``. Defaults to ``1``.
-        in_reply_to (str | None): The ``msg_id`` this replies to, if any.
-        ts (str): ISO timestamp the message was created.
-        seq (int | None): Monotonic sequence id assigned by the bus on insert.
-    """
+    """One bus message persisted in the ``events`` table."""
 
     msg_id: str
     from_agent: str
@@ -94,19 +82,7 @@ class Message:
         priority: int = 1,
         in_reply_to: str | None = None,
     ) -> "Message":
-        """Construct a new message with a fresh ``msg_id``.
-
-        Args:
-            from_agent (str): Sending agent id.
-            to_agent (str): Recipient agent id (``"*"`` for broadcast).
-            topic (str): Topic.
-            payload (dict[str, Any]): The message payload.
-            priority (int): Priority in ``0..3``. Defaults to ``1``.
-            in_reply_to (str | None): The ``msg_id`` this replies to, if any.
-
-        Returns:
-            Message: The constructed message (``seq`` unset until inserted).
-        """
+        """Construct a new message with a fresh ``msg_id``."""
         return cls(
             msg_id=uuid.uuid4().hex,
             from_agent=from_agent,
@@ -119,14 +95,7 @@ class Message:
 
     @classmethod
     def from_row(cls, row) -> "Message":
-        """Build a :class:`Message` from an ``events`` table row.
-
-        Args:
-            row: A mapping-like DB row with the ``events`` columns.
-
-        Returns:
-            Message: The reconstructed message.
-        """
+        """Build a :class:`Message` from an ``events`` table row."""
         return cls(
             msg_id=row["msg_id"],
             from_agent=row["from_agent"],
@@ -140,12 +109,7 @@ class Message:
         )
 
     def to_db_row(self) -> tuple:
-        """Serialise the message into an ``events`` INSERT tuple.
-
-        Returns:
-            tuple: The column values in INSERT order (``payload`` JSON-encoded);
-                ``seq`` is intentionally omitted as it is DB-assigned.
-        """
+        """Serialise the message into an ``events`` INSERT tuple."""
         return (
             self.msg_id,
             self.from_agent,
@@ -159,32 +123,14 @@ class Message:
 
 
 class MessageBus:
-    """Append-only message log backed by the ``events`` table.
-
-    Attributes:
-        db (SqliteConnection): The backing SQLite connection.
-    """
+    """Append-only message log backed by the ``events`` table."""
 
     def __init__(self, db: SqliteConnection):
-        """Initialise the bus.
-
-        Args:
-            db (SqliteConnection): The backing SQLite connection.
-        """
+        """Initialise the bus."""
         self.db = db
 
     async def append_and_seq(self, msg: Message) -> int:
-        """Append one message and return its assigned sequence id.
-
-        Args:
-            msg (Message): The message to append; its ``seq`` is set in place.
-
-        Returns:
-            int: The monotonic sequence id assigned by SQLite.
-
-        Raises:
-            ValueError: If the topic is unknown or priority is out of ``0..3``.
-        """
+        """Append one message and return its assigned sequence id."""
         if msg.topic not in TOPIC_ALLOWLIST:
             raise ValueError(f"unknown topic: {msg.topic!r}")
         if not (0 <= msg.priority <= 3):
@@ -206,18 +152,7 @@ class MessageBus:
         to_agent: str | None = None,
         topic: str | None = None,
     ) -> list[Message]:
-        """Return the most recent messages matching the given filters.
-
-        Args:
-            n (int): Maximum number of messages to return. Defaults to ``200``.
-            after_seq (int): Only return messages with ``seq`` greater than
-                this. Defaults to ``0``.
-            to_agent (str | None): Filter to this recipient (plus broadcasts).
-            topic (str | None): Filter to this topic.
-
-        Returns:
-            list[Message]: Matching messages ordered by descending ``seq``.
-        """
+        """Return the most recent messages matching the given filters."""
         clauses = ["seq > ?"]
         params: list[Any] = [after_seq]
         if to_agent is not None:
@@ -238,18 +173,7 @@ class MessageBus:
         after_seq: int,
         limit: int = DEFAULT_EVENTS_KEEP_RECENT,
     ) -> list[Message]:
-        """Used at resume — returns events in monotonic seq order.
-
-        Args:
-            to_agent (str): Recipient agent id (broadcasts are included).
-            after_seq (int): Only return messages with ``seq`` greater than
-                this.
-            limit (int): Maximum rows to return, matching the bus retention
-                watermark so a large backlog is not loaded at once.
-
-        Returns:
-            list[Message]: Matching messages ordered by ascending ``seq``.
-        """
+        """Used at resume — returns events in monotonic seq order."""
         rows = await self.db.fetchall(
             "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC LIMIT ?",
             (after_seq, to_agent, limit),
@@ -257,14 +181,7 @@ class MessageBus:
         return [Message.from_row(r) for r in rows]
 
     async def lookup_by_id(self, msg_id: str) -> Message | None:
-        """Look up a single message by its ``msg_id``.
-
-        Args:
-            msg_id (str): The message identifier.
-
-        Returns:
-            Message | None: The matching message, or ``None`` if absent.
-        """
+        """Look up a single message by its ``msg_id``."""
         row = await self.db.fetchone("SELECT * FROM events WHERE msg_id = ?", (msg_id,))
         return Message.from_row(row) if row else None
 

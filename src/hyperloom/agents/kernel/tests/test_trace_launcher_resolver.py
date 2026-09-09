@@ -5,12 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for recovering a kernel's Python launcher frame from a Kineto trace.
-
-The resolver exists because TraceLens reports ``launcher_path = "Not found"``
-for hand-written Triton kernels (no ``cpu_op`` parent), even though the trace
-still carries the full ``python_function`` chain down to the launch.
-"""
+"""Tests for recovering a kernel's Python launcher frame from a Kineto trace."""
 
 from __future__ import annotations
 
@@ -71,11 +66,7 @@ def _stack(*frames: str, base_ts: float = 100.0) -> list[dict]:
 
 
 def test_the_most_specific_overlapping_symbol_wins():
-    """``wanted`` is a set, so a first-hit-wins scan raced on PYTHONHASHSEED.
-
-    Both names are substrings of the event, and picking the shorter one binds
-    the kernel to a different symbol -- and then to a different source file.
-    """
+    """``wanted`` is a set, so a first-hit-wins scan raced on PYTHONHASHSEED."""
     for _ in range(50):
         assert _match_kernel("moe_gemm1_0.kd", {"moe_gemm1", "moe_gemm1_0"}) == "moe_gemm1_0"
 
@@ -139,15 +130,7 @@ def test_exact_match_survives_ambiguous_decorated_symbols(tmp_path):
 
 
 def test_a_correlation_id_reused_across_ranks_resolves_nothing(tmp_path):
-    """A merged trace restarts correlation ids per rank.
-
-    The id then names two launches, so it names neither, and both are dropped.
-    Pairing on ``(pid, correlation)`` cannot rescue this: Kineto records the
-    kernel against the device and the launch against the host, so those two
-    pids never match on a real trace (see the GPU/host test below). Refusing
-    the ambiguous id is the only answer that cannot attribute a kernel to
-    another rank's source file.
-    """
+    """A merged trace restarts correlation ids per rank."""
 
     def ev(base, pid):
         out = dict(base)
@@ -170,12 +153,7 @@ def test_a_correlation_id_reused_across_ranks_resolves_nothing(tmp_path):
 
 
 def test_a_device_side_kernel_pairs_with_its_host_side_launch(tmp_path):
-    """The shape every real Kineto trace has: GPU pid != host pid.
-
-    The kernel event is attributed to the device and the runtime call to the
-    host process, so correlation is the only field spanning the pair. Keying on
-    pid too made this -- the ordinary case -- resolve to nothing.
-    """
+    """The shape every real Kineto trace has: GPU pid != host pid."""
     host_pid, gpu_pid, tid = 12345, 0, 777
     events = [
         {
@@ -210,11 +188,7 @@ def test_a_device_side_kernel_pairs_with_its_host_side_launch(tmp_path):
 
 
 def test_one_host_process_driving_several_devices(tmp_path):
-    """Correlation stays unique per process, so multi-GPU needs no pid help.
-
-    Each device stream carries its own pid, none of which is the host's; the
-    ids do not collide because they are allocated by the one profiled process.
-    """
+    """Correlation stays unique per process, so multi-GPU needs no pid help."""
     host_pid, tid = 999, 5
     events = [
         {
@@ -279,11 +253,7 @@ def test_one_host_process_driving_several_devices(tmp_path):
 
 
 def test_split_probes_leave_the_kernel_unresolved(tmp_path):
-    """A plurality is not agreement.
-
-    Three probes pointing at three different frames used to resolve to
-    whichever Counter saw first -- trace order, not evidence.
-    """
+    """A plurality is not agreement."""
     events = []
     for i, path in enumerate(["/repo/x.py(1): fa", "/repo/y.py(2): fb", "/repo/z.py(3): fc"]):
         base = 100.0 + i * 1000
@@ -374,12 +344,7 @@ def test_missing_trace_events_is_reported_as_a_file_error(tmp_path):
 
 
 def test_single_trailing_dot_is_not_treated_as_elided(tmp_path):
-    """Prefix matching must be gated by the same predicate as the ambiguity check.
-
-    _match_kernel used to accept any name that rstrip changed, so a single
-    trailing dot enabled prefix matching while _is_elided still said False --
-    the name then skipped the ambiguity check and could bind to any sibling.
-    """
+    """Prefix matching must be gated by the same predicate as the ambiguity check."""
     trace = _write(
         tmp_path / "t.json",
         [
@@ -393,12 +358,7 @@ def test_single_trailing_dot_is_not_treated_as_elided(tmp_path):
 
 
 def test_scan_is_bounded_when_kernels_never_resolve(tmp_path, monkeypatch):
-    """A capture folder must not be read end to end chasing the unresolvable.
-
-    Kernels launched from C++ or only replayed from a graph never resolve, so
-    "stop once everything is resolved" alone would read every file in the
-    folder -- dozens of them, two streaming passes each.
-    """
+    """A capture folder must not be read end to end chasing the unresolvable."""
     files = []
     for i in range(10):
         files.append(_write(tmp_path / f"rank{i}.json", [_kernel("_never_launched_kernel", i + 1)]))
@@ -495,13 +455,7 @@ def _tied_frames_trace(tmp_path, *, outer_first: bool) -> Path:
 
 
 def test_same_timestamp_frames_resolve_by_nesting_not_write_order(tmp_path):
-    """Microsecond ties must not let trace write order pick the frame.
-
-    Profiler timestamps are microsecond-granular, so adjacent frames on a fast
-    call chain land on the same ``ts``. Ordering by start alone left the tie to
-    Python's stable sort, i.e. to the order events happen to appear in the file,
-    which collapsed different kernels onto whichever frame was written first.
-    """
+    """Microsecond ties must not let trace write order pick the frame."""
     expected = ("/opt/aiter/aiter/ops/flydsl/moe_kernels.py", 859, "_moe_kernel")
     picks = []
     for outer_first in (True, False):
@@ -633,12 +587,7 @@ def test_kernel_without_matching_runtime_is_omitted(tmp_path):
 
 
 def test_truncated_mangled_symbol_still_matches(tmp_path):
-    """TraceLens elides a long mangled symbol; the trace keeps the full name.
-
-    Real case: the Kernel Name cell reads
-    ``_ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi8EEEvPNS_8RankDataENS_1...``
-    while the trace event is the untruncated symbol.
-    """
+    """TraceLens elides a long mangled symbol; the trace keeps the full name."""
     full = "_ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi8EEEvPNS_8RankDataENS_11RankSignalsEiiii"
     truncated = "_ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi8EEEvPNS_8RankDataENS_1..."
     trace = _write(
@@ -654,12 +603,7 @@ def test_truncated_mangled_symbol_still_matches(tmp_path):
 
 
 def test_flydsl_jit_plumbing_is_skipped_for_the_real_kernel(tmp_path):
-    """Verbatim eager stack of aiter's FlyDSL MoE GEMM.
-
-    Every FlyDSL-compiled kernel bottoms out in the same
-    ``flydsl/compiler/jit_executor.py: __call__``; resolving there aims a backend
-    at the compiler and collapses distinct kernels onto one source.
-    """
+    """Verbatim eager stack of aiter's FlyDSL MoE GEMM."""
     trace = _write(
         tmp_path / "t.json",
         [
@@ -770,11 +714,7 @@ def test_triton_stack_unaffected_by_the_flydsl_rule(tmp_path):
 
 
 def test_ambiguous_elided_prefix_is_refused(tmp_path):
-    """Two distinct symbols behind one elided name cannot be told apart.
-
-    Attributing either launcher to the shared prefix would hand a backend the
-    wrong source file, so the resolver declines and leaves it to grep.
-    """
+    """Two distinct symbols behind one elided name cannot be told apart."""
     shared = "_ZN5aiter40some_quite_long_collective_symbol_nameI"
     trace = _write(
         tmp_path / "t.json",
