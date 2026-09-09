@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import subprocess
 import time
@@ -411,7 +412,7 @@ def run_rewrite(
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
-            allow_non_improving=True,
+            session_key=port_commit,
         )
         print(
             f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
@@ -449,6 +450,45 @@ def run_rewrite(
     )
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
+    #
+    # Every KEEP is published, not just the run's final best, because an OPTIMIZE session can be terminated at its
+    # cutoff or killed outright. forge-loop cannot do this itself -- it runs here under --no-experience-kb because the
+    # rewrite identity is not its own -- so the rewrite layer watches its result file and publishes to its own store.
+    # Naming the record after the forge-loop session rather than the artifact makes each publication replace the last.
+    optimize_session_key = ""
+
+    def _publish_keep(payload: dict) -> None:
+        nonlocal optimize_session_key
+        commit = str(payload.get("best_commit") or "")
+        # Read the kernel out of the commit, never off disk: the workspace still belongs to the running agent, and the
+        # best is only restored there once OPTIMIZE is over.
+        shown = _git(workspace, "show", f"{commit}:{spec.flydsl_kernel_relpath}")
+        if shown.returncode != 0 or not shown.stdout.strip():
+            print(
+                f"  [forge-rewrite] KEEP publish skipped: {commit[:12]} has no {spec.flydsl_kernel_relpath}",
+                flush=True,
+            )
+            return
+        optimize_session_key = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
+        write = write_flydsl_kb_solution(
+            spec,
+            driver_path,
+            config,
+            source_ms=source_ms,
+            flydsl_best_ms=payload.get("best_ms"),
+            best_commit=commit,
+            framework=framework,
+            # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
+            # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
+            snr_db=None,
+            session_key=optimize_session_key,
+            content_override=shown.stdout.encode(),
+        )
+        print(
+            f"  [forge-rewrite] KEEP KB publish ({commit[:12]}): {write.get('reason') or write.get('solution')}",
+            flush=True,
+        )
+
     opt: dict = {}
     if time.time() < search_stop_unix:
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
@@ -464,6 +504,7 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:
         print(
@@ -478,16 +519,21 @@ def run_rewrite(
         opt = {**opt, "best_commit": port_commit}
 
     if rewrite_kb_enabled:
+        final_commit = str(opt.get("best_commit") or "")
         kb_write = write_flydsl_kb_solution(
             spec,
             driver_path,
             config,
             source_ms=source_ms,
             flydsl_best_ms=opt.get("best_ms"),
-            best_commit=str(opt.get("best_commit") or ""),
+            best_commit=final_commit,
             framework=framework,
-            snr_db=port.snr_db,
-            allow_non_improving=port.attempts > 0,
+            # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
+            # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
+            snr_db=port.snr_db if final_commit == port_commit else None,
+            # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
+            # otherwise -- either way it replaces that session's record instead of standing beside it.
+            session_key=optimize_session_key or port_commit,
         )
     else:
         kb_write = {"written": False, "reason": "disabled"}

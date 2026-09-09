@@ -126,11 +126,24 @@ def test_write_fails_closed_without_gpu_type(config, workspace):
     }
 
 
-def test_write_skips_no_improvement_and_empty_diff(config, workspace):
-    assert _write(config, workspace, mean_case_speedup=1.0)["reason"] == "no_improvement"
-    assert _write(config, workspace, mean_case_speedup=0.9)["reason"] == "no_improvement"
+def test_write_skips_empty_diff(config, workspace):
     assert _write(config, workspace, cumulative_diff="")["reason"] == "empty_diff"
     assert _records(config, workspace).list_candidates() == []
+
+
+def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
+    """Losing to the source baseline must not cost the run its evidence.
+
+    An operator whose best attempt is still slower than what ships is the one that most needs its progress carried to
+    the next run. Withholding it made every later run read the same losing seed and repeat the same climb.
+    """
+    losing = _write(config, workspace, mean_case_speedup=0.9)
+
+    assert losing["written"] is True
+    assert losing["speedup"] == 0.9
+    # Recorded, but not held up as the identity's best.
+    assert losing["champion"] is False
+    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
 
 
 def test_write_requires_explicit_mean_case_speedup(config, workspace):

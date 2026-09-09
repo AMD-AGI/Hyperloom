@@ -1312,25 +1312,12 @@ class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
     tuner: str | None
 
 
-class V6KernelCollectiveRun(V6KernelLaneRun, total=False):
-    """One collective-tuning run."""
-
-    op: str | None
-    algo: str | None
-    size_bytes: int | None
-    world_size: int | None
-    gain_pct: float | None
-    withheld: bool
-    withhold_reason: str | None
-
-
 class V6KernelForgeLanes(TypedDict, total=False):
-    """The four forge candidate lanes, split back out at assembly."""
+    """The forge candidate lanes, split back out at assembly."""
 
     kernel_rewrites: list[V6KernelRewriteRun]
     fusion_runs: list[V6KernelFusionRun]
     gemm_tuning_runs: list[V6KernelGemmTuningRun]
-    collective_runs: list[V6KernelCollectiveRun]
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -1773,7 +1760,6 @@ __all__ = [
     "V6KernelAdoptedRow",
     "V6KernelAnalysisArtifacts",
     "V6KernelAnalysisDetail",
-    "V6KernelCollectiveRun",
     "V6KernelDiscoveredKernel",
     "V6KernelEntry",
     "V6KernelExt",

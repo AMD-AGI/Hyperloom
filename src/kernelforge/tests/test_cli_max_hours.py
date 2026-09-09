@@ -265,3 +265,32 @@ def test_failed_later_keep_preserves_warm_publication_and_marks_pending():
     assert publication["published_commit"] == "warm-local-commit"
     assert publication["pending_commit"] == "keep-commit"
     assert publication["status"] == "pending_retry"
+
+
+def test_a_keep_the_store_declined_on_merit_stops_being_pending():
+    """A decision is not a failure, so it must not be retried forever.
+
+    A warm-started run that ends no faster than the solution it started from is declined because re-recording it would
+    only add a second copy. That is the common refusal now that losing to the source baseline no longer causes one, and
+    holding it pending would leave the campaign waiting on an attempt that can never succeed.
+    """
+    state = _initial_remote_publication_state(
+        {
+            "applied": True,
+            "applied_commit": "warm-local-commit",
+            "solution_slug": "kernelforge-exp/op/existing-solution",
+        }
+    )
+    state["pending_commit"] = "keep-commit"
+
+    _record_remote_publication_result(
+        state,
+        commit="keep-commit",
+        result={"written": False, "reason": "no_improvement_over_reuse"},
+    )
+
+    publication = _remote_publication_view(state, "keep-commit")
+    assert publication["status"] == "no_improvement_over_reuse"
+    assert publication["pending_commit"] == ""
+    # The warm-started solution keeps its standing; only this attempt is over.
+    assert publication["published_commit"] == "warm-local-commit"

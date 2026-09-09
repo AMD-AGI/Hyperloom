@@ -282,17 +282,6 @@ crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
 `delegate{action_name='specialist', params={scope='freeform', ...}}`
 is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
 
-**Empty `reusable_native_kernel_ids` does NOT by itself mean the collective
-lever is gone.** Vendor RCCL/NCCL kernels are opaque binaries and stay
-unoptimizable, but a source-resolvable custom collective (e.g. a framework's
-own fused all-reduce) is withheld from `reusable_native_kernel_ids` on
-purpose: it belongs to the Coordinator's collective lane, not to
-`kernel_opt`. So an empty list can coexist with a collective campaign that
-is queued or already running. Before you call the phase exhausted, check
-whether a `run_collective_done` / `collective_integrate_done` response is
-still outstanding for this KERNEL entry; skipping while one is in flight
-throws away its gain.
-
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
 
@@ -388,17 +377,17 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   KernelForge rewrite controller owns operator discovery, selection and
   dispatch: it reads the trace and source evidence itself and returns patch
   artifacts. You only observe its `kernel_rewrite_controller_done` result.
-* `run_gemm_tuning`, `run_fusion` and `run_collective` ALSO have programmatic
+* `run_gemm_tuning` and `run_fusion` ALSO have programmatic
   handlers but are NOT yours to request: they are
   Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
-  their own gate passes. PolicyGate REJECTS any of those kinds from you
+  their own gate passes. PolicyGate REJECTS either kind from you
   (`request_kind`) because a direct request bypasses that gate, the
   lane's SharedState accounting and its integrate step. You only OBSERVE
   them — outcomes land in your inbox as
-  `run_gemm_tuning_done` / `run_fusion_done` / `run_collective_done`,
-  followed by `fusion_integrate_done` / `collective_integrate_done` once a
+  `run_gemm_tuning_done` / `run_fusion_done`, followed by
+  `fusion_integrate_done` once a
   KEEP is integrated, at which point `optimization_stack` carries a
-  `fusion:forge_fusion` / `collective:forge_collective` entry. Read them as
+  `fusion:forge_fusion` entry. Read them as
   progress; to act on a source-level kernel yourself, `integrate` the KEEPs
   the optimization lane queues in `pending_keep_kernels`.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`

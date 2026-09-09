@@ -1,6 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Per-shape production split-K support, by trial-dispatch."""
+"""Per-shape production split-K support, by trial-dispatch.
+
+The trial is per-op: a limit measured on one op's kernel says nothing about
+another's, so :data:`_TRIAL_OPS` registers the production callable per op and an
+unregistered op answers ``None`` (caller keeps its static cap). Answering with
+the wrong kernel's limit would license a splitK the real kernel rejects (crash)
+or tighten one it accepts (silent loss). ``a8w8_blockscale_bpreshuffle`` is
+absent on purpose: its ck/cktile wrappers take no ``splitK`` at all, so
+``_SPLITK_FORWARDING_LIBTYPES`` in ``tuners._aiter_dense_common`` is the gate
+that matters there.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +39,7 @@ def _resolve_device(gpu_ids: str = "") -> str:
     return f"cuda:{first}"
 
 
-def _supports(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
+def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
     """True if the production a8w8_blockscale CK kernel dispatches (m,n,k,split_k)."""
     import torch  # noqa: PLC0415
     import aiter  # noqa: PLC0415
@@ -47,17 +57,44 @@ def _supports(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> boo
     return True
 
 
-def max_supported_splitk(m: int, n: int, k: int, ceiling: int = 6, device: str = "cuda") -> int | None:
-    """Max splitK in ``0..ceiling`` the production kernel accepts for (m,n,k)."""
+#: Ops whose production split-K limit this module can measure, keyed by the
+#: tuner ``script_key``. Absent => no trial, caller keeps its static cap.
+_TRIAL_OPS = {
+    "a8w8_blockscale": _supports_a8w8_blockscale,
+}
+
+
+def supported_ops() -> frozenset[str]:
+    """Op keys :func:`make_support_fn` can build a real trial for."""
+    return frozenset(_TRIAL_OPS)
+
+
+def max_supported_splitk(
+    m: int,
+    n: int,
+    k: int,
+    ceiling: int = 6,
+    device: str = "cuda",
+    op: str = "a8w8_blockscale",
+) -> int | None:
+    """Max splitK in ``0..ceiling`` the production kernel accepts for (m,n,k).
+
+    ``None`` when ``op`` has no registered trial, or when the splitK=0 control
+    fails, so the caller keeps its static fallback rather than trusting an
+    unvalidated trial.
+    """
+    probe = _TRIAL_OPS.get(op)
+    if probe is None:
+        return None
     try:
-        if not _supports(m, n, k, 0, device=device):
+        if not probe(m, n, k, 0, device=device):
             return None
     except Exception:  # noqa: BLE001 — no GPU / import error / tensor issue
         return None
     best = 0
     for sk in range(1, max(0, ceiling) + 1):
         try:
-            ok = _supports(m, n, k, sk, device=device)
+            ok = probe(m, n, k, sk, device=device)
         except Exception:  # noqa: BLE001 — treat a hard error as "unsupported"
             ok = False
         if not ok:
@@ -66,15 +103,23 @@ def max_supported_splitk(m: int, n: int, k: int, ceiling: int = 6, device: str =
     return best
 
 
-def make_support_fn(ceiling: int = 6, gpu_ids: str = ""):
-    """Return an (m,n,k)->int|None callable memoized per shape for reuse as the ``support_fn`` of ``_cap_splitk_to_serve_safe``."""
+def make_support_fn(ceiling: int = 6, gpu_ids: str = "", op: str = "a8w8_blockscale"):
+    """Return an (m,n,k)->int|None callable memoized per shape for reuse as the ``support_fn`` of ``_cap_splitk_to_serve_safe``.
+
+    ``op`` selects the production kernel to trial; an unregistered op answers
+    ``None`` for every shape so the caller falls back to its static cap instead
+    of being handed another op's limit.
+    """
+    if op not in _TRIAL_OPS:
+        return lambda m, n, k: None
+
     cache: dict[tuple[int, int, int], int | None] = {}
     device = _resolve_device(gpu_ids)
 
     def _fn(m: int, n: int, k: int):
         key = (m, n, k)
         if key not in cache:
-            cache[key] = max_supported_splitk(m, n, k, ceiling=ceiling, device=device)
+            cache[key] = max_supported_splitk(m, n, k, ceiling=ceiling, device=device, op=op)
         return cache[key]
 
     return _fn

@@ -145,7 +145,7 @@ def test_two_sinks_over_one_section_keep_their_rows_in_separate_files(tmp_path):
             "kernel_lane_run", {"attempt_id": "att-7", "lane": "kernel_rewrites"}, row_type="lane", natural_ids="att-7"
         )
         rec.make_sink("prelude:0:roofline", producer="orchestrator").record(
-            "kernel_lane_run", {"attempt_id": "att-7", "lane": "collective_runs"}, row_type="lane", natural_ids="att-7"
+            "kernel_lane_run", {"attempt_id": "att-7", "lane": "fusion_runs"}, row_type="lane", natural_ids="att-7"
         )
 
     assert len(_fragments(tmp_path)) == 2

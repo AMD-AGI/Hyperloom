@@ -1327,9 +1327,8 @@ ensure_geak() {
   fi
 }
 
-# The forge backend drives the `claude` CLI inside its autonomous loop
-# (see forge_submit._apply_kernel_backend_env), so it needs Node/npm, the claude npm
-# CLI, and ~/.claude auth.
+# The forge backend drives the `claude` CLI inside its autonomous loop, so it
+# needs Node/npm, the claude npm CLI, and ~/.claude auth.
 ensure_forge_claude_cli() {
   log "ensuring claude CLI for the forge backend"
   if [ "$CHECK_ONLY" -eq 1 ]; then

@@ -85,14 +85,6 @@ def test_summarize_tool_input_non_dict_values():
     assert pu._summarize_tool_input(123) == "123"
 
 
-def test_forge_usage_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_usage("FORGE_LLM_USAGE") is None
-
-
-def test_forge_steps_marker_with_empty_blob_is_none():
-    assert pu.parse_forge_steps("FORGE_STEPS") is None
-
-
 def test_parse_ts_missing_and_unparseable():
     assert lm.parse_ts(None) is None
     assert lm.parse_ts("") is None

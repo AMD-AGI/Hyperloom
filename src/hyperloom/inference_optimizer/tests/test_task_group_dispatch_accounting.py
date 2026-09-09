@@ -163,7 +163,7 @@ class TestEnqueueNominatedPatch:
         """The exclusion follows the whole-file overwrite, not one lane's label."""
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
-        for action in ("integrate", "collective", "fusion"):
+        for action in ("integrate", "fusion"):
             state = SharedState()
             enqueue_nominated_patch(state, patch=self._patch("weak", "/repo/a.py", micro=1.1))
             enqueue_nominated_patch(state, patch=self._patch("strong", "/repo/a.py", micro=1.9))

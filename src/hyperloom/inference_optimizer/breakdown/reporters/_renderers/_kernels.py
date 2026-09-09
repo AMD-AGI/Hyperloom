@@ -32,7 +32,7 @@ __all__ = [
 #: The source kinds each report-level capability owns. The recorder tallies at
 #: the granularity of the producer that made the candidate; the report speaks
 #: of the two routes those producers belong to.
-FORGE_SOURCES = ("kernel_rewrite", "fusion", "gemm_tuning", "collective")
+FORGE_SOURCES = ("kernel_rewrite", "fusion", "gemm_tuning")
 GEAK_SOURCES = ("geak_authored_kernel", "geak_env_selection")
 
 #: Lane outcomes that say the candidate was ruled against rather than left

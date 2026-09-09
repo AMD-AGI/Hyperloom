@@ -1010,7 +1010,7 @@ def test_a_lane_that_produced_nothing_stays_empty(tmp_path):
     assert len(lanes["fusion_runs"]) == 1
     assert lanes["kernel_rewrites"] == []
     assert lanes["gemm_tuning_runs"] == []
-    assert lanes["collective_runs"] == []
+    assert "collective_runs" not in lanes
 
 
 def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):

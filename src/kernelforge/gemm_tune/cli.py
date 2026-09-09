@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -58,7 +59,13 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     try:
         from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        report = parse_log_file(server_log)
+        # Hyperloom's workload env sets AITER_LOG_TUNED_CONFIG=1 for every
+        # serving run, and it is inherited here, so when it is on we can say a
+        # zero-hit table really had zero coverage instead of leaving the verdict
+        # inconclusive. Absent/0 stays unknown -- an operator-supplied log may
+        # have been produced without it.
+        hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
+        report = parse_log_file(server_log, hit_logging=hit_logging or None)
     except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
         log.debug("could not parse %s for demand", server_log, exc_info=True)
         return ""

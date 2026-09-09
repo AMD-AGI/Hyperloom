@@ -38,7 +38,6 @@ def _publish_task(
     (task_dir / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity,
                 "base_commit": base_commit,
                 "repo_root": str(repo_root),

@@ -448,7 +448,7 @@ def _build_specialist_env() -> dict[str, str]:
     env = scrub_child_process_env(env)
     # claude's bypassPermissions/--dangerously-skip-permissions refuses to start
     # under root unless IS_SANDBOX=1 (SWSPLAT-42390). Mirror the kernel-agent
-    # forge tools (forge_fusion / forge_submit) so specialist authoring
+    # forge tools (forge_fusion) so specialist authoring
     # subprocesses run on bare-root pods (non-Claw hosts) instead of crashing
     # immediately. setdefault only under root keeps the guard intact elsewhere.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
