@@ -225,24 +225,11 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-#: Params a kind needs before the routing gate will pass it. ``integrate``
-#: requires an explicit ``mode``; the rest carry no mandatory field.
-_MINIMAL_REQUEST_PARAMS: dict[str, dict[str, str]] = {"integrate": {"mode": "patch"}}
-
-
 @pytest.mark.parametrize("kind", sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS))
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 
-    _emit(
-        _llm_gate(),
-        IntentType.REQUEST,
-        {
-            "target_agent": "kernel_agent",
-            "kind": kind,
-            "params": _MINIMAL_REQUEST_PARAMS.get(kind, {}),
-        },
-    )
+    _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
 
 
 def test_an_unregistered_kind_reaches_the_auto_reject() -> None:

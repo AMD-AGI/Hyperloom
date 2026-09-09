@@ -210,42 +210,9 @@ def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "integrate",
-                "params": {"kernel_id": "k1", "mode": "patch"},
-            },
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"kernel_id": "k1"}},
         ),
     )
-
-
-def _integrate_intent(params: dict) -> Intent:
-    return Intent(
-        type=IntentType.REQUEST,
-        payload={"target_agent": "kernel_agent", "kind": "integrate", "params": params},
-    )
-
-
-def test_gate_denies_integrate_without_an_explicit_mode():
-    """An omitted mode would resolve a patch and bill its gain to the env change."""
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            _integrate_intent({"kernel_id": "k1", "extra_envs": {"A": "1"}}),
-        )
-    assert exc.value.rule == "missing_integrate_mode"
-
-
-def test_gate_reads_integrate_mode_from_params_not_the_envelope():
-    """The router merges ``params`` over the envelope; the gate must look there too."""
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _integrate_intent({"kernel_id": "k1", "mode": "envonly"}))
-    assert exc.value.rule == "invalid_integrate_mode"
-    gate.validate_intent("orchestration", _integrate_intent({"kernel_id": "k1", "mode": "env_only"}))
 
 
 def test_gate_orchestration_delegate_normal_action_ok(gate):

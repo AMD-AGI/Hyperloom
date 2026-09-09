@@ -6599,6 +6599,10 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
+    # Coordinator-internal: the GEMM lanes call this handler directly and set
+    # env_only to measure a config change with no patch. It is not in the agent
+    # request schema -- an agent integrate always lands a KEEP'd patch, and
+    # env / serve-flag changes are explore's lever, fingerprint-deduped.
     # env_only skips artifact resolution entirely: back-filling patch_path from
     # the last kernel optimization would silently measure an unrelated patch.
     mode = str(payload.get("mode") or "patch").strip().lower()

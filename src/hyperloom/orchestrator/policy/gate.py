@@ -1069,28 +1069,6 @@ class PolicyGate:
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
-        if kind == "integrate":
-            # A request carries its handler payload under ``params``, which the
-            # router merges over the envelope; read it the same way.
-            merged = {**payload, **(payload.get("params") or {})}
-            mode = str(merged.get("mode") or "").strip().lower()
-            if not mode:
-                # Defaulting here would send an env-only request through
-                # artifact resolution, which back-fills a patch from the
-                # per-kernel ledger and reports its gain as the env change's.
-                raise PolicyDenied(
-                    "integrate requires an explicit mode",
-                    rule="missing_integrate_mode",
-                    hint=(
-                        "mode='patch' applies a kernel patch; mode='env_only' "
-                        "measures an env / serve-flag change and takes no patch fields"
-                    ),
-                )
-            if mode not in ("patch", "env_only"):
-                raise PolicyDenied(
-                    f"integrate mode must be 'patch' or 'env_only', got {mode!r}",
-                    rule="invalid_integrate_mode",
-                )
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
             role.name,

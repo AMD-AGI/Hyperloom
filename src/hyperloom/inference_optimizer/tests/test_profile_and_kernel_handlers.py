@@ -3889,7 +3889,6 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k001",
-                            "mode": "patch",
                             "patch_path": "/tmp/k001.py",
                             "target_file": "/p/moe_op.py",
                             # no base_tput intentionally
@@ -3937,7 +3936,6 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k009",
-                            "mode": "patch",
                             "patch_path": "/tmp/k009.py",
                             "target_file": "/p/rmsnorm.py",
                             "base_tput": 4200.0,  # operator override
