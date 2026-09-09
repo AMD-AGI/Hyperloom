@@ -6,6 +6,13 @@
 ``run_gemm_tuning`` / ``run_fusion`` are Coordinator-owned lanes that
 PolicyGate denies from an LLM, so no part of the prompt -- generated sections or
 the ``orchestration.md`` rules fragment -- may advertise them as requestable.
+
+Ownership is only half of it. A lane that is retired rather than reassigned
+leaves no entry in these tables at all, so every assertion derived from them
+passes while the prompt goes on teaching the lane. That is how the collective
+lane's request kind and inbox responses survived its removal, and why
+:func:`test_no_retired_request_kind_survives_in_the_prompt` names the retired
+vocabulary directly instead of deriving it.
 """
 
 from __future__ import annotations
@@ -113,3 +120,30 @@ def test_no_analysis_recommendation_routes_to_an_owned_request_kind(kernel_promp
     """Analysis-driven targeting may only route to actions the model can emit."""
     assert "run `run_gemm_tuning` first" not in kernel_prompt
     assert "## Compute Kernel Optimizations" in kernel_prompt
+
+
+#: Vocabulary of lanes this repository has retired. A retired lane leaves no
+#: entry in the ownership tables, so nothing derived from them can notice that
+#: the prompt still teaches it -- the name has to be written down here.
+_RETIRED_VOCABULARY = (
+    "run_collective",
+    "run_collective_done",
+    "collective_integrate_done",
+    "forge_collective",
+)
+
+
+@pytest.mark.parametrize("term", _RETIRED_VOCABULARY)
+def test_no_retired_request_kind_survives_in_the_prompt(kernel_prompt, term: str):
+    """A retired lane must leave the prompt, not just the ownership tables.
+
+    The assertions above all read from those tables, so removing a lane's entry
+    satisfies every one of them at once while the rules fragment goes on
+    describing the request kind, the inbox responses it never sends, and the
+    ``optimization_stack`` entry it never writes. The model then plans against
+    a contract naming a response that cannot arrive.
+    """
+    assert term not in kernel_prompt, (
+        f"{term} belongs to a retired lane but is still in the assembled prompt; "
+        "removing its ownership-table entry is not enough"
+    )
