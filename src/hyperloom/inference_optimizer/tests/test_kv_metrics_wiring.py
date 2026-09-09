@@ -44,7 +44,9 @@ def _sample(**kwargs) -> KvSample:
     return KvSample(**base)
 
 
-# â”€â”€ scanner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --------------------------------------------------------------------------
+# scanner
+# --------------------------------------------------------------------------
 def test_scan_survives_truncation_by_rescanning_from_the_top(tmp_path):
     """A rotated log is shorter than the consumed offset; markers in the new
     content must still be seen rather than skipped past."""
@@ -86,7 +88,9 @@ def test_resolve_scan_logs_includes_the_agentx_client_log(tmp_path):
     assert any(p.endswith("aiperf.log") for p in resolved)
 
 
-# â”€â”€ recorder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --------------------------------------------------------------------------
+# recorder
+# --------------------------------------------------------------------------
 def test_rows_are_tagged_with_the_phase_they_were_taken_in():
     poller = _StubPoller([_sample() for _ in range(6)])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
@@ -359,7 +363,9 @@ def test_sampling_failure_does_not_propagate():
     assert rec.rows() == []
 
 
-# â”€â”€ loop integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --------------------------------------------------------------------------
+# loop integration
+# --------------------------------------------------------------------------
 class _Recorder:
     """Minimal stand-in matching the duck-typed contract the loop expects."""
 
@@ -567,7 +573,9 @@ def test_artifact_name_is_stable():
     assert Path(KV_ARTIFACT_NAME).suffix == ".json"
 
 
-# â”€â”€ call-site wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --------------------------------------------------------------------------
+# call-site wiring
+# --------------------------------------------------------------------------
 def test_no_recorder_without_a_server_log_path():
     """A helper subprocess has no engine to scrape and no round to scope to."""
     assert sk._build_kv_recorder(None, {}) is None

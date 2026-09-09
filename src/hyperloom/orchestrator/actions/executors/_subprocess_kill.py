@@ -648,7 +648,9 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
                 "server_log_path": str(server_log_path),
                 "workspace": workspace.name,
                 "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")),
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
             },
         )
     except Exception:
