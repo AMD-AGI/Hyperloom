@@ -97,10 +97,23 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
     "aiter_fmoe": (
         "`kernelName1=<str>` and `kernelName2=<str>` (both required) -- the stage-1 and stage-2 "
         "kernels, spelled exactly as aiter spells them. Optional: `block_m=<int>` (default 32), "
-        "`ksplit=<int>` (default 0), `run_1stage`/`xbf16`/`flat` (default 0). A pair that aiter "
-        "does not resolve to is refused rather than timed: the adapter reads back which kernels "
-        "aiter actually chose, and a row it ignored would otherwise be timed as the default path "
-        "and scored as a tie."
+        "`ksplit=<int>` (default 0), `run_1stage`/`xbf16`/`flat` (default 0). Do not invent a "
+        "name: enumerate them from the installed library, which keeps the authoritative "
+        "registry in `aiter.ops.flydsl.moe_kernels` -- `get_flydsl_stage1_kernels(a, b, out)` "
+        "and `get_flydsl_stage2_kernels(a, b, out)` each return `{name: params}` for every "
+        "config it can compile. Filter that list against your own shape before proposing "
+        "anything: a name encodes its tile as `t<M>x<N>x<K>`, and aiter silently downgrades a "
+        "tile that does not divide the dimension it walks -- stage-1 `N` and stage-2 `K` are "
+        "both `inter_dim` -- so a name whose tile does not divide runs a different kernel than "
+        "the one you asked for. `block_m` is not a free knob either: it is the granularity the "
+        "tokens are sorted into before either kernel indexes them, and it has to equal the "
+        "`M` tile of *both* names. Measured on gfx950, every mismatch of the three ran without "
+        "faulting and returned garbage -- a mean error of 1.1 to 1.4 against the default path -- "
+        "and the mismatched pairs were the fastest thing in the search, so a tuner that pins "
+        "`block_m` and trusts its clock will rank nonsense first. A pair that aiter does not "
+        "resolve to is refused rather than "
+        "timed: the adapter reads back which kernels aiter actually chose, and a row it ignored "
+        "would otherwise be timed as the default path and scored as a tie."
     ),
 }
 
