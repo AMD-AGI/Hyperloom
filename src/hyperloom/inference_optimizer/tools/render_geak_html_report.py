@@ -70,8 +70,17 @@ MAX_CALLS_EMBEDDED = 400
 
 
 def load_calls(path: Path) -> list[dict[str, Any]]:
-    """Read the ledger, skipping lines that are not JSON objects."""
+    """Read the ledger, skipping lines that are not JSON objects.
+
+    A missing ledger is empty, not fatal. Claude Code writes the ledger into a
+    config home the run does not own, so a run whose home was a container overlay
+    can finish, measure a real result, and still have no ledger left to read. That
+    run's outcome is still worth a page; the page just has to say the cost half is
+    gone rather than imply the phases were free.
+    """
     rows: list[dict[str, Any]] = []
+    if not path.is_file():
+        return rows
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -544,6 +553,15 @@ function drill(key,btn){
 def _coverage_section(cov: dict[str, Any], outcome: dict[str, Any] | None) -> str:
     """The banner that says what these numbers are and are not. Always rendered."""
     caveats: list[str] = []
+    if not cov["calls"]:
+        # Zero calls and zero dollars mean the ledger is gone, not that the run
+        # was free. Say which, at the top, before any number is read.
+        caveats.append(
+            f"No {CALLS_FILENAME} was found, so this run's LLM ledger is not available and every cost, "
+            f"token and wall-clock figure below is absent rather than zero. Claude Code writes that "
+            f"ledger into its own config home; if that home was a container overlay it died with the "
+            f"container. What the run measured survived, and is reported in full."
+        )
     if cov["unpriced_calls"]:
         caveats.append(f"{cov['unpriced_calls']:,} calls carry no cost and contribute $0 to every total below.")
     if cov["untimed_calls"]:
@@ -558,7 +576,7 @@ def _coverage_section(cov: dict[str, Any], outcome: dict[str, Any] | None) -> st
             f"truncates prompts, and the authoritative label lives in the wf_*.json workflow record. "
             f"They are shown as '{UNLABELLED}' rather than guessed at."
         )
-    if not cov["thinking"]:
+    if not cov["thinking"] and cov["calls"]:
         caveats.append(
             "No thinking tokens were recorded for this run, so the thinking columns are zero because "
             "there was nothing to record -- not because thinking was measured at zero."
@@ -574,16 +592,22 @@ def _coverage_section(cov: dict[str, Any], outcome: dict[str, Any] | None) -> st
             "different measured throughputs, so multiplying the per-phase gains does not give a "
             "measured figure. The observed first-to-last number is the measured one."
         )
-    caveats.append(
-        "Roles are derived from each agent's first prompt, not read from the workflow record. "
-        "They are a reading aid; the agent id is the identifier."
-    )
+    if cov["calls"]:
+        caveats.append(
+            "Roles are derived from each agent's first prompt, not read from the workflow record. "
+            "They are a reading aid; the agent id is the identifier."
+        )
     items = "".join(f"<li>{_esc(c)}</li>" for c in caveats)
     return (
         '<div class="note"><b>Coverage - read this before quoting a number</b>'
-        f"<div>{cov['calls']:,} API calls across {cov['agents']} agents and {cov['phases']} phases, "
-        f"model{'s' if len(cov['models']) != 1 else ''} {_esc(', '.join(cov['models']) or 'not recorded')}."
-        f"</div><ul>{items}</ul></div>"
+        + (
+            "<div>Outcome only: what this run measured, without its LLM ledger.</div>"
+            if not cov["calls"]
+            else f"<div>{cov['calls']:,} API calls across {cov['agents']} agents and {cov['phases']} phases, "
+            f"model{'s' if len(cov['models']) != 1 else ''} "
+            f"{_esc(', '.join(cov['models']) or 'not recorded')}.</div>"
+        )
+        + f"<ul>{items}</ul></div>"
     )
 
 
@@ -606,6 +630,16 @@ def _headline_cards(cov: dict[str, Any], outcome: dict[str, Any] | None) -> str:
                 "tok/s, baseline to last measured stage",
             )
         )
+    if not cov["calls"]:
+        # No ledger: a $0.00 card next to a real throughput number reads as
+        # "this run was free", which is the one thing it definitely was not.
+        cards.append(("Spend", "no ledger", "the LLM ledger for this run was not preserved"))
+        body = "".join(
+            f'<div class="card"><div class="k">{_esc(k)}</div><div class="v">{v}</div>'
+            f'<div class="n">{_esc(n)}</div></div>'
+            for k, v, n in cards
+        )
+        return f'<div class="cards">{body}</div>'
     cards += [
         ("Total spend", _usd(cov["usd"]), f"{cov['calls']:,} API calls"),
         ("Input tokens", _int(cov["isl"]), f"{cov['isl'] / max(1, cov['isl'] + cov['osl']) * 100:.1f}% of all tokens"),
@@ -622,7 +656,9 @@ def _headline_cards(cov: dict[str, Any], outcome: dict[str, Any] | None) -> str:
     return f'<div class="cards">{body}</div>'
 
 
-def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: dict[str, Any] | None) -> str:
+def _outcome_section(
+    joined: list[dict[str, Any]], total_usd: float, outcome: dict[str, Any] | None, no_ledger: bool = False
+) -> str:
     """The join the whole report exists for: spend beside measured result."""
     if outcome is None:
         return (
@@ -631,7 +667,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
             "Spend is still reported below; the result each phase measured is not, because nothing "
             "in the ledger records it and inferring it would be a guess.</p>"
         )
-    rows = []
+    rows: list[tuple[str, float, float, str, str]] = []
     for phase in joined:
         out = phase["outcome"]
         share = phase["usd"] / total_usd if total_usd else 0.0
@@ -678,13 +714,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
                     + f"; ceiling was {_num(best.get('amdahl_ceiling_pct')):.2f}%)</span>"
                 )
                 efficiency = _usd(phase["usd"] / delta) if delta > 0 else '<span class="none">n/a</span>'
-                rows.append(
-                    f"<tr><td><b>{_esc(phase['phase'])}</b></td>"
-                    f"<td>{_usd(phase['usd'])}{_bar(share)}</td>"
-                    f"<td>{share * 100:.1f}%</td>"
-                    f'<td style="text-align:left">{bought}</td>'
-                    f"<td>{efficiency}</td></tr>"
-                )
+                rows.append((phase["phase"], phase["usd"], share, bought, efficiency))
                 continue
             ceiling = max((_num(t["amdahl_ceiling_e2e_pct"]) for t in measured), default=0.0)
             detail = ", ".join(
@@ -701,13 +731,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
                 f'<span class="{tone}">{ceiling:+.2f}%</span> <span class="mut">end-to-end ceiling - {detail}</span>'
             )
             efficiency = '<span class="none">n/a</span>' if ceiling <= 0 else _usd(phase["usd"] / ceiling)
-        rows.append(
-            f"<tr><td><b>{_esc(phase['phase'])}</b></td>"
-            f"<td>{_usd(phase['usd'])}{_bar(share)}</td>"
-            f"<td>{share * 100:.1f}%</td>"
-            f'<td style="text-align:left">{bought}</td>'
-            f"<td>{efficiency}</td></tr>"
-        )
+        rows.append((phase["phase"], phase["usd"], share, bought, efficiency))
     summary = outcome.get("summary") or {}
     estimate_note = ""
     if summary.get("compounded_is_estimate"):
@@ -726,6 +750,29 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
             f"({_num(summary.get('observed_speedup_first_to_last')):.4f}x); compounding the phase gains "
             f"would give {_num(summary.get('compounded_speedup')):.4f}x, which is an estimate.</p>"
         )
+    if no_ledger:
+        # Every cost cell would read $0.00 and every share 0.0%, which is a claim
+        # about spend this report cannot make. Drop the columns instead.
+        body = "".join(
+            f'<tr><td><b>{_esc(name)}</b></td><td style="text-align:left">{bought}</td></tr>'
+            for name, _usd_, _share_, bought, _eff_ in rows
+        )
+        return (
+            '<h2 id="bought">What each phase bought</h2>'
+            '<p class="lede">The result each phase measured, from the artifacts the run wrote at each '
+            "phase boundary. What it cost to buy is not shown: this run's LLM ledger was not preserved, "
+            "so there is no spend to report and a zero would be a false one.</p>"
+            '<div class="scroll"><table><thead><tr><th>Phase</th>'
+            f"<th>Measured result</th></tr></thead><tbody>{body}</tbody></table></div>{estimate_note}"
+        )
+    body = "".join(
+        f"<tr><td><b>{_esc(name)}</b></td>"
+        f"<td>{_usd(usd)}{_bar(share)}</td>"
+        f"<td>{share * 100:.1f}%</td>"
+        f'<td style="text-align:left">{bought}</td>'
+        f"<td>{efficiency}</td></tr>"
+        for name, usd, share, bought, efficiency in rows
+    )
     return (
         '<h2 id="bought">What each phase bought, and what it cost to buy it</h2>'
         '<p class="lede">Spend comes from the call ledger; the result comes from the artifacts the run '
@@ -733,7 +780,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
         "shown as zero.</p>"
         '<div class="scroll"><table><thead><tr><th>Phase</th><th>Cost</th><th>Share</th>'
         "<th>Measured result</th><th>Cost per +1%</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></div>{estimate_note}"
+        f"<tbody>{body}</tbody></table></div>{estimate_note}"
     )
 
 
@@ -793,7 +840,7 @@ def performance_ladder(joined: list[dict[str, Any]], outcome: dict[str, Any] | N
     }
 
 
-def _performance_section(ladder: dict[str, Any]) -> str:
+def _performance_section(ladder: dict[str, Any], no_ledger: bool = False) -> str:
     """Which phase made the run faster, and by how much."""
     if not ladder:
         return (
@@ -805,7 +852,10 @@ def _performance_section(ladder: dict[str, Any]) -> str:
     summary = ladder["summary"]
     rows = []
     for step in ladder["steps"]:
-        cost = _usd(step["usd"]) if step["usd"] is not None else '<span class="none">not billed</span>'
+        if step["usd"] is not None:
+            cost = _usd(step["usd"])
+        else:
+            cost = '<span class="none">' + ("no ledger" if no_ledger else "not billed") + "</span>"
         if step["kind"] == "reference":
             rows.append(
                 f'<tr class="ref"><td><b>{_esc(step["phase"])}</b></td>'
@@ -1149,8 +1199,30 @@ def render(calls_path: Path, outcome_path: Path, title: str | None = None) -> st
     ladder = performance_ladder(joined, outcome)
 
     run_id = (outcome or {}).get("run_id") or calls_path.parent.parent.name
-    heading = title or "GEAK run - where the time and the money went"
+    heading = title or ("GEAK run - what it measured" if not rows else "GEAK run - where the time and the money went")
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # Name only the files actually read. Crediting a ledger that was not there is
+    # the kind of small untruth that makes a reader distrust the real numbers.
+    read = [calls_path.name] if rows else []
+    read += [outcome_path.name] if outcome else []
+    sources = " and ".join(f"<code>{_esc(name)}</code>" for name in read) or "no readable input"
+
+    # Without a ledger the three spend sections have no rows to show. An empty
+    # table under a confident heading reads as "nothing happened here"; leaving
+    # them out, and the nav entries with them, says the opposite and is true.
+    no_ledger = not cov["calls"]
+    nav_items = [("#perf", "Throughput"), ("#bought", "Cost vs result" if not no_ledger else "What it bought")]
+    if not no_ledger:
+        nav_items += [("#phases", "Spend by phase"), ("#deep", "Inside each phase")]
+        nav_items += [("#delegate", "Delegation signals")]
+    nav = "".join(f'<a href="{href}">{_esc(label)}</a>' for href, label in nav_items)
+    ledger_sections = (
+        ""
+        if no_ledger
+        else _phase_table(joined, cov["usd"], cov["isl"])
+        + _deepdive_section(joined, cov["usd"])
+        + _delegation_section(signals)
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1159,20 +1231,16 @@ def render(calls_path: Path, outcome_path: Path, title: str | None = None) -> st
 <body><div class="wrap">
 <h1>{_esc(heading)}</h1>
 <p class="sub">Run <code>{_esc(run_id)}</code> | generated {generated} from
-<code>{_esc(calls_path.name)}</code>
-{"and <code>" + _esc(outcome_path.name) + "</code>" if outcome else ""}</p>
-<nav><a href="#perf">Throughput</a><a href="#bought">Cost vs result</a><a href="#phases">Spend by phase</a>
-<a href="#deep">Inside each phase</a><a href="#delegate">Delegation signals</a></nav>
+{sources}</p>
+<nav>{nav}</nav>
 {_headline_cards(cov, outcome)}
 {_coverage_section(cov, outcome)}
-{_performance_section(ladder)}
-{_outcome_section(joined, cov["usd"], outcome)}
-{_phase_table(joined, cov["usd"], cov["isl"])}
-{_deepdive_section(joined, cov["usd"])}
-{_delegation_section(signals)}
+{_performance_section(ladder, no_ledger)}
+{_outcome_section(joined, cov["usd"], outcome, no_ledger)}
+{ledger_sections}
 <h2>How to reproduce this</h2>
-<p class="lede">Everything above is computed from two files this run wrote. Nothing is modelled or
-carried over from another run. Regenerate with:</p>
+<p class="lede">Everything above is computed from {"the file" if len(read) == 1 else "two files"}
+this run wrote. Nothing is modelled or carried over from another run. Regenerate with:</p>
 <pre class="mono">python3 -m hyperloom.inference_optimizer.tools.render_geak_html_report \\
     --reports-dir {_esc(calls_path.parent)} -o {_esc(calls_path.parent / DEFAULT_OUTPUT)}</pre>
 </div>
@@ -1189,12 +1257,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     calls_path = args.reports_dir / CALLS_FILENAME
-    if not calls_path.is_file():
-        print(f"error: no {CALLS_FILENAME} in {args.reports_dir}", file=sys.stderr)
+    outcome_path = args.reports_dir / OUTCOME_FILENAME
+    if not calls_path.is_file() and not outcome_path.is_file():
+        print(f"error: neither {CALLS_FILENAME} nor {OUTCOME_FILENAME} in {args.reports_dir}", file=sys.stderr)
         return 2
+    if not calls_path.is_file():
+        print(f"warning: no {CALLS_FILENAME}; rendering the outcome half only", file=sys.stderr)
     output = args.output or args.reports_dir / DEFAULT_OUTPUT
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render(calls_path, args.reports_dir / OUTCOME_FILENAME, args.title), encoding="utf-8")
+    output.write_text(render(calls_path, outcome_path, args.title), encoding="utf-8")
     print(f"wrote {output} ({output.stat().st_size:,} bytes)")
     return 0
 

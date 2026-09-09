@@ -76,6 +76,12 @@ ledger and none needs to.
    numbers are not comparable.
 
    It needs `geak_calls.jsonl`, so render step 2 with `--include-text` first.
+   **A run whose ledger was lost still gets a page.** With only
+   `geak_outcome.json` present the renderer warns and produces the outcome half
+   alone: the throughput ladder and what each phase measured, with every cost,
+   token and wall-clock figure marked absent rather than shown as zero, and the
+   three spend sections omitted rather than rendered empty. Only when both files
+   are missing does it fail.
    `geak_outcome.json` is written by GEAK's own outcome report and is optional —
    without it the page says so, and every gain column reads *not measured*
    rather than 0.00%.

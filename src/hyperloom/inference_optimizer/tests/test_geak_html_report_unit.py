@@ -363,3 +363,47 @@ def test_grid_columns_can_shrink_and_scroll_rather_than_overlap(reports):
         head = body.index(header)
         opener = body.rindex("<table>", 0, head)
         assert body[:opener].rstrip().endswith('<div class="scroll">'), header
+
+
+def test_a_run_whose_ledger_was_lost_still_gets_its_outcome_page(reports):
+    """The ledger and the outcome have different lifetimes; losing one is not losing both.
+
+    Claude Code writes the ledger into a config home the run does not own, so a
+    run can finish, measure a real result, and have no ledger left. That run's
+    measured outcome is still worth a page.
+    """
+    (reports / "geak_calls.jsonl").unlink()
+    html = R.render(reports / "geak_calls.jsonl", reports / "geak_outcome.json", None)
+    assert "no ledger" in html
+    # Never a dollar figure, a call count or a token total: those would be zeros
+    # standing in for numbers that are simply absent.
+    assert "Total spend" not in html and "$0.00" not in html
+    assert "Cost per +1%" not in html
+    # The empty spend sections are omitted, not rendered headed and rowless.
+    for gone in ('id="phases"', 'id="deep"', 'id="delegate"'):
+        assert gone not in html
+    # It says which file it read, and does not credit the one it did not.
+    assert "geak_outcome.json</code>" in html
+    assert "geak_calls.jsonl</code>" not in html
+    # The measured half is reported in full.
+    assert "P4 ConfigSweep" in html
+
+
+def test_load_calls_treats_a_missing_ledger_as_empty_not_fatal(tmp_path):
+    """A missing ledger is a fact about durability, not a parse error."""
+    assert R.load_calls(tmp_path / "absent.jsonl") == []
+
+
+def test_main_needs_one_of_the_two_files_and_says_which_are_missing(tmp_path, capsys):
+    """Both files absent is the only case with nothing to render."""
+    assert R.main(["--reports-dir", str(tmp_path), "-o", str(tmp_path / "x.html")]) == 2
+    assert "neither" in capsys.readouterr().err
+
+
+def test_main_renders_the_outcome_alone_and_warns_that_it_did(reports, capsys):
+    """Rendering half a report is a warning, not a silent success or a failure."""
+    (reports / "geak_calls.jsonl").unlink()
+    out = reports / "outcome_only.html"
+    assert R.main(["--reports-dir", str(reports), "-o", str(out)]) == 0
+    assert "rendering the outcome half only" in capsys.readouterr().err
+    assert out.is_file() and out.read_text(encoding="utf-8").isascii()
