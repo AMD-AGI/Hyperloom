@@ -691,6 +691,9 @@ KV_ARTIFACT_NAME = "kv_metrics.json"
 #: do with the throughput benchmark. Only ``measured`` may enter a comparison.
 PHASES = ("boot", "warmup", "measured", "eval")
 
+#: The one phase whose numbers may be compared against another round's.
+_COMPARABLE_PHASE = "measured"
+
 #: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A
 #: three-hour round at the scrape interval below lands well over this.
 _MAX_STORED_ROWS = 5000
@@ -778,8 +781,8 @@ class KvMetricsRecorder:
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
         self._phase_marks: list[dict[str, Any]] = []
-        self._first_counters: dict[str, dict[str, dict[str, float]]] = {}
-        self._last_counters: dict[str, dict[str, dict[str, float]]] = {}
+        self._first_counters: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
+        self._last_counters: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
         self._capacity_tokens: float | None = None
         self._capacity_derived = False
         self._capacity_gb: float | None = None
@@ -845,6 +848,11 @@ class KvMetricsRecorder:
         # and diff. The prefix-cache ones need it as much as the pressure ones,
         # because under warm reuse the engine outlives the round and its
         # absolute totals carry the previous round's cache warming.
+        # Bracketed per phase, not per round. An engine keeps retracting through
+        # warmup and the accuracy eval, and a round-wide difference silently
+        # folds both into the one number that is supposed to describe the
+        # measured window alone. The gauge rows carry their phase and can be
+        # re-sliced later; counters cannot, so the split has to happen here.
         for name, series in (
             ("retract", sample.retract_total),
             ("preempt", sample.preempt_total),
@@ -854,8 +862,9 @@ class KvMetricsRecorder:
         ):
             if not series:
                 continue
-            self._first_counters.setdefault(name, {g: dict(s) for g, s in series.items()})
-            self._last_counters[name] = {g: dict(s) for g, s in series.items()}
+            snapshot = {g: dict(s) for g, s in series.items()}
+            self._first_counters.setdefault(self._phase, {}).setdefault(name, snapshot)
+            self._last_counters.setdefault(self._phase, {})[name] = snapshot
         self._rows.append(
             {
                 "phase": self._phase,
@@ -873,6 +882,26 @@ class KvMetricsRecorder:
             }
         )
 
+    def _counter_deltas(self, name: str) -> tuple[float | None, dict[str, float | None]]:
+        """Increment of one counter, attributed to the phase that earned it.
+
+        Args:
+            name (str): Counter key used by :meth:`_absorb`.
+
+        Returns:
+            tuple[float | None, dict[str, float | None]]: The measured-phase
+            increment -- the only one that may enter a comparison -- and the
+            full per-phase breakdown. The measured figure is ``None`` when no
+            sample landed in that phase, which is not an increment of zero.
+        """
+        by_phase: dict[str, float | None] = {}
+        for phase in PHASES:
+            last = self._last_counters.get(phase, {}).get(name)
+            if not last:
+                continue
+            by_phase[phase] = counter_delta(self._first_counters.get(phase, {}).get(name, {}), last)
+        return by_phase.get(_COMPARABLE_PHASE), by_phase
+
     def _prefix_cache_window(self) -> dict[str, Any]:
         """Prefix-cache increments attributable to this round.
 
@@ -888,12 +917,11 @@ class KvMetricsRecorder:
         """
         window: dict[str, Any] = {}
         for name in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total"):
-            last = self._last_counters.get(name)
-            if not last:
+            measured, by_phase = self._counter_deltas(name)
+            if not by_phase:
                 continue
-            window[f"{name}_delta"] = counter_delta(self._first_counters.get(name, {}), last)
-            window[f"{name}_first"] = self._first_counters.get(name, {})
-            window[f"{name}_last"] = last
+            window[f"{name}_delta"] = measured
+            window[f"{name}_delta_by_phase"] = by_phase
         return window
 
     def rows(self) -> list[dict[str, Any]]:
@@ -922,6 +950,8 @@ class KvMetricsRecorder:
             means the endpoint was never reached one way or the other, which is
             not the same as reaching it and finding no pressure.
         """
+        retract_measured, retract_by_phase = self._counter_deltas("retract")
+        preempt_measured, preempt_by_phase = self._counter_deltas("preempt")
         return {
             "schema_version": 1,
             "source": "metrics",
@@ -935,14 +965,14 @@ class KvMetricsRecorder:
             "series_count": self._series_count,
             "prefix_cache": self._prefix_cache_window(),
             "phase_marks": self._phase_marks,
-            "retract_delta": counter_delta(
-                self._first_counters.get("retract", {}),
-                self._last_counters.get("retract", {}),
-            ),
-            "preempt_delta": counter_delta(
-                self._first_counters.get("preempt", {}),
-                self._last_counters.get("preempt", {}),
-            ),
+            # The headline figure is the measured phase alone, because that is
+            # the only phase the plan lets into a comparison. The breakdown is
+            # kept beside it so a round that retracted hard during warmup is
+            # still visible rather than rounded away.
+            "retract_delta": retract_measured,
+            "retract_delta_by_phase": retract_by_phase,
+            "preempt_delta": preempt_measured,
+            "preempt_delta_by_phase": preempt_by_phase,
             "sample_count": len(self._rows),
             "samples": self.rows(),
         }

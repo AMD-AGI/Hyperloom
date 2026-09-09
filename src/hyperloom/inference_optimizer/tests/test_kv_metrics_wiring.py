@@ -125,6 +125,7 @@ def test_capacity_is_latched_from_the_first_reading_that_has_it():
     with the server gone must still carry it."""
     poller = _StubPoller([_sample(capacity_tokens=32768.0, capacity_gb=180.0), _sample()])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
 
@@ -152,6 +153,42 @@ def test_counter_delta_does_not_multiply_lockstep_ranks():
     last = {"": {f'tp_rank="{i}"': 48.0 for i in range(8)}}
 
     assert counter_delta(first, last) == 48.0
+
+
+def test_counter_deltas_are_attributed_to_the_phase_that_earned_them():
+    """An engine retracts through warmup and the accuracy eval too.
+
+    A round-wide difference folds both into the number that is supposed to
+    describe the measured window alone, and unlike the gauge rows -- which carry
+    their phase and can be re-sliced -- a counter difference cannot be taken
+    apart afterwards.
+    """
+    poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in (0.0, 5.0, 5.0, 7.0, 7.0, 10.0)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+
+    rec.note_phase("warmup", 0.0)
+    rec.tick(0.0)
+    rec.tick(1.0)
+    rec.note_phase("measured", 2.0)
+    rec.tick(2.0)
+    rec.tick(3.0)
+    rec.note_phase("eval", 4.0)
+    rec.tick(4.0)
+    rec.tick(5.0)
+
+    summary = rec.summary()
+    assert summary["retract_delta"] == 2.0
+    assert summary["retract_delta_by_phase"] == {"warmup": 5.0, "measured": 2.0, "eval": 3.0}
+
+
+def test_measured_delta_is_none_when_no_sample_landed_there():
+    """Not an increment of zero: nothing was ever measured."""
+    poller = _StubPoller([_sample(retract_total=_grouped(a=5.0))])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.note_phase("warmup", 0.0)
+    rec.tick(0.0)
+
+    assert rec.summary()["retract_delta"] is None
 
 
 def test_counter_delta_adds_independent_engines():
@@ -194,14 +231,14 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted():
         ]
     )
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
 
     window = rec.summary()["prefix_cache"]
     assert window["prefix_cache_queries_delta"] == 400.0
     assert window["prefix_cache_hits_delta"] == 300.0
-    assert window["prefix_cache_queries_first"] == _grouped(a=1000.0)
-    assert window["prefix_cache_queries_last"] == _grouped(a=1400.0)
+    assert window["prefix_cache_queries_delta_by_phase"] == {"measured": 400.0}
 
 
 def test_prefix_cache_counters_add_across_independent_engines():
@@ -212,6 +249,7 @@ def test_prefix_cache_counters_add_across_independent_engines():
     last = {'engine="0"': {'engine="0"': 200.0}, 'engine="1"': {'engine="1"': 200.0}}
     poller = _StubPoller([_sample(prefix_cache_queries=first), _sample(prefix_cache_queries=last)])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
 
@@ -223,6 +261,7 @@ def test_prefix_cache_restart_credits_only_the_post_restart_count():
         [_sample(cached_tokens_total=_grouped(a=900.0)), _sample(cached_tokens_total=_grouped(a=12.0))]
     )
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
 
