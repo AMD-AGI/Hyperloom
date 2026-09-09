@@ -28,9 +28,11 @@ inbox events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
 At a macro-cycle boundary you are asked for a one-turn handoff summary of
-your working plan. The Coordinator persists it and pastes it back as
-`=== Your working memory (recovered) ===` on later turns, so put intent
-and rationale there, not raw numbers you can re-pull.
+your working plan. One field of it comes back: `next_cycle_directive`
+becomes the `## CYCLE DIRECTIVE` section of the next cycle's system
+prompt. Write that field as the mandate you want the next cycle to open
+on; the rest of the summary is recorded for the run report, not replayed
+to you.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->

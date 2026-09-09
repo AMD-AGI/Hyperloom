@@ -830,7 +830,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # Orchestration working memory — macro-cycle handoff summary, pasted back into the projection and used on crash-recovery rebuild; Coordinator-only writer.
+    # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
     # Bounded ring (cap 10) of prior ``orchestration_memory`` records, so a cycle that captures nothing usable can fall
