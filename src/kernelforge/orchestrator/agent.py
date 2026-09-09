@@ -168,28 +168,27 @@ def make_agent_fn(
             file=sys.stderr,
         )
 
-    # Kernel-backend prompts name build/test/bench/pmc/registers as if they were tools.
+    # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
+    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
+    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
+    # now, so only the framing that is actually about this loop is left.
     kernel_backend_section = ""
     if kernel_backend_context:
-        # Drop the profile/pmc mentions from this framing when profiling is disabled, so the implementer prompt
-        # carries no profiling guidance. (The loaded kernel_backend_context is backend domain knowledge and is left
-        # as-is.)
+        # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
+        # kernel_backend_context is backend domain knowledge and is left as-is.)
         _self_verbs = (
-            "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
+            "build, run, and profile the kernel YOURSELF via Bash"
             if profiling_enabled
-            else "build and run the kernel YOURSELF via the Bash tool (compile, run the driver)"
-        )
-        _self_tools = (
-            "`build`/`test`/`bench`/`pmc`/`registers`" if profiling_enabled else "`build`/`test`/`bench`/`registers`"
+            else "build and run the kernel YOURSELF via Bash"
         )
         kernel_backend_section = (
             f"{chr(10)}## Backend Expertise ({kernel_backend_name}){chr(10)}"
             "Backend guidance for choosing and implementing your edit. In this "
             f"loop you {_self_verbs} to verify every change before finishing. "
-            f"Where the guidance below names {_self_tools} tools, run those steps "
-            "as shell commands via Bash. After you finish, the loop also runs an "
-            "SNR pre-filter + benchmark pass on your final kernel, and accepts it "
-            "only if the task's own correctness suite passes too."
+            "After you finish, the loop also runs an SNR pre-filter + benchmark "
+            "pass on your final kernel, and accepts it only if the task's own "
+            "correctness suite passes too."
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
