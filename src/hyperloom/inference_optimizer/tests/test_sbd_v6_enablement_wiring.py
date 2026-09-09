@@ -363,9 +363,7 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     for _ in range(_ENABLEMENT_MAX_ATTEMPTS):
         task_id = await lane._maybe_enqueue_enablement_specialist()
         lane.shared_state.enablement.last_specialist_task_id = task_id
-        await lane._maybe_rearm_enablement(
-            {"enablement": True, "status": "reverted", "specialist_task_id": task_id}
-        )
+        await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
     await lane._maybe_enqueue_enablement_specialist()
 
     assert lane.shared_state.stop_reason == "enablement_attempts_exhausted"

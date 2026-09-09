@@ -1285,7 +1285,9 @@ class ExploreExecutor:
                                 # candidate has to clear belongs to the gate, as
                                 # the tolerance does for accuracy.
                                 "observed": (
-                                    graded.candidate if _graded_on_intvty else gain_pct(graded.candidate, graded.reference)
+                                    graded.candidate
+                                    if _graded_on_intvty
+                                    else gain_pct(graded.candidate, graded.reference)
                                 ),
                                 "threshold": graded.reference if _graded_on_intvty else keep_threshold_pct,
                                 "reason": reason,
