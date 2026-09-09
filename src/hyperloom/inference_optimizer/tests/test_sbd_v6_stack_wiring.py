@@ -3,16 +3,9 @@
 
 """The stack ledger against the real production writers, not a stand-in.
 
-``test_sbd_v6_stack_ledger.py`` pins what the ledger computes; these pin that
-the orchestrator actually feeds it. The distinction matters here more than
-usual, because the whole argument for recording adoptions is that
-``throughput_before`` exists only inside ``_lift_to_current_best`` -- so a test
-that hands the recorder a before figure of its own has assumed away the thing
-being claimed.
-
-The tests below drive the real ``WritebackCollaborator`` on a real
-``SharedState`` and read what came out the other end, including the case the
-lift refuses, which must leave no row at all.
+``test_sbd_v6_stack_ledger.py`` pins what the ledger computes; these pin that the
+orchestrator feeds it. ``throughput_before`` exists only inside
+``_lift_to_current_best``, so a test that supplies its own has assumed the claim.
 """
 
 from __future__ import annotations
@@ -77,13 +70,6 @@ def _rows() -> list[dict[str, Any]]:
 
 
 def test_a_real_lift_records_the_anchor_it_beat(session_dir):
-    """The figure the lift graded against lands on the row.
-
-    This is the fact the legacy ledger had to reconstruct: it is read from
-    ``current_best`` inside the lift and overwritten by the same call, so an
-    export-time reader has only the final anchor and has to walk backwards
-    through the attempt rows guessing which reading each step was graded on.
-    """
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
 
@@ -100,7 +86,6 @@ def test_a_real_lift_records_the_anchor_it_beat(session_dir):
 
 
 def test_the_row_index_matches_the_stack_the_lift_appended_to(session_dir):
-    """``stack_index`` indexes ``optimization_stack`` directly, so it can be joined."""
     with session_scope(session_dir):
         coord = _coord(session_dir)
         coord._lift_to_current_best("explore", 1100.0, {"name": "first"})
@@ -114,7 +99,6 @@ def test_the_row_index_matches_the_stack_the_lift_appended_to(session_dir):
 
 
 def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
-    """Two real lifts, and the contributions add up to what the chain gained."""
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
         coord._lift_to_current_best("explore", 1100.0, {"name": "first"})
@@ -128,13 +112,6 @@ def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
 
 
 def test_a_refused_lift_records_nothing(session_dir):
-    """No append, no row. The ledger is the stack, not the attempts.
-
-    A winner that does not beat the anchor is not an adoption, and the attempt
-    is already on its own stage event. Recording it here would put a
-    non-adoption in the chain and break the arithmetic that makes the ledger
-    reconcile.
-    """
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1200.0)
 
@@ -143,13 +120,6 @@ def test_a_refused_lift_records_nothing(session_dir):
 
 
 def test_an_already_stacked_config_is_not_recorded_twice(session_dir):
-    """A rerun of a stacked config re-anchors without re-earning its gain.
-
-    The lift skips the append, keyed by ``(action, variant_name)``. Recording
-    on the lift's return rather than on the append would have credited the same
-    optimization twice, which is exactly the kind of double count the
-    reconciliation exists to catch.
-    """
     with session_scope(session_dir):
         coord = _coord(session_dir)
         coord._lift_to_current_best("explore", 1100.0, {"name": "same"})
@@ -160,12 +130,6 @@ def test_an_already_stacked_config_is_not_recorded_twice(session_dir):
 
 
 def test_the_lift_carries_the_backend_onto_the_row(session_dir):
-    """Kernel adoptions reach the per-backend split through the stack entry.
-
-    Which backend authored a kernel win is passed to the lift as
-    ``entry_extra`` by the promoting lane, so the row can report it without the
-    recorder knowing anything about kernel backends.
-    """
     with session_scope(session_dir):
         coord = _coord(session_dir)
         coord._lift_to_current_best(
@@ -182,7 +146,6 @@ def test_the_lift_carries_the_backend_onto_the_row(session_dir):
 
 
 def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
-    """``_update_cumulative_gain_validated`` is the other production writer."""
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
         coord._lift_to_current_best("explore", 1100.0, {"name": "first"})
@@ -193,13 +156,11 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert settled["stack_len"] == 1
         assert settled["validated_gain_pct"] == pytest.approx(10.0)
         assert ext["validations"]["at_head"] is True
-        # The whole-stack figure and the ledger agree, which is the outcome
-        # worth pinning: the two were measured independently.
+        # The whole-stack figure and the ledger were measured independently.
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 
 
 def test_recording_failure_does_not_refuse_the_adoption(session_dir, monkeypatch):
-    """The stack outranks its own record: a broken sink must not lose a KEEP."""
     with session_scope(session_dir):
         coord = _coord(session_dir)
         monkeypatch.setattr(stack_event, "_sink", lambda: (_ for _ in ()).throw(RuntimeError("spool down")))

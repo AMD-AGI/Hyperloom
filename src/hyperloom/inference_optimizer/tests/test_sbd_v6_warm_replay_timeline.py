@@ -3,11 +3,9 @@
 
 """Coverage for the SBD V6 ``warm_replay`` event.
 
-The event this replaces was projected, and two of the projection's defects are
-what most of these tests pin: the gate verdicts were not recorded, so which
-gate ended the arc had to be guessed from the terminal status, and the anchor
-the gain was measured against was never persisted, so the event back-solved it
-from the gain -- which is exact only until the session re-baselines.
+Most of these tests pin the two facts the projected event it replaces lost: the
+gate verdict that ended the arc, and the anchor the gain was measured against,
+which back-solving recovers only until the session re-baselines.
 """
 
 from __future__ import annotations
@@ -71,7 +69,6 @@ def _recorder(**overrides: Any):
 
 
 def test_the_replay_lands_on_the_timeline_when_it_is_enqueued(_bound_session):
-    """The event opens at enqueue, so its window is not collapsed onto its end."""
     _recorder()
     events = _events(_bound_session)
     assert len(events) == 1
@@ -79,11 +76,9 @@ def test_the_replay_lands_on_the_timeline_when_it_is_enqueued(_bound_session):
 
 
 def test_the_anchor_the_gain_was_measured_against_is_recorded_verbatim(_bound_session):
-    """The enqueue anchor is a recorded fact, not a value re-derived from the gain."""
     recorder = _recorder(session_baseline_tput=15630.0)
-    # The replay was enqueued against an older, lower baseline and the session
-    # has since re-baselined upward. Back-solving from the gain would recover
-    # the current baseline and report a gain the replay never measured.
+    # Enqueued against a lower baseline than the session now holds: back-solving
+    # from the gain would report a gain the replay never measured.
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
     recorder.finish({"status": "reproduced"})
 
@@ -94,7 +89,6 @@ def test_the_anchor_the_gain_was_measured_against_is_recorded_verbatim(_bound_se
 
 
 def test_a_gate_that_never_ran_is_absent_rather_than_failed(_bound_session):
-    """An arc cut short leaves no row for the gates it never reached."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=0.0, after_tput=0.0, gain_pct=None)
     recorder.record_gate(GATE_TPUT_VALID, passed=False, reason="invalid_tput tput=0 baseline=0")
@@ -106,7 +100,6 @@ def test_a_gate_that_never_ran_is_absent_rather_than_failed(_bound_session):
 
 
 def test_an_eval_that_ran_without_a_score_neither_passes_nor_fails(_bound_session):
-    """``None`` is a verdict: no score was readable, not a score that failed."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, eval_ran=True)
     recorder.record_gate(GATE_ACCURACY, passed=None, reason="keep_verdict_unscored")
@@ -118,7 +111,6 @@ def test_an_eval_that_ran_without_a_score_neither_passes_nor_fails(_bound_sessio
 
 
 def test_a_threshold_rejection_after_an_unscored_eval_names_the_threshold(_bound_session):
-    """An outright failure outranks a gate that merely could not rule."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36)
     recorder.record_gate(GATE_ACCURACY, passed=None, reason="keep_verdict_unscored")
@@ -131,7 +123,6 @@ def test_a_threshold_rejection_after_an_unscored_eval_names_the_threshold(_bound
 
 
 def test_a_quality_rejection_reads_as_a_completed_arc_not_a_failure(_bound_session):
-    """A replay measured and judged is a finished arc; only a lost measurement fails."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=17000.0, gain_pct=21.4)
     recorder.record_gate(GATE_QUALITY, passed=False, reason="image-quality gate failed vs baseline reference")
@@ -142,7 +133,6 @@ def test_a_quality_rejection_reads_as_a_completed_arc_not_a_failure(_bound_sessi
 
 
 def test_a_reproduced_replay_records_what_the_promotion_moved(_bound_session):
-    """Promotion states the checkout and patches it changed, not just that it happened."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, accuracy=0.71)
     recorder.record_gate(GATE_ACCURACY, passed=True, observed=0.71, threshold=0.65)
@@ -163,7 +153,6 @@ def test_a_reproduced_replay_records_what_the_promotion_moved(_bound_session):
 
 
 def test_a_reproduced_replay_with_nothing_to_replay_is_degraded(_bound_session):
-    """Measured uplift the session cannot act on is neither a success nor a failure."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
     recorder.finish({"status": "reproduced_but_no_params", "reason": "task.params missing extra_server_args"})
@@ -172,7 +161,6 @@ def test_a_reproduced_replay_with_nothing_to_replay_is_degraded(_bound_session):
 
 
 def test_an_outcome_status_the_module_does_not_know_does_not_read_as_success(_bound_session):
-    """An unmapped status is an arc this module cannot vouch for."""
     recorder = _recorder()
     recorder.finish({"status": "some_new_status_nobody_taught_us"})
 
@@ -180,7 +168,6 @@ def test_an_outcome_status_the_module_does_not_know_does_not_read_as_success(_bo
 
 
 def test_a_replay_killed_mid_flight_is_recovered_as_interrupted(_bound_session):
-    """A recorder that never closed leaves an event finalize can still settle."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
     recorder.record_gate(GATE_ACCURACY, passed=True, observed=0.71, threshold=0.65)
@@ -188,14 +175,12 @@ def test_a_replay_killed_mid_flight_is_recovered_as_interrupted(_bound_session):
     assert finalize_events(_bound_session) == [recorder.event_id]
     event = _events(_bound_session)[0]
     assert event["status"] == EVENT_STATUS_INTERRUPTED
-    # The rows it did write survive: the point of recovery is the evidence, not
-    # the status.
+    # The rows it did write survive: recovery is about the evidence, not the status.
     assert event["ext"]["measurement"]["before_tput"] == 14000.0
     assert [row["gate"] for row in event["ext"]["gates"]] == [GATE_ACCURACY]
 
 
 def test_a_crash_is_told_apart_from_a_kill(_bound_session):
-    """An executor that raised records a failure row; a kill leaves none."""
     recorder = _recorder()
     recorder.finish_crashed(RuntimeError("boom"))
 
@@ -205,7 +190,6 @@ def test_a_crash_is_told_apart_from_a_kill(_bound_session):
 
 
 def test_the_gates_read_back_in_the_order_they_were_evaluated(_bound_session):
-    """Assembly preserves evaluation order, which is what makes the arc readable."""
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
     for gate in (GATE_TPUT_VALID, GATE_QUALITY, GATE_ACCURACY, GATE_KEEP_THRESHOLD):
@@ -221,7 +205,6 @@ def test_the_gates_read_back_in_the_order_they_were_evaluated(_bound_session):
 
 
 def test_recording_the_same_gate_twice_settles_rather_than_duplicates(_bound_session):
-    """A gate re-ruled on better evidence is one row, not two."""
     recorder = _recorder()
     recorder.record_gate(GATE_ACCURACY, passed=None, reason="score pending")
     recorder.record_gate(GATE_ACCURACY, passed=True, observed=0.71, threshold=0.65)

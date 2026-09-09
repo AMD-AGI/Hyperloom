@@ -77,26 +77,10 @@ def _is_upstream_pr_candidate(pending: Any) -> bool:
 def _record_config_proposal(router: Any, pending: Any) -> None:
     """Record one config-arm grid on the framework event, as it is proposed.
 
-    The arm's measured attempts already name this row through their
-    ``proposal_ref``, so without it the whole upstream of the config arm is a
-    dangling reference: the event says six variants were benched and cannot
-    say what was proposed or who proposed it.
-
-    Recorded when the grid is proposed rather than when it is approved, so one
-    the Critic denies is still on record as a thing the phase pursued and
-    dropped -- which is the reading the arm's plateau acts on.
-
-    One row per grid, not per variant, because that is what the attempts point
-    at: the config arm proposes in batches and the Critic rules on them by
-    name, so a grid of six variants is one proposal with six attempts.
-
-    Module-level and self-defending like the phase's other recording helpers:
-    this seam is driven by lightweight stand-ins in tests, and a proposal must
-    never fail to route because its observability did.
-
-    Args:
-        router: The intent router, or a stand-in; the recorder is read off it.
-        pending: The pending proposal just minted.
+    Recorded at proposal time rather than at approval, so a grid the Critic
+    denies is still on record as a thing the phase pursued and dropped. One row
+    per grid, not per variant: the measured attempts point back at the grid
+    through their ``proposal_ref``.
     """
     if str(getattr(pending, "action_name", "") or "") != "explore":
         return
@@ -120,10 +104,9 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
     if len(labels) == 1:
         producer, producer_ref = producer_for_provenance(next(iter(labels)))
     else:
-        # A grid mixing provenances was assembled by the orchestration agent:
-        # a specialist's own config arrives as a single-provenance proposal of
-        # its own. Either way each variant keeps its label on its attempt, so
-        # the mix is not lost by naming the assembler here.
+        # A grid mixing provenances was assembled by the orchestration agent.
+        # Each variant keeps its own label on its attempt, so naming the
+        # assembler here loses nothing.
         producer, producer_ref = PRODUCER_ORCHESTRATION, ""
     scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
     try:
@@ -148,20 +131,11 @@ def _variant_review_rows(
     payload: Mapping[str, Any] | None,
     held_by_name: Mapping[str, str] | None,
 ) -> list[dict[str, Any]]:
-    """Return the per-variant rulings a ``verdict_map`` carried.
+    """Return one row per named variant, in the order the Critic wrote them.
 
-    A variant the Critic rejected never reaches a bench, so its ruling has no
-    attempt row to live on and the map is the only record that it was judged
-    at all. Kept per variant rather than collapsed, because the collapse is
-    deliberately lossy: a grid proceeds on its approved subset, and the summary
-    verdict says nothing about which variants that was.
-
-    Args:
-        payload: The ``review_verdict`` payload, read for ``verdict_map``.
-        held_by_name: What each entry was held to, keyed by variant name.
-
-    Returns:
-        One row per named variant, in the order the Critic wrote them.
+    A variant the Critic rejected never reaches a bench, so the map is the only
+    record that it was judged at all; a collapsed verdict says nothing about
+    which variants a grid proceeded on.
     """
     entries = (payload or {}).get("verdict_map")
     if not isinstance(entries, Mapping):
@@ -193,17 +167,10 @@ def _variant_review_rows(
 def _review_subject(pending: Any) -> str:
     """Return the proposal row a ruling belongs on.
 
-    The two arms identify a proposal differently: a configuration grid is known
-    by the bus message that raised it, an upstream candidate by its candidate
-    id, and the row already recorded under that id is the one the ruling is
-    about. Resolving it here is what keeps a review on the proposal it judged
-    instead of opening a second, near-empty row beside it.
-
-    Args:
-        pending: The proposal reviewed.
-
-    Returns:
-        The candidate id when the proposal carries one, else the bus message id.
+    The two arms identify a proposal differently, so this is the candidate id
+    when the proposal carries one and the bus message id otherwise. Resolving it
+    here keeps a review on the proposal it judged instead of opening a second,
+    near-empty row beside it.
     """
     payload = getattr(pending, "payload", None) or {}
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
@@ -216,12 +183,7 @@ def _review_subject(pending: Any) -> str:
 def _phase_scope(router: Any) -> tuple[str, int]:
     """The phase and macro cycle a proposal is being raised in.
 
-    Args:
-        router: The intent router, or a stand-in.
-
-    Returns:
-        tuple[str, int]: The phase name and macro cycle, ``("", 0)`` when the
-            stand-in carries no state.
+    ``("", 0)`` when the stand-in carries no state.
     """
     state = getattr(router, "shared_state", None) or getattr(router, "state", None)
     phase = str(getattr(state, "phase", "") or "")
@@ -236,16 +198,7 @@ def _record_phase_proposal(router: Any, pending: Any) -> None:
     """Record one proposal against the phase that raised it.
 
     Every proposal, not only the ones a framework arm claims: this is the row
-    the Critic's ruling is filed on, and a ruling on a KERNEL ``kernel_opt`` or
-    on an action no arm maps to had no subject row anywhere before this.
-
-    Module-level and self-defending like the phase's other recording helpers:
-    this seam is driven by lightweight stand-ins in tests, and a proposal must
-    never fail to route because its observability did.
-
-    Args:
-        router: The intent router, or a stand-in.
-        pending: The pending proposal just minted.
+    the Critic's ruling is filed on.
     """
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
@@ -288,15 +241,6 @@ def _record_phase_proposal_review(
     Keyed on the bus message id the verdict named, rather than on the subject
     the framework row is resolved under: the two differ for a proposal
     carrying a candidate id, and this row is about the proposal itself.
-
-    Args:
-        pending: The proposal reviewed.
-        authored: The verdict the Critic wrote.
-        effective: The verdict the loop acted on.
-        reason: The Critic's reasoning.
-        payload: The ``review_verdict`` payload.
-        advisory: The advisory block serialised for the rebroadcast.
-        variants: Per-variant rulings, when a ``verdict_map`` named any.
     """
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
@@ -337,36 +281,15 @@ def _record_critic_review(
 ) -> None:
     """Record the Critic's ruling on one proposal, onto the proposal.
 
-    Every action the Critic reviews is recorded, not only the config-arm grid:
-    a rejected ``integrate_patch`` is the reason a patch never landed, and
-    keeping that ruling only in the state mirror the patch gate consults left
-    the round reading as though the patch had never been authored.
-
-    Both verdicts are kept because they are different facts and the loop
-    already treats them so: a reject held to a formatting rule is mirrored
-    onto state as the reject the Critic wrote, not as what the hold made of
-    it. The review carries what the Critic ruled; the lifecycle step carries
-    what the loop then did with it.
-
-    A rejected proposal is settled here. It never reaches a bench, so nothing
-    downstream would otherwise resolve it, and a proposal left ``pending``
-    reads as one the phase never finished deciding.
-
-    Args:
-        router: The intent router, or a stand-in.
-        pending: The proposal reviewed.
-        authored: The verdict the Critic wrote.
-        effective: The verdict the loop acted on.
-        reason: The Critic's reasoning.
-        payload: The ``review_verdict`` payload, read for the grounds the
-            Critic stated -- source, confidence and the rule it cited.
-        advisory: The advisory block already serialised for the rebroadcast.
-        variants: Per-variant rulings, when a ``verdict_map`` named any.
+    Every action the Critic reviews is recorded, not only the config-arm grid.
+    ``authored`` (what the Critic wrote) and ``effective`` (what the loop acted
+    on) are both kept: a reject held to a formatting rule is mirrored onto state
+    as the reject the Critic wrote. A rejected proposal is settled here, since
+    it never reaches a bench and nothing downstream would otherwise resolve it.
     """
-    # Onto the proposal's own row first. The framework row below exists only
-    # while a framework event is open for this cycle, so a ruling reached in
-    # any other phase -- or after this one exited -- would otherwise be acted
-    # on with nothing recording what the Critic said.
+    # The framework row below exists only while a framework event is open for
+    # this cycle, so the proposal's own row is what carries a ruling reached in
+    # any other phase.
     _record_phase_proposal_review(
         pending,
         authored=authored,
@@ -429,10 +352,8 @@ def _record_critic_review(
 def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
     """Record on the proposal row what the loop did with its ruling.
 
-    Args:
-        pending: The proposal ruled on.
-        **outcome: ``materialized`` / ``denied`` / ``reauthored`` /
-            ``patch_verdict_key``, as the framework row names them.
+    ``outcome`` carries ``materialized`` / ``denied`` / ``reauthored`` /
+    ``patch_verdict_key``, as the framework row names them.
     """
     proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
     if not proposal_id:
@@ -452,13 +373,7 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
 
 
 def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
-    """Record what the loop did with a ruling, onto the ruling.
-
-    Args:
-        router: The intent router, or a stand-in.
-        pending: The proposal ruled on.
-        **outcome: The fields ``record_proposal_review_outcome`` accepts.
-    """
+    """Record what the loop did with a ruling, onto the ruling."""
     _record_phase_proposal_outcome(pending, **outcome)
 
     proposal_id = _review_subject(pending)
@@ -786,26 +701,11 @@ class IntentRouter:
     ) -> None:
         """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
 
-        Args:
-            source: The agent emitting the verdict.
-            pending: The pending proposal the verdict targets.
-            verdict: The collapsed verdict (approve / advise / reject / needs_review).
-            reasoning: Free-text reasoning recorded with the verdict.
-            authored_verdict: The verdict the Critic itself wrote, before any
-                hold to a cited rule. Mirrored onto ``specialist_patch_verdicts``
-                in place of ``verdict``; defaults to ``verdict``.
-            advisory: Pre-serialised advisory fields (``required_evidence`` /
-                ``risks`` / ``advice_text`` / ``alternative_action`` /
-                ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
-                the rebroadcast payload so the full Critic context reaches the
-                orchestration inbox and downstream consumers.
-            approved_variant_names: When a ``verdict_map`` named proceedable
-                variants, restrict an explore grid to those names; ``None``
-                keeps the full proposal.
-            payload: The ``review_verdict`` payload, recorded onto the
-                proposal for the grounds the Critic stated.
-            variant_verdicts: The per-variant rulings a ``verdict_map``
-                carried, recorded onto the proposal.
+        ``verdict`` is one of approve / advise / reject / needs_review.
+        ``authored_verdict`` is what the Critic itself wrote before any hold to
+        a cited rule; it is mirrored onto ``specialist_patch_verdicts`` in place
+        of ``verdict`` and defaults to it. ``approved_variant_names`` restricts
+        an explore grid to the named variants; ``None`` keeps the full proposal.
         """
         pending.decided = True
         pending.verdict = verdict
@@ -1130,10 +1030,8 @@ class IntentRouter:
 
         An analysis dispatched this way opens no roofline event of its own, so
         without this the snapshot counter it advanced has nothing on the
-        timeline to account for it, and the kernel table it produced reaches a
-        reader only through the state projection.
-
-        Best-effort: a failed record never breaks the request.
+        timeline to account for it. Best-effort: a failed record never breaks
+        the request.
         """
         try:
             from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request

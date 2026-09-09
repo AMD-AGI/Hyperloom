@@ -3,17 +3,11 @@
 
 """What a specialist round came back with is recorded on the row that dispatched it.
 
-The section this replaces was one row per round, keyed by a counter, sitting
-beside the timeline with no link to the phase that ordered the dispatch or to
-the framework run that consumed the proposals. Rounds are dispatched from three
-places -- PRELUDE scouts, the periodic dispatch inside FRAMEWORK_AGENT, and the
-plateau trajectory reviewer -- and only the middle one has a framework event
-open, so a single landing site could never hold all three.
-
-The product now merges onto whichever row already carries the dispatch: the
-framework run for FRAMEWORK_AGENT rounds, the phase action row otherwise. These
-tests pin both routes, and that the merge lands on the dispatch rather than
-appending a second row.
+Rounds are dispatched from PRELUDE scouts, from inside FRAMEWORK_AGENT and from
+the plateau reviewer, and only the middle one has a framework event open, so the
+product merges onto whichever row already carries the dispatch: the framework run
+for FRAMEWORK_AGENT rounds, the phase action row otherwise. These tests pin both
+routes, and that the merge lands on the dispatch rather than appending a row.
 """
 
 from __future__ import annotations
@@ -55,11 +49,7 @@ def _runs(session_dir) -> list[dict[str, Any]]:
     return events[0]["ext"]["runs"]
 
 
-# --- the route with no framework event open -------------------------------
-
-
 def test_a_prelude_round_lands_on_the_action_that_dispatched_it(tmp_path) -> None:
-    """PRELUDE scouts run before any framework event exists."""
     phase_event.record_dispatch(action="specialist", task_id="t-1", phase="PRELUDE", macro_cycle=0, dispatched_unix=4.0)
     phase_event.record_specialist_round(
         task_id="t-1",
@@ -104,7 +94,6 @@ def test_an_empty_round_says_so_rather_than_going_missing(tmp_path) -> None:
 
 
 def test_a_round_settled_outside_the_dispatcher_still_gets_a_row(tmp_path) -> None:
-    """Nothing opened a dispatch, so the product opens one rather than dropping."""
     phase_event.record_specialist_round(
         task_id="t-3",
         phase="PLATEAU",
@@ -121,7 +110,6 @@ def test_a_round_settled_outside_the_dispatcher_still_gets_a_row(tmp_path) -> No
 
 
 def test_re_recording_the_same_round_does_not_duplicate_it(tmp_path) -> None:
-    """Resume re-walks the round list; the key must fold the second write in."""
     phase_event.record_dispatch(action="specialist", task_id="t-4", phase="EXPLORE", macro_cycle=0, dispatched_unix=1.0)
     phase_event.record_specialist_round(task_id="t-4", phase="EXPLORE", macro_cycle=0, proposals_total=1)
     phase_event.record_specialist_round(task_id="t-4", phase="EXPLORE", macro_cycle=0, proposals_total=3)
@@ -132,7 +120,6 @@ def test_re_recording_the_same_round_does_not_duplicate_it(tmp_path) -> None:
 
 
 def test_an_unapproved_field_cannot_smuggle_itself_into_the_row(tmp_path) -> None:
-    """The round entry carries bookkeeping the timeline row has no shape for."""
     phase_event.record_dispatch(action="specialist", task_id="t-5", phase="EXPLORE", macro_cycle=0, dispatched_unix=1.0)
     phase_event.record_specialist_round(
         task_id="t-5",
@@ -147,9 +134,6 @@ def test_an_unapproved_field_cannot_smuggle_itself_into_the_row(tmp_path) -> Non
     assert row["summary"] == "kept"
     assert "parallelism" not in row
     assert "task_domains" not in row
-
-
-# --- the seam that picks between the two routes ---------------------------
 
 
 class _StubTask:
@@ -174,7 +158,6 @@ class _Seam:
 
 
 def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> None:
-    """The entry's ``source_phase`` is optional; the live phase is the fallback."""
     seam = _Seam(phase="KERNEL_AGENT")
     seam._record_specialist_round_product(
         task=_StubTask("t-6"),
@@ -187,7 +170,6 @@ def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> 
 
 
 def test_a_framework_round_is_not_also_written_to_the_phase(tmp_path) -> None:
-    """One dispatch, one row: the two routes must not both fire."""
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_run("t-7", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded")
     seam = _Seam(phase="FRAMEWORK_AGENT", framework_recorder=recorder)
@@ -200,9 +182,6 @@ def test_a_framework_round_is_not_also_written_to_the_phase(tmp_path) -> None:
     (run,) = _runs(tmp_path)
     assert run["proposals_total"] == 4
     assert _actions("FRAMEWORK_AGENT")["count"] == 0
-
-
-# --- the route inside FRAMEWORK_AGENT --------------------------------------
 
 
 def test_a_framework_round_lands_on_the_run_that_dispatched_it(tmp_path) -> None:

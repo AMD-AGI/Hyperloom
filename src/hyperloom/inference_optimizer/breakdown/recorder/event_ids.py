@@ -67,10 +67,7 @@ def event_id(phase: str, macro_cycle: int, component: str) -> str:
 
 
 def parse_event_id(value: str) -> EventId:
-    """Split an event id back into its segments.
-
-    Args:
-        value (str): An event id built by :func:`event_id`.
+    """Split an event id built by :func:`event_id` back into its segments.
 
     Raises:
         ValueError: If ``value`` is not three separator-joined segments, or a

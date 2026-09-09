@@ -6,12 +6,8 @@
 The critic agent reviews the session as a whole, iteration after iteration,
 and each iteration is complete the moment the review comes back: its topic,
 its verdict, the summary it wrote and the four artifacts it left behind. This
-records it there.
-
-This is the session-level channel and it does not compete with the per-proposal
-verdicts, which stay with the proposals they judge. What lives here is the
-agent's own run: how many times it was asked, what it was asked about, and what
-it concluded each time.
+records it there. It is the session-level channel and does not compete with the
+per-proposal verdicts, which stay with the proposals they judge.
 
 Iterations are keyed by a content-derived id rather than the process-local
 iteration number, because that number is reused when a session resumes and
@@ -92,22 +88,9 @@ def record_critic_iteration(
     """Record one critic iteration under a session-unique identity.
 
     ``request`` and ``judge_bundle`` are read back from ``workdir`` when the
-    caller does not hold them, since the agent has just written both there.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value
-            is a no-op.
-        iter_n (int): the process-local critic iteration number.
-        review (dict[str, Any] | None): the critic review payload.
-        emit (dict[str, Any] | None): the critic emit payload.
-        workdir (Path | str | None): the iteration's workdir, holding the four
-            artifact files.
-        request (dict[str, Any] | None): the critic request payload.
-        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
-        kb_priors (dict[str, Any] | None): the iteration's historical-KB
-            priors trace (whether priors were used, the request, the response,
-            and whether the verdict referenced them); omitted when empty.
-        producer (str): the breakdown producer label.
+    caller does not hold them, since the agent has just written both there. A
+    falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
+    omitted from the row rather than recorded blank.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=ITERATION_SECTION)

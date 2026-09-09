@@ -6,23 +6,21 @@
 from __future__ import annotations
 
 import logging
+import types
 
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
-from hyperloom.inference_optimizer.breakdown.recorder.instrument import record_singleton_section
+from hyperloom.inference_optimizer.breakdown.recorder.instrument import snapshot_state_sections
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 from hyperloom.orchestrator.kernel._recorder_trace import trace_recording_skipped
 
 
 def _record(session_dir, payload=None):
-    """Record through the SDK, so the trace sees both sides of the call."""
-    record_singleton_section(
-        session_dir,
-        "session",
-        {"session_id": "s-1", "phase": "CLOSE"} if payload is None else payload,
-        producer="coordinator",
-    )
+    """Record through the surviving state-snapshot instrumentation."""
+    values = {"session_id": "s-1", "phase": "CLOSE"} if payload is None else payload
+    state = types.SimpleNamespace(**values) if values else None
+    snapshot_state_sections(session_dir, state)
 
 
 @pytest.fixture
@@ -55,9 +53,6 @@ def test_a_write_says_what_it_wrote_and_who_asked(tmp_path, traced):
 
     assert "section=session" in line
     assert "outcome=created" in line
-    # Both sides of the SDK: the helper that built the payload, and the code that decided to record something.
-    assert "via=instrument.py:" in line
-    assert "record_singleton_section" in line
     assert f"from={__file__.rsplit('/', 1)[-1]}:" in line
 
 
@@ -230,7 +225,7 @@ def test_a_record_that_was_never_attempted_says_why(tmp_path, traced):
     lines = [record.getMessage() for record in traced.records]
 
     assert any("outcome=skipped" in line and "no session_dir" in line for line in lines)
-    assert any("outcome=skipped" in line and "empty payload" in line for line in lines)
+    assert any("outcome=skipped" in line and "no state" in line for line in lines)
     assert all("via=instrument.py:" in line for line in lines if "skipped" in line)
 
 

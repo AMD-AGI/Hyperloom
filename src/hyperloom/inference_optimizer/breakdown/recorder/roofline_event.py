@@ -140,10 +140,7 @@ __all__ = [
 
 
 def roofline_event_id(phase: str, macro_cycle: Any) -> str:
-    """Build the event id of the rooflines one phase dispatched in one cycle.
-
-    Returns:
-        str: The event id, ``{phase}:{macro_cycle}:roofline``.
+    """Build ``{phase}:{macro_cycle}:roofline``, the id of one phase's rooflines in one cycle.
 
     Raises:
         ValueError: If either segment is malformed.
@@ -157,9 +154,7 @@ def _rank_of(path: str) -> str:
     xDiT tensor/sequence-parallel profiles write one trace per rank, named with
     a ``rank<N>`` / ``_<N>.pt.trace.json.gz`` suffix. Grouping by rank turns a
     424-entry path list into a histogram that shows whether every rank reported.
-
-    Returns:
-        str: The rank token, or ``"unknown"`` when no rank is encoded.
+    A filename with no rank encoded in it yields ``"unknown"``.
     """
     name = Path(str(path)).name
     for token in name.replace("-", "_").split("_"):
@@ -175,14 +170,9 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     diverge in the tail: bypass measures attainment against a real rocprof
     ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
     TraceLens has only its analytical model. Both spellings are kept, because
-    the absent one is itself the answer to "was this number measured".
-
-    Args:
-        entry (Mapping[str, Any]): One ``kernels[]`` row from the sidecar.
-
-    Returns:
-        dict[str, Any] | None: The normalized row, or ``None`` when the row
-            carries no kernel identity and so cannot be joined to anything.
+    the absent one is itself the answer to "was this number measured". A row
+    carrying no kernel identity cannot be joined to anything and yields
+    ``None``.
     """
     kernel_id = _text_or_none(entry.get("kernel_id"))
     name = _text_or_none(entry.get("name"))
@@ -226,12 +216,10 @@ def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]
     rather than something the exporter re-derives from whatever files survived
     to the end of the session.
 
-    Returns:
-        tuple[dict[str, Any], list[dict[str, Any]]]: The table's provenance
-            header and its per-kernel rows, ordered by descending GPU share. An
-            unreadable or malformed sidecar yields ``({}, [])``: the table is a
-            detail of a run that already succeeded, so losing it must not turn
-            that run into a failure.
+    The rows come back ordered by descending GPU share, behind the table's own
+    provenance header. An unreadable or malformed sidecar gives ``({}, [])``:
+    the table is a detail of a run that already succeeded, so losing it must
+    not turn that run into a failure.
     """
     text = str(path or "")
     if not text:
@@ -271,10 +259,10 @@ def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]
 def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize a roofline snapshot into the shape the event carries.
 
-    The snapshot is the run's quantitative conclusion: where the achieved
+    The snapshot is the run's quantitative conclusion -- where the achieved
     throughput sits against the memory and compute ceilings, and which of the
-    two binds. The event recorded only its id, which made the conclusion
-    reachable solely by joining against session state that later runs overwrite.
+    two binds -- carried in full rather than by id, because session state is
+    overwritten by later runs.
     """
     top_kernel = _as_dict(snapshot.get("top_kernel"))
     row = {
@@ -321,12 +309,7 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
-    """Summarize the profile's trace file set without carrying every path.
-
-    Returns:
-        dict[str, Any]: The resolved main path, the file count, a per-rank
-            histogram, a bounded sample of paths, and the selection reason.
-    """
+    """Summarize the profile's trace file set without carrying every path."""
     files = [str(row) for row in _as_list(profile_result.get("trace_files")) if row]
     by_rank: dict[str, int] = {}
     for path in files:
@@ -367,11 +350,8 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     The validator runs per profile attempt, so its verdict is stored on the run
     row rather than on the effective-run summary: "attempt 1 recorded no graph
     launches, attempt 2 did" is only answerable when each attempt keeps the
-    verdict computed against the trace it produced.
-
-    Returns:
-        dict[str, Any]: The validation block, empty when the validator did not
-            run.
+    verdict computed against the trace it produced. Empty when the validator
+    did not run.
     """
     validate = _as_dict(profile_result.get("trace_validate"))
     if not validate:
@@ -639,21 +619,12 @@ class RooflineEventRecorder:
     ) -> None:
         """Close the action as succeeded and record the promoted artifacts.
 
-        Also records the two things the run concluded that the action only
-        pointed at before: the snapshot's own numbers, and the per-kernel
-        roofline table read back from the sidecar.
-
-        Args:
-            snapshot_id (Any): The roofline snapshot id the recorder bumped to.
-            hot_kernel_count (int): Hot kernels handed to candidate dispatch.
-            kernel_attribution_degraded (bool): True when zero hot kernels are an
-                attribution artifact rather than a real absence.
-            cached (dict[str, Any] | None): The promoted ``last_trace_analyze``
-                cache.
-            trace_path (str): The profile trace the conclusion rests on.
-            snapshot (Mapping[str, Any] | None): The snapshot this run appended
-                to the history, passed in rather than looked up because the
-                recorder holds no reference to session state.
+        Also records the two things the run concluded: the snapshot's own
+        numbers, and the per-kernel roofline table read back from the sidecar.
+        ``kernel_attribution_degraded`` says that zero hot kernels are an
+        attribution artifact rather than a real absence, and ``snapshot`` is
+        passed in rather than looked up because the recorder holds no reference
+        to session state.
         """
         promoted = _as_dict(cached)
         roofline_path = str(promoted.get("kernel_roofline_path") or "")
@@ -842,9 +813,8 @@ def _kernel_roofline_block(
 ) -> dict[str, Any] | None:
     """Assemble the action's per-kernel roofline table.
 
-    Returns:
-        dict[str, Any] | None: The table, or ``None`` when the action recorded
-            none -- a failed action, or one whose analyzer wrote no sidecar.
+    ``None`` when the action recorded none -- a failed action, or one whose
+    analyzer wrote no sidecar.
     """
     header = _as_dict(action_row.get("kernel_roofline_table"))
     if not header and not kernel_rows:
@@ -862,13 +832,10 @@ def assemble_roofline_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble one roofline event's ``ext`` out of its recorded rows.
 
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload, holding one entry per
-            action the event owns, and the status derived from them. A phase can
-            dispatch roofline more than once in a macro cycle, so the event that
-            holds them takes the worst of their statuses: an event reading
-            ``succeeded`` while one of its actions failed would hide the failure
-            behind the retry that recovered from it.
+    The ``ext`` holds one entry per action the event owns, and the derived
+    status is the worst of theirs: a phase can dispatch roofline more than once
+    in a macro cycle, and an event reading ``succeeded`` while one of its
+    actions failed would hide the failure behind the retry that recovered.
     """
     actions = assemble_roofline_actions(parts, event=event)
     return {"actions": actions}, _worst_status([str(action.get("status") or "") for action in actions])

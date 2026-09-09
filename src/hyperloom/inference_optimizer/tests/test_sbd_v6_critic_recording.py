@@ -3,10 +3,9 @@
 
 """The ``critic`` key carries the critic agent's own run.
 
-Unlike the robustness section, the v4 source here was real, so this recorder
-had to reproduce its rows exactly before that writer could be retired. It did,
-and the writer is gone; what it did *besides* recording the fact -- minting
-operation and artifact entities on the side -- was never this key's business.
+The v4 writer this replaces was real, so these rows had to reproduce it exactly
+before it could be retired; the operation and artifact entities it also minted on
+the side were never this key's business.
 """
 
 from __future__ import annotations
@@ -58,7 +57,6 @@ def test_an_iteration_carries_its_verdict_and_its_artifacts(tmp_path: Path) -> N
 
 
 def test_a_resumed_session_does_not_overwrite_an_earlier_iteration(tmp_path: Path) -> None:
-    """``iter`` is reused across a resume, so it cannot be the key."""
     _record(tmp_path, iter_n=0, emit={**_EMIT, "topic": "first pass"})
     _record(tmp_path, iter_n=0, emit={**_EMIT, "topic": "after the resume"})
 

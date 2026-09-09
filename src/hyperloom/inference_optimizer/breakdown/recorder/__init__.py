@@ -100,7 +100,6 @@ from .event_timeline import (
 from .trace import TRACE, TRACE_ENV, enable_trace, trace_enabled
 from .instrument import (
     record_backend_versions_and_timeline,
-    record_singleton_section,
     snapshot_state_sections,
 )
 from .tool_versions import record_tool_version
@@ -177,7 +176,6 @@ __all__ = [
     "record_metadata_identity",
     "record_metadata_langfuse",
     "record_backend_versions_and_timeline",
-    "record_singleton_section",
     "record_tool_version",
     "recorder_for",
     "residual_events",

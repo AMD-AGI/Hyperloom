@@ -32,7 +32,6 @@ from hyperloom.orchestrator.state.optimization_journal import (
 )
 
 
-# Unified token + decision timeline.
 _TOKEN_IN_KEY = "input_tokens"
 
 
@@ -49,7 +48,7 @@ _TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
 _TOKEN_REASONING_KEY = "reasoning_output_tokens"
 
 
-# Terminal-status key + its success value, re-declared for the same reason as the token keys above.
+# Terminal-status key and the one value that counts a call as successful.
 _STATUS_KEY = "status"
 
 
@@ -289,28 +288,18 @@ def write_decision_trace(
     LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a ``ts``-window
     phase fallback for calls that carry neither.
 
-    The joined timeline is the product, and ``reports/trace/decision_trace.jsonl``
-    is where it lives: the Langfuse emitter turns each row into a Score, and
-    the backfill tool replays the same file. Writing is best-effort — an OSError
-    lands in ``warnings`` rather than failing the session's close-out.
-
-    Writes an empty file when no trace files exist, so a session that ran
-    before the trace subsystem landed degrades cleanly.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
+    Writes an empty file when no trace files exist, so a session that ran before
+    the trace subsystem landed degrades cleanly. Best-effort: an OSError lands
+    in ``warnings``, mutated in place, rather than failing the close-out.
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
     scores_by_variant = _proposal_scores_by_variant(state)
 
-    # Attribute Critic review calls to the decision their reviewed proposal became.
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
-    # Index calls by decision key. A call carrying neither key anchors to no
-    # decision row, so it has nothing to contribute to the timeline.
+    # A call carrying neither key anchors to no decision row, so it has nothing
+    # to contribute to the timeline.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
     for call in calls:
         key = _decision_key(
@@ -320,7 +309,6 @@ def write_decision_trace(
         if key is not None:
             calls_by_key.setdefault(key, []).append(call)
 
-    # Gather decisions from the journal + dispatch_history.
     decisions: list[dict[str, Any]] = []
     for e in _load_optimization_journal(session_dir, warnings):
         if not isinstance(e, dict):
@@ -331,7 +319,6 @@ def write_decision_trace(
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
         provenance = str(e.get("provenance") or "")
         change_kind = str(e.get("kind") or "")
-        # ``component`` is the real proposer derived from provenance.
         decision: dict[str, Any] = {
             "component": proposer_for(provenance) if provenance else "orchestration",
             "change": str(e.get("change") or ""),
@@ -360,7 +347,6 @@ def write_decision_trace(
         variant_name = str(e.get("variant_name") or "")
         if variant_name:
             decision["variant_name"] = variant_name
-            # Attach the proposal_scorer signal (who rated this proposal, how).
             scored = scores_by_variant.get(variant_name)
             if scored:
                 decision["proposal_scores"] = scored
@@ -398,7 +384,6 @@ def write_decision_trace(
             }
         )
 
-    # Attach calls to decisions; build the joined trace.
     consumed_keys: set[str] = set()
     decision_trace: list[dict[str, Any]] = []
     for dec in sorted(decisions, key=lambda d: d.get("ts") or ""):
@@ -442,17 +427,10 @@ def _write_decision_trace_jsonl(
 ) -> None:
     """Append-free atomic-ish write of ``reports/trace/decision_trace.jsonl``.
 
-    Rewrites the whole file (one JSON object per decision) on each export;
-    the collector is the single producer, so a full rewrite is simpler than
-    append + dedup and stays consistent with the latest join. Best-effort:
-    OSError is recorded in ``warnings`` and swallowed.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        decision_trace (list[dict[str, Any]]): The joined decision-trace rows
-            to write (one JSON object per line).
-        warnings (list[str]): Shared warnings list (mutated in place on write
-            failure).
+    Rewrites the whole file (one JSON object per decision) on each export; the
+    collector is the single producer, so a full rewrite is simpler than append
+    + dedup and stays consistent with the latest join. Best-effort: OSError is
+    recorded in ``warnings`` and swallowed.
     """
     target = decision_trace_path(session_dir)
     try:
@@ -469,21 +447,12 @@ def _write_decision_trace_jsonl(
 def write_session_decision_trace(session_dir: Path | str) -> list[str]:
     """Write the session's decision trace, loading ``state.json`` itself.
 
-    The single entry point for callers that only know the session directory.
-    It exists so the trace can be produced from wherever the session's
-    artifacts are written without that caller having to know the trace needs
-    ``state.json``, or that the file must land before any Langfuse flush reads
-    it.
-
-    Never raises: the trace describes a session that has already finished, and
-    losing it must not take the close-out with it.
-
-    Args:
-        session_dir (Path | str): Absolute session root.
-
-    Returns:
-        list[str]: Warnings raised while reading the inputs, for the caller to
-            log. Empty on a clean write.
+    The single entry point for callers that only know the session directory, so
+    none of them has to know the trace needs ``state.json`` or that the file
+    must land before any Langfuse flush reads it. Never raises: the trace
+    describes a session that has already finished, and losing it must not take
+    the close-out with it. Returns the warnings raised while reading the inputs,
+    for the caller to log; empty on a clean write.
     """
     warnings: list[str] = []
     try:

@@ -3,69 +3,24 @@
 
 """The SBD V6 ``framework_agent`` event: both OPTIMIZE arms, recorded live.
 
-FRAMEWORK_AGENT runs two arms in one phase. The configuration arm searches
-server args and env vars; the source arm lands upstream patches. The phase
+FRAMEWORK_AGENT runs two arms in one phase: the configuration arm searches
+server args and env vars, the source arm lands upstream patches. The phase
 leaves only when both have run dry, because one arm going quiet is a reason to
 switch levers inside the phase rather than to abandon the other.
 
-The event this replaces was projected out of ``operations`` rows, journal
-evidence and mutated state -- about 1200 lines of reconstruction whose defects
-this module exists to remove:
+The wire shape follows the progression a proposal moves along rather than the
+arm it belongs to, since the arms differ in content and not in lifecycle:
+``proposals`` is the main line, ``runs`` holds the dispatch facts those rows
+reference, and ``attempts`` is one uniform row per thing measured, which the
+adoption ledger walks. ``plateau`` is off that progression, and each evaluation
+records the inputs and thresholds it used because re-deriving them later reads
+a history that has kept growing. A proposal names its producer because the
+orchestration agent, the seed grid and the switch manifest all yield variants
+nobody proposed.
 
-* Policy was scavenged through two-to-four-deep fallback chains per field, so
-  the thresholds the phase actually ran under were a guess assembled from
-  wherever a number happened to survive.
-* ``decision_mode`` was inferred by collecting every variant's overtime anchor
-  and taking the value only if all of them agreed.
-* The failure block scanned journal rows backwards for particular event names
-  and reason strings, with a five-deep fallback for the message.
-* ``KEEP_UNSTABLE`` was collapsed into ``REVERT``, so a keep withheld for stack
-  instability became indistinguishable from a measured regression.
-* Config rounds had three reconstruction paths, one of which read a state field
-  no writer has ever produced.
-
-Shape
------
-
-The wire shape is organized by the progression a proposal moves along rather
-than by which arm it belongs to, because the arms differ in content and not in
-lifecycle. Grouping by arm forced two parallel sets of near-identical
-structures and put the discriminator in the field *name*, where nothing can
-select on it.
-
-``proposals`` is the main line: one row per pursued thing, carrying its whole
-lifecycle -- who produced it, how the Critic ruled, which runs touched it, and
-which attempts it funnelled into. ``runs`` holds the dispatch facts those rows
-reference, stored once rather than copied into every proposal a run produced.
-``attempts`` is the funnel's mouth: one uniform row per thing that was actually
-measured, which is also the row the adoption ledger walks.
-
-``plateau`` is not on that progression. Nothing on the chain triggers a plateau
-evaluation -- the tick clock does, when composing the advisory the agent reads,
-and the phase does when deciding whether to leave. Its content is a reading
-over the accumulated runs and attempts, which is why each evaluation records
-the inputs and thresholds it used: re-deriving them later reads a history that
-has kept growing, and returns a number the phase never acted on.
-
-Producers, not just specialists
--------------------------------
-
-A proposal names its producer because the chain has holes at both ends. The
-orchestration agent proposes config variants directly from its own reactor
-pass, with no specialist dispatched; the explore executor seeds a default grid
-and the switch manifest generates lever-attribution variants, which are
-measured without anyone proposing them. Both are ordinary paths, so a shape
-that can only hang a proposal under a specialist would have to invent a
-dispatch that never happened.
-
-Storage
--------
-
-Gates and lifecycle steps are stored as their own sections and composed into
-the rows that own them. A row's list field cannot accumulate: repeated writes
-on one key deep-merge, and a merge replaces a list wholesale rather than
-appending to it. So each gate and each step is its own keyed row, and assembly
-gathers them -- the same arrangement the warm-replay gates use.
+Gates and lifecycle steps are their own sections, composed into the rows that
+own them at assembly: a row's list field cannot accumulate, because repeated
+writes on one key deep-merge and a merge replaces a list wholesale.
 """
 
 from __future__ import annotations
@@ -123,9 +78,8 @@ ARM_CONFIG = "config"
 ARM_SOURCE = "source"
 
 #: A run's position on the chain, which is not derivable from its arm: the
-#: source arm dispatches a specialist twice, once to discover candidates and
-#: again to author a patch from one, so a reader must not assume a run sits
-#: upstream of the proposals it appears beside.
+#: source arm dispatches a specialist twice, to discover candidates and then to
+#: author a patch from one.
 ROLE_CONFIG = "config"
 ROLE_DISCOVERY = "discovery"
 ROLE_AUTHORING = "authoring"
@@ -136,15 +90,14 @@ PRODUCER_SPECIALIST = "specialist"
 PRODUCER_ORCHESTRATION = "orchestration_agent"
 PRODUCER_SEED_GRID = "seed_grid"
 
-#: Which reader evaluated a plateau. The two ask different questions -- the
-#: advisory asks whether to switch arms, the exit asks whether the phase may
-#: leave -- so a snapshot that did not say which is not interpretable.
+#: Which reader evaluated a plateau. The advisory asks whether to switch arms
+#: and the exit whether the phase may leave, so a snapshot that did not say
+#: which one is not interpretable.
 PLATEAU_PATH_ADVISORY = "advisory"
 PLATEAU_PATH_EXIT = "exit"
 
 #: The steps a proposal can move through. Recorded as they happen rather than
-#: derived from counters, so a candidate re-authored twice reads as two steps
-#: instead of an integer a reader has to reconcile against the attempts.
+#: derived from counters, so a candidate re-authored twice reads as two steps.
 STEP_PROPOSED = "proposed"
 STEP_REVIEWED = "reviewed"
 STEP_AUDITED = "audited"
@@ -161,10 +114,8 @@ DISPOSITION_ATTEMPTED = "attempted"
 DISPOSITION_DROPPED = "dropped"
 DISPOSITION_PENDING = "pending"
 
-#: Who authored a review. The Critic states this itself, and a ruling it could
-#: not ground is not the same fact as one it did: a proposal blocked because
-#: the Critic had no manifest to read must not be reported as one the Critic
-#: examined and refused.
+#: Who authored a review. A proposal blocked because the Critic had no manifest
+#: to read must not be reported as one the Critic examined and refused.
 REVIEWER_CRITIC = "critic"
 REVIEWER_CRITIC_UNAVAILABLE = "critic_unavailable"
 
@@ -215,20 +166,11 @@ __all__ = [
 
 
 def producer_for_provenance(provenance: Any) -> tuple[str, str]:
-    """Map a config variant's provenance label onto this event's producer.
+    """Map a config variant's provenance label onto ``(producer, producer_ref)``.
 
-    The explore grid labels each variant with how it was proposed --
-    ``llm_direct``, ``default_grid``, ``specialist:<domain>``, ``legacy:*`` --
-    which is a different vocabulary from ``producer``, deliberately: the label
-    is the grid's own and changes with it. Translating it in one place keeps
-    every seam that records a config proposal agreeing on the answer.
-
-    Returns:
-        tuple[str, str]: The ``producer`` and its ``producer_ref``. The ref
-            names the specialist's domain when a specialist proposed the
-            variant; the other two producers have nothing to name, so it is
-            empty. An unlabelled variant reads as the orchestration agent's,
-            which is what the grid parser's own default says.
+    The explore grid's labels are deliberately its own vocabulary. The ref names
+    the specialist's domain and is empty otherwise; an unlabelled variant reads
+    as the orchestration agent's, matching the grid parser's own default.
     """
     label = str(provenance or "").strip()
     if label.startswith("specialist:"):
@@ -239,46 +181,23 @@ def producer_for_provenance(provenance: Any) -> tuple[str, str]:
 
 
 def framework_event_id(macro_cycle: Any) -> str:
-    """Build the event id of the FRAMEWORK_AGENT entry in one macro cycle.
-
-    Returns:
-        str: The event id, ``framework_agent:{macro_cycle}:framework``.
-
-    Raises:
-        ValueError: If ``macro_cycle`` is not a non-negative integer.
-    """
+    """Build ``framework_agent:{macro_cycle}:framework``. Raises ``ValueError``
+    if ``macro_cycle`` is not a non-negative integer."""
     return event_id(EVENT_PHASE, macro_cycle, EVENT_COMPONENT)
 
 
 def _key(value: Any) -> str:
-    """Escape a data-derived id for use as a fragment natural id.
-
-    Candidate ids in this phase are PR urls, and a fragment key joins its
-    segments on ``:`` -- so an unescaped url is rejected outright and the row
-    is dropped, which is how the whole source arm can go missing from an event
-    that otherwise looks complete.
-
-    The escaping is injective rather than a substitution, because a fragment
-    key that two distinct ids can both produce merges their rows silently. So
-    ``%`` is escaped first and the separator second, which is undoable and
-    therefore cannot collide.
-
-    Returns:
-        str: The escaped token. Only the key is escaped; the row's payload
-            carries the id verbatim, which is what a reader sees.
-    """
+    """Escape a data-derived id for use as a fragment natural id: candidate ids
+    here are PR urls and a fragment key joins its segments on ``:``. Injective
+    -- ``%`` first, then the separator -- because a key two distinct ids can
+    both produce merges their rows silently."""
     return str(value or "").replace("%", "%25").replace(":", "%3A")
 
 
 def _stack(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the configuration stack an attempt was measured against.
-
-    Returns:
-        dict[str, Any]: The stack block. Both arms have one -- a source patch
-            is applied on top of whatever the session is currently serving,
-            exactly as a config variant is -- so it is recorded uniformly
-            rather than only on the arm whose projection happened to carry it.
-    """
+    """Project the configuration stack an attempt was measured against. Both
+    arms have one -- a source patch sits on top of whatever the session is
+    serving, exactly as a config variant does -- so it is recorded uniformly."""
     return {
         "throughput": _float_or_none(values.get("throughput")),
         "accuracy": _float_or_none(values.get("accuracy")),
@@ -291,23 +210,11 @@ def _stack(values: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _resume_gate_ordinals(event: str) -> dict[tuple[str, str], int]:
-    """Recover the gate ordinals this event has already handed out.
+    """The ordinal held by each ``(attempt_id, gate)`` already on record.
 
-    A phase entry can be recorded by more than one recorder: a resume that
-    re-enters the same macro cycle binds to the same event id. Gate rows are
-    keyed, because a gate can be re-ruled and the second ruling has to land on
-    the first row rather than beside it -- so a resumed leg has to know which
-    ordinal each gate was already given, or it would either renumber a gate it
-    is re-ruling or reuse a number that is taken.
-
-    Args:
-        event (str): The event id whose gate rows to read.
-
-    Returns:
-        dict[tuple[str, str], int]: The ordinal held by each
-            ``(attempt_id, gate)`` already on record. A map rather than a high
-            water mark because re-ruling a gate reuses its original ordinal,
-            which is what keeps it in its original position.
+    A resume re-entering the same macro cycle binds to the same event id, so a
+    second recorder must not renumber a gate it re-rules or reuse a taken
+    number; a re-ruled gate keeps its original ordinal and position.
     """
     try:
         from .assembler import framework_event_parts
@@ -327,31 +234,21 @@ class FrameworkEventRecorder:
     """Records one FRAMEWORK_AGENT entry's facts, one fragment per row.
 
     Holds a sink and the ordinals its keyed gate rows are ordered by. Nothing
-    else it writes is read back until :meth:`finish`, which assembles
-    the whole event out of the fragments rather than out of anything the
-    recorder remembers -- so an entry recorded across a resume assembles from
-    both halves.
-    """
+    else it writes is read back until :meth:`finish`, which assembles from the
+    fragments and not from anything remembered, so an entry recorded across a
+    resume assembles from both halves."""
 
     def __init__(self, sink: RecordSink, *, macro_cycle: int = 0):
-        """Bind a recorder to the event of one phase entry.
-
-        Args:
-            sink (RecordSink): Where the rows go, which decides the event they
-                belong to.
-            macro_cycle (int): The macro cycle this entry belongs to. Recorded
-                on the event as well as being a segment of its id, because a
-                consumer reading the assembled event does not parse the id.
-        """
+        """Bind a recorder to the event of one phase entry. ``macro_cycle`` is
+        recorded on the event as well as being a segment of its id, because a
+        consumer reading the assembled event does not parse the id."""
         self._sink = sink
         self._t0 = time.monotonic()
         self._start_time = _now()
         self._sequence: int | None = None
         self._closed = False
-        # Only gates are counted. Plateau readings and lifecycle steps are
-        # appended, so their order is the order they were written in and their
-        # identity is the write itself; a gate is keyed so it can be re-ruled,
-        # and a keyed row needs a number that no other leg has spent.
+        # Only gates are counted: appended rows carry their order in the write
+        # itself, while a keyed gate needs a number no other leg has spent.
         self._gate_ordinals = _resume_gate_ordinals(self.event_id)
         self._sink.record(SECTION_EVENT, {"macro_cycle": int(macro_cycle or 0)})
 
@@ -363,11 +260,8 @@ class FrameworkEventRecorder:
     # ---- lifecycle -------------------------------------------------------
 
     def begin(self) -> None:
-        """Put the event on the timeline.
-
-        Opening is idempotent, so a phase whose entry hook runs more than once
-        in a cycle shares one timeline entry rather than adding a second.
-        """
+        """Put the event on the timeline. Opening is idempotent, so a phase
+        whose entry hook runs twice in a cycle shares one timeline entry."""
         self._sequence = open_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -378,21 +272,8 @@ class FrameworkEventRecorder:
         )
 
     def record_policy(self, **fields: Any) -> None:
-        """Record the thresholds the entry runs under, as it resolves them.
-
-        Recorded at author time because the projection had to scavenge each
-        field through a chain of two-to-four candidate locations, which answers
-        "what did the phase run under" with wherever a number survived rather
-        than with what it used.
-
-        Args:
-            **fields: ``keep_threshold_pct``, ``variant_timeout_sec``,
-                ``overtime_kill_ratio``, ``force_exit_budget_pct``, and the
-                per-arm blocks ``config`` (``keep_gain_threshold_pct``,
-                ``empty_streak_threshold``, ``lookback``) and ``source``
-                (``no_keep_streak_threshold``, ``discovery_retry_limit``,
-                ``authoring_enabled``).
-        """
+        """Record the thresholds the entry runs under, as it resolves them, so
+        the event says what the phase used rather than what survived."""
         config = _as_dict(fields.get("config"))
         source = _as_dict(fields.get("source"))
         self._sink.record(
@@ -432,31 +313,12 @@ class FrameworkEventRecorder:
     ) -> None:
         """Snapshot one plateau evaluation with the values it ruled on.
 
-        The whole point of the row is that it is not re-derivable. The inputs
-        are counts over runs and attempts, and the history they count keeps
-        growing after the ruling: an export-time recomputation reads winners
-        added after the advisory fired and returns a number the phase never
-        acted on. So the inputs and thresholds are recorded beside the verdict
-        rather than referenced.
-
-        Every call appends. An evaluation is not an entity that gets revised,
-        it is a reading taken at a moment, so two readings that agree are still
-        two readings and the second must not land on the first.
-
-        Args:
-            arm (str): ``ARM_CONFIG`` or ``ARM_SOURCE``.
-            path (str): ``PLATEAU_PATH_ADVISORY`` or ``PLATEAU_PATH_EXIT``.
-            triggered (bool | None): The verdict. ``None`` is an evaluation
-                that could not rule, which happens when a threshold it needs
-                was never resolved -- a state worth recording, because the
-                phase then behaves as though the arm were live.
-            inputs (Mapping[str, Any] | None): The values read, e.g.
-                ``recent_keep_gain_pct`` / ``empty_streak`` /
-                ``tested_this_cycle`` for the config arm and
-                ``consecutive_no_keep`` / ``candidates_exhausted`` for the
-                source arm.
-            thresholds (Mapping[str, Any] | None): The bars they were read
-                against.
+        The inputs and thresholds are recorded beside the verdict rather than
+        referenced, because the history they count keeps growing: recomputing
+        at export returns a number the phase never acted on. Every call
+        appends, since two readings that agree are still two readings. A
+        ``triggered`` of ``None`` could not rule, and the phase then behaves as
+        though the arm were live.
         """
         self._sink.append(
             SECTION_PLATEAU,
@@ -476,20 +338,8 @@ class FrameworkEventRecorder:
         """Record one specialist dispatch, or update the one already open.
 
         A dispatch and the result harvested from its worktree minutes later are
-        two calls on one ``run_id``. Keying the fragment by that id is what
-        keeps them one row instead of two.
-
-        Args:
-            run_id (str): The dispatched task id, which is also what a
-                proposal's ``run_ref`` points at.
-            **fields: Any of ``role``, ``arm``, ``status``, ``domain``,
-                ``scope``, ``tags``, ``gap_canonical_id``, ``reason``,
-                ``dispatched_at``, ``completed_at``, ``parallelism``,
-                ``confidence_avg``, ``transcripts``, ``worktree``, plus what
-                the round came back with: ``summary``, ``proposals_total``,
-                ``empty``, ``confidence``, ``new_findings``,
-                ``residual_questions``, ``notes``, ``ensemble_scores``.
-        """
+        two calls on one ``run_id`` -- what a proposal's ``run_ref`` points at
+        -- and keying the fragment by it keeps them one row."""
         key = str(run_id or "")
         if not key:
             return
@@ -531,19 +381,8 @@ class FrameworkEventRecorder:
         """Record one pursued thing, or update the one already open.
 
         Only the fields the caller passes are written, so ``run_ref`` is absent
-        on a proposal with no dispatch behind it rather than present and empty.
-        Absence is the load-bearing fact for the two producers that have no
-        parent run, and assembly reads a missing key the same as an empty one.
-
-        Args:
-            proposal_id (str): The proposal's own id -- a specialist's
-                ``proposal_msg_id``, or the candidate id on the source arm.
-            **fields: Any of ``arm``, ``producer``, ``producer_ref``,
-                ``run_ref``, ``domain``, ``scope``, ``lever_kind``,
-                ``gap_canonical_id``, ``confidence``, and the source-arm
-                identity ``source_ref`` / ``repo`` / ``title`` /
-                ``changed_files`` / ``verdict`` / ``route``.
-        """
+        rather than empty on a proposal with no dispatch behind it -- the
+        load-bearing fact for the producers with no parent run."""
         key = str(proposal_id or "")
         if not key:
             return
@@ -589,46 +428,17 @@ class FrameworkEventRecorder:
     ) -> None:
         """Record the Critic's ruling on one proposal, inline on its row.
 
-        The review lives on the proposal because that is what it is about. On
-        the bus the proposal and its verdict are two messages on one subject,
-        and the Critic reviews proposals from every phase -- so a review
-        attached to the proposal follows it wherever it was raised, instead of
-        needing a per-phase home. There is no separate review stream to
-        reconcile against the proposals, and a proposal read on its own already
-        carries why it was allowed to run.
-
-        Both verdicts are kept. A reject the loop held to a rule that only
-        declared ``advise`` is two facts -- what the Critic ruled, and what the
-        loop acted on -- and reporting either alone misreads the round: the
-        first says a proposal was refused that in fact ran, the second says one
-        was approved that the Critic refused.
+        The review lives on the proposal so that it follows the proposal
+        wherever it was raised. Both verdicts are kept: a reject the loop held
+        to a rule that only declared ``advise`` is two facts, and reporting
+        either alone misreads the round.
 
         Args:
-            proposal_id (str): The proposal reviewed.
-            verdict (str): The ruling the Critic wrote.
-            effective_verdict (str): The ruling the loop acted on. Defaults to
-                ``verdict``, which is the case whenever nothing held it.
-            held_to_rule (str): The reason code a reject was held to, when the
-                rule it cited declared a lesser verdict.
-            reviewer (str): Which reviewer ruled -- ``REVIEWER_CRITIC``, or
-                ``REVIEWER_CRITIC_UNAVAILABLE`` for a ruling it could not
-                ground.
-            iteration (Any): Which review round this was, for a proposal
-                re-submitted after a ``needs_review`` verdict.
-            reason (str): Why it ruled that way.
-            confidence (Any): How sure it was.
-            failure_reason_code (str): The rule it cited, when it cited one.
-            concerns (Any): The concerns it raised.
-            advisory (Mapping[str, Any] | None): The advisory block the Critic
-                attached -- ``required_evidence``, ``risks``, ``notes``,
-                ``kb_evidence``, ``packet_evidence``, ``advice_text``,
-                ``alternative_action``, ``followup_task_ids``. Recorded as
-                given, since the vocabulary is the Critic's own and a
-                re-spelling here would drift from what it emitted.
-            variants (Iterable[Mapping[str, Any]] | None): Per-variant rulings
-                for a grid reviewed by ``verdict_map``. A rejected variant
-                never reaches a bench, so this is the only place its ruling is
-                recorded -- there is no attempt row to carry it.
+            advisory: Recorded as given, since the vocabulary is the Critic's
+                own and a re-spelling here would drift from what it emitted.
+            variants: Per-variant rulings for a grid reviewed by
+                ``verdict_map``; a rejected variant reaches no bench, so no
+                attempt row carries its ruling.
         """
         key = str(proposal_id or "")
         if not key:
@@ -682,23 +492,10 @@ class FrameworkEventRecorder:
     ) -> None:
         """Record what the loop did with a ruling, onto the ruling itself.
 
-        A verdict and its consequence are decided at different moments, and the
-        consequence is the part a reader is usually after: an ``advise`` that
-        materialised and an ``advise`` that was held at the patch gate are the
-        same ruling with opposite outcomes. Recorded onto the review rather
-        than beside it, because on its own the outcome does not say what it was
-        the outcome of.
-
-        Args:
-            proposal_id (str): The proposal ruled on.
-            materialized (Any): Whether the ruling put work on the queue.
-            denied (Any): Whether it wrote the candidate off.
-            patch_verdict_key (str): The subject the patch gate will consult
-                this ruling under, when the proposal carries patches. Naming it
-                is what lets a reader connect a blocked ``integrate_patch`` to
-                the review that blocked it.
-            reauthored (Any): Whether it sent the candidate back to be
-                re-authored.
+        An ``advise`` that materialised and an ``advise`` held at the patch gate
+        are the same ruling with opposite outcomes. ``patch_verdict_key`` is the
+        subject the patch gate consults this ruling under, which connects a
+        blocked ``integrate_patch`` back to the review that blocked it.
         """
         key = str(proposal_id or "")
         if not key:
@@ -732,21 +529,9 @@ class FrameworkEventRecorder:
     ) -> None:
         """Record one step of a proposal's lifecycle as it happens.
 
-        Steps are recorded rather than derived from counters. A candidate
-        re-authored twice then retried once is three rows a reader can follow,
-        where three integers on the proposal would have to be reconciled
-        against the attempts to mean anything.
-
-        Args:
-            proposal_id (str): The proposal that moved.
-            step (str): A ``STEP_*`` value.
-            run_ref (str): The run that performed it, when a run did. The
-                authoring run lands here: it is a step on the proposal's
-                lifecycle, and separately a row in ``runs`` holding its own
-                dispatch facts.
-            outcome (str): How the step ended.
-            reason (str): Why.
-        """
+        Steps are recorded rather than derived from counters: a candidate
+        re-authored twice then retried once is three rows a reader can follow.
+        ``step`` is a ``STEP_*`` value."""
         key = str(proposal_id or "")
         name = str(step or "")
         if not key or not name:
@@ -770,16 +555,9 @@ class FrameworkEventRecorder:
         disposition: str,
         reason: str = "",
     ) -> None:
-        """Record where a proposal ended up.
-
-        Args:
-            proposal_id (str): The proposal settled.
-            disposition (str): A ``DISPOSITION_*`` value. A proposal left
-                ``pending`` is one the phase never resolved, which is the
-                honest reading of a session that was killed mid-review.
-            reason (str): Why it landed there -- the audit verdict that
-                dropped it, the Critic denial, the review-count abort.
-        """
+        """Record where a proposal ended up. ``disposition`` is a
+        ``DISPOSITION_*`` value; ``pending`` is one the phase never resolved,
+        the honest reading of a session killed mid-review."""
         key = str(proposal_id or "")
         if not key:
             return
@@ -804,27 +582,7 @@ class FrameworkEventRecorder:
 
         This is the row the adoption ledger walks, so the throughput pair is
         recorded on it rather than cited: a later attempt on the same lever
-        overwrites the measurements this one was judged on, and a percentage
-        taken against a denominator that has since moved cannot be added to
-        anything.
-
-        Args:
-            attempt_id (str): The attempt's own id.
-            **fields: The uniform core -- ``arm``, ``round_id``, ``task_id``,
-                ``proposal_ref``, ``provenance``, ``outcome``, ``reason``,
-                ``stage``, ``decision``, ``adopted``,
-                ``attribution_eligible``, ``validation_basis``,
-                ``measured_against`` (see :func:`_stack`), ``measurement``
-                (``before_tput`` / ``after_tput`` / ``gain_pct`` /
-                ``runtime_sec`` / ``estimated_output_throughput``),
-                ``accuracy`` (``required`` / ``reference`` / ``value`` /
-                ``passed``), ``failure``, ``artifacts`` -- plus the arm's own
-                identity: ``config_delta`` / ``fingerprint`` /
-                ``variant_name`` / ``accepted_kernels`` for the config arm,
-                ``candidate_id`` / ``source_ref`` / ``route`` /
-                ``patch_source`` / ``patch_path`` / ``patches_applied`` /
-                ``target_files`` for the source arm.
-        """
+        overwrites the measurements this one was judged on."""
         key = str(attempt_id or "")
         if not key:
             return
@@ -916,26 +674,10 @@ class FrameworkEventRecorder:
         """Record one gate's verdict on one attempt, as it is evaluated.
 
         A gate that was never reached writes no row, which is how assembly
-        tells "did not pass" apart from "did not apply". The two arms are
-        gated differently -- switch-off parity applies only to a source patch
-        -- so a fixed block of gate fields would have to report the config
-        arm's parity as null, which reads as a gate that ran and could not
-        rule.
-
-        Evaluation order is what says which gate ended the arc, and a whole
-        gating sequence fits inside a single clock tick, so the row carries an
-        ordinal rather than resting on its timestamp. The ordinal is assigned
-        on a gate's first evaluation and reused afterwards, so re-ruling one
-        keeps the position it was first decided in.
-
-        Args:
-            attempt_id (str): The attempt gated.
-            gate (str): The gate's name.
-            passed (bool | None): Whether it passed. ``None`` is a gate that
-                ran but could not rule.
-            reason (str): Why it ruled that way.
-            observed (Any): The value it read.
-            threshold (Any): The bar it was read against.
+        tells "did not pass" apart from "did not apply". A whole gating
+        sequence fits inside one clock tick, so order comes from an ordinal
+        assigned on the first evaluation and reused. ``passed`` of ``None``
+        is a gate that ran but could not rule.
         """
         key = str(attempt_id or "")
         name = str(gate or "")
@@ -955,9 +697,7 @@ class FrameworkEventRecorder:
                 "reason": str(reason or ""),
                 "observed": _float_or_none(observed),
                 "threshold": _float_or_none(threshold),
-                # The latest ruling's time. Position comes from the ordinal, so
-                # re-ruling a gate updates when it was decided without moving
-                # it out of the sequence it was decided in.
+                # The latest ruling's time; position comes from the ordinal.
                 "ts": _now_precise(),
             },
             row_type=ROW_ATTEMPT_GATE,
@@ -975,22 +715,9 @@ class FrameworkEventRecorder:
         switch_bottleneck: bool | None = None,
         failure: Mapping[str, Any] | None = None,
     ) -> None:
-        """Close the event on the phase's own exit evidence.
-
-        Recorded from what the exit decided rather than reconstructed. The
-        projection mapped reason strings onto triggers in an export-time table
-        and scanned journal rows backwards to find a failure, which is how a
-        discovery failure came to be identified by matching on prose.
-
-        Args:
-            exit_reason (str): The phase's exit reason.
-            trigger (str): What triggered it.
-            hint (str): The escalate hint, when one was honoured.
-            switch_bottleneck (bool | None): Whether the next cycle should
-                steer off this one's bottleneck.
-            failure (Mapping[str, Any] | None): ``failed_task_id`` /
-                ``error_class`` / ``error`` when the entry failed.
-        """
+        """Close the event on the phase's own exit evidence. ``failure`` carries
+        ``failed_task_id`` / ``error_class`` / ``error`` when the entry
+        failed."""
         failed = _as_dict(failure)
         payload: dict[str, Any] = {
             "exit": {
@@ -1024,13 +751,8 @@ class FrameworkEventRecorder:
         )
 
     def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
-        """Record the terminal facts and close the event.
-
-        Args:
-            status (str): The status the caller reads, used only when assembly
-                derives nothing.
-            payload (Mapping[str, Any]): The terminal fields to record.
-        """
+        """Record the terminal facts and close the event. ``status`` is used
+        only when assembly derives nothing of its own."""
         if self._closed:
             return
         self._closed = True
@@ -1063,19 +785,10 @@ def assemble_framework_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble one framework event's ``ext`` out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The framework sections as
-            read back from the spool, section name to row list.
-        event (str): The event id to assemble; rows of every other event in the
-            same session are ignored.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status derived
-            from the rows. The status is empty when the event holds no work,
-            which leaves the caller's own reading standing.
-    """
+    """Assemble one framework event's ``ext``, and the status derived from its
+    rows, out of the sections read back from the spool. Rows of every other
+    event are ignored, and the status is empty when the event holds no work,
+    which leaves the caller's own reading standing."""
     event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = event_rows[0] if event_rows else {}
 
@@ -1133,15 +846,13 @@ def assemble_framework_ext(
             steps_by_proposal.get(key, []),
             drop=("event_id", "proposal_id"),
         )
-        # Derived at close rather than recorded on both rows: the attempt
-        # already names its proposal, and a second copy of the link is a second
-        # thing that can disagree.
+        # Derived at close: the attempt already names its proposal, and a
+        # second copy of the link is a second thing that can disagree.
         row["attempt_refs"] = attempts_by_proposal.get(key, [])
         proposals.append(row)
 
-    # A run's own row does not name what it produced -- the proposal does --
-    # so the back-reference is projected here for a reader following the chain
-    # downward.
+    # A run's own row does not name what it produced -- the proposal does -- so
+    # the back-reference is projected here for a reader following the chain.
     produced: dict[str, list[str]] = {}
     for row in proposals:
         ref = str(row.get("run_ref") or "")
@@ -1171,15 +882,10 @@ def _derived_status(
     proposals: list[dict[str, Any]],
     attempts: list[dict[str, Any]],
 ) -> str:
-    """Decide the status the event closes on.
-
-    Returns:
-        str: ``failed`` when the entry recorded a failure, ``skipped`` when it
-            did nothing at all, ``degraded`` when it worked but never closed,
-            and otherwise the worst status its runs reported. An entry that
-            dispatched runs which all failed is not a success, which is what
-            reporting ``succeeded`` for any entry holding work would have said.
-    """
+    """Decide the status the event closes on: ``failed`` when the entry
+    recorded a failure, ``skipped`` when it did nothing at all, ``degraded``
+    when it worked but never closed, and otherwise the worst status its runs
+    reported -- an entry whose every run failed is not a success."""
     if _as_dict(header.get("failure")):
         return "failed"
     if not (runs or proposals or attempts):
@@ -1190,14 +896,9 @@ def _derived_status(
 
 
 def _blocking_gate(gates: list[dict[str, Any]]) -> str:
-    """Name the first gate that did not pass, or ``""`` when all of them did.
-
-    Returns:
-        str: The gate's name. A gate that ruled ``None`` counts as blocking
-            only if nothing after it failed outright, so an attempt admitted on
-            an unscored accuracy eval and then rejected on the keep threshold
-            reports the threshold rather than the eval.
-    """
+    """Name the first gate that did not pass, or ``""`` when all of them did. A
+    gate that ruled ``None`` blocks only if nothing after it failed outright,
+    so an attempt rejected on the keep threshold reports that threshold."""
     unresolved = ""
     for row in gates:
         passed = row.get("passed")
@@ -1219,23 +920,9 @@ def record_review_evidence(
 
     Called from the Critic's own turn rather than through the phase's recorder,
     because that is where these facts exist: the artifacts are written by the
-    review runtime and the KB write result only comes back on its emit. The
-    turn resolves the same event the phase is recording into, so the evidence
-    lands on the proposal row the verdict already updated instead of in a
-    parallel per-turn stream that a reader would have to join back.
-
-    Silent when there is no session or no such event -- the Critic runs on
-    every tick, including ticks in phases that record no framework event, and
-    a ruling with nowhere to land must not disturb the review.
-
-    Args:
-        macro_cycle (Any): The cycle whose event the ruling belongs to.
-        proposal_id (str): The proposal ruled on.
-        artifacts (Mapping[str, Any] | None): The review's own files --
-            ``{request_path, judge_bundle_path, review_path, emit_path}``.
-        kb (Mapping[str, Any] | None): The knowledge base's part in the ruling
-            -- the priors it was given, whether it asked for the lesson to be
-            persisted, and what became of that write.
+    review runtime and the KB write result only comes back on its emit. Silent
+    when there is no session or no such event, since the Critic also runs on
+    ticks in phases that record no framework event.
     """
     key = str(proposal_id or "")
     evidence: dict[str, Any] = {}
@@ -1261,17 +948,10 @@ def record_review_evidence(
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
-
-    Phase behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
-    declines too: writing the timeline into whatever the working directory
-    happens to be is worse than not recording.
-
-    Returns:
-        FrameworkEventRecorder | None: The recorder, already opened on the
-            timeline, or ``None`` when it could not be built.
-    """
+    """Build a recorder already opened on the timeline, or ``None``. Phase
+    behavior must not depend on the recorder existing, so construction failures
+    degrade to "no event", and an unbound session declines rather than writing
+    the timeline into an arbitrary directory."""
     from ...session.session_binding import session_is_bound
 
     try:

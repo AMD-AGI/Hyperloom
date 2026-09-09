@@ -3,56 +3,19 @@
 
 """The SBD V6 ``enablement`` event: the repair lane, recorded as it runs.
 
-Enablement is the one subsystem with a full action lifecycle and no record of
-it. A (model, backend) combo that cannot boot -- or boots and fails its
-accuracy eval -- opens a lane that dispatches an authoring specialist, applies
-its patch, optionally compiles a component, benches the result, and either
-lands or rearms against the next gap. That is a sequence of dispatched actions
-with outcomes, which is what the timeline is for; until now it was published as
-a flat projection of ``SharedState.enablement`` at export.
+A combo that cannot boot -- or boots and fails its accuracy eval -- opens a
+lane that dispatches an authoring specialist, applies its patch, optionally
+compiles a component, benches the result, and either lands or rearms against
+the next gap. Each round is one row, keyed by the specialist task that authored
+it, so the sequence stays legible: counters cannot say which round landed the
+fix, and the lane's own ``launch_log`` is replaced on every advance.
 
-The projection lost the lane's history, which is the only part worth reading.
-
-**Rounds were folded into counters.** ``attempts`` said how many rounds ran and
-``kept_patches`` said which patches survived all of them, so a five-round lane
-where round 3 landed the fix and rounds 4-5 chased a deeper gap read exactly
-like a five-round lane that never landed anything but accumulated patches. Each
-round's own failure kind, the log it was dispatched against, the status it
-settled on and the products it contributed are now one row per round, keyed by
-the specialist task that authored it, so the sequence is legible.
-
-**The trigger was reconstructed, and reconstructed wrongly.** ``origin`` was
-derived as ``"eval" if origin == "eval" or baseline_eval_kind else "boot"``,
-because ``origin`` is cleared on success while ``baseline_eval_kind`` is not --
-a disjunction over two fields with different lifetimes, standing in for a fact
-nobody recorded. It is now recorded when the lane opens, and it stays what it
-was.
-
-**``launch_log`` describes only the last round.** The lane replaces it on every
-advance, so the exported excerpt is the gap the *newest* round faced and the
-export presented it as the reason the lane ran at all. The opening trigger and
-each round's own log are now separate facts.
-
-**``failure_kind`` was always empty.** The collector read
-``state["enablement"]["failure_kind"]``; ``EnablementRound`` has no such field.
-The classified kind lives in the specialist params the dispatch builds, which
-is where it is now recorded from.
-
-The event covers the whole session because the lane does. It is not scoped to a
-phase: the pump runs on every coordinator tick precisely because a combo that
-cannot boot never leaves PRELUDE, and the round that repairs it is judged in
-FRAMEWORK_AGENT. Scoping the event by ``state.phase`` would split one lane into
-a PRELUDE half holding the trigger and a FRAMEWORK_AGENT half holding the
-outcome, neither of which is a lane.
-
-For the same reason nothing here holds a recorder object. The facts are
-produced in six modules on different ticks -- the writeback that stores the
-trigger, the pump that dispatches, the integrate gate that rules, the build
-executor, the revalidation enqueue, the promote -- and threading one object
-through all of them would make the lane's record depend on the call graph that
-happens to reach it. Every entry point below is a module-level function that
-opens the event idempotently and records its own row, so a fact lands from
-wherever it is produced.
+The event covers the whole session rather than a phase, because the lane does:
+a combo that cannot boot never leaves PRELUDE, and the round repairing it is
+judged in FRAMEWORK_AGENT. Nothing here holds a recorder object for the same
+reason -- the facts are produced in six modules on different ticks, so every
+entry point below is a module-level function that opens the event idempotently
+and records its own row.
 """
 
 from __future__ import annotations
@@ -79,42 +42,32 @@ log = logging.getLogger(__name__)
 EVENT_TYPE = "enablement"
 EVENT_KIND = "enablement"
 
-#: The component segment of the enablement event id.
 EVENT_COMPONENT = "enablement"
 
-#: The phase segment. A literal, not a read of ``state.phase``: the lane is
-#: driven by a phase-independent pump and its rounds are ruled in a different
-#: phase from the one its trigger was recorded in, so a phase-scoped id would
-#: cut one lane into halves that are each missing the other's half of the story.
+#: A literal, not a read of ``state.phase``: a lane's rounds are ruled in a
+#: different phase from its trigger, so a phase-scoped id would halve it.
 EVENT_PHASE = "enablement"
 
-#: The macro-cycle segment. Also a literal, and for the same reason: a lane
-#: opened in cycle 0 can still be rearming in cycle 4, and there is one lane.
+#: Also a literal: a lane opened in cycle 0 can still be rearming in cycle 4.
 EVENT_CYCLE = 0
 
 PRODUCER = "orchestrator"
 
-#: The event-level section: the admitted mode, the trigger that opened the
-#: lane, and the terminal reading it settled on.
 SECTION_EVENT = "enablement_event"
 
-#: One row per authoring round, keyed by the specialist task that authored it.
-#: The dispatch writes what the round was asked to repair and the rearm merges
-#: in what it settled on, so a round killed between the two is on the timeline
-#: as a dispatched round with no outcome rather than as nothing at all.
+#: One row per authoring round, keyed by its specialist task. The dispatch
+#: writes the gap and the rearm merges in the outcome, so a round killed
+#: between the two survives as a dispatch with no outcome.
 SECTION_ATTEMPT = "enablement_attempt"
 
-#: One row per targeted build, keyed by its task id.
 SECTION_BUILD = "enablement_build"
 
 #: One row per revalidation window, keyed by its generation. Eval-origin only:
 #: a KEEP there is provisional until a genuine baseline re-measures accuracy.
 SECTION_REVALIDATION = "enablement_revalidation"
 
-#: One row per distinct launch failure the lane could not classify, keyed by
-#: the log's digest. These are the rounds that never happened: a non-blank log
-#: that matches no actionable signature dispatches nothing and is filed for a
-#: human, and the projection published only how many there had been.
+#: One row per unclassifiable launch failure, keyed by the log's digest --
+#: such a log dispatches nothing, so it would leave no other trace.
 SECTION_HUMAN_REVIEW = "enablement_human_review"
 
 #: The lane was opened by a baseline that could not launch at all.
@@ -123,58 +76,40 @@ ORIGIN_BOOT = "boot"
 #: The lane was opened by a baseline that launched and failed its accuracy eval.
 ORIGIN_EVAL = "eval"
 
-# The statuses an authoring round settles on, in the integrate gate's own
-# words. ``advanced`` is the one worth naming: the patch did not make the combo
-# runnable, but it cleared the gap it targeted and the boot now stops somewhere
-# deeper, which is progress and is scored as progress.
+# Round statuses, in the integrate gate's own words. ``advanced``: the patch
+# did not make the combo runnable but the boot now stops deeper, and that is
+# scored as progress.
 ROUND_KEPT = "kept"
 ROUND_ADVANCED = "advanced"
 ROUND_REVERTED = "reverted"
 
-# The lane's own outcome. ``stalled`` is the terminal that stops the run;
-# ``pending`` is a lane that was still working when the session ended, which is
-# a different thing from one that gave up.
+# ``stalled`` is the terminal that stops the run; ``pending`` is a lane still
+# working when the session ended, which is not a lane that gave up.
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_STALLED = "stalled"
 OUTCOME_PENDING = "pending"
 
-# Event statuses. A lane that stalled is a failure of the lane, not of the
-# recording, and a lane that ran rounds without landing one is degraded rather
-# than failed: the run continued and the rounds it did land may still have
-# moved the boot forward.
+# A lane that ran rounds without landing one is degraded rather than failed:
+# the run continued and those rounds may still have moved the boot forward.
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_DEGRADED = "degraded"
 STATUS_SKIPPED = "skipped"
 
-#: Trigger and per-round logs are tracebacks and eval transcripts. The tail is
-#: the part that names the gap, so they are clipped from the front and the
-#: budget matches what the projection published.
+#: Logs are clipped from the front: the tail is the part that names the gap.
 MAX_LOG_EXCERPT_CHARS = 2000
 
-#: Attempt runtimes are capped at five in state, so the same bound applies here
-#: rather than letting the event hold a history state no longer has.
+#: Attempt runtimes are capped at five in state; the same bound applies here.
 MAX_RUNTIME_RECORDS = 5
 
 
 def enablement_event_id() -> str:
-    """Build the enablement lane's event id.
-
-    Returns:
-        str: ``enablement:0:enablement``. Both leading segments are literals;
-        see :data:`EVENT_PHASE`.
-    """
+    """Build the enablement lane's event id, ``enablement:0:enablement``."""
     return event_id(EVENT_PHASE, EVENT_CYCLE, EVENT_COMPONENT)
 
 
 def _sink() -> EventSink | None:
-    """The sink every row here is written through, or ``None`` with no session.
-
-    Returns:
-        EventSink | None: The bound session's sink, or ``None`` when nothing is
-        bound -- a unit test driving the lane directly, or a resume before the
-        session scope is entered. Recording is best-effort either way.
-    """
+    """The sink rows are written through; ``None`` when no session is bound."""
     try:
         from ...session.session_binding import bound_session_or_none
 
@@ -189,19 +124,10 @@ def _sink() -> EventSink | None:
 def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | None:
     """Put the lane on the timeline, once, however many callers ask.
 
-    :func:`open_event` returns the sequence an earlier open took rather than
-    writing a second shell, which is what lets every entry point below call
-    this without any of them owning the lane's lifetime.
-
-    Args:
-        mode (str): The admitted ``--enablement`` mode, when known.
-        origin (str): :data:`ORIGIN_BOOT` or :data:`ORIGIN_EVAL`, when known.
-        start_time (str): When the lane opened; defaults to now.
-
-    Returns:
-        int | None: The storage sequence to close with, or ``None`` when the
-        shell write failed. A caller that gets ``None`` still records: the
-        fragments land, and finalize recovers the event from them.
+    :func:`open_event` returns an earlier open's sequence rather than writing a
+    second shell, so no entry point below owns the lane's lifetime. ``None``
+    means the shell write failed; the caller still records, because finalize
+    recovers the event from the fragments.
     """
     shell: dict[str, Any] = {}
     if mode:
@@ -209,10 +135,8 @@ def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | No
     if origin:
         shell["origin"] = str(origin)
     if shell:
-        # Onto the fragment as well as the shell. Assembly rebuilds ``ext``
-        # from the fragments, so a field that only ever rode on the shell is
-        # dropped the moment anything closes the event -- and the shell write
-        # is skipped entirely on every open after the first.
+        # Onto the fragment too: assembly rebuilds ``ext`` from fragments,
+        # so a shell-only field dies at the first close.
         sink = _sink()
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
@@ -242,30 +166,11 @@ def record_trigger(
 ) -> None:
     """Open the lane and record what opened it. Never raises.
 
-    The first call wins the ``trigger`` block. A lane reopened by a second
-    failure of the same kind -- a re-baseline that fails its eval again, a
-    revalidation that comes back under the floor -- is the same lane still
-    working on the same gap, and its later evidence belongs to the round that
-    faced it, not to the trigger. What the projection did instead was let the
-    newest failure overwrite the oldest, which is how an eval-less re-baseline
-    could downgrade a measured ``accuracy_below_floor`` to an empty
-    ``accuracy_unavailable``.
-
-    Args:
-        origin (str): :data:`ORIGIN_BOOT` or :data:`ORIGIN_EVAL`.
-        mode (str): The admitted ``--enablement`` mode.
-        kind (str): The trigger's failure kind -- the eval kind for an
-            eval-origin lane, the classified boot signature for a boot-origin
-            one.
-        evidence (Any): The launch log or eval transcript the trigger was read
-            from; clipped to its tail.
-        observed_accuracy (Any): The accuracy measured, eval-origin only.
-        accuracy_floor (Any): The floor it was graded against.
-        observed_task (Any): The eval task.
-        observed_metric (Any): The eval metric.
-        eval_contract_fingerprint (Any): The contract the revalidation must
-            reproduce.
-        probe_config_path (Any): The config the failing eval ran.
+    The first call wins the ``trigger`` block: a lane reopened by a second
+    failure is the same lane on the same gap, and letting the newest failure
+    overwrite the oldest is how an eval-less re-baseline downgrades a measured
+    ``accuracy_below_floor`` to an empty ``accuracy_unavailable``. The accuracy
+    fields are eval-origin only.
     """
     try:
         sink = _sink()
@@ -273,11 +178,8 @@ def record_trigger(
             return
         _open(mode=mode, origin=origin)
         if _recorded_trigger():
-            # Repeated calls on one keyed row deep-merge, so a second trigger
-            # would overwrite the first field by field rather than being
-            # ignored -- which is the projection's failure mode reproduced
-            # inside the recorder. The mode and origin are already on the
-            # shell, so there is nothing left to write.
+            # Keyed rows deep-merge, so a second trigger would overwrite the
+            # first field by field; mode and origin are already on the shell.
             return
         trigger: dict[str, Any] = {
             "kind": str(kind or ""),
@@ -295,9 +197,7 @@ def record_trigger(
             {
                 "mode": str(mode or ""),
                 "origin": str(origin or ""),
-                # Merged under a key of its own so a later write that carries
-                # ``mode`` or the outcome cannot flatten the trigger, and so
-                # the first trigger is the one assembly reads.
+                # Under its own key so a later write cannot flatten it.
                 "trigger": trigger,
             },
         )
@@ -318,18 +218,9 @@ def record_dispatch(
     """Record an authoring round at the moment it is dispatched. Never raises.
 
     Written before the specialist has done anything, because what the round was
-    asked to repair is a fact of the dispatch and is lost once the lane moves
-    on: ``launch_log`` is replaced by every advance, and the classified kind
-    only ever existed in the params this dispatch built.
-
-    Args:
-        task_id (str): The specialist task id, which keys the round's row.
-        attempt (int): The round's ordinal, 1-based.
-        failure_kind (str): The signature the round was pointed at.
-        launch_log (Any): The log it was dispatched against; clipped.
-        candidate_refs (Any): The candidate refs the mandate carried.
-        mode (str): The admitted mode, for a lane whose trigger went unrecorded.
-        origin (str): The lane's origin, likewise.
+    asked to repair is lost once the lane moves on: ``launch_log`` is replaced
+    by every advance, and the classified kind only ever existed in the params
+    this dispatch built.
     """
     try:
         sink = _sink()
@@ -364,20 +255,10 @@ def record_round(
 ) -> None:
     """Record how an authoring round settled. Never raises.
 
-    Merges onto the row :func:`record_dispatch` opened, so the round reads as
-    one thing that was asked to repair a named gap and then either did or did
-    not. A round nothing dispatched -- a build routed into the lane, a round
-    the pump found finished without a rearm -- opens its own row here, because
-    it is still a round the lane spent.
-
-    Args:
-        task_id (str): The specialist task id whose row this settles.
-        attempt (int): The round's ordinal, for a row keyed without a task id.
-        result (Mapping[str, Any] | None): The ``integrate_patch`` result.
-        stall_streak (int): The streak after this round was scored.
-        succeeded (bool): Whether the lane reached terminal success on it.
-        validation_pending (bool): Whether an eval-origin KEEP opened a
-            revalidation window instead of landing.
+    Merges onto the row :func:`record_dispatch` opened; a round nothing
+    dispatched opens its own row here, being still a round the lane spent.
+    ``validation_pending`` means an eval-origin KEEP opened a revalidation
+    window instead of landing.
     """
     try:
         sink = _sink()
@@ -410,9 +291,7 @@ def record_round(
             "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
             "runtime": _runtime_row(res.get("enablement_active_runtime")),
             "localization_manifest": _as_dict(res.get("enablement_localization_manifest")) or None,
-            # The gap the *next* round will face, recorded on the round that
-            # revealed it. This is the fact the projection's single
-            # ``launch_log`` overwrote on every advance.
+            # The next round's gap, on the round that revealed it.
             "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
         }
         sink.record(SECTION_ATTEMPT, row, row_type="attempt", natural_ids=_row_id(task_id, attempt))
@@ -421,19 +300,9 @@ def record_round(
 
 
 def record_human_review(*, digest: str, failure_kind: str, reason: str = "", signature: Any = None) -> None:
-    """Record a launch failure the lane could not act on. Never raises.
+    """Record a launch failure the lane could not act on, keyed by ``digest``.
 
-    A non-blank log that classifies to no actionable signature dispatches
-    nothing, so it leaves no round behind -- and a lane that spent a whole
-    session declining to dispatch reads, from counters alone, exactly like a
-    lane that was never triggered. One row per distinct log, keyed by the same
-    digest the lane dedupes on.
-
-    Args:
-        digest (str): The log's digest, which keys the row.
-        failure_kind (str): The kind it classified to, ``UNKNOWN`` in practice.
-        reason (str): Why it was filed for a human rather than dispatched.
-        signature (Any): The classified signature, as the classifier stated it.
+    Never raises. Such a log dispatches nothing, so it leaves no round behind.
     """
     try:
         sink = _sink()
@@ -457,13 +326,7 @@ def record_human_review(*, digest: str, failure_kind: str, reason: str = "", sig
 
 
 def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelty_key: str = "") -> None:
-    """Record one targeted build the lane ran. Never raises.
-
-    Args:
-        task_id (str): The build task id, which keys the row.
-        entry (Mapping[str, Any] | None): The ``BuildResult.to_state()`` entry.
-        novelty_key (str): The novelty key the enqueue was idempotent on.
-    """
+    """Record one ``BuildResult.to_state()`` entry, keyed by ``task_id``. Never raises."""
     try:
         sink = _sink()
         if sink is None or not str(task_id or "").strip():
@@ -492,9 +355,8 @@ def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelt
         }
         if novelty_key:
             row["novelty_key"] = str(novelty_key)
-        # ``ok`` distinguishes a build that ran from a routing sentinel, which
-        # carries no verdict; the projection filtered sentinels out by the same
-        # test and so published nothing about a build that was only enqueued.
+        # ``ok`` separates a build that ran from a verdict-less sentinel,
+        # whose row still belongs on the timeline.
         if manifest.get("ok") is not None:
             row["ok"] = bool(manifest.get("ok"))
             row["failure_class"] = str(manifest.get("failure_class") or "ok")
@@ -511,15 +373,7 @@ def record_revalidation(
     config_path: str = "",
     reason: str = "",
 ) -> None:
-    """Record a revalidation window opening. Never raises.
-
-    Args:
-        generation (int): The window's generation, which keys the row.
-        task_id (str): The baseline task id enqueued to revalidate.
-        config_path (str): The config it will run -- the accepted one from the
-            KEEP'd bench, or the original probe config as a fallback.
-        reason (str): Why the window opened, when it was not a KEEP.
-    """
+    """Record a revalidation window opening, keyed by ``generation``. Never raises."""
     try:
         sink = _sink()
         if sink is None:
@@ -554,16 +408,8 @@ def record_revalidation_outcome(
 ) -> None:
     """Record how a revalidation window closed. Never raises.
 
-    Args:
-        generation (int): The window's generation, whose row this settles.
-        promoted (bool): Whether a genuine baseline promoted and cleared it.
-        task_id (str): The baseline task that answered.
-        accuracy (Any): The accuracy it measured.
-        accuracy_floor (Any): The floor it was graded against.
-        error_class (str): The failure class, when it failed rather than
-            measuring under the floor.
-        reason (str): Why it did not promote, in the caller's words -- a
-            window the run stopped is not a window that failed.
+    ``error_class`` is set only when the baseline failed rather than measuring
+    under the floor; a window the run stopped is not a window that failed.
     """
     try:
         sink = _sink()
@@ -610,25 +456,10 @@ def finish(
 ) -> None:
     """Close the lane on the terminal it reached. Never raises.
 
-    Called where the terminal is *set*, not where it is later observed: success
-    on the KEEP that landed or the revalidation that promoted, ``stalled`` on
-    the round that hit the cap. A lane that was still working when the session
-    ended is not closed here at all -- finalize recovers it as ``interrupted``,
-    which is the honest reading, because nothing judged it.
-
-    Args:
-        outcome (str): :data:`OUTCOME_SUCCEEDED` or :data:`OUTCOME_STALLED`.
-        reason (str): The stop reason or the terminal's own words.
-        kept_patches (Any): The patches the lane landed, in order.
-        kept_artifacts (Any): The artifacts it installed.
-        setup_commands (Any): The env-setup commands it replays.
-        accepted_config (Any): The env/arg layers the landed bench ran with.
-        accepted_config_path (str): The materialized config it accepted.
-        setting_script (str): The reproduction script it wrote.
-        active_runtime (Any): The promoted framework runtime.
-        attempt_runtimes (Any): Every runtime it provisioned.
-        framework_root (str): The source tree the patches apply against.
-        stall_streak (int): The streak the lane ended on.
+    Called where the terminal is *set*, not where it is later observed. A lane
+    still working when the session ended is not closed here at all: finalize
+    recovers it as ``interrupted``, because nothing judged it. ``outcome`` is
+    :data:`OUTCOME_SUCCEEDED` or :data:`OUTCOME_STALLED`.
     """
     try:
         sink = _sink()
@@ -676,9 +507,8 @@ def finish(
         log.debug("enablement event: finish failed", exc_info=True)
 
 
-#: Every section the enablement event assembles from. Declared here as well as
-#: in the assembler so :func:`finish` can read its own parts without importing
-#: the assembler's tuple, which would close an import cycle.
+#: Every section the enablement event assembles from. Duplicated from the
+#: assembler so :func:`finish` can read its own parts without an import cycle.
 ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
     SECTION_EVENT,
     SECTION_ATTEMPT,
@@ -693,17 +523,10 @@ def assemble_enablement_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble the enablement event's ``ext`` out of its recorded rows.
+    """Assemble the enablement event's ``ext`` from its recorded rows.
 
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The enablement sections as
-            read back from the spool, section name to row list.
-        event (str): The event id to assemble.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status the lane
-            settled on. The status is empty when no write has closed the
-            event, which leaves the caller's own reading standing.
+    The returned status is empty when no write has closed the event, which
+    leaves the caller's own reading standing.
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     attempts = wire_rows(
@@ -726,18 +549,12 @@ def assemble_enablement_ext(
     ext: dict[str, Any] = {
         "mode": str(header.get("mode") or ""),
         "origin": str(header.get("origin") or ""),
-        # Recorded, not inferred: the lane exists on the timeline because it
-        # was triggered, so an event that is here at all was engaged. The
-        # projection had to reconstruct this from four unrelated signals
-        # because a section with no event behind it could equally mean
-        # "armed and never needed".
+        # Recorded, not inferred: an event that exists at all was engaged.
         "engaged": True,
         "trigger": _as_dict(header.get("trigger")) or None,
         "attempts": {
             "count": len(attempts),
-            # Rounds that got a verdict, which is the number the projection's
-            # ``attempts`` counter was read as and is not: it counted
-            # dispatches, including the one still in flight.
+            # Rounds with a verdict; ``count`` includes one still in flight.
             "settled": sum(1 for row in attempts if row.get("status")),
             "landed": sum(1 for row in attempts if str(row.get("status") or "") == ROUND_KEPT),
             "advanced": sum(1 for row in attempts if row.get("advanced")),
@@ -761,13 +578,8 @@ def assemble_enablement_ext(
 
 
 def _status_for(outcome: str, *, attempts: int) -> str:
-    """The status the event reports, from the terminal the lane reached.
-
-    A lane that landed its repair succeeded. One that hit the stall cap failed,
-    and it failed the run with it. A lane that closed on neither ran rounds
-    that neither landed nor gave up, which is degraded -- and one that closed
-    having run no round at all was admitted and never needed, which is skipped.
-    """
+    """The status the event reports: degraded when the lane closed on neither
+    terminal, skipped when it ran no round at all."""
     settled = str(outcome or "").strip().lower()
     if settled == OUTCOME_SUCCEEDED:
         return STATUS_SUCCEEDED
@@ -777,12 +589,8 @@ def _status_for(outcome: str, *, attempts: int) -> str:
 
 
 def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header.
-
-    There is one fragment per event, so this is normally a single row; folding
-    rather than taking ``rows[0]`` keeps a spool that somehow holds two from
-    dropping whichever one is second.
-    """
+    """Fold the event-level fragments into one header, rather than take
+    ``rows[0]``, so a spool holding two does not drop the second."""
     header: dict[str, Any] = {}
     for row in rows:
         if isinstance(row, Mapping):
@@ -793,9 +601,8 @@ def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def _recorded_trigger() -> bool:
     """Whether the lane already recorded what opened it.
 
-    Read back from the spool rather than held in memory, because the trigger
-    and the failure that would overwrite it are recorded from different ticks
-    and, on a resume, from different processes.
+    Read from the spool, not memory: the trigger and the failure that would
+    overwrite it come from different ticks and, on resume, different processes.
     """
     try:
         from .assembler import event_parts
@@ -808,12 +615,8 @@ def _recorded_trigger() -> bool:
 
 
 def _start_time() -> str:
-    """The start time the open write stored, read back for the close.
-
-    Nothing here holds the lane's start in memory, because nothing here holds
-    the lane. The open write put it on the event-level fragment, which is the
-    lane's only durable identity, so the close reads it from there.
-    """
+    """The start time the open write stored, read back for the close: nothing
+    here holds the lane, so the fragment is its only durable identity."""
     try:
         from .assembler import event_parts
 
@@ -828,13 +631,8 @@ def _start_time() -> str:
 
 
 def _row_id(task_id: Any, attempt: Any) -> str:
-    """The natural id of an authoring round's row.
-
-    The specialist task id when there is one, because that is what the dispatch
-    and the rearm both name the round by. A round the lane synthesised carries
-    no task id -- a build routed into the lane, a round found finished without
-    a rearm -- and falls back to its ordinal, which is unique per lane and is
-    what keeps a synthesised round from upserting onto a real one.
+    """The natural id of an authoring round's row: the specialist task id the
+    dispatch and rearm both name it by, or its ordinal for a synthesised round.
     """
     task = str(task_id or "").strip()
     if task:
@@ -851,12 +649,8 @@ def _tail(value: Any) -> str | None:
 
 
 def _artifact_row(artifact: Mapping[str, Any]) -> dict[str, Any]:
-    """Project one installed artifact, dropping the backup bookkeeping.
-
-    ``backup`` / ``source`` / ``existed`` describe how the install was made
-    reversible, which is the executor's business and not a fact about the
-    repair.
-    """
+    """Project one installed artifact, dropping the ``backup`` / ``source`` /
+    ``existed`` bookkeeping, which is not a fact about the repair."""
     row = _as_dict(artifact)
     return {
         "target": str(row.get("target") or ""),

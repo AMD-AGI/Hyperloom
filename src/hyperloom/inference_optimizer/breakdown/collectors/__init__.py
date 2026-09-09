@@ -21,7 +21,6 @@ from ._common import (
     _load_jsonl_safe as _load_jsonl_safe,
     _to_float as _to_float,
     _to_int as _to_int,
-    _rel as _rel,
     _safe_get as _safe_get,
     _parse_iso_unix as _parse_iso_unix,
 )

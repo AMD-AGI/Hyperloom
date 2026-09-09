@@ -300,13 +300,7 @@ def _arm_status(results: list[VariantResult]) -> str:
 
     An arm that measured some rungs and lost others is ``degraded`` rather
     than either extreme: the curve it produced is real and shorter than the
-    ladder it was asked for, and both halves of that matter to a reader.
-
-    Args:
-        results: The arm's variant results.
-
-    Returns:
-        The arm's status.
+    ladder it was asked for.
     """
     statuses = {str(result.status or "").lower() for result in results}
     if not statuses:
@@ -332,17 +326,11 @@ def _record_rung(
 ) -> None:
     """Record one rung on the sweep's event, if the sweep is being recorded.
 
-    Args:
-        recorder: The sweep's event recorder, or ``None``.
-        arm_name: The arm the rung belongs to.
-        result: The rung's result, flattened into the same point the report
-            writes so the recorded curve and the written one cannot differ.
-        stage: A ``STAGE_*`` value naming how the rung came to run.
-        committed: Whether the rung is part of the published curve.
-        start_time: When the rung started, ISO-8601.
-        wall_duration_sec: How long the rung occupied, wall clock.
-        granted_cap_sec: The cap the rung was granted.
-        budget_remaining_sec: What the budget had left at admission.
+    The result is flattened into the same point the report writes, so the
+    recorded curve and the written one cannot differ. ``stage`` is a
+    ``STAGE_*`` value naming how the rung came to run, ``committed`` says
+    whether it is part of the published curve, and the seconds fields are
+    wall clock.
     """
     if recorder is None:
         return
@@ -437,46 +425,11 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     (boot-retry-descend).  Falls back to the legacy per-variant server-restart
     path (Option B) when all boot retries are exhausted.
 
-    The shared ``_all_results_ref`` list is mutated in place so incremental
-    checkpoints always see the latest cross-arm view.
-
-    Args:
-        arm_name: Label for this arm (``baseline`` or ``optimized``).
-        concs_desc: Concurrency ladder in strictly descending order.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        num_prompts_factor: CONC multiplier for NUM_PROMPTS.
-        arm_args: Extra server args for this arm.
-        arm_envs: Extra environment variables for this arm.
-        base_yaml_path: Materialized base Magpie YAML path.
-        workspace: Per-sweep workspace root.
-        model_path: Resolved model path string.
-        gpu_type: Resolved GPU type string.
-        variant_timeout_sec: Per-variant hard timeout in seconds.
-        soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
-        deadline: Absolute wall-clock epoch (``time.time()`` basis) at which the
-            total conc-sweep budget expires, or None when unbounded. Distinct
-            from ``soft_deadline_sec``, which is a duration.
-        state: Shared run state (for incremental checkpoint metadata).
-        session_dir: Session directory (for incremental checkpoints).
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        started_at: Wall-clock start of the overall sweep (for elapsed_sec).
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        opt_args: Optimized server args (for payload metadata).
-        opt_envs: Optimized server env vars (for payload metadata).
-        _all_results_ref: Shared list of all results collected across arms;
-            mutated in place so incremental flushes have the full cross-arm
-            picture.
-        _budget_state: Mutable dict carrying budget flags (``budget_exhausted``,
-            ``budget_skip_reason``, ``budget_remaining_sec``) shared with the
-            caller so the main function can inspect the final budget status.
-        recorder: The sweep's SBD V6 event recorder, or ``None``.
-
-    Returns:
-        List of VariantResult for this arm (one per CONC).
+    ``_all_results_ref`` and ``_budget_state`` are mutated in place: the first
+    so incremental flushes see the full cross-arm picture, the second so the
+    caller can inspect the final budget status. ``deadline`` is an absolute
+    ``time.time()`` epoch (``None`` when unbounded), distinct from
+    ``soft_deadline_sec``, which is a duration.
     """
     from ..actions.executors._grid_runner import _num_gpus_for_config
     from ..actions.executors._ray_serving import maybe_serving_lease
@@ -970,37 +923,11 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
     Used when ``_sweep_one_arm_single_server`` detects the framework is not
-    lifecycle-eligible or all boot retries are exhausted.
-
-    Args:
-        arm_name: Label for this arm (``baseline`` or ``optimized``).
-        grid: Pre-built grid for this arm.
-        base_yaml_path: Materialized base Magpie YAML path.
-        workspace: Per-sweep workspace root.
-        model_path: Resolved model path string.
-        gpu_type: Resolved GPU type string.
-        variant_timeout_sec: Per-variant hard timeout in seconds.
-        soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
-        deadline: Absolute epoch (``time.time()``) at which the total budget
-            expires, or None when budget tracking is off (``has_budget`` False).
-        state: Shared run state.
-        session_dir: Session directory.
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        started_at: Wall-clock start of the overall sweep.
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        _all_results_ref: Shared results list (mutated in place).
-        _budget_state: Shared budget-status dict (mutated in place).
-        serving_lease: Caller-owned Ray serving lease forwarded to ``run_grid``;
-            None when the arm runs on the local (non-Ray) path.
-        recorder: The sweep's SBD V6 event recorder, or ``None``.
-
-    Returns:
-        List of VariantResult for the arm (one per CONC).
+    lifecycle-eligible or all boot retries are exhausted. ``_all_results_ref``
+    and ``_budget_state`` are mutated in place; ``deadline`` is an absolute
+    ``time.time()`` epoch, ``None`` when budget tracking is off; and
+    ``serving_lease`` is ``None`` when the arm runs on the local (non-Ray)
+    path.
     """
     arm_results: list[VariantResult] = []
     for variant in grid:
@@ -1145,27 +1072,6 @@ def _maybe_flush(  # noqa: PLR0913
 
     A thin convenience wrapper that avoids repeating the argument list at every
     call site.
-
-    Args:
-        state: Shared run state (metadata fields).
-        session_dir: Session directory.
-        json_path: Pre-resolved JSON report path.
-        csv_path: Pre-resolved CSV report path.
-        all_results: All results collected so far (cross-arm).
-        concs: Full requested concurrency ladder (informational).
-        isl: Input sequence length.
-        osl: Output sequence length.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        workspace: Per-sweep workspace root.
-        started_at: Wall-clock start of the sweep.
-        total_budget_sec: Configured total budget in seconds (``None`` when
-            the budget gate is off).
-        has_budget: Whether budget tracking is active.
-        budget_exhausted: Whether the budget has been exhausted.
-        budget_skip_reason: Reason string when budget was exhausted.
-        budget_remaining_sec: Remaining budget seconds when exhausted.
-        recorder: The sweep's SBD V6 event recorder, or ``None``.
     """
     _flush_partial_conc_sweep_report(
         results=list(all_results),
@@ -1204,17 +1110,6 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_singleton_section(
-                session_dir,
-                "conc_sweep_summary",
-                payload,
-                producer="conc_sweep",
-            )
-        except Exception:  # noqa: BLE001 — capture must never break the sweep
-            log.debug("conc_sweep breakdown capture failed", exc_info=True)
     except Exception:  # noqa: BLE001
         log.debug("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
 
@@ -1247,30 +1142,10 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
     in-progress payload, sets ``report_json_path`` / ``report_csv_path``, and
     delegates to :func:`_flush_conc_sweep_report`.
 
-    Args:
-        results: Variant results collected so far (may be partial).
-        state: Shared run state (used for metadata fields).
-        session_dir: Session directory for report output.
-        json_path: Destination JSON path (already resolved).
-        csv_path: Destination CSV path (already resolved).
-        concs: Full requested concurrency ladder.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        opt_args: Optimized server args.
-        opt_envs: Optimized server env vars.
-        workspace: Workspace directory for this sweep run.
-        started_at: Wall-clock start time of the sweep.
-        total_budget_sec: Total budget in seconds.
-        has_budget: Whether budget tracking is active.
-        budget_exhausted: Whether the budget has been exhausted.
-        budget_skip_reason: Reason string when budget was exhausted.
-        budget_remaining_sec: Remaining budget seconds when exhausted.
-        partial: When ``True`` the status is set to ``"in_progress"`` rather
-            than a terminal status; this makes it easy to distinguish an
-            incremental checkpoint from a final write.
-        recorder: The sweep's SBD V6 event recorder, or ``None``. The pair
-            table is recorded on the same beat as this flush, so an event read
-            mid-sweep carries the pairs measured so far rather than nothing.
+    ``partial`` sets the status to ``"in_progress"`` rather than a terminal
+    one, distinguishing an incremental checkpoint from a final write. The pair
+    table is recorded on the same beat as this flush, so an event read
+    mid-sweep carries the pairs measured so far rather than nothing.
     """
     try:
         b_pts: list[dict[str, Any]] = []
@@ -1331,18 +1206,9 @@ def _skip(reason: str, **extras: Any) -> dict[str, Any]:
 def _declined(recorder: Any, reason: str, **extras: Any) -> dict[str, Any]:
     """Build a skip envelope and close the sweep's event on it.
 
-    A sweep that declines is still a sweep that was dispatched, and the reason
-    it declined is the only thing a reader of that phase can be told. Routing
-    every pre-flight refusal through here means none of them can be added
-    later without the event learning about it.
-
-    Args:
-        recorder: The sweep's event recorder, or ``None``.
-        reason: Operator-readable reason for skipping.
-        **extras: Additional key/value fields to merge into the envelope.
-
-    Returns:
-        A skip-status payload dict.
+    A sweep that declines is still a sweep that was dispatched. Routing every
+    pre-flight refusal through here means none can be added later without the
+    event learning about it.
     """
     payload = _skip(reason, **extras)
     if recorder is not None:
@@ -1369,22 +1235,11 @@ async def run_conc_sweep(
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
 
-    Args:
-        state: Shared run state (baseline, current_best, workload shape).
-        session_dir: Session directory for workspace and report outputs.
-        concs: Concurrency ladder to sweep; ``None`` uses the default ladder.
-        variant_timeout_sec: Per-variant timeout in seconds.
-        total_budget_sec: Total wall-clock budget in seconds. ``None`` runs the
-            ladder unbounded; ``<=0`` means the caller's clamp left no time and
-            the sweep skips immediately rather than running unbounded.
-        num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
-        write_reports: When ``True``, write the JSON/CSV reports to disk.
-        recorder: The SBD V6 event recorder for this sweep, supplied by the
-            executor that dispatched it. ``None`` records nothing, which is
-            what a direct caller with no session bound wants.
-
-    Returns:
-        The sweep payload dict (a skip envelope when prerequisites are unmet).
+    ``concs`` of ``None`` uses the default ladder. ``total_budget_sec`` of
+    ``None`` runs the ladder unbounded, while ``<=0`` means the caller's clamp
+    left no time and the sweep skips immediately. A ``None`` recorder records
+    nothing, which is what a direct caller with no session bound wants.
+    Returns a skip envelope when prerequisites are unmet.
     """
     session_dir = Path(session_dir)
     # Whether the ladder was handed to the sweep or picked for the workload --
@@ -1485,21 +1340,14 @@ async def run_conc_sweep(
     # The module default is synthetic-sized and cannot fund a single AgentX rung.
     # ``_granted_cap_sec`` prices a rung at what ``run_grid`` will actually grant
     # it, which under AgentX is the raised cap (10800s at canonical settings) --
-    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own. Left alone, the
-    # first rung trips "insufficient_remaining_for_variant" and the whole ladder
-    # is skipped with zero measurements, which reads like a benchmark failure
-    # rather than a budget that was never sized for this workload.
-    #
-    # The CLI already raises this knob for AgentX; a caller that reaches
-    # ``run_conc_sweep`` directly (SDK, tests, any path that does not go through
-    # ``_apply_agentx_budget_profile``) got the synthetic default. Give it the
-    # same floor here, and only when the caller left the default in place -- a
-    # number the operator chose is never overridden. Safe to raise: this is the
-    # action's own slice, and the session deadline still clamps it via
-    # ``_session_soft_dl`` below.
-    # Priced once and reused: the raise below and the session soft deadline
-    # further down both ask what a rung will actually be granted, and the two
-    # answering differently is the disagreement this number exists to close.
+    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own, so the whole
+    # ladder would be skipped with zero measurements. The CLI already raises
+    # this knob for AgentX; a caller reaching ``run_conc_sweep`` directly got
+    # the synthetic default. Give it the same floor here, but only when the
+    # caller left the default in place -- a number the operator chose is never
+    # overridden. Safe to raise: this is the action's own slice, and the
+    # session deadline still clamps it via ``_session_soft_dl`` below, which
+    # is why the price is computed once and reused rather than asked twice.
     _rung_cost = _granted_cap_sec(variant_timeout_sec, state)
     declared_total_budget_sec = total_budget_sec
     budget_raised = False

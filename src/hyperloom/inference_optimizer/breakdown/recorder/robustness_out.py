@@ -8,18 +8,10 @@ validates: the intents it raised, the parse problems it reported, and the
 workdir the exchange happened in are all in hand right there. This records
 them at that point.
 
-The section it replaces did the opposite, and could not work. It ran after the
-fact and rebuilt the turn by reading ``signal.json`` and ``action.json`` out of
-the agent's workdir -- two filenames nothing in the tree has ever written. The
-agent writes ``request.json`` and ``emit.json``. So every row it produced was
-three empty strings and a directory name, and a reader could not tell a session
-where the agent raised a dozen intents from one where it never spoke.
-
 Turns the agent could not complete are recorded too, and they are the more
-valuable half: an invalid envelope or a missing one used to reach the log and
-stop there, so a session whose robustness agent was mute throughout looked
-exactly like one that had nothing to report. The ``outcome`` names which of
-those happened.
+valuable half: without them a session whose robustness agent was mute
+throughout reads exactly like one that had nothing to report. The ``outcome``
+names which of those happened.
 
 Recording is best-effort: a failure here degrades the exported section and must
 never propagate into the agent loop it is describing.
@@ -59,10 +51,7 @@ def _intent_rows(intents: Iterable[Any] | None) -> list[dict[str, Any]]:
 
     Accepts either the validated intent objects (which carry a ``type`` enum
     and a payload) or plain mappings, so a caller holding either shape records
-    the same row.
-
-    Returns:
-        list[dict[str, Any]]: one row per intent that named a type.
+    the same row. Intents that named no type are dropped.
     """
     rows: list[dict[str, Any]] = []
     for intent in intents or ():
@@ -105,23 +94,9 @@ def record_robustness_turn(
     """Record one robustness-agent turn, keyed by its turn index.
 
     Idempotent per turn: a re-recorded turn overwrites its own row and leaves
-    the other turns alone.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value
-            is a no-op.
-        turn_idx (int): the agent turn this row describes; keys the row.
-        outcome (str): one of the ``OUTCOME_*`` codes.
-        tick_index (Any): the optimizer tick the agent reported for this turn.
-        intents (Iterable[Any] | None): the validated intents, when the
-            envelope validated.
-        parse_warnings (Iterable[Any] | None): the parse problems the agent
-            reported for this turn.
-        workdir (Path | str | None): the turn's workdir, kept as a provenance
-            pointer rather than a data source.
-        detail (str): why a turn without intents ended that way.
-        ts (str): the recording timestamp; defaults to now.
-        producer (str): the breakdown producer label.
+    the other turns alone. A falsy ``session_dir`` is a no-op, ``outcome`` is
+    one of the ``OUTCOME_*`` codes, and ``workdir`` is kept as a provenance
+    pointer rather than a data source.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=TURN_SECTION)

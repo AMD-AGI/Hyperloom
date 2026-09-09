@@ -170,7 +170,6 @@ def _final(**overrides: Any) -> dict[str, Any]:
 # The window the projection could not report
 # ---------------------------------------------------------------------------
 def test_the_event_opens_when_the_sweep_starts_rather_than_when_it_ends(_bound_session):
-    """The projection back-dated nothing: it had only the finish timestamp."""
     recorder = _recorder()
     open_events = [event for event in read_timeline_events(_bound_session) if event.get("type") == "conc_sweep"]
     assert [event["status"] for event in open_events] == ["running"]
@@ -186,7 +185,6 @@ def test_the_event_opens_when_the_sweep_starts_rather_than_when_it_ends(_bound_s
 
 
 def test_a_sweep_killed_mid_ladder_still_reaches_the_timeline(_bound_session):
-    """Recovery closes the event on the rows that landed before the kill."""
     recorder = _recorder()
     _plan(recorder)
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
@@ -202,7 +200,6 @@ def test_a_sweep_killed_mid_ladder_still_reaches_the_timeline(_bound_session):
 # The plan
 # ---------------------------------------------------------------------------
 def test_the_ladder_says_whether_it_was_chosen_or_handed_over(_bound_session):
-    """``grid_source`` was a constant null in the projection."""
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
@@ -226,7 +223,6 @@ def test_a_ladder_the_mode_picked_says_so(_bound_session):
 
 
 def test_the_event_names_the_configuration_it_was_asked_to_compare(_bound_session):
-    """``input_anchor`` was three constant nulls in the projection."""
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
@@ -253,7 +249,6 @@ def test_an_anchor_with_no_throughput_reports_no_per_gpu_number(_bound_session):
 
 
 def test_the_budget_reports_both_the_number_asked_for_and_the_number_spent(_bound_session):
-    """A sweep that spent six hours on a 9000s budget is not a contradiction."""
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
@@ -268,7 +263,6 @@ def test_the_budget_reports_both_the_number_asked_for_and_the_number_spent(_boun
 
 
 def test_the_sweeps_own_task_id_is_recorded_apart_from_the_dispatched_one(_bound_session):
-    """The minted id names the workspace and nothing else ever wrote it down."""
     recorder = _recorder(task_id="cs-9")
     _plan(recorder)
     recorder.finish(_final())
@@ -282,7 +276,6 @@ def test_the_sweeps_own_task_id_is_recorded_apart_from_the_dispatched_one(_bound
 
 
 def test_the_dispatch_says_why_the_sweep_ran(_bound_session):
-    """``trigger.kind`` was a constant null; the phase's reason is the answer."""
     recorder = _recorder(reason="phase_entry")
     recorder.finish(_final())
 
@@ -296,7 +289,6 @@ def test_the_dispatch_says_why_the_sweep_ran(_bound_session):
 # Arms
 # ---------------------------------------------------------------------------
 def test_an_arm_says_how_it_ran_its_ladder(_bound_session):
-    """The reuse path and the restart path fail differently."""
     recorder = _recorder()
     _plan(recorder)
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={"SGLANG_X": "1"})
@@ -355,7 +347,6 @@ def test_an_arm_that_restarted_per_rung_says_why(_bound_session):
 
 
 def test_the_baseline_arms_empty_args_are_an_answer_rather_than_a_gap(_bound_session):
-    """Adding no server args is the baseline arm's defining property."""
     recorder = _recorder()
     recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
     recorder.finish_arm(ARM_BASELINE, status="succeeded")
@@ -380,7 +371,6 @@ def test_an_arm_the_budget_turned_away_records_the_gate_that_did_it(_bound_sessi
 
 
 def test_an_arm_that_never_ran_reports_no_strategy_rather_than_a_wrong_one(_bound_session):
-    """Both arms are always present, so the absent one must read as absent."""
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
@@ -434,7 +424,6 @@ def test_a_rung_carries_the_agentic_axis_the_projection_dropped(_bound_session):
 
 
 def test_the_curve_reads_upward_whatever_order_the_ladder_ran_in(_bound_session):
-    """The ladder descends so the server boots at its most demanding rung."""
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.record_variant(ARM_OPTIMIZED, stage=STAGE_BOOT, conc=64, point=_point(64))
@@ -449,7 +438,6 @@ def test_the_curve_reads_upward_whatever_order_the_ladder_ran_in(_bound_session)
 
 
 def test_a_rung_the_budget_refused_is_not_a_benchmark_failure(_bound_session):
-    """The whole point of the stage label: these look identical in the report."""
     recorder = _recorder()
     recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
     recorder.record_variant(
@@ -476,7 +464,6 @@ def test_a_rung_the_budget_refused_is_not_a_benchmark_failure(_bound_session):
 # Boot-retry-descend
 # ---------------------------------------------------------------------------
 def test_the_concurrencies_the_server_would_not_boot_at_are_reported(_bound_session):
-    """The capacity finding the sweep produces for free and used to discard."""
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.record_variant(
@@ -517,8 +504,6 @@ def test_the_concurrencies_the_server_would_not_boot_at_are_reported(_bound_sess
 
 
 def test_a_failed_boot_counts_only_once_a_lower_rung_came_up(_bound_session):
-    """Every boot failing means the ladder is retried, so the attempts do not
-    join the curve -- but the attempt itself is still the diagnosis."""
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     for conc in (64, 32):
@@ -595,8 +580,6 @@ def test_the_pair_table_keeps_the_gain_columns_the_projection_dropped(_bound_ses
 
 
 def test_a_failed_pair_is_explained_by_the_arm_that_broke(_bound_session):
-    """Reporting one status for the pair hands back ``succeeded`` as the reason
-    whenever it is the optimized side that failed."""
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.record_variant(
@@ -644,7 +627,6 @@ def test_a_pair_with_no_point_at_all_says_so(_bound_session):
 
 
 def test_a_later_pass_revises_a_pair_rather_than_adding_one(_bound_session):
-    """The pair table is rebuilt after every rung, so it must be keyed."""
     recorder = _recorder()
     recorder.record_progress(
         comparison=[{"conc": 32, "baseline_tput": None, "speedup": None, "baseline_status": ""}],
@@ -689,7 +671,6 @@ def test_the_result_carries_the_roll_up_statistics(_bound_session):
 
 
 def test_the_theoretical_ceiling_reaches_the_event(_bound_session):
-    """A whole block the projection never forwarded out of the V5 section."""
     ceiling = {
         "schema_version": 1,
         "source": "roofline_ceiling.py",
@@ -725,7 +706,6 @@ def test_a_sweep_with_no_ceiling_reports_none_rather_than_an_empty_block(_bound_
 
 
 def test_a_curve_cut_short_by_the_budget_is_degraded(_bound_session):
-    """It produced usable pairs, just not the ladder that was asked for."""
     recorder = _recorder()
     recorder.finish(_final(budget_exhausted=True, budget_skip_reason="total_budget_exhausted"))
 
@@ -779,8 +759,6 @@ def test_a_sweep_that_raised_closes_the_event_on_the_failure(_bound_session):
 
 
 def test_closing_twice_does_not_publish_two_verdicts(_bound_session):
-    """The executor closes on a crash and the sweep closes on its payload; a
-    sweep that did both would otherwise contradict itself."""
     recorder = _recorder()
     recorder.finish(_final())
     recorder.finish_crashed(RuntimeError("late"))
@@ -799,8 +777,6 @@ def test_the_session_stop_reason_reaches_the_failure_block(_bound_session):
 # Assembly edges
 # ---------------------------------------------------------------------------
 def test_an_event_nothing_recorded_assembles_to_nothing(_bound_session):
-    """A caller assembling an event that never happened gets no shape to read
-    as a sweep that produced empty results."""
     assert assemble_conc_sweep_ext({}, event="sweep:2:conc_sweep") == ({}, "")
 
 
@@ -820,8 +796,6 @@ def test_rows_of_another_event_are_not_pulled_in(_bound_session):
 
 
 def test_a_second_sweep_in_one_cycle_is_named_rather_than_dropped(_bound_session):
-    """The dispatcher enqueues one per phase and cycle, so this should not
-    happen -- and if it does, the event says it is reporting the newest."""
     first = _recorder(task_id="cs-1")
     first.finish(_final(elapsed_sec=10.0))
     second = _recorder(task_id="cs-2")
@@ -837,6 +811,5 @@ def test_a_recorder_with_no_sink_declines_instead_of_raising(_bound_session):
 
 
 def test_a_malformed_event_id_declines_instead_of_breaking_the_sweep(_bound_session):
-    """Recording never changes the behavior of the thing being recorded."""
     with pytest.raises(ValueError):
         make_sink("not-an-event-id", producer=PRODUCER)

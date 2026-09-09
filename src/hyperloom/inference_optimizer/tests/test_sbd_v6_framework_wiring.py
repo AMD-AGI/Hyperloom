@@ -3,12 +3,10 @@
 
 """The FRAMEWORK_AGENT timeline event's wiring into the phase itself.
 
-`test_sbd_v6_framework_timeline` covers the recorder against calls made
-directly. These tests go through the real Coordinator seams instead, because
-the failure they exist to catch is not in the recorder: it is an event that
-never opens, a close that never fires, or a policy field read off an attribute
-whose name drifted. None of those are visible to a test that calls the recorder
-itself.
+`test_sbd_v6_framework_timeline` covers the recorder against direct calls. These
+go through the real Coordinator seams instead, because the failures they exist to
+catch -- an event that never opens, a close that never fires, a policy field read
+off an attribute whose name drifted -- are invisible to a recorder-level test.
 """
 
 from __future__ import annotations
@@ -55,13 +53,6 @@ def session_dir(tmp_path: Path):
 
 
 def test_open_records_the_resolved_policy(session_dir: Path):
-    """The policy on the event is what the phase's own owners resolved.
-
-    Each field is read from the function or attribute that owns it, so this
-    also pins the attribute names: a rename that silently turned a threshold
-    into ``None`` is exactly the regression the projection used to hide behind
-    its fallback chains.
-    """
     coord = _coordinator(session_dir)
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
@@ -88,11 +79,6 @@ def test_open_records_the_resolved_policy(session_dir: Path):
 
 
 def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
-    """No runtime path resolves it, so the event says so.
-
-    Reporting a default here would claim the phase ran under a bar it never
-    applied. The projection's fallback chain did exactly that.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -103,12 +89,6 @@ def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
 
 @pytest.mark.asyncio
 async def test_phase_transition_closes_the_event(session_dir: Path):
-    """Leaving FRAMEWORK_AGENT closes the event through the machine's seam.
-
-    The machine has entry hooks only, so a close that is not wired into the
-    transition leaves every event open and the whole phase reads as
-    interrupted.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.phase_history = [{"to_phase": "FRAMEWORK_AGENT", "reason": "prelude_done", "evidence": {}}]
@@ -130,11 +110,6 @@ async def test_phase_transition_closes_the_event(session_dir: Path):
 
 @pytest.mark.asyncio
 async def test_exit_plateau_comes_from_the_deciding_evidence(session_dir: Path):
-    """The exit plateau rows hold what the exit rule read, not a recount.
-
-    The rule's evidence is the only record of the counts as they stood when it
-    ruled; by close time more candidates may have resolved.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -170,11 +145,6 @@ async def test_exit_plateau_comes_from_the_deciding_evidence(session_dir: Path):
 
 @pytest.mark.asyncio
 async def test_a_transition_without_a_plateau_reading_writes_no_rows(session_dir: Path):
-    """A budget exit did not evaluate a plateau, so it claims none.
-
-    Writing rows from an evidence map that never held a plateau reading would
-    report an evaluation that did not happen.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -190,12 +160,6 @@ async def test_a_transition_without_a_plateau_reading_writes_no_rows(session_dir
 
 
 def test_advisory_plateau_snapshots_both_arms(session_dir: Path):
-    """Composing the advisory records what it was composed from.
-
-    Both arms land whether or not either fired: "evaluated and did not trip"
-    is the reading that explains a phase staying open, and it is not
-    recoverable from a history that kept growing afterwards.
-    """
     coord = _coordinator(session_dir)
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
@@ -212,12 +176,6 @@ def test_advisory_plateau_snapshots_both_arms(session_dir: Path):
 
 
 def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
-    """A harvested round records the run, its candidates, and what it dropped.
-
-    The audited-away entries are the round's most informative output: five PRs
-    all judged already landed is a very different result from finding nothing,
-    and the projection reported both as an empty round.
-    """
     from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
@@ -261,11 +219,6 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
 
 
 def test_failed_discovery_round_records_the_failure(session_dir: Path):
-    """A round that could not run reports nothing about what is out there.
-
-    The projection had to identify this by scanning journal rows backwards for
-    particular event names.
-    """
     from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
@@ -289,11 +242,6 @@ def test_failed_discovery_round_records_the_failure(session_dir: Path):
 
 
 def test_terminal_row_settles_the_proposal(session_dir: Path):
-    """Every dead end settles its proposal, through the one terminal writer.
-
-    Hooked at that writer rather than at each of its dozen callers, so a newly
-    added dead end cannot silently leave its proposal pending.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -313,7 +261,6 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
 
 
 def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
-    """A denial is a review on the proposal plus a terminal disposition."""
     import asyncio
     from types import SimpleNamespace
 
@@ -329,8 +276,7 @@ def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
     coord._close_framework_timeline(exit_reason="optimize_no_more_leverage")
 
     proposal = _events(session_dir)[0]["ext"]["proposals"][0]
-    # The Critic's own word for it, not the phase's past tense: one field
-    # spelled two ways depending on which path wrote it cannot be selected on.
+    # The Critic's own word for it: a field spelled two ways cannot be selected on.
     assert proposal["critic_review"]["verdict"] == "reject"
     assert "serving loop" in proposal["critic_review"]["reason"]
     assert proposal["critic_review"]["outcome"]["denied"] is True
@@ -340,13 +286,6 @@ def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
 
 
 def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: Path):
-    """Explore variants land as attempts with both ends of their pair.
-
-    The anchor advances on every KEEP, so a gain without its own denominator
-    cannot be added to anything -- and for a killed variant there is no gain to
-    divide an anchor back out of. The outcome stays verbatim: the journal
-    beside this collapses the non-plain-revert outcomes together.
-    """
     import asyncio
     from types import SimpleNamespace
 
@@ -396,19 +335,13 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     killed = attempts["fp2"]
     assert killed["outcome"] == "KILLED_OVERTIME"
     assert killed["adopted"] is False
-    # An anchor with nothing measured against it: no gain to divide out, which
-    # is exactly the row a back-solved anchor could not represent.
+    # An anchor with nothing measured against it, so there is no gain to divide back out.
     assert killed["measurement"]["before_tput"] == 112.0
     assert killed["measurement"]["after_tput"] is None
     assert killed["attribution_eligible"] is False
 
 
 def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Path):
-    """An authored patch lands as the same uniform attempt row.
-
-    Both arms are measured against whatever the session is serving, so one
-    shape serves both and the ledger walks them with one reader.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.framework_agent_specialist_candidate_map = {"t-auth-1": "https://x/pr/1"}
@@ -467,7 +400,6 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
 
 
 def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
-    """A gate that did not run is absent, not failed."""
     from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
@@ -492,17 +424,12 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
 
 
 def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
-    """Propose one explore grid through the real intent seam.
-
-    Returns:
-        The proposal's message id, which is also its row's id.
-    """
+    """Propose one explore grid through the real intent seam, returning the id its row is keyed by."""
     import asyncio
 
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-    # The execution-order gate holds ``explore`` until a baseline exists, which
-    # this phase always runs after; without it the proposal never mints.
+    # The execution-order gate holds ``explore`` until a baseline exists, or nothing mints.
     if coord.shared_state.baseline_tput <= 0:
         coord.shared_state.baseline_tput = 100.0
     before = set(coord.state.pending_proposals)
@@ -518,12 +445,6 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
 
 
 def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
-    """The config arm's attempts have an upstream row to point at.
-
-    The attempts already carried a ``proposal_ref``; until this row existed it
-    referred to nothing, so the event could say six variants were benched and
-    not what was proposed or who proposed it.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -545,13 +466,11 @@ def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
     # No dispatch stands behind it, and absence is the load-bearing fact.
     assert not proposal.get("run_ref")
     assert [step["step"] for step in proposal["lifecycle"]] == ["proposed"]
-    # Nothing has resolved it yet: the key is absent rather than holding an
-    # empty disposition, so unresolved cannot be read as settled-on-nothing.
+    # Absent rather than an empty disposition, so unresolved cannot read as settled-on-nothing.
     assert "terminal" not in proposal
 
 
 def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
-    """A specialist's config is its domain's, not the orchestrator's."""
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -566,7 +485,6 @@ def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
 
 
 def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
-    """The seed grid is its own producer, so a default is never read as a proposal."""
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -578,11 +496,6 @@ def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
 
 
 def test_a_mixed_grid_is_the_assemblers(session_dir: Path):
-    """Only the orchestration agent assembles a grid from several sources.
-
-    The mix is not lost by naming the assembler: every variant still carries
-    its own label on its own attempt.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -596,11 +509,6 @@ def test_a_mixed_grid_is_the_assemblers(session_dir: Path):
 
 
 def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
-    """A denied grid stays on record as something pursued and dropped.
-
-    Recorded at proposal time for exactly this case: a grid that never reaches
-    a bench is invisible to anything that reads only the attempts.
-    """
     import asyncio
 
     coord = _coordinator(session_dir)
@@ -625,8 +533,7 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
     assert proposal["critic_review"]["verdict"] == "reject"
     assert "memory floor" in proposal["critic_review"]["reason"]
     assert proposal["terminal"]["disposition"] == "dropped"
-    # A denial is a review plus a disposition, as it is on the source arm; the
-    # drop is not a step of its own.
+    # A denial is a review plus a disposition; the drop is not a lifecycle step of its own.
     assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed"]
 
 
@@ -648,12 +555,6 @@ def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:
 
 
 def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
-    """The whole ruling lands on the proposal, not just its verdict.
-
-    A bare verdict cannot be audited: an ``advise`` that let a grid through on
-    a stated risk and one that let it through on nothing are the same word, and
-    the risk was the reason the round is worth reading.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -690,11 +591,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
 
 
 def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
-    """The ruling and what the loop acted on are different facts.
-
-    Reporting only what the Critic wrote says a grid was refused that in fact
-    ran; reporting only what the loop did says the Critic approved it.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -720,11 +616,6 @@ def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
 
 
 def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
-    """A rejected variant has no attempt row, so the map is its only record.
-
-    The collapse is deliberately lossy -- the grid proceeds on its approved
-    subset -- so the summary verdict cannot say which variants were refused.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -759,7 +650,6 @@ def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
 
 
 def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
-    """A proposal blocked by a missing manifest was never actually examined."""
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
@@ -783,11 +673,6 @@ def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
 
 
 def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
-    """The source arm identifies a proposal by candidate id, not message id.
-
-    A review keyed on the bus message would open a second, near-empty row
-    beside the candidate's own, and the candidate would read as never reviewed.
-    """
     import asyncio
     from types import SimpleNamespace
 
@@ -834,13 +719,6 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
 
 
 def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
-    """The artifacts and the KB write land on the ruling they belong to.
-
-    Recorded from the Critic's turn rather than the phase's recorder, since
-    that is the only place a KB write's result comes back -- and filed onto the
-    proposal so there is no per-turn stream to join back on a turn index that
-    resume reuses.
-    """
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
     coord = _coordinator(session_dir)
@@ -872,7 +750,6 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
 
 
 def test_evidence_for_a_cycle_with_no_event_is_dropped_quietly(session_dir: Path):
-    """The Critic runs on every tick, including ticks that record no event."""
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
     record_review_evidence(
@@ -885,7 +762,6 @@ def test_evidence_for_a_cycle_with_no_event_is_dropped_quietly(session_dir: Path
 
 
 def test_review_subjects_resolve_a_candidate_to_its_own_row():
-    """A source-arm ruling is filed under the candidate id, not the message id."""
     from hyperloom.orchestrator.roles.critic_agent import _review_subjects
 
     bundle = {
@@ -900,7 +776,6 @@ def test_review_subjects_resolve_a_candidate_to_its_own_row():
 
 
 def test_measured_variants_settle_their_grid(session_dir: Path):
-    """The grid settles on being measured, and its attempts link back to it."""
     import asyncio
     from types import SimpleNamespace
 
@@ -939,12 +814,6 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
 
 
 def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Path):
-    """The fingerprint is the join key; the name is what identifies it to a person.
-
-    Recording only the fingerprint left every config attempt labelled by a
-    12-char digest, so the arm's own history was unreadable without joining
-    back through a state ledger that is going away.
-    """
     import asyncio
     from types import SimpleNamespace
 
@@ -980,12 +849,6 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
 
 
 def test_every_applied_patch_is_recorded_not_just_the_primary(session_dir: Path):
-    """One attempt can land several patches, and the rest are not recoverable.
-
-    ``patch_path`` names the one the attempt was dispatched for; a candidate
-    that needed a fixup applied more, and which ones landed is what a revert
-    or a re-apply has to walk.
-    """
     from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
@@ -1016,13 +879,6 @@ def test_every_applied_patch_is_recorded_not_just_the_primary(session_dir: Path)
 
 
 def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path):
-    """The config arm's verdicts are recorded, not re-derived downstream.
-
-    ``REVERT`` on its own cannot say which gate ended the arc, and the stack a
-    variant ran on top of advances on every KEEP -- so both have to travel from
-    the round that decided them rather than be reconstructed at write-back from
-    the session's current config or by matching on a reason string.
-    """
     import asyncio
     from types import SimpleNamespace
 
@@ -1078,17 +934,11 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
         ("keep_threshold", True),
         ("accuracy", False),
     ]
-    # It cleared the gain bar and died on accuracy; the outcome alone could not
-    # have said which.
+    # It cleared the gain bar and died on accuracy; the outcome alone cannot say which.
     assert attempt["blocked_by"] == "accuracy"
 
 
 def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
-    """A session with no baseline accuracy gates nothing, and says so.
-
-    ``unscored_keep_count`` is computed from this field today, so a KEEP that
-    rested on throughput alone must not read like one an accuracy gate ruled.
-    """
     import asyncio
     from types import SimpleNamespace
 
@@ -1127,12 +977,6 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
 
 
 def test_no_recorder_leaves_the_phase_alone(session_dir: Path):
-    """Every seam is a no-op when the event was never opened.
-
-    The close seam fires on any transition out of the phase, including ones
-    from a leg that never opened an event -- a resume, or a session recorded
-    before this event existed.
-    """
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
 

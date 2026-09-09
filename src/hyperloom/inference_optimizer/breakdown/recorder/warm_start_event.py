@@ -4,37 +4,17 @@
 """The SBD V6 ``warm_start`` event: the T0 Recipe KB lookup, recorded live.
 
 At session start T0 asks the KB whether anyone has already optimized this
-workload, and either anchors on what it finds or starts cold. This recorder
-replaces a projection of that lookup, and removes three specific losses.
+workload, and either anchors on what it finds or starts cold.
 
-**The status answered the wrong question.** The projection published
-``matched`` / ``not_matched`` as the *event status*, so a first-ever session for
-a workload -- an empty KB answering correctly -- was filed under a word that
-reads as something not having worked. Whether the lookup ran and whether it
-found anything are two different facts, and they are now two fields: ``status``
-is the lookup's own outcome, and ``match_status`` is what it found.
+Whether the lookup ran and what it found are two facts and two fields:
+``status`` is the lookup's own outcome, ``match_status`` is what it found. The
+split is load-bearing, because on a cold KB T0 stamps its own anchor row before
+searching, then matches that row and demotes it to ``seed_only`` -- a status
+that graded the finding would report every first-ever session as degraded.
 
-The split matters more than it looks. On a cold KB T0 stamps its own anchor row
-before searching, then matches that row and demotes it to ``seed_only`` -- so a
-status that graded the finding would report every first-ever session as
-degraded, which is the same conflation in a new place.
-
-**The reads block described the wrong window.** It aggregated the last 50 rows
-of the session's recipe audit log and called them "this session's Recipe KB
-reads", inside an event that covers T0 alone. Two unrelated things landed in
-it: every successful ``put_recipe`` write, which the log carries with
-``hit: True`` and which the aggregation counted as both a read and a hit; and
-the runtime-amendment reads from ``_kb_amend_recipe``, which are real reads but
-belong to the middle of the session, not to its anchor. Filtering by operation
-would only have fixed the first. Reads are now recorded one row each, and only
-inside T0's own lookup window, so the block counts what the event is about.
-
-**Two of the block's fields could never be populated.** ``by_source`` and
-``best_config_by_source`` read ``result.sources`` and
-``result.best_config_source`` off the audit rows; nothing in the codebase has
-ever written either key, so both maps were always empty. They are dropped
-rather than carried, because a permanently-empty attribution reads as "no
-source was involved" instead of "this was never recorded".
+Reads are recorded one row each, and only inside T0's own lookup window: the
+recipe audit log also carries KB writes and the mid-session reads from
+``_kb_amend_recipe``, and neither belongs to the anchor's tally.
 """
 
 from __future__ import annotations
@@ -66,9 +46,8 @@ EVENT_KIND = "warm_start"
 EVENT_COMPONENT = "warm_start"
 
 #: The phase segment. A literal rather than a read of ``state.phase``: T0 runs
-#: before the phase machine has settled anywhere, and on a resume it re-runs
-#: from whatever phase the session came back in -- which would give the same
-#: lookup two different event ids and split one anchor into two half-events.
+#: before the phase machine settles, and on a resume it re-runs from whatever
+#: phase the session came back in, which would split one anchor into two.
 EVENT_PHASE = "prelude"
 
 PRODUCER = "orchestrator"
@@ -80,10 +59,9 @@ SECTION_EVENT = "warm_start_event"
 #: One row per KB read T0 made, in the order they were served.
 SECTION_READ = "warm_start_read"
 
-# What the lookup found, as T0's own ``warm_start_context`` states it. Kept as
-# the producer's words rather than folded into the event status: ``seed_only``
-# is a record that was found and cannot be executed, which is neither a match
-# a reader can act on nor the absence of one.
+# What the lookup found, as T0's own ``warm_start_context`` states it.
+# ``seed_only`` is a record that was found and cannot be executed, which is
+# neither a match a reader can act on nor the absence of one.
 MATCH_HIT = "hit"
 MATCH_SEED_ONLY = "seed_only"
 MATCH_MISS = "miss"
@@ -91,12 +69,6 @@ MATCH_MISS = "miss"
 # The lookup's own outcome, and only that. Every finding -- a hit, a
 # ``seed_only``, a miss -- is a lookup that ran and answered, so all three are
 # ``succeeded`` and the finding is read off ``match_status``.
-#
-# ``seed_only`` in particular must not be a status of its own. On a cold KB T0
-# matches the bare anchor row it wrote seconds earlier, which demotes to
-# ``seed_only`` by design, so grading it here would mark every first-ever
-# session as though something had gone wrong -- the same conflation of "found
-# nothing" with "failed" that this recorder exists to undo.
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 
@@ -107,23 +79,18 @@ MATCHED_STATUSES = frozenset({MATCH_HIT, MATCH_SEED_ONLY})
 #: than a relaxed neighbourhood of it.
 _EXACT_TIER = "exact"
 
-#: The recorder whose lookup is currently in flight, for the audit hook to
-#: attribute reads to. A context variable rather than a global because the hook
-#: runs on whatever task the KB op was issued from. It holds the recorder and
-#: not just an id so that a read arriving after the event closed is dropped
-#: even if the variable itself outlived the lookup.
+#: The recorder whose lookup is in flight, for the audit hook to attribute reads
+#: to. A context variable because the hook runs on whatever task the KB op was
+#: issued from, and it holds the recorder rather than an id so a read arriving
+#: after the event closed is dropped even if the variable outlived the lookup.
 _ACTIVE: ContextVar[WarmStartEventRecorder | None] = ContextVar("warm_start_active", default=None)
 
 
 def warm_start_event_id(macro_cycle: Any = 0) -> str:
-    """Build the T0 lookup's event id.
+    """Build the T0 lookup's event id, ``prelude:{macro_cycle}:warm_start``.
 
-    Args:
-        macro_cycle (Any): The macro cycle T0 ran in, which is ``0`` for the
-            anchor and non-zero only for a resumed session that re-anchors.
-
-    Returns:
-        str: The event id, ``prelude:{macro_cycle}:warm_start``.
+    ``macro_cycle`` is ``0`` for the anchor and non-zero only for a resumed
+    session that re-anchors.
 
     Raises:
         ValueError: If either segment is malformed.
@@ -135,14 +102,10 @@ def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
     """Record one KB read served while a T0 lookup is in flight. Never raises.
 
     Called from the recipe audit hook, which sees writes as well as reads, and
-    sees reads from every seam that consults the KB. Both are filtered here: a
-    write is not a read, and a read served while no lookup is open belongs to
-    whatever else was asking -- which is what keeps ``_kb_amend_recipe``'s
-    mid-session traffic out of the anchor's tally.
-
-    Args:
-        session_dir (Any): The session directory; a falsy value is a no-op.
-        audit_event (Mapping[str, Any]): The audit event the KB just emitted.
+    reads from every seam that consults the KB. Both are filtered here: a write
+    is not a read, and a read served while no lookup is open belongs to whatever
+    else was asking, which keeps ``_kb_amend_recipe``'s mid-session traffic out
+    of the anchor's tally. A falsy ``session_dir`` is a no-op.
     """
     active = _ACTIVE.get()
     if not session_dir or active is None or not active.claims(session_dir):
@@ -166,9 +129,8 @@ def _read_row(event: str, ordinal: int, audit_event: Mapping[str, Any]) -> dict[
     result = _as_dict(audit_event.get("result"))
     return {
         "event_id": event,
-        # Service order, carried explicitly. The cascade issues its reads well
-        # inside one second, so a second-resolution timestamp cannot order
-        # them -- and the order is the point: it is what shows the exact-identity
+        # Service order, carried explicitly: the cascade issues its reads well
+        # inside one second, and the order is what shows the exact-identity
         # probe missing before the degradation ladder was walked.
         "ordinal": ordinal,
         "ts": _now(),
@@ -209,10 +171,9 @@ class WarmStartEventRecorder:
         self._start_time = start_time
         self._t0 = time.monotonic()
         self._request = {
-            # The identity T0 actually queried, recorded because the hardware
-            # dimension is topology-aware and resolved from the runtime
-            # environment: rebuilding it at export could disagree with what
-            # the run asked for, which is what the projection had to do.
+            # The identity T0 actually queried. Its hardware dimension is
+            # topology-aware and resolved from the runtime environment, so
+            # rebuilding it at export could disagree with what the run asked.
             "canonical_id": str(requested_canonical_id or ""),
             "scope": dict(scope or {}),
         }
@@ -242,7 +203,7 @@ class WarmStartEventRecorder:
         A lookup that raised before settling leaves its window open, so the
         session it was opened in is checked rather than assumed: a stale window
         must not attribute a later session's reads to an anchor that never
-        finished, which is the one way a leak could cross sessions.
+        finished.
         """
         if self._closed:
             return False
@@ -258,12 +219,10 @@ class WarmStartEventRecorder:
 
         The request rides on the open shell so a session killed during its
         lookup is readable as a lookup of a named identity rather than as an
-        anonymous event that never finished.
-
-        Opening also claims the reads the KB is about to serve. The event's own
-        open interval is the attribution window, so a caller does not have to
-        hold a second scope around the same span -- and a lookup that dies
-        without settling keeps its reads, which is what says how far it got.
+        anonymous event that never finished. Opening also claims the reads the
+        KB is about to serve: the event's own open interval is the attribution
+        window, so a lookup that dies without settling keeps its reads, which
+        is what says how far it got.
         """
         self._sequence = open_event(
             event_type=EVENT_TYPE,
@@ -283,16 +242,10 @@ class WarmStartEventRecorder:
         matched: Mapping[str, Any] | None = None,
         error: str = "",
     ) -> None:
-        """Settle the lookup.
+        """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        Args:
-            match_status (str): What was found -- ``hit`` / ``seed_only`` /
-                ``miss``.
-            matched (Mapping[str, Any] | None): The matched record's facts,
-                when something was matched.
-            error (str): The exception class name, when the lookup itself
-                failed. A failed lookup found nothing, which is not the same
-                as having looked and found nothing.
+        ``error`` carries the exception class name when the lookup itself
+        failed, which is not the same as having looked and found nothing.
         """
         if self._closed:
             return
@@ -341,9 +294,7 @@ class WarmStartEventRecorder:
 def _status_for(match_status: str, *, error: str = "") -> str:
     """The lookup's own outcome, which is independent of what it found.
 
-    A miss is ``succeeded``: the KB was asked and it answered. The projection
-    filed it under ``not_matched``, which put a cold start for a workload
-    nobody has optimized yet under a word that reads as a malfunction.
+    A miss is ``succeeded``: the KB was asked and it answered.
     """
     return STATUS_FAILED if error else STATUS_SUCCEEDED
 
@@ -357,16 +308,8 @@ def make_warm_start_recorder(
 ) -> WarmStartEventRecorder | None:
     """Open the T0 lookup's event, or ``None`` when it cannot be recorded.
 
-    Args:
-        macro_cycle (Any): The macro cycle T0 ran in.
-        requested_canonical_id (str): The identity being queried.
-        scope (Mapping[str, Any] | None): The workload dimensions queried under.
-        start_time (str): When the lookup began; defaults to now.
-
-    Returns:
-        WarmStartEventRecorder | None: The open recorder, or ``None`` when no
-        session is bound or the open write failed. Recording is best-effort:
-        the anchor outranks its own record.
+    ``None`` means no session is bound or the open write failed; ``start_time``
+    defaults to now. Recording is best-effort: the anchor outranks its record.
     """
     try:
         from ...session.session_binding import bound_session
@@ -392,16 +335,9 @@ def assemble_warm_start_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble one warm-start event's ``ext`` out of its recorded rows.
 
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The warm-start sections as
-            read back from the spool, section name to row list.
-        event (str): The event id to assemble; rows of every other event in the
-            same session are ignored.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status the
-            recorded lookup settled on. The status is empty when no write has
-            closed the event, which leaves the caller's own reading standing.
+    ``parts`` is the spool's sections keyed by name, and rows of every event
+    other than ``event`` are ignored. The returned status is empty when no
+    write has closed the event, which leaves the caller's own reading standing.
     """
     event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = event_rows[0] if event_rows else {}
@@ -424,10 +360,9 @@ def assemble_warm_start_ext(
 def _reads_block(reads: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Summarize T0's reads, keeping every row it summarizes.
 
-    The tallies are kept because they are what a reader scans first, but they
-    are derived here from rows that are themselves published, so a number that
-    looks wrong can be checked against the reads it came from. The projection
-    published tallies over an aggregation whose rows it had already discarded.
+    The tallies are what a reader scans first, but they are derived from rows
+    that are themselves published, so a number that looks wrong can be checked
+    against the reads it came from.
     """
     if not reads:
         return None

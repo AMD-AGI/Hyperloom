@@ -3,66 +3,22 @@
 
 """The SBD V6 ``phase`` event: where the run was, and what it dispatched there.
 
-Every other event on the timeline is scoped by a phase -- the event id's first
-segment *is* a phase name -- and until now the timeline held no record of the
-phases themselves. A reader could see a baseline event tagged ``framework_agent``
-and had no way to learn when that phase was entered, why the run left it, or how
-long it had. Those facts were published as two derived top-level keys instead:
+Every other event is scoped by a phase, but the phases themselves were only
+derived at export: from ``phase_history`` rows paired two at a time, so the
+segment the session ended in had no successor to close it, and by testing each
+action's timestamp against ``[entered_ts, exit_ts)``, which charges an action
+outliving its phase to whichever phase inherited it. So the phase becomes an
+event, opened on entry and closed on exit, and each dispatch records its own
+phase at the moment it is dispatched.
 
-**``phase_segments`` was recomputed at export from ``phase_history``.** Rows were
-paired off two at a time to synthesize each segment's exit and duration
-(``collectors/timeline.py:753-769``), which is a reconstruction of a timespan
-that the transition itself knew exactly. It also cannot describe the segment the
-session ended in, because that one has no successor row to be paired with.
-
-**``phase_timeline`` attributed actions to phases by guessing.** The audit writer
-is handed the phase and the macro cycle (``shared_state.py:2918``) and drops both
-from the payload it records (``instrument.py:849-859``), forwarding them only to
-a v4 mirror. Export therefore had to attribute each action by testing its
-timestamp against ``[entered_ts, exit_ts)`` (``collectors/timeline.py:826-855``).
-A guess is the wrong answer whenever an action outlives the phase that ordered
-it -- a long baseline settling after a plateau exit gets charged to the phase
-that inherited it, not the one that asked for it -- and the fact needed to get it
-right was in scope at the writer and thrown away.
-
-So the phase becomes an event, opened on entry and closed on exit, and each
-dispatch records its own phase at the moment it is dispatched.
-
-What this event does *not* do is duplicate the per-dispatch detail the stage
-events already record. The original plan for this section was a flat action
-stream carrying every attempt's status, decision and key metric; that row is a
-strict subset of what ``baseline.ext.actions[]``, ``roofline.ext.actions[]``,
-``framework_agent.ext.attempts[]`` and ``enablement.ext.attempts.rows[]`` hold,
-and poorer -- none of them can express a baseline's discarded cold-warmup rounds
-or a framework attempt's arm and provenance. Recording it anyway would put one
-semantic in two places, which is the drift this whole layer exists to remove.
-
-:data:`SECTION_ACTION` rows are therefore deliberately thin: identity, the phase
-that ordered the dispatch, and the verdict. The detail is reached by joining on
-``task_id``, which every stage event's per-dispatch rows already carry -- so the
-link needs no ``event_ref`` field, and more to the point no author-time table
-mapping action kinds to components. Such a table is exactly how
-``_AUDIT_ACTIONS`` came to cover four kinds and stay there while the catalogue
-grew to fifteen.
-
-For the actions no stage event covers -- ``report``, ``recover``,
-``session_breakdown``, ``target_analysis``, which were invisible on the timeline
-entirely -- these rows are the only record, and the join simply finds nothing.
-
-Coverage does not come from enumerating the action catalogue, which is how
-``_AUDIT_ACTIONS`` came to cover four of fifteen kinds and stay there. It comes
-from the three places the code already funnels through:
-:meth:`~hyperloom.orchestrator.loop.dispatcher.DispatcherCollaborator.run_task_registered`
-(whose docstring calls itself "the only way an action runs", and which holds the
-sole call to ``sub.run_task`` in the tree), the settle branch in
-``_reap_dispatched_task`` that both the promote and the unpromotable paths pass
-through, and :func:`~hyperloom.orchestrator.phases.machine_state.record_phase_transition`.
+:data:`SECTION_ACTION` rows stay thin -- identity, the ordering phase, the
+verdict -- because the stage events hold the per-dispatch detail and joining on
+``task_id`` reaches it. For ``report``, ``recover``, ``session_breakdown`` and
+``target_analysis``, which no stage event covers, the join finds nothing and
+these rows are the only record.
 
 Nothing here holds a recorder object, for the same reason the enablement event
-does not: the three call sites live in different modules on different ticks, and
-threading one object between them would make the record depend on the call graph
-that reached it. Each function below resolves its own sink and opens its own
-event idempotently.
+does not: the call sites live in different modules on different ticks.
 """
 
 from __future__ import annotations
@@ -90,9 +46,8 @@ log = logging.getLogger(__name__)
 EVENT_TYPE = "phase"
 EVENT_KIND = "phase"
 
-#: The component segment of a phase event's id. The phase segment carries the
-#: phase name itself, so ``framework_agent:2:phase`` is "the run's time in
-#: FRAMEWORK_AGENT during macro cycle 2".
+#: The component segment of a phase event's id; the phase segment carries the
+#: phase name, so ``framework_agent:2:phase`` is that phase's time in cycle 2.
 EVENT_COMPONENT = "phase"
 
 PRODUCER = "orchestrator"
@@ -100,32 +55,22 @@ PRODUCER = "orchestrator"
 #: The event-level section: which phase, and the span it ended up covering.
 SECTION_EVENT = "phase_event"
 
-#: One row per entry into the phase, keyed by the ``phase_history`` position the
-#: entering transition took. A phase re-entered inside one macro cycle does not
-#: get a second event -- the id has no segment that could distinguish them, and
-#: inventing one would break the rule that every segment be recomputable from
-#: persisted state -- so each entry is a row and the event covers all of them.
+#: One row per entry into the phase, keyed by the entering transition's
+#: ``phase_history`` position. A re-entry inside one cycle gets a second row,
+#: not a second event: the id has no segment that could distinguish them.
 SECTION_SEGMENT = "phase_segment"
 
 #: One row per dispatched action, keyed by its task id. Opened at dispatch and
 #: settled in place, so an action killed mid-flight reads as dispatched with no
-#: verdict rather than as never having happened.
+#: verdict, not as never having happened.
 SECTION_ACTION = "phase_action"
 
 #: One row per non-transition ``phase_history`` marker, keyed by its position.
 SECTION_MARKER = "phase_marker"
 
-#: One row per proposal the phase raised, keyed by the bus message that carries
-#: it. The proposal is recorded here because this is the one event that exists
-#: for every phase: an action becomes a ``phase_action`` row only once it is
-#: dispatched, and a proposal that the Critic rejected is never dispatched at
-#: all -- so without this row the refusal had nothing to be recorded against.
-#:
-#: This is also the only place a Critic ruling can be filed with the thing it
-#: ruled on. ``framework_agent`` carries ``proposals[].critic_review``, but its
-#: rows exist for two creation paths inside one phase; a ruling on a KERNEL
-#: ``kernel_opt``, on a PRELUDE ``baseline``, or on an action no framework arm
-#: maps to had no subject row anywhere, and was dropped without trace.
+#: One row per proposal the phase raised, keyed by the bus message carrying it.
+#: A proposal the Critic refused is never dispatched, so it gets no action row,
+#: and the ruling would otherwise have no subject to be filed against.
 SECTION_PROPOSAL = "phase_proposal"
 
 STATUS_SUCCEEDED = "succeeded"
@@ -138,25 +83,13 @@ MAX_REASON_CHARS = 500
 
 
 def phase_event_id(phase: str, macro_cycle: int) -> str:
-    """Build the event id for one phase's time in one macro cycle.
-
-    Returns:
-        str: ``{phase}:{macro_cycle}:phase``.
-
-    Raises:
-        ValueError: If ``phase`` is not a token or ``macro_cycle`` is negative.
-    """
+    """Build ``{phase}:{macro_cycle}:phase``. Raises ``ValueError`` if ``phase``
+    is not a token or ``macro_cycle`` is negative."""
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
 def _sink(event: str) -> EventSink | None:
-    """The sink rows for ``event`` are written through, or ``None``.
-
-    Returns:
-        EventSink | None: The bound session's sink, or ``None`` when no session
-        is bound -- a unit test driving the phase machine directly, or a resume
-        before the session scope is entered. Recording is best-effort either way.
-    """
+    """The sink for ``event``, or ``None`` when no session is bound."""
     try:
         from ...session.session_binding import bound_session_or_none
 
@@ -171,28 +104,15 @@ def _sink(event: str) -> EventSink | None:
 def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> int | None:
     """Put a phase on the timeline, once, however many callers ask.
 
-    :func:`open_event` hands back the sequence an earlier open took instead of
-    writing a second shell, which is what lets a dispatch open the phase it
-    belongs to without knowing whether the transition already did.
-
-    Args:
-        event (str): The phase event id.
-        phase (str): The phase name, as recorded.
-        macro_cycle (int): The macro cycle.
-        start_time (str): When the phase was entered; defaults to now.
-
-    Returns:
-        int | None: The storage sequence to close with, or ``None`` when the
-        shell write failed. A caller that gets ``None`` still records: the
-        fragments land, and finalize recovers the event from them.
-    """
+    :func:`open_event` hands back the sequence an earlier open took, so a
+    dispatch can open its phase without knowing whether the transition already
+    did. ``None`` means the shell write failed; the caller records anyway."""
     shell: dict[str, Any] = {
         "phase": str(phase or "").strip().upper(),
         "macro_cycle": int(macro_cycle or 0),
     }
-    # Onto the fragment as well as the shell. Assembly rebuilds ``ext`` from
-    # the fragments and never re-reads the shell, so a field that rode only on
-    # the shell is dropped the moment anything closes the event.
+    # Onto the fragment as well as the shell: assembly rebuilds ``ext`` from the
+    # fragments and never re-reads the shell.
     sink = _sink(event)
     if sink is not None:
         sink.record(SECTION_EVENT, dict(shell))
@@ -218,20 +138,9 @@ def record_entry(
     entered_at: str = "",
     entered_unix: float | None = None,
 ) -> None:
-    """Open the phase being entered and record how the run got there. Never raises.
-
-    Args:
-        phase (str): The phase being entered.
-        macro_cycle (int): The macro cycle it is entered in.
-        sequence (int): The entering transition's position in ``phase_history``,
-            which keys the segment row.
-        from_phase (str): The phase being left, empty at the run's first entry.
-        reason (str): The transition reason, from ``PHASE_EXIT_REASONS``.
-        evidence (Mapping[str, Any] | None): The transition's structured evidence.
-        entered_at (str): The transition's ISO timestamp; defaults to now.
-        entered_unix (float | None): The matching Unix epoch, used to measure
-            the segment when it closes.
-    """
+    """Open the phase being entered and record how the run got there. Never
+    raises. ``sequence`` is the transition's ``phase_history`` position and keys
+    the segment row; ``entered_unix`` measures the segment when it closes."""
     try:
         event = phase_event_id(phase, macro_cycle)
         sink = _sink(event)
@@ -269,22 +178,10 @@ def record_exit(
     """Close the phase being left on the exit that ended it. Never raises.
 
     The segment settled is the open one, found by reading the phase's own rows
-    back rather than by trusting the caller's macro cycle. The loopback bumps
-    ``macro_cycle`` on its way out of a phase, so the cycle in scope at the
-    transition can already be the *next* one -- computing the outgoing event id
-    from it would close an event that was never opened and leave the real one
-    hanging.
-
-    Args:
-        phase (str): The phase being left.
-        macro_cycle (int): The cycle in scope at the transition, used only as
-            the fallback when no open segment can be found.
-        to_phase (str): The phase being entered.
-        reason (str): The exit reason.
-        evidence (Mapping[str, Any] | None): The transition's evidence.
-        exited_at (str): The transition's ISO timestamp; defaults to now.
-        exited_unix (float | None): The matching Unix epoch, which measures the
-            segment against its own recorded entry.
+    back rather than by trusting the caller's macro cycle: the loopback bumps
+    ``macro_cycle`` on its way out, so an id computed from it would close an
+    event that was never opened. ``macro_cycle`` is only the fallback for when
+    no open segment can be found.
     """
     try:
         found = _open_segment(phase)
@@ -331,16 +228,8 @@ def record_marker(
     evidence: Mapping[str, Any] | None = None,
     ts: str = "",
 ) -> None:
-    """Record one non-transition marker against the phase it was raised in. Never raises.
-
-    Args:
-        phase (str): The phase the marker belongs to.
-        macro_cycle (int): The macro cycle it was raised in.
-        sequence (int): The marker's position in ``phase_history``, which keys it.
-        reason (str): The marker's reason.
-        evidence (Mapping[str, Any] | None): Its structured payload.
-        ts (str): Its ISO timestamp; defaults to now.
-    """
+    """Record one non-transition marker against the phase it was raised in.
+    Never raises. ``sequence`` is its ``phase_history`` position and keys it."""
     try:
         event = phase_event_id(phase, macro_cycle)
         sink = _sink(event)
@@ -363,10 +252,8 @@ def record_marker(
 
 
 #: What a specialist round contributes to the action row that dispatched it.
-#: The dispatch and settle already say when it ran and how it ended; these say
-#: what it came back with. ``proposal_set`` is deliberately absent -- for the
-#: FRAMEWORK arm each proposal owns a row on the framework event, and for the
-#: phase-independent scouts the product is the findings, not a variant list.
+#: ``proposal_set`` is deliberately absent: for the FRAMEWORK arm each proposal
+#: owns a row on the framework event, and for the scouts the product is findings.
 _ROUND_TEXT_FIELDS = ("domain", "gap_canonical_id", "summary", "reason", "source")
 _ROUND_LIST_FIELDS = ("tags", "new_findings", "residual_questions", "notes")
 
@@ -385,25 +272,9 @@ def record_specialist_round(
 ) -> None:
     """Merge what a specialist round produced onto the action row that ordered it.
 
-    The dispatcher already opened an action row for this task, keyed by
-    ``task_id``, on the phase that ordered it. This merges onto that row rather
-    than adding a second one, so the round's product sits with the dispatch it
-    came from instead of in a flat ledger that had to be re-attributed to a
-    phase at export.
-
-    Args:
-        task_id (str): The specialist task's id, which keys the row.
-        phase (str): The phase in scope, used only when no dispatch row exists.
-        macro_cycle (int): The macro cycle, same fallback.
-        round_id (str): The round's own id, when it differs from the task id.
-        proposals_total (Any): How many proposals came back.
-        empty (Any): Whether the round produced nothing.
-        confidence (Any): The round's self-reported confidence.
-        ensemble_scores (Mapping[str, Any] | None): Advisory multi-model
-            scoring of the proposals, when it ran.
-        **fields: Any of ``domain``, ``gap_canonical_id``, ``summary``,
-            ``reason``, ``source``, ``tags``, ``new_findings``,
-            ``residual_questions``, ``notes``.
+    Merged onto the action row the dispatcher already opened for ``task_id``,
+    not added as a second one. ``phase`` and ``macro_cycle`` are the fallback
+    for when no dispatch row exists.
     """
     try:
         key = str(task_id or "")
@@ -452,21 +323,9 @@ def record_dispatch(
 ) -> None:
     """Record an action against the phase that ordered it, at dispatch. Never raises.
 
-    Written here rather than at settle because the phase that ordered a dispatch
-    is the phase that owns it, and an action can outlive the phase that ordered
-    it. Recording the phase in scope when the result lands would charge a
-    plateau-exit-straddling baseline to whichever phase inherited it, which is
-    what the export-time timestamp-window attribution did.
-
-    Args:
-        action (str): The action kind.
-        task_id (str): The task id, which keys the row.
-        phase (str): The dispatching phase.
-        macro_cycle (int): The dispatching macro cycle.
-        tick (int): The coordinator tick, for ordering within a phase.
-        dispatched_at (str): The dispatch's ISO timestamp; defaults to now.
-        dispatched_unix (float | None): The matching Unix epoch, which measures
-            the action when it settles.
+    Written here rather than at settle because an action can outlive the phase
+    that ordered it: the phase in scope when the result lands would charge a
+    plateau-straddling baseline to whichever phase inherited it.
     """
     try:
         if not str(task_id or ""):
@@ -509,24 +368,9 @@ def record_proposal(
 ) -> None:
     """Record a proposal against the phase that raised it. Never raises.
 
-    Written when the proposal is minted, not when it is acted on, because most
-    proposals are never acted on: one refused by the Critic, or left pending
-    when the phase exits, has no dispatch and therefore no other row. The
-    proposal is the unit the Critic rules on, so it has to exist before the
-    ruling can be filed against it.
-
-    Args:
-        proposal_msg_id (str): The bus message carrying it, which keys the row.
-        action (str): The action proposed, in the proposer's own words --
-            including the ones no framework arm maps to.
-        phase (str): The phase in scope when it was raised.
-        macro_cycle (int): The macro cycle it was raised in.
-        from_agent (str): The role that raised it.
-        tick (int): The coordinator tick, for ordering within a phase.
-        predicted_gain_pct (Any): The gain the proposer claimed, when it did.
-        candidate_id (Any): The upstream candidate, when the proposal names one.
-        variant_name (Any): The variant, when the proposal names one.
-        proposed_at (str): The ISO timestamp; defaults to now.
+    Written when the proposal is minted, not when it is acted on: one refused by
+    the Critic or left pending at the phase exit has no dispatch and so no other
+    row, and the ruling needs a subject to be filed against.
     """
     try:
         if not str(proposal_msg_id or ""):
@@ -575,31 +419,11 @@ def record_proposal_review(
 ) -> None:
     """File the Critic's ruling on the proposal it ruled on. Never raises.
 
-    The row is located by reading back which phase event holds the proposal,
-    rather than by using the phase in scope: the Critic runs on its own tick
-    and a proposal raised in one phase is routinely ruled on after the phase
-    has exited. Charging the ruling to whichever phase happened to be current
-    would file it against a phase that never saw the proposal.
-
-    A ruling for a proposal with no row is dropped rather than minting one. A
-    ruling cannot bring into existence the thing it claims to be about, and a
-    minted row would carry a verdict with no proposal behind it.
-
-    Args:
-        proposal_msg_id (str): The proposal ruled on.
-        verdict (str): What the Critic authored.
-        effective_verdict (str): What was committed, which the envelope
-            validator can change; defaults to the authored one.
-        source (str): ``critic`` or ``critic_unavailable``.
-        reasoning (Any): The Critic's own account.
-        confidence (Any): How sure it was.
-        failure_reason_code (Any): The code behind a refusal.
-        required_evidence (Any): What it asked to see first.
-        risks (Any): The risks it named.
-        advice_text (Any): The advisory attached to the ruling.
-        alternative_action (Any): What it proposed instead.
-        variants (Any): Per-variant rulings, when the proposal is a grid.
-        reviewed_at (str): The ISO timestamp; defaults to now.
+    The row is located by reading back which phase event holds the proposal, not
+    from the phase in scope: the Critic runs on its own tick and routinely rules
+    after the raising phase has exited. A ruling for a proposal with no row is
+    dropped rather than minting one. ``effective_verdict`` is what was
+    committed, which the envelope validator can change.
     """
     try:
         if not str(proposal_msg_id or ""):
@@ -620,9 +444,8 @@ def record_proposal_review(
                 "critic_review": {
                     "verdict": authored,
                     "effective_verdict": effective,
-                    # Recorded as its own field because the two verdicts alone
-                    # say that they differ without saying that the difference
-                    # was imposed by the envelope validator.
+                    # Its own field because the two verdicts alone say that they
+                    # differ, not that the envelope validator imposed it.
                     "held_to_rule": effective != authored,
                     "source": str(source or ""),
                     "reasoning": _clip(reasoning, MAX_REASON_CHARS),
@@ -655,23 +478,8 @@ def record_proposal_outcome(
 ) -> None:
     """Record what the loop did with a proposal. Never raises.
 
-    ``task_id`` is what joins the proposal to the action it became: the
-    dispatch row beside it on this same event. Without it the two halves of one
-    decision -- what was asked for, and what was run -- sit on the same event
-    with nothing connecting them.
-
-    Located the same way as the ruling, and dropped the same way when the
-    proposal has no row.
-
-    Args:
-        proposal_msg_id (str): The proposal acted on.
-        materialized (bool): Whether it went ahead.
-        denied (bool): Whether the framework refused it.
-        reauthored (bool): Whether it was sent back to be authored again.
-        task_id (Any): The task it materialized into, when it did.
-        patch_verdict_key (Any): The patch the ruling was recorded against.
-        settled_at (str): The ISO timestamp; defaults to now.
-    """
+    ``task_id`` joins the proposal to the dispatch row it became, beside it on
+    this same event. Located and dropped the same way as the ruling."""
     try:
         if not str(proposal_msg_id or ""):
             return
@@ -716,24 +524,9 @@ def record_settle(
 ) -> None:
     """Settle a dispatched action's row with the verdict it got. Never raises.
 
-    The row settled is the one the dispatch opened, located by reading back
-    which phase event holds ``task_id``. The dispatching phase is not in scope
-    at the settle -- that is the whole point of recording it at dispatch -- and
-    a resumed process has no memory of the dispatch either, so the lookup goes
-    through the spool rather than through anything held.
-
-    Args:
-        task_id (str): The settled task's id.
-        status (str): The status it settled on.
-        decision (str): The promotion verdict.
-        error_class (Any): The failure class, when it failed.
-        workspace (Any): The workspace it ran in.
-        settled_at (str): The settle's ISO timestamp; defaults to now.
-        settled_unix (float | None): The matching Unix epoch.
-        phase (str): The phase in scope now, used only to place the row when no
-            dispatch row can be found.
-        macro_cycle (int): The macro cycle in scope now, same fallback.
-        action (str): The action kind, same fallback.
+    The row settled is the one the dispatch opened, found by reading the spool
+    back: the dispatching phase is not in scope at the settle, and a resumed
+    process holds no memory of it. The other arguments are only the fallback.
     """
     try:
         if not str(task_id or ""):
@@ -741,8 +534,7 @@ def record_settle(
         event = _action_event(str(task_id))
         if event is None:
             # No dispatch row: a task settled by a path that never went through
-            # the runner, or a spool that could not be read. Place it in the
-            # phase in scope and say so, rather than dropping the verdict.
+            # the runner, or an unreadable spool. Better placed than dropped.
             if not str(phase or ""):
                 return
             event = phase_event_id(phase, macro_cycle)
@@ -771,14 +563,9 @@ def record_settle(
 
 
 def _finish(event: str, *, end_time: str) -> None:
-    """Close ``event`` on the rows recorded against it so far.
-
-    The sequence is re-derived through :func:`_open`, which hands back the one
-    the first open took. A phase is closed once per exit and can be exited
-    several times in a cycle, so closing on a fresh sequence would publish one
-    phase as two timeline entries -- the re-entry's close would not overwrite
-    the first entry's.
-    """
+    """Close ``event`` on the rows recorded against it so far. The sequence is
+    re-derived through :func:`_open`, which hands back the one the first open
+    took: a phase exited twice in a cycle would otherwise publish twice."""
     from .assembler import event_parts
     from .event_ids import parse_event_id
 
@@ -799,11 +586,7 @@ def _finish(event: str, *, end_time: str) -> None:
 
 
 def _rows(section: str, event: str) -> list[dict[str, Any]]:
-    """Read one section's rows for one event back out of the spool.
-
-    Returns:
-        list[dict[str, Any]]: The matching rows, empty when nothing is readable.
-    """
+    """Read one section's rows for one event back out of the spool."""
     try:
         from .assembler import event_parts
 
@@ -814,17 +597,8 @@ def _rows(section: str, event: str) -> list[dict[str, Any]]:
 
 
 def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
-    """Find the phase's most recent entry that has not been closed.
-
-    Args:
-        phase (str): The phase whose open segment is wanted.
-
-    Returns:
-        tuple[str, int, float | None] | None: The event id holding it, the
-        segment's sequence, and the Unix epoch it was entered at. ``None`` when
-        the phase has no open segment, which is the normal reading for a first
-        transition or an unreadable spool.
-    """
+    """The phase's most recent unclosed entry: its event id, sequence, and
+    entry epoch. ``None`` at a first transition or on an unreadable spool."""
     try:
         from .assembler import event_parts
 
@@ -849,12 +623,7 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
 
 
 def _action_event(task_id: str) -> str | None:
-    """Find which phase event holds ``task_id``'s dispatch row.
-
-    Returns:
-        str | None: The owning event id, or ``None`` when no dispatch was
-        recorded for it.
-    """
+    """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
     try:
         from .assembler import event_parts
 
@@ -870,12 +639,7 @@ def _action_event(task_id: str) -> str | None:
 
 
 def _proposal_event(proposal_msg_id: str) -> str | None:
-    """Find which phase event holds ``proposal_msg_id``'s row.
-
-    Returns:
-        str | None: The owning event id, or ``None`` when the proposal was
-        never recorded.
-    """
+    """The phase event holding ``proposal_msg_id``'s row, if it was recorded."""
     try:
         from .assembler import event_parts
 
@@ -891,8 +655,7 @@ def _proposal_event(proposal_msg_id: str) -> str | None:
 
 
 #: Every section a phase event assembles from. Declared here as well as in the
-#: assembler so :func:`_finish` can read its own parts without importing the
-#: assembler's tuple, which would close an import cycle.
+#: assembler so :func:`_finish` reads its parts without closing an import cycle.
 PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     SECTION_EVENT,
     SECTION_SEGMENT,
@@ -907,25 +670,16 @@ def assemble_phase_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble a phase event's ``ext`` out of its recorded rows.
-
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The phase sections as read
-            back from the spool, section name to row list.
-        event (str): The event id to assemble.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status the phase
-            reports.
-    """
+    """Assemble a phase event's ``ext``, and the status it reports, out of the
+    sections read back from the spool."""
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     segments = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_SEGMENT) or [], event), keys=("sequence",)),
         drop=("event_id",),
     )
     actions = [
-        # Measured from the row's own two endpoints rather than recorded at the
-        # settle, which cannot see the dispatch that opened the row.
+        # Measured here because the settle cannot see the dispatch that opened
+        # the row.
         dict(row, duration_sec=_span(row.get("dispatched_unix"), row.get("settled_unix")))
         for row in wire_rows(
             sort_rows(
@@ -946,10 +700,8 @@ def assemble_phase_ext(
         ),
         drop=("event_id",),
     )
-    # Summed over the entries, not measured from the first to the last: a phase
-    # re-entered inside one cycle did not own the time the run spent elsewhere
-    # in between, and charging it that time is how a budget guard comes to
-    # believe a phase overran.
+    # Summed over the entries, not measured first to last: a phase re-entered
+    # inside one cycle did not own the time the run spent elsewhere in between.
     measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
     ext: dict[str, Any] = {
         "phase": str(header.get("phase") or ""),
@@ -960,17 +712,11 @@ def assemble_phase_ext(
         "entries": len(segments),
         "duration_sec": round(sum(float(d) for d in measured), 6) if measured else None,
         # An entry with no exit is the segment the run was in when it stopped.
-        # ``phase_segments`` could not represent this at all: it paired rows two
-        # at a time, so the final segment had no successor to be closed by and
-        # was published with an empty exit and no duration.
         "open": any(not row.get("exited_at") for row in segments),
         "segments": segments,
         "actions": {
             "count": len(actions),
-            # Dispatches that got a verdict. The gap between this and ``count``
-            # is the actions still in flight or killed mid-flight, which the
-            # flat projection could not express: it only ever held settled rows,
-            # so a cancelled dispatch read as one that never happened.
+            # The gap to ``count`` is the actions still in or killed in flight.
             "settled": sum(1 for row in actions if row.get("status")),
             "kinds": sorted({str(row.get("action") or "") for row in actions if row.get("action")}),
             "rows": actions,
@@ -978,10 +724,8 @@ def assemble_phase_ext(
         "markers": {"count": len(markers), "rows": markers},
         "proposals": {
             "count": len(proposals),
-            # Proposals the Critic ruled on. The gap between this and ``count``
-            # is the ones it never reached -- left pending when the phase
-            # exited, or filtered as already reviewed -- which is a different
-            # thing from having been refused.
+            # The gap to ``count`` is the ones the Critic never reached, which
+            # is not the same as the ones it refused.
             "reviewed": sum(1 for row in proposals if row.get("critic_review")),
             "materialized": sum(1 for row in proposals if _as_dict(row.get("outcome")).get("materialized")),
             "rows": proposals,
@@ -994,14 +738,9 @@ def _status_for(
     segments: Sequence[Mapping[str, Any]],
     actions: Sequence[Mapping[str, Any]],
 ) -> str:
-    """The status a phase event reports.
-
-    A phase the run left cleanly succeeded, whatever the actions inside it
-    decided -- their own events carry those verdicts, and a phase is not failed
-    by having dispatched a failing action. A phase still open at assembly is
-    ``interrupted``: nothing ruled on it. A phase whose every dispatch failed
-    left without doing what it was entered for, which is degraded.
-    """
+    """The status a phase event reports: a phase the run left cleanly succeeded
+    whatever the actions inside it decided, one still open at assembly is
+    ``interrupted``, and one whose every dispatch failed is degraded."""
     if not segments or any(not row.get("exited_at") for row in segments):
         return STATUS_INTERRUPTED
     settled = [row for row in actions if row.get("status")]
@@ -1011,16 +750,8 @@ def _status_for(
 
 
 def _span(start: Any, end: Any) -> float | None:
-    """Measure a span from its two recorded endpoints.
-
-    Args:
-        start (Any): The Unix epoch the span opened at.
-        end (Any): The Unix epoch it closed at.
-
-    Returns:
-        float | None: The elapsed seconds, or ``None`` when either endpoint is
-        missing -- an open span, not a zero-length one.
-    """
+    """Elapsed seconds between two Unix epochs, or ``None`` when either is
+    missing -- an open span, not a zero-length one."""
     lo, hi = _float_or_none(start), _float_or_none(end)
     if lo is None or hi is None:
         return None

@@ -22,9 +22,8 @@ __all__ = [
 #: The field every row payload repeats so assembly can select by it.
 EVENT_ID_FIELD = "event_id"
 
-#: Recording-side bookkeeping that never reaches the wire: the event id has
-#: done its job once the rows are filtered, and ``ordinal`` is superseded by
-#: the row's position once the array is sorted.
+#: Recording-side bookkeeping that never reaches the wire: the event id has done
+#: its job once the rows are filtered, and ``ordinal`` once the array is sorted.
 SCOPE_FIELDS: tuple[str, ...] = (EVENT_ID_FIELD, "ordinal")
 
 
@@ -37,17 +36,10 @@ def rows_for_event(rows: Iterable[Any], event: str) -> list[dict[str, Any]]:
 
 
 def _sort_token(value: Any) -> tuple[int, float, str]:
-    """Render one field value as a totally-ordered, type-safe sort token.
+    """Render one field value as ``(is_empty, numeric, text)``.
 
-    Empty values sort last: a row whose primary key was never recorded has no
-    claim to a position among the rows that did record one, and putting it
-    first would read as "this happened before everything else".
-
-    Returns:
-        tuple[int, float, str]: ``(is_empty, numeric, text)``. Numbers and
-            strings both compare without raising, which matters because a
-            section's rows come from disk and one malformed fragment must not
-            take the whole assembly down.
+    Empty sorts last, and numbers and strings both compare without raising, so
+    one malformed fragment off disk cannot take the whole assembly down.
     """
     if value is None or value == "":
         return (1, 0.0, "")
@@ -92,11 +84,5 @@ def wire_rows(
     *,
     drop: Sequence[str] = SCOPE_FIELDS,
 ) -> list[dict[str, Any]]:
-    """Strip recording-side bookkeeping off every row.
-
-    Args:
-        rows (Iterable[Mapping[str, Any]]): The assembled rows.
-        drop (Sequence[str]): Fields to remove; defaults to
-            :data:`SCOPE_FIELDS`.
-    """
+    """Strip recording-side bookkeeping off every row."""
     return [wire_row(row, drop=drop) for row in rows if isinstance(row, Mapping)]

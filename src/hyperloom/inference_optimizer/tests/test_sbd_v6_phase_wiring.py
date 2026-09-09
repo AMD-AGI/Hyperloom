@@ -3,17 +3,12 @@
 
 """The phase event, recorded by the real phase machine and dispatcher.
 
-:mod:`test_sbd_v6_phase_timeline` drives the recorder directly. These tests
-drive the production call sites -- ``record_phase_transition``,
-``append_phase_history_event``, and the dispatcher's ``run_task_registered`` --
-and assert on what reaches the timeline, so a call site that stops recording
-fails here even while the recorder stays correct.
-
-Coverage of this event rests entirely on those three being the only ways their
-facts are produced. ``run_task_registered`` in particular holds the tree's sole
-call to ``sub.run_task``, which is what lets a single hook cover every action
-kind instead of a whitelist that has to be grown by hand. Both properties are
-pinned below.
+:mod:`test_sbd_v6_phase_timeline` drives the recorder directly; these tests drive the production call
+sites -- ``record_phase_transition``, ``append_phase_history_event`` and the dispatcher's
+``run_task_registered`` -- so a call site that stops recording fails here even while the recorder stays
+correct. Coverage rests on those three being the only producers of their facts, which is pinned below:
+``run_task_registered`` holds the tree's sole call to ``sub.run_task``, and that is what lets one hook
+cover every action kind instead of a hand-grown whitelist.
 """
 
 from __future__ import annotations
@@ -66,11 +61,7 @@ def _state(tmp_path: Path) -> SharedState:
     return state
 
 
-# --- the real phase machine -------------------------------------------------
-
-
 def test_the_real_transition_opens_the_phase_it_entered(tmp_path):
-    """``record_phase_transition`` puts the phase it entered on the timeline."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="session_start")
 
@@ -82,12 +73,6 @@ def test_the_real_transition_opens_the_phase_it_entered(tmp_path):
 
 
 def test_the_real_transition_closes_the_phase_it_left(tmp_path):
-    """The second transition settles the first phase with its own reason.
-
-    ``phase_segments`` reconstructed this by pairing history rows; here the
-    exit is written by the transition that caused it, so the exit reason is the
-    leaving transition's own and needs no successor row to be found.
-    """
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="session_start")
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="baseline_ready")
@@ -101,7 +86,6 @@ def test_the_real_transition_closes_the_phase_it_left(tmp_path):
 
 
 def test_the_real_transition_carries_its_evidence_both_ways(tmp_path):
-    """A transition's evidence lands on the entry it opened and the exit it closed."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     machine_state.record_phase_transition(
@@ -119,7 +103,6 @@ def test_the_real_transition_carries_its_evidence_both_ways(tmp_path):
 
 
 def test_a_real_re_entry_is_a_second_segment_on_one_event(tmp_path):
-    """Returning to a phase inside one cycle adds a segment, not an event."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     machine_state.record_phase_transition(state, to_phase="KERNEL_AGENT", reason="plateau_no_gain")
@@ -130,20 +113,12 @@ def test_a_real_re_entry_is_a_second_segment_on_one_event(tmp_path):
     assert ext["entries"] == 2
     assert [row["exit_reason"] for row in ext["segments"]] == ["plateau_no_gain", "plateau_no_gain"]
     assert [row["entered_reason"] for row in ext["segments"]] == ["start", "kernel_done"]
-    # One entry on the timeline, not one per exit: the re-entry's close reuses
-    # the sequence the first open took, so it overwrites rather than appends.
+    # The re-entry's close reuses the sequence the first open took, so it overwrites rather than appends.
     published = [event["id"] for event in _events(tmp_path)]
     assert published.count("framework_agent:0:phase") == 1
 
 
 def test_a_real_loopback_closes_the_cycle_it_ran_in(tmp_path):
-    """A cycle bumped before the transition does not orphan the open phase.
-
-    The loopback increments ``macro_cycle`` on its way out of EXPLORE, so the
-    cycle in scope at the transition is already the next one. The exit is placed
-    by looking up the open segment instead, which is the only reason the phase
-    that just ran gets closed at all.
-    """
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="EXPLORE", reason="start")
     state.macro_cycle = 1
@@ -157,7 +132,6 @@ def test_a_real_loopback_closes_the_cycle_it_ran_in(tmp_path):
 
 
 def test_the_real_marker_lands_in_the_phase_it_was_raised_in(tmp_path):
-    """``append_phase_history_event`` records against the current phase."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     machine_state.append_phase_history_event(
@@ -170,12 +144,10 @@ def test_the_real_marker_lands_in_the_phase_it_was_raised_in(tmp_path):
     assert markers["count"] == 1
     assert markers["rows"][0]["reason"] == "plateau_proxy_provisional"
     assert markers["rows"][0]["evidence"] == {"r09_provisional": True}
-    # A marker is not a transition, so it did not open a segment.
     assert _ext("FRAMEWORK_AGENT")["entries"] == 1
 
 
 def test_a_transition_still_happens_when_recording_cannot(tmp_path, monkeypatch):
-    """The record is best-effort; the phase change is not."""
     state = _state(tmp_path)
 
     def _boom(**_kwargs):
@@ -186,9 +158,6 @@ def test_a_transition_still_happens_when_recording_cannot(tmp_path, monkeypatch)
 
     assert state.phase == "PRELUDE"
     assert len(state.phase_history) == 1
-
-
-# --- the real dispatcher ----------------------------------------------------
 
 
 class _Sub:
@@ -228,7 +197,6 @@ def _task(kind: str, task_id: str) -> Any:
 
 
 def test_the_real_runner_records_the_dispatch(tmp_path):
-    """The only way an action runs is also where the dispatch is recorded."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     state.tick = 11
@@ -243,18 +211,11 @@ def test_the_real_runner_records_the_dispatch(tmp_path):
     assert row["task_id"] == "t-1"
     assert row["phase"] == "FRAMEWORK_AGENT"
     assert row["tick"] == 11
-    # Still in flight as far as this event knows: the verdict is the reap's to
-    # record, and a runner that returned is not a task that was ruled on.
+    # Still in flight as far as this event knows: the verdict is the reap's to record.
     assert row.get("status", "") == ""
 
 
 def test_the_real_runner_records_every_kind_it_is_given(tmp_path):
-    """No whitelist stands between an action and its row.
-
-    ``_AUDIT_ACTIONS`` covers four of the catalogue's kinds; the four asserted
-    here are among the eleven it does not, and were invisible on the timeline
-    before this event existed.
-    """
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="CLOSE", reason="start")
     sub = _Sub(result="done")
@@ -268,16 +229,6 @@ def test_the_real_runner_records_every_kind_it_is_given(tmp_path):
 
 
 def test_the_runner_is_the_only_path_an_action_takes(tmp_path):
-    """Pins the property the dispatch hook's coverage rests on.
-
-    ``run_task_registered`` holds the tree's sole call to ``sub.run_task``. A
-    second one would be an action that runs without being recorded, and the
-    hook would silently cover less than the catalogue.
-
-    Scanned in-process rather than by shelling out to a grep: a missing binary
-    would otherwise read as "no call sites found", which is the one answer this
-    assertion must never accept quietly.
-    """
     pattern = re.compile(r"\bsub\.run_task\(")
     root = Path(__file__).resolve().parents[3] / "hyperloom"
     found = [
@@ -292,7 +243,6 @@ def test_the_runner_is_the_only_path_an_action_takes(tmp_path):
 
 
 def test_a_dispatch_still_runs_when_recording_cannot(tmp_path, monkeypatch):
-    """The record is best-effort; the action is not."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="start")
 
@@ -308,7 +258,6 @@ def test_a_dispatch_still_runs_when_recording_cannot(tmp_path, monkeypatch):
 
 
 def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
-    """The row is opened before the action runs, so a crash cannot erase it."""
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="KERNEL_AGENT", reason="start")
 
@@ -325,16 +274,7 @@ def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
     assert rows[0].get("status", "") == ""
 
 
-# --- the catalogue ----------------------------------------------------------
-
-
 def test_the_recorder_needs_no_knowledge_of_the_catalogue(tmp_path):
-    """Every catalogue kind records without being named in the recorder.
-
-    The action name is carried through as data. Nothing in the recording layer
-    enumerates kinds, which is the whole reason this event covers the catalogue
-    rather than the four kinds someone remembered to list.
-    """
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     kinds = sorted(ACTION_CATALOGUE)

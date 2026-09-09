@@ -3,18 +3,14 @@
 
 """Substream composition in the breakdown assembler.
 
-Producers write one fragment per row from deep inside their own work, and the
-assembler folds each substream into the view its readers see. What order the
-rows land in, and what a session that produced none looks like, is what these
-pin.
+Producers write one fragment per row and the assembler folds each substream into
+the view its readers see. These pin what order the rows land in, and what a
+session that produced none looks like.
 """
 
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.breakdown.recorder import assembler as asm
-
-
-# ---- substream composition ----
 
 
 def test_critic_iterations_fold_in_the_order_the_agent_ran_them():
@@ -46,7 +42,6 @@ def test_robustness_turns_fold_in_turn_order():
 
 
 def test_a_session_with_no_robustness_turns_gets_no_section():
-    """Absence of the substream is not an empty agent -- it never ran."""
     out = {}
     asm._compose_robustness(out)
 

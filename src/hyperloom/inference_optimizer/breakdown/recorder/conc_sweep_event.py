@@ -5,33 +5,18 @@
 
 The sweep runs the CONC ladder twice -- once on the session's optimized server
 args, once on none -- and pairs the two curves into a speedup per concurrency.
-Until this recorder existed the event was projected out of
-``reports/conc_sweep_summary.json`` after the fact, and the projection was
-limited by what that file is: a *result* document. It carries the points that
-were measured and says nothing about the run that measured them.
+``reports/conc_sweep_summary.json`` is a result document, so a ladder that
+measured three rungs of eight looks the same whether the budget gate refused
+the rest, the server would not boot at those concurrencies, or the session
+started closing. The rows here are therefore the sweep's own decisions,
+recorded where they are made; the measurement itself is the same flattening
+the report writes.
 
-What the projection therefore could not report is the whole of why a sweep
-came out short. A ladder that measured three rungs of eight looks identical
-whether five rungs were refused by the budget gate, killed by a server that
-would not boot at that concurrency, or never reached because the session
-started closing. Those are different failures with different fixes, and every
-one of them is a decision the sweep makes explicitly and then forgets.
-
-So the rows here are the sweep's own decisions, recorded where they are made:
-the ladder and where it came from, the budget the arm was admitted under and
-what each rung was priced at, whether the arm held one server across the
-ladder or restarted per rung and why, every boot attempt of the
-boot-retry-descend loop including the concurrencies that would not come up,
-and the wall-clock window of each rung. The measurement itself is the same
-dict the report writes -- one flattening, recorded rather than re-read.
-
-The event is flat rather than an array of actions, unlike ``baseline`` and
-``roofline``: the SWEEP phase enqueues its sweep through
-``create_or_return_existing``, so one phase and macro cycle hold at most one,
-and an event id of ``{phase}:{macro_cycle}:conc_sweep`` names exactly one
-sweep. Rows are still keyed by the dispatched task id, so a second sweep
-cannot merge into the first; assembly publishes the newest and counts the
-rest.
+The event is flat rather than an array of actions: the SWEEP phase enqueues
+through ``create_or_return_existing``, so one phase and macro cycle hold at
+most one sweep. Rows are still keyed by the dispatched task id, so a second
+sweep cannot merge into the first; assembly publishes the newest and counts
+the rest.
 """
 
 from __future__ import annotations
@@ -85,26 +70,25 @@ ARM_BASELINE = "baseline"
 ARM_OPTIMIZED = "optimized"
 
 # How a rung came to run. The sweep prefers to boot one server at the top of
-# the ladder and reuse it down (``boot`` then ``reuse``); a framework with no
-# server lifecycle, or a ladder whose every boot failed, restarts the server
-# per rung instead. ``boot_attempt`` is a rung the boot-retry-descend loop
-# tried and could not bring up -- kept whether or not it was later committed,
-# because a concurrency the server will not start at is the finding.
+# the ladder and reuse it down; a framework with no server lifecycle, or a
+# ladder whose every boot failed, restarts per rung instead. ``boot_attempt``
+# is a rung the retry-descend loop could not bring up, kept whether or not it
+# was later committed, because that concurrency is itself the finding.
 STAGE_BOOT_ATTEMPT = "boot_attempt"
 STAGE_BOOT = "boot"
 STAGE_REUSE = "reuse"
 STAGE_SERVER_RESTART = "server_restart"
 STAGE_BUDGET_SKIP = "budget_skip"
 
-# How an arm ran its ladder. The reuse path is the intent; the restart path is
-# both the fallback for a lifecycle-ineligible framework and the retry after
-# every boot failed, which is why the arm also records the reason.
+# How an arm ran its ladder. The restart path is both the fallback for a
+# lifecycle-ineligible framework and the retry after every boot failed, which
+# is why the arm also records the reason.
 STRATEGY_SINGLE_SERVER = "single_server_reuse"
 STRATEGY_SERVER_RESTART = "server_restart"
 
-# Where the CONC ladder came from. The sweep can distinguish a ladder it was
-# handed -- by the operator's flag or the session's own setting, which reach it
-# as the same argument -- from the one it picked for the workload itself.
+# Where the CONC ladder came from: handed to the sweep by the operator's flag
+# or the session setting, which arrive as the same argument, or picked by the
+# sweep for the workload.
 GRID_REQUESTED = "requested"
 GRID_MODE_DEFAULT = "mode_default"
 
@@ -113,8 +97,7 @@ GRID_MODE_DEFAULT = "mode_default"
 STRATEGY_REFUSED = "refused"
 
 # Pair statuses that count as a measured side. Mirrors the sweep's own
-# ``successful_pairs`` accounting so a recorded pair explains itself without
-# assembly re-ruling on it.
+# ``successful_pairs`` accounting so assembly never re-rules on a pair.
 _OK_POINT_STATUSES = frozenset({"succeeded", "ok", "success"})
 
 __all__ = [
@@ -151,14 +134,8 @@ __all__ = [
 
 
 def conc_sweep_event_id(*, phase: str, macro_cycle: Any) -> str:
-    """Build the event id for a sweep dispatched in one phase and cycle.
-
-    Returns:
-        str: The event id, ``{phase}:{macro_cycle}:conc_sweep``.
-
-    Raises:
-        ValueError: If either segment is malformed.
-    """
+    """Build ``{phase}:{macro_cycle}:conc_sweep``. Raises ``ValueError`` if
+    either segment is malformed."""
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
@@ -183,22 +160,12 @@ def _pair_error(
     baseline_point: Mapping[str, Any] | None,
     optimized_point: Mapping[str, Any] | None,
 ) -> str | None:
-    """Explain why one concurrency produced no speedup, at the moment it did not.
+    """Explain why one concurrency produced no speedup, or ``None`` when it did.
 
-    The pairing is an outer join, so a pair fails when an arm errored or when
-    an arm has no point at that concurrency at all. Only the arm that did not
-    succeed can say why, and each says it in its own words -- reporting one
-    status for the pair hands back ``succeeded`` as the reason whenever it is
-    the optimized side that broke.
-
-    Args:
-        row (Mapping[str, Any]): The comparison row the sweep computed.
-        baseline_point (Mapping[str, Any] | None): The baseline point at this
-            concurrency, when one was measured.
-        optimized_point (Mapping[str, Any] | None): The optimized point.
-
-    Returns:
-        str | None: The reason, or ``None`` when the pair produced a speedup.
+    The pairing is an outer join, so a pair fails when an arm errored or has no
+    point at that concurrency. Only the arm that did not succeed can say why --
+    one status for the pair hands back ``succeeded`` whenever it is the
+    optimized side that broke.
     """
     if _float_or_none(row.get("speedup")) is not None:
         return None
@@ -216,11 +183,9 @@ def _pair_error(
 class ConcSweepEventRecorder:
     """Records one concurrency sweep as it runs.
 
-    One instance per dispatched sweep. Every method is a fact the sweep knows
-    at the moment it is called and would otherwise have to be re-derived from
-    the report it writes at the end, or -- for the arm and rung decisions --
-    could not be re-derived at all.
-    """
+    One instance per dispatched sweep. Every method records a fact the sweep
+    knows when it is called and that the report it writes at the end either
+    loses or -- for the arm and rung decisions -- never held."""
 
     def __init__(
         self,
@@ -231,19 +196,9 @@ class ConcSweepEventRecorder:
         reason: str = "",
         params: Mapping[str, Any] | None = None,
     ) -> None:
-        """Open the action row for one dispatched sweep.
-
-        Args:
-            sink (RecordSink): Where the rows go, and which event they join.
-            task_id (str): The dispatched task id, which keys this sweep's rows
-                apart from any other sweep landing in the same event.
-            task_kind (str): The dispatched task's kind.
-            reason (str): Why the sweep was dispatched. The SWEEP phase
-                enqueues it on phase entry, which is the answer the projected
-                event left null because nothing recorded it.
-            params (Mapping[str, Any] | None): The task params as dispatched,
-                read for the knobs the caller overrode.
-        """
+        """Open the action row for one dispatched sweep. ``task_id`` keys this
+        sweep's rows apart from any other sweep landing in the same event, and
+        ``params`` is read for the knobs the caller overrode."""
         self._sink = sink
         self._t0 = time.monotonic()
         self._start_time = _now_iso()
@@ -252,9 +207,8 @@ class ConcSweepEventRecorder:
         self._action_id = _text(task_id) or "unnamed"
         self._arm_ordinal = 0
         self._variant_ordinal = 0
-        # Points are needed to explain a failed pair, and the pair table is
-        # rebuilt on every flush. Keeping the measurements here avoids reading
-        # rows back out of the spool to say why a rung had no partner.
+        # The pair table is rebuilt on every flush, so keeping the measurements
+        # here avoids reading rows back to say why a rung had no partner.
         self._points: dict[str, dict[int, dict[str, Any]]] = {ARM_BASELINE: {}, ARM_OPTIMIZED: {}}
         given = _as_dict(params)
         self._sink.record(
@@ -318,12 +272,9 @@ class ConcSweepEventRecorder:
         tp: Any = None,
         benchmark_mode: Any = None,
     ) -> None:
-        """Record the shape the ladder is swept over.
-
-        Which axis pair the points are drawn on follows from
-        ``benchmark_mode``, so a reader never has to infer it from whether
-        ``intvty_p90`` happens to be null.
-        """
+        """Record the shape the ladder is swept over. Which axis pair the points
+        are drawn on follows from ``benchmark_mode``, so a reader never infers
+        it from whether ``intvty_p90`` happens to be null."""
         self._record_action(
             {
                 "workload": {
@@ -352,19 +303,7 @@ class ConcSweepEventRecorder:
         The optimized arm is whatever the session's current best was when the
         sweep started, and that is a moving target: a sweep dispatched two
         cycles later compares a different configuration under the same event
-        type. Naming the configuration here is what lets a reader tell which
-        one a curve belongs to.
-
-        Args:
-            baseline_tput (Any): The session baseline throughput the sweep
-                gated its own prerequisites on.
-            anchor_tput (Any): The current best's throughput.
-            tp (Any): Tensor parallelism, for the per-GPU normalization.
-            variant_id (Any): The current best's variant name, when it has one.
-            action (Any): The action kind that promoted the current best, which
-                is what the session records about where a champion came from.
-            extra_server_args (Any): The args defining the optimized arm.
-            extra_envs (Any): The envs defining the optimized arm.
+        type. ``action`` is the action kind that promoted the current best.
         """
         tput = _float_or_none(anchor_tput)
         gpus = _int_or_none(tp)
@@ -396,21 +335,12 @@ class ConcSweepEventRecorder:
         """Record the ladder the sweep resolved and the order it will run it in.
 
         The arm order matters to a reader of the budget: the optimized arm runs
-        first because it is the more informative of the two, which means a
-        budget that runs out takes the baseline arm with it rather than the
-        arm whose numbers were being asked for.
-
-        Args:
-            concs_requested (Any): The ladder as requested, in request order.
-            concs_ordered (Any): The ladder as it will run -- deduplicated and
-                descending, because a single-server arm boots at the most
-                demanding rung so the lower ones need no restart.
-            grid_source (str): A ``GRID_*`` value saying whether the ladder was
-                handed to the sweep or picked for the workload.
-            num_prompts_factor (Any): The multiplier turning a rung's CONC into
-                its NUM_PROMPTS.
-            variant_timeout_sec (Any): The declared per-rung hard timeout.
-            arms_order (Sequence[str]): The arms in the order they will run.
+        first as the more informative of the two, so a budget that runs out
+        takes the baseline arm with it. ``concs_ordered`` is deduplicated and
+        descending, because a single-server arm boots at the most demanding
+        rung so the lower ones need no restart. ``grid_source`` is a ``GRID_*``
+        value, and ``num_prompts_factor`` turns a rung's CONC into its
+        NUM_PROMPTS.
         """
         self._record_action(
             {
@@ -439,22 +369,12 @@ class ConcSweepEventRecorder:
         """Record the budget the ladder was admitted under.
 
         Both totals are kept because they disagree: the sweep raises its own
-        default when that default cannot fund even one rung at the cap the
-        grid runner will actually grant, and a reader looking at a sweep that
-        spent three hours on a nine-hundred-second budget is otherwise looking
-        at a contradiction.
-
-        Args:
-            declared_total_sec (Any): The total budget as the caller set it.
-            granted_total_sec (Any): The total budget the ladder ran under.
-            rung_cost_sec (Any): What one rung was priced at -- the cap the
-                grid runner grants, not the declared timeout, since pricing at
-                the smaller of the two admits a rung the budget cannot pay for.
-            raised (bool): Whether the sweep raised its own default.
-            gate_active (bool): Whether the budget gate is on at all.
-            deadline (Any): The wall-clock epoch the budget expires at.
-            session_soft_deadline_sec (Any): The per-rung soft deadline the
-                session's own remaining time clamps to.
+        default when that default cannot fund even one rung at the cap the grid
+        runner will actually grant, and a sweep that spent three hours on a
+        nine-hundred-second budget otherwise reads as a contradiction.
+        ``rung_cost_sec`` is that granted cap rather than the declared timeout,
+        since pricing at the smaller admits a rung the budget cannot pay for.
+        ``deadline`` is a wall-clock epoch.
         """
         self._record_action(
             {
@@ -484,19 +404,8 @@ class ConcSweepEventRecorder:
         """Record what the sweep resolved to run against.
 
         ``sweep_task_id`` is the sweep's own minted id, distinct from the
-        dispatched task id: it names the ``runs/conc_sweep/`` workspace the
-        rung artifacts live under, and nothing else ever wrote it down.
-
-        Args:
-            sweep_task_id (Any): The sweep's own id.
-            workspace (Any): The per-sweep workspace root.
-            model_path (Any): The resolved model path.
-            gpu_type (Any): The canonicalized GPU type, which selects the
-                runner script.
-            base_config_path (Any): The materialized base config every rung
-                renders from.
-            report_json_path (Any): Where the summary JSON will be written.
-            report_csv_path (Any): Where the flat curve CSV will be written.
+        dispatched task id: it names the ``runs/conc_sweep/`` workspace the rung
+        artifacts live under, and nothing else ever wrote it down.
         """
         self._record_action(
             {
@@ -517,15 +426,9 @@ class ConcSweepEventRecorder:
     # ---- arms ------------------------------------------------------------
 
     def open_arm(self, arm: str, *, extra_server_args: Any = None, extra_envs: Any = None) -> None:
-        """Record that one arm has started its ladder.
-
-        Args:
-            arm (str): The arm label.
-            extra_server_args (Any): The server args defining this arm; ``""``
-                on the baseline arm, whose defining property is that it adds
-                none.
-            extra_envs (Any): The environment defining this arm.
-        """
+        """Record that one arm has started its ladder. ``extra_server_args`` is
+        ``""`` on the baseline arm, whose defining property is that it adds
+        none."""
         self._arm_ordinal += 1
         self._record_arm(
             arm,
@@ -539,16 +442,9 @@ class ConcSweepEventRecorder:
         )
 
     def record_arm_grid(self, arm: str, *, rungs: Sequence[Mapping[str, Any]]) -> None:
-        """Record the rungs this arm will run, with the load each carries.
-
-        A rung's NUM_PROMPTS is derived from its CONC and never written down,
-        so a run cannot be reproduced from the report alone.
-
-        Args:
-            arm (str): The arm label.
-            rungs (Sequence[Mapping[str, Any]]): One entry per rung, carrying
-                ``name``, ``conc`` and ``num_prompts``.
-        """
+        """Record the rungs this arm will run, with the load each carries. A
+        rung's NUM_PROMPTS is derived from its CONC and never written down, so
+        a run cannot be reproduced from the report alone."""
         self._record_arm(
             arm,
             {
@@ -581,18 +477,9 @@ class ConcSweepEventRecorder:
         The reuse path and the restart path fail differently -- one can fail to
         boot at a concurrency, the other pays a server start per rung -- so a
         curve is not readable without knowing which one produced it.
-
-        Args:
-            arm (str): The arm label.
-            strategy (str): A ``STRATEGY_*`` value.
-            reason (Any): Why that strategy, when it was not the intended one.
-            lifecycle_eligible (Any): Whether the framework supports keeping a
-                server across rungs.
-            lifecycle_reason (Any): What the lifecycle resolution reported.
-            port (Any): The port the arm's server serves on.
-            framework (Any): The serving framework resolved from the config.
-            serving_lease_held (Any): Whether a Ray serving lease covers this
-                arm's server for its whole lifetime.
+        ``strategy`` is a ``STRATEGY_*`` value and ``reason`` says why, when it
+        was not the intended one; ``lifecycle_eligible`` is whether the
+        framework can keep a server across rungs.
         """
         self._record_arm(
             arm,
@@ -618,17 +505,9 @@ class ConcSweepEventRecorder:
         attempted_concs: Any = None,
         failed_concs: Any = None,
     ) -> None:
-        """Record how the boot-retry-descend loop resolved.
-
-        Args:
-            arm (str): The arm label.
-            succeeded (bool): Whether any rung brought the server up.
-            booted_conc (Any): The concurrency that did, when one did.
-            attempted_concs (Any): Every concurrency tried, in the order tried.
-            failed_concs (Any): The concurrencies that would not come up --
-                the capacity finding the sweep produces for free and then
-                discards.
-        """
+        """Record how the boot-retry-descend loop resolved. ``attempted_concs``
+        is in the order tried, and ``failed_concs`` is the capacity finding the
+        sweep produces for free and then discards."""
         self._record_arm(
             arm,
             {
@@ -643,12 +522,7 @@ class ConcSweepEventRecorder:
 
     def record_arm_refused(self, arm: str, *, reason: Any, remaining_sec: Any = None) -> None:
         """Record an arm the budget gate refused before it built anything.
-
-        Args:
-            arm (str): The arm label.
-            reason (Any): Which gate refused it.
-            remaining_sec (Any): What was left when it was refused.
-        """
+        ``reason`` names the gate and ``remaining_sec`` what was left."""
         self._record_arm(
             arm,
             {
@@ -685,29 +559,16 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record one rung, measured or refused.
 
-        The measurement is the same flattening the report writes, so the curve
-        does not change shape by being recorded. Everything around it is what
-        the report has no place for: which of the four ways this rung came to
-        run, what it was priced at, what the budget had left when it was
-        admitted, and the wall-clock window it occupied -- the report carries
-        one ``elapsed_sec`` for the whole sweep.
+        Everything around the measurement is what the report has no place for,
+        since it carries one ``elapsed_sec`` for the whole sweep.
 
         Args:
-            arm (str): The arm label.
-            stage (str): A ``STAGE_*`` value.
-            conc (Any): The rung's concurrency.
-            point (Mapping[str, Any] | None): The flattened measurement.
-            committed (bool): Whether this attempt is part of the published
-                curve. A failed boot is recorded uncommitted and promoted by
-                :meth:`commit_variant` if a lower rung eventually boots, since
-                a capacity failure only means something once something worked.
-            num_prompts (Any): The rung's NUM_PROMPTS.
-            start_time (Any): When the rung started, ISO-8601.
-            wall_duration_sec (Any): How long the rung occupied, wall clock --
-                distinct from the benchmark's own ``duration_seconds``, which
-                measures only the measured window.
-            granted_cap_sec (Any): The cap the rung was granted.
-            budget_remaining_sec (Any): What the budget had left at admission.
+            stage: A ``STAGE_*`` value.
+            committed: Whether this attempt is part of the published curve. A
+                failed boot is recorded uncommitted and promoted by
+                :meth:`commit_variant` if a lower rung eventually boots.
+            wall_duration_sec: Wall clock, distinct from the benchmark's own
+                ``duration_seconds``, which covers only the measured window.
         """
         self._variant_ordinal += 1
         measurement = _as_dict(point)
@@ -736,15 +597,9 @@ class ConcSweepEventRecorder:
         )
 
     def commit_variant(self, arm: str, *, stage: str, conc: Any, point: Mapping[str, Any] | None = None) -> None:
-        """Promote an attempt recorded before it was known to count.
-
-        Args:
-            arm (str): The arm label.
-            stage (str): The ``STAGE_*`` value the attempt was recorded under.
-            conc (Any): The rung's concurrency.
-            point (Mapping[str, Any] | None): The measurement, so the pair
-                table can explain a rung this attempt is the only record of.
-        """
+        """Promote an attempt recorded before it was known to count. ``point``
+        is passed so the pair table can explain a rung this attempt is the only
+        record of."""
         rung = _int_or_none(conc)
         if rung is not None and point is not None:
             self._points.setdefault(_text(arm), {})[rung] = dict(_as_dict(point))
@@ -760,15 +615,11 @@ class ConcSweepEventRecorder:
     def record_progress(self, *, comparison: Any, summary: Any) -> None:
         """Record the pair table as it stands, on every checkpoint.
 
-        The sweep already recomputes this after each rung so the report on
-        disk is never stale; recording it on the same beat means an event read
-        mid-sweep carries the pairs measured so far rather than nothing. Each
-        pair is keyed by its concurrency, so a later pass revises a row rather
-        than adding one.
-
-        The reason a pair failed is settled here rather than at export: the
-        arm that broke is the only one that can say why, and its error is in
-        hand at this point.
+        Recorded on the same beat the sweep recomputes it, so an event read
+        mid-sweep carries the pairs measured so far. Each pair is keyed by its
+        concurrency, so a later pass revises a row rather than adding one, and
+        a failure reason is settled here because the arm that broke is the only
+        one that can say why.
         """
         for row in _as_list(comparison):
             if not isinstance(row, Mapping):
@@ -812,14 +663,9 @@ class ConcSweepEventRecorder:
     # ---- closing ---------------------------------------------------------
 
     def record_declined(self, payload: Mapping[str, Any] | None) -> None:
-        """Close a sweep that declined before it ran anything.
-
-        A decline is a fact worth a timeline entry: the sweep was dispatched
-        and refused, and the reason -- no baseline to compare against, a
-        missing workload shape, no optimization yet, a config that would not
-        materialize -- is what a reader wants of a phase that produced no
-        curve.
-        """
+        """Close a sweep that declined before it ran anything. The reason -- no
+        baseline to compare against, a missing workload shape, no optimization
+        yet -- is what a reader wants of a phase that produced no curve."""
         envelope = _as_dict(payload)
         self._close(
             "skipped",
@@ -840,14 +686,9 @@ class ConcSweepEventRecorder:
         """Close the sweep on the report it produced.
 
         The payload is the sweep's own final document, so the fields taken off
-        it here are the ones it settles only at the end: the ceiling it can
-        compute once every point is in, the roll-up over the pairs, and the
-        budget state it inspects after both arms have run.
-
-        Args:
-            payload (Mapping[str, Any] | None): The final sweep payload.
-            stop_reason (Any): The session stop reason, when the session's own
-                end is what cut the sweep short.
+        it here are the ones it settles only at the end: the ceiling, the
+        roll-up over the pairs, and the budget state after both arms have run.
+        ``stop_reason`` is set when the session's end cut the sweep short.
         """
         final = _as_dict(payload)
         status = _text(final.get("status")) or "failed"
@@ -936,13 +777,9 @@ def _assemble_arm(
     *,
     variants: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Assemble one arm out of its row and its rungs.
-
-    ``points`` is the curve -- the committed attempts, one per concurrency,
-    ascending, which is the order a curve is read in. ``boot.attempts`` is the
-    descend ladder in the order it was tried, carrying the rungs that never
-    produced a point at all.
-    """
+    """Assemble one arm out of its row and its rungs. ``points`` is the curve:
+    the committed attempts, ascending. ``boot.attempts`` is the descend ladder
+    in the order tried, carrying the rungs that never produced a point."""
     points = [
         {
             **_as_dict(rung.get("measurement")),
@@ -999,13 +836,9 @@ def assemble_conc_sweep_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble one conc-sweep event's ``ext`` out of its recorded rows.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the sweep's status.
-            The pair is empty and ``""`` when the event holds no sweep, which
-            is what a caller assembling an event that was never recorded gets.
-    """
+    """Assemble one conc-sweep event's ``ext`` and the sweep's status out of its
+    recorded rows. Both are empty when the event holds no sweep, which is what
+    a caller assembling an event that was never recorded gets."""
     action_rows = sort_rows(
         rows_for_event(parts.get(SECTION_ACTION) or [], event),
         keys=("start_time", "task_id"),
@@ -1054,8 +887,7 @@ def assemble_conc_sweep_ext(
     }
     if len(action_rows) > 1:
         # One phase and cycle enqueue one sweep, so this cannot happen through
-        # the dispatcher. Saying so is cheaper than a silent drop if it ever
-        # does: the reader learns the event is reporting the newest of several.
+        # the dispatcher; saying so is cheaper than a silent drop if it does.
         ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1] if other is not row]
     ext["arms"][ARM_BASELINE]["arm"] = ARM_BASELINE
     ext["arms"][ARM_OPTIMIZED]["arm"] = ARM_OPTIMIZED
@@ -1075,23 +907,10 @@ def make_conc_sweep_recorder(
     reason: str = "",
     params: Mapping[str, Any] | None = None,
 ) -> ConcSweepEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
-
-    Sweep behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating -- as does an absent
-    sink, which is what a caller with no session bound has.
-
-    Args:
-        sink (RecordSink | None): Where the rows go, or ``None`` to decline.
-        task_id (str): Dispatched task id.
-        task_kind (str): The dispatched task's kind.
-        reason (str): Why the sweep was dispatched.
-        params (Mapping[str, Any] | None): The task params as dispatched.
-
-    Returns:
-        ConcSweepEventRecorder | None: The recorder, or ``None`` when it could
-            not be built.
-    """
+    """Build a recorder, or ``None`` when one cannot be constructed. Sweep
+    behavior must not depend on the recorder existing, so construction failures
+    degrade to "no event", as does the absent sink a caller with no session
+    bound has."""
     if sink is None:
         return None
     try:

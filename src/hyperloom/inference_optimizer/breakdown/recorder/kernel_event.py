@@ -228,14 +228,8 @@ def active_kernel_recorder() -> "KernelEventRecorder | None":
 
 
 def kernel_event_id(macro_cycle: Any) -> str:
-    """Build the event id of the KERNEL entry in one macro cycle.
-
-    Returns:
-        str: The event id, ``kernel_agent:{macro_cycle}:kernel``.
-
-    Raises:
-        ValueError: If ``macro_cycle`` is not a non-negative integer.
-    """
+    """Build ``kernel_agent:{macro_cycle}:kernel``. Raises ``ValueError`` if
+    ``macro_cycle`` is not a non-negative integer."""
     return event_id(EVENT_PHASE, macro_cycle, EVENT_COMPONENT)
 
 
@@ -280,32 +274,15 @@ def record_integrate_verdict(
     that event exists, so a verdict never mints an event of its own.
 
     Args:
-        macro_cycle (Any): The macro cycle the gate settled in.
-        integration_id (str): The queued patch's id, which keys the row.
-        kernel_id (str): The kernel the patch targeted.
-        decision (str): The gate's verdict (``KEEP`` / ``REVERT``).
-        status (str): How the gate's own run ended.
-        attempt_count (Any): Gate attempts this patch has had, faults included.
-        fault_count (Any): How many of those never measured the patch fairly.
-        gain_pct (Any): The best end-to-end gain the patch measured.
-        accuracy_pass (Any): Whether accuracy held.
-        validation_tier (str): How thoroughly the patch was validated.
-        patch_path (str): The patch that was integrated.
-        target_file (str): The file it was applied to.
-        error_class (str): The last failure's classification.
-        rejected_reason (str): Why the patch was rejected outright, when it
-            was -- an exhausted budget rather than a verdict on the code.
-        retryable (bool): Whether the gate will try this patch again.
-        settled_at (str): ISO timestamp the verdict landed.
-        extra_server_args (str): Server-arg fragment the adoption introduced.
-        basis (str): Throughput basis the gain was measured on (``hot`` /
-            ``cold``). A gain is meaningless without the baseline behind it.
-        alignment_status (str): Whether the producer's baseline agreed with
-            the orchestrator's.
-        gain_attributed (Any): Whether the measured gain is this one kernel's.
-            A rebench carrying several kernels at once measured all of them
-            together, so the gain is real but unattributable, which is a
-            different fact from the accuracy check in ``accuracy_pass``.
+        decision: The gate's verdict (``KEEP`` / ``REVERT``).
+        fault_count: How many attempts never measured the patch fairly.
+        rejected_reason: Why the patch was rejected outright, when it was -- an
+            exhausted budget rather than a verdict on the code.
+        basis: Throughput basis the gain was measured on (``hot`` / ``cold``);
+            a gain is meaningless without the baseline behind it.
+        gain_attributed: Whether the measured gain is this one kernel's. A
+            rebench carrying several kernels measured all of them together, so
+            the gain is real but unattributable.
     """
     if not str(integration_id or ""):
         return
@@ -579,14 +556,6 @@ def _fold_integrate_into_by_source(
 
     A kernel gated more than once counts once, under the verdict that stands.
 
-    Args:
-        by_source (dict[str, dict[str, Any]]): The per-source counters, updated
-            in place.
-        lanes (Mapping[str, list[dict[str, Any]]]): The settled forge lane rows.
-        acceptances (Mapping[str, list[dict[str, Any]]]): The settled GEAK
-            acceptance rows by kind.
-        integrate_by_kernel (Mapping[str, list[dict[str, Any]]]): Integrate rows
-            grouped by the kernel they ruled on.
     """
     for counters in by_source.values():
         counters.update({"keeps": 0, "reverts": 0, "micro_only_keeps": 0, "e2e_gain_pct": None})
@@ -639,16 +608,7 @@ def _discovered_kernel_row(
 ) -> dict[str, Any] | None:
     """Normalize one hot-kernel row into the discovered-kernel view.
 
-    Args:
-        entry (Mapping[str, Any]): One row from ``hot_kernels_top15`` or the
-            roofline sidecar merge.
-        rank (int): Position in the discovery ordering.
-        snapshot_id (int | None): The analysis snapshot this row came from.
-        provenance (str): Why this snapshot was recorded.
-        reusable_ids (set[str]): Kernel ids the analysis admitted as targets.
-
-    Returns:
-        dict[str, Any] | None: The normalized row, or ``None`` without identity.
+    Returns the normalized row, or ``None`` without identity.
     """
     kernel_id = _text(entry.get("kernel_id"))
     name = _text(entry.get("name"))
@@ -723,17 +683,6 @@ def _lane_row(
     that verdict is a different row which may not have been written yet. It is
     resolved at assembly, once both halves are on disk.
 
-    Args:
-        source_kind (str): One of the six producers.
-        run_id (str): Lane-stable identifier for this candidate.
-        status (str): How the candidate's own run ended.
-        started_at (str | None): ISO timestamp the candidate started.
-        ended_at (str | None): ISO timestamp the candidate ended.
-        duration_sec (float | None): Wall-clock seconds the candidate took.
-        micro_decision (str | None): The candidate layer's verdict on its own
-            output.
-        rebench_ref (str | None): The rebench attempt id that re-measured it.
-        failure_reason (str | None): Normalized failure reason.
     """
     return {
         "source_kind": str(source_kind),
@@ -773,23 +722,6 @@ def _rebench_row(
     overlay digest to decide ``validated`` versus ``fallback``, and dropped both
     booleans on the floor once the decision was made.
 
-    Args:
-        attempt_id (str): Ledger-stable identifier for this attempt.
-        source_kind (str): The producer whose candidate this attempt
-            re-measured.
-        ledger (str): :data:`LEDGER_FORGE` or :data:`LEDGER_GEAK`.
-        source_ref (str | None): The candidate's ``run_id``.
-        idempotency_key (str | None): The dispatch idempotency key.
-        task_id (str | None): The dispatched task id.
-        dispatched_at (str | None): ISO timestamp the attempt was dispatched.
-        settled_at (str | None): ISO timestamp the verdict landed.
-        base_tput (float | None): The throughput the attempt measured against.
-        measured_tput (float | None): The throughput the attempt measured.
-        decision (str | None): The rebench verdict, or ``None`` while unsettled.
-        decision_reason (str | None): Why the verdict landed that way.
-        status (str | None): The attempt's own lifecycle status.
-        engagement (dict[str, Any] | None): Config / overlay verification
-            booleans.
     """
     verified = _as_dict(engagement)
     base = _float_or_none(base_tput)
@@ -1072,17 +1004,10 @@ class KernelEventRecorder:
         the phase went on to rewrite was ever a legitimate target.
 
         Args:
-            run_id (str): Entry-stable identifier for this analysis.
-            trigger (str): ``pre_run_optimization`` or ``llm_explicit``.
-            status (str): ``ok`` or ``failed``.
-            result (Any): The analysis tool's result dict.
-            requested_by (str): The role that requested it.
-            request_msg_id (str): The bus request message id.
-            trace_input (str): The trace the run analysed.
-            top_k (Any): The requested ranking depth.
-            snapshot (dict[str, Any] | None): The ``last_trace_analyze`` cache
-                the run produced.
-            cache_hit (bool): Whether a cached result served the request.
+            run_id: Entry-stable identifier for this analysis.
+            trigger: ``pre_run_optimization`` or ``llm_explicit``.
+            status: ``ok`` or ``failed``.
+            snapshot: The ``last_trace_analyze`` cache the run produced.
         """
         _write_trace_analyze_run(
             self._sink,

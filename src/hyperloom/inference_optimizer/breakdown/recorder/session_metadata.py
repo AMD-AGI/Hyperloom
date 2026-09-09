@@ -96,12 +96,7 @@ def record_metadata_identity(
 
     Called where the manifest is stamped, which is the only point that knows
     the spawn-time image, host and pid without probing the environment a
-    second time at export.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        manifest: The manifest mapping just built for this session.
-        producer: The breakdown producer label that owns the write.
+    second time at export. A falsy ``session_dir`` is a no-op.
     """
     if not isinstance(manifest, Mapping) or not manifest:
         trace_skip(reason="empty payload", section=SECTION)
@@ -151,12 +146,8 @@ def record_metadata_langfuse(
     """Record the Langfuse entrypoint and push counts from an emitter receipt.
 
     Called both when the emitter decides whether it is enabled and after the
-    final flush, so a session that pushed nothing still explains why.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        receipt: The emitter receipt mapping.
-        producer: The breakdown producer label that owns the write.
+    final flush, so a session that pushed nothing still explains why. A falsy
+    ``session_dir`` is a no-op.
     """
     if not isinstance(receipt, Mapping) or not receipt:
         trace_skip(reason="empty payload", section=SECTION)
@@ -173,10 +164,6 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     Called on every state save, so the last write before the session stops is
     the one the export reads -- which is what freezes the elapsed time at the
     end of the run instead of letting a re-export stretch it.
-
-    Args:
-        rec: The recorder writing on the Coordinator's behalf.
-        state: The live ``SharedState`` to snapshot.
     """
     session_id = _text(getattr(state, "session_id", ""))
     if not session_id:
@@ -223,22 +210,11 @@ def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
 def _workload_signature(config: Mapping[str, Any]) -> str:
     """The workload contract digest for ``config``, empty when it is unknown.
 
-    The explore executor stamps this digest on every variant it tests so a
-    cross-workload resume can tell that an old KEEP was measured under a
-    different (CONC, ISL, OSL, precision, TP). It is a pure function of those
-    five, which makes it session-level rather than per-variant, so it belongs
-    here once instead of on every attempt row.
-
-    An all-unknown contract still digests to a stable string, which the
-    leaf-by-leaf singleton merge would then treat as a real value and never
-    replace. So it is only returned once at least one input is known.
-
-    Args:
-        config: A mapping carrying ``conc`` / ``isl`` / ``osl`` /
-            ``precision`` / ``tp``.
-
-    Returns:
-        The 12-char digest, or ``""`` when no input is known.
+    A pure function of ``conc`` / ``isl`` / ``osl`` / ``precision`` / ``tp``,
+    which makes it session-level rather than per-variant. An all-unknown
+    contract still digests to a stable string, which the leaf-by-leaf singleton
+    merge would treat as a real value and never replace, so the 12-char digest
+    is only returned once at least one of the five is known.
     """
     fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
     if not any(str(value or "").strip() for value in fields.values()):
@@ -284,28 +260,16 @@ def _launch_config(state: Any) -> dict[str, Any]:
 def _elapsed_seconds(state: Any) -> tuple[float, float]:
     """Seconds this run leg has been running, and the total across all legs.
 
-    The leg starts at ``resumed_ts``, falling back to ``start_ts`` for a
-    session that has only ever run once. ``start_ts`` cannot stand in for it in
-    general: a resume after a clean stop deliberately keeps the original anchor
-    so the wall-clock budget still counts from there, and measuring the leg
-    from it would charge the leg with the gap between the two.
-
-    The leg ends at ``stop_ts``, which is only evidence of an end while a
-    ``stop_reason`` stands -- a clean-stop resume keeps the stamp of the
-    previous leg -- and any stamp that does not postdate the leg's start is
-    that stale one rather than this leg's end.
-
-    The total is the session's own charged budget (``elapsed_charged_sec`` plus
-    whatever the live leg has run since the last charge), so it measures time
-    the session spent running instead of the span it existed over. It is read
-    rather than recomputed here because the budget that stops the run is the
-    one a report has to agree with.
-
-    Args:
-        state: The live ``SharedState`` to measure.
-
-    Returns:
-        ``(leg_seconds, total_seconds)``.
+    The leg starts at ``resumed_ts``, falling back to ``start_ts`` only for a
+    session that has run once: a resume after a clean stop keeps the original
+    anchor so the wall-clock budget still counts from there, and measuring the
+    leg from it would charge the leg with the gap between the two. It ends at
+    ``stop_ts``, which is evidence of an end only while a ``stop_reason``
+    stands, and any stamp that does not postdate the leg's start is a stale one
+    from the previous leg. The total is the session's own charged budget
+    (``elapsed_charged_sec`` plus what the live leg has run since the last
+    charge), read rather than recomputed because the budget that stops the run
+    is the one a report has to agree with.
     """
     started = to_unix(_text(getattr(state, "resumed_ts", "")) or _text(getattr(state, "start_ts", "")), 0.0) or 0.0
     ended = 0.0

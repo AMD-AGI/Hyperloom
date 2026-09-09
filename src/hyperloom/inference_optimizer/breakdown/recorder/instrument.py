@@ -7,21 +7,12 @@ These helpers are called from the producing code (the Coordinator's
 ``SharedState``) to record breakdown facts where they are born, instead of
 having the exporter re-walk artifacts later.
 
+What lives here: the Coordinator's state snapshots, the backend build
+provenance carried by a kernel-agent result (which reaches the optimizer
+through nothing else).
+
 Every helper is best-effort: all failures are swallowed (logged at debug).
 Payloads are shaped to the matching ``schema.py`` TypedDict.
-
-What is left in this module after the entity streams were retired:
-
-* Coordinator state snapshots -- ``session`` / ``metadata`` /
-  ``explore_search`` / ``roofline`` sections, plus one ``phase_timeline``
-  event per recorded action attempt.
-* Backend build provenance from a kernel-agent result, which reaches the
-  optimizer through nothing else, mirrored alongside the per-backend
-  attempts onto the kernel timeline event.
-* A generic singleton-section writer for producer-owned summaries.
-
-The authoritative public surface is the re-export list in
-``recorder/__init__``.
 """
 
 from __future__ import annotations
@@ -46,11 +37,7 @@ _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 
 
 def _recorder(session_dir: Path | str, producer: str):
-    """Return the process-cached recorder for ``session_dir`` and ``producer``.
-
-    Returns:
-        The process-cached recorder for the ``(session_dir, producer)`` pair.
-    """
+    """Return the process-cached recorder for ``session_dir`` and ``producer``."""
     from .recorder import recorder_for
 
     return recorder_for(session_dir, producer=producer)
@@ -239,16 +226,10 @@ def record_backend_versions_and_timeline(
 ) -> None:
     """Record what a kernel-agent result says about the backends that ran.
 
-    Two facts outlive the entity streams this used to also write: the build of
-    each backend, which reaches the optimizer through nothing else, and the
-    attempts themselves, which are mirrored onto the kernel timeline event.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value
-            is a no-op.
-        result (dict[str, Any]): the kernel-agent result carrying the
-            per-backend ``attempts`` ladder.
-        producer (str): the breakdown producer label.
+    Two facts are recorded: the build of each backend, which reaches the
+    optimizer through nothing else, and the attempts themselves, which are
+    mirrored onto the kernel timeline event. A falsy ``session_dir``, or a
+    ``result`` that is not a dict, is a no-op.
     """
     if not session_dir or not isinstance(result, dict):
         trace_skip(
@@ -296,28 +277,9 @@ def record_backend_versions_and_timeline(
         trace_skip(reason="writer raised", section="versions", error=exc)
 
 
-def record_singleton_section(
-    session_dir: Path | str | None,
-    section: str,
-    payload: dict[str, Any],
-    *,
-    producer: str,
-) -> None:
-    """Record a producer-owned singleton section (report summaries, etc.)."""
-    if not session_dir or not isinstance(payload, dict) or not payload:
-        trace_skip(reason="no session_dir" if not session_dir else "empty payload", section=section)
-        return
-    try:
-        _recorder(session_dir, producer).record_singleton(section, payload)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_singleton_section %s failed", section, exc_info=True)
-        trace_skip(reason="writer raised", section=section, error=exc)
-
-
 __all__ = [
     "PRODUCER_COORDINATOR",
     "PRODUCER_KERNEL_AGENT",
     "record_backend_versions_and_timeline",
-    "record_singleton_section",
     "snapshot_state_sections",
 ]

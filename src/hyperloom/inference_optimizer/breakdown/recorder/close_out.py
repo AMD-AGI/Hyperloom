@@ -3,32 +3,16 @@
 
 """Author-time recording of the SBD v6 ``close`` section.
 
-The CLOSE sequencer states what it did as it does it: it opens the section on
-entry, appends a row per step it settles, names each artifact at the step that
-produced it, and records its verdict as its last act.
+The CLOSE sequencer states what it did as it does it. The verdict cannot be
+derived at export time, because ``session_breakdown`` is itself a step in the
+middle of the sequence, so the sequencer's own last act is the only thing that
+knows the sequence finished. Until it writes, the section stands at
+``running``, leaving three states distinguishable on the wire: no ``close``
+fragment (the close-out was never reached), ``running`` (the mid-sequence
+snapshot, or a process that died), and any other status (the verdict).
 
-This replaces a projection that had to infer all of that at export time, and
-the inference could not be made to work. ``session_breakdown`` is itself a step
-in the middle of the sequence, so at the moment the breakdown is written the
-steps after it genuinely have not happened yet -- and a verdict derived from
-that snapshot reported ``degraded`` for a session that was closing perfectly
-normally. ``degraded`` therefore had to mean "the record is incomplete" rather
-than "the close-out went badly", which left a reader unable to tell a healthy
-session from a damaged one by the field that exists to say exactly that.
-
-Recording splits the two apart. The sequencer's own last act is the only thing
-that knows the sequence finished, so it is what writes the verdict; until it
-does, the section stands at ``running``. That makes the three states a reader
-cares about distinguishable on the wire:
-
-* no ``close`` fragment at all -- the session never reached its close-out,
-* ``status: "running"`` -- the close-out started and no verdict was ever
-  recorded, so either this is the mid-sequence snapshot or the process died
-  before finishing,
-* any other status -- the verdict the sequencer reached.
-
-Recording is best-effort throughout: a failure here degrades the exported
-section and must never propagate into the wind-down it is describing.
+Recording is best-effort: a failure here must never propagate into the
+wind-down it is describing.
 """
 
 from __future__ import annotations
@@ -51,10 +35,8 @@ WRITE_BACK_SECTION = "close_write_back"
 WRITE_BACK_ATTEMPT_SECTION = "close_write_back_attempt"
 PRODUCER = "coordinator"
 
-#: Stable ``result_type`` codes for the Recipe KB publication. The publisher
-#: sets one at each of its exits, so the code says what that exit meant instead
-#: of being recovered downstream by matching substrings against a reason string
-#: that had already lost its structure.
+#: Stable ``result_type`` codes for the Recipe KB publication, set by the
+#: publisher at each exit so no reader substring-matches a free-text reason.
 RESULT_WRITTEN = "written"
 RESULT_KB_DISABLED = "kb_disabled"
 RESULT_AGENTX_BLOCKED = "agentx_blocked"
@@ -70,51 +52,36 @@ RESULT_CHAMPION_NOT_PROMOTED = "champion_not_promoted"
 RESULT_BUNDLE_BUILD_FAILED = "bundle_build_failed"
 RESULT_SKIPPED_OTHER = "skipped_other"
 
-#: The attempt status that means the publication was opened and never settled.
-#: Kept as itself rather than coerced to a failure: the KB never refused
-#: anything, the process died before it could answer.
+#: An attempt opened and never settled. Not coerced to a failure: the KB never
+#: refused anything, the process died before it could answer.
 STATUS_PENDING = "pending"
 
-#: The breakdown names its own path rather than testing for it: the file is
-#: being written at the moment this section is assembled, so its presence
-#: cannot be probed, and its name is fixed by the exporter.
+#: Named rather than probed: the file is being written as this is assembled.
 SESSION_BREAKDOWN_PATH = "session_breakdown.json"
 
-#: The ``stop_reason`` that means a robustness critic escalated the session to
-#: its close. Compared once here, at the point the reason is known, instead of
-#: being re-matched against the state file by every reader.
+#: The ``stop_reason`` meaning a robustness critic escalated to the close.
 ESCALATED_STOP_REASON = "robustness_escalated"
 
-#: Where the robustness ladder persists what it found, relative to the session
-#: directory. Read here rather than mirrored through a recorder because the
-#: ladder already writes a durable, complete record: a second copy taken as the
-#: findings were raised could only be the same rows or fewer.
+#: Where the robustness ladder persists findings. Read rather than mirrored
+#: through a recorder: a second copy could only be poorer than the ladder's.
 ROBUSTNESS_FINDINGS_SUBDIR = "agents/robustness/findings"
 
-#: How many findings the close-out carries. A session that degrades badly can
-#: fire the ladder on most of its ticks, and the close-out is a summary of the
-#: session rather than a second copy of the ladder's log; the newest are kept
-#: because they are the ones the stop reason was drawn from, and the total is
-#: reported alongside so a truncated list never reads as the whole of it.
+#: How many findings the close-out carries; the newest, being the ones the stop
+#: reason was drawn from. ``findings_total`` reports the untruncated count.
 _FINDINGS_LIMIT = 50
 
-#: The share of the theoretical ceiling the session aims at. A roofline ceiling
-#: is not reachable in practice, so progress is reported against both the
-#: ceiling and this target.
+#: The share of the theoretical ceiling the session aims at, a roofline
+#: ceiling not being reachable in practice.
 ROOFLINE_TARGET_RATIO = 0.70
 
-#: A step status that means the step reported a genuine failure. Kept separate
-#: from "not settled": a step with no terminal row was interrupted, which is
-#: not evidence against it.
+#: A genuine failure, as against a step with no terminal row, which was
+#: merely interrupted.
 _FAILED = "failed"
 
 
 def _stamp(ts: str) -> str:
-    """``ts`` if the caller supplied one, else now.
-
-    Microsecond precision, because consecutive steps routinely settle inside
-    the same second and second-precision would erase the order between them.
-    """
+    """``ts`` if the caller supplied one, else now, at microsecond precision:
+    consecutive steps routinely settle inside the same second."""
     return str(ts).strip() or now_iso()
 
 
@@ -137,12 +104,8 @@ def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None
     """Open the section as the sequencer is entered.
 
     Writes ``status: "running"``, which stands until :func:`record_close_settled`
-    replaces it. A session that dies mid-close leaves it in place, and that is
-    the point: the state is reported rather than mistaken for a verdict.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        ts: The entry timestamp; defaults to now.
+    replaces it, so a session that dies mid-close reports that state rather
+    than having it mistaken for a verdict.
     """
     _write(
         session_dir,
@@ -167,18 +130,8 @@ def record_close_step(
     """Append one settled close step.
 
     Rows are append-only rather than keyed by step name: a resumed session
-    re-enters CLOSE and runs the sequence again, and the second pass's rows
-    describe a second close-out attempt instead of correcting the first.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        step: The step name, e.g. ``report`` or ``artifact_package``.
-        status: One of ``running`` / ``done`` / ``failed`` / ``skipped``.
-        ts: When the step settled; defaults to now.
-        task_id: The task the step ran as, when it dispatched one.
-        detail: Free text for a human, e.g. the reason a step was skipped.
-            Not parsed by anything downstream -- a fact a reader needs is
-            recorded as a field of its own.
+    runs the sequence again, and its rows describe a second close-out attempt
+    instead of correcting the first. ``detail`` is free text for a human.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=STEP_SECTION)
@@ -208,20 +161,9 @@ def record_close_artifacts(
 ) -> None:
     """Name the artifacts the close-out produced, at the step that produced them.
 
-    Each path is recorded by the step that just wrote the file, so the export
-    no longer probes the filesystem for the reports nor recovers the package
-    location by parsing it back out of a step's free-text ``detail``.
-
-    Only the arguments actually supplied are written. The singleton merges
-    leaf-by-leaf with no notion of an empty value, so passing a path this
-    caller does not know would overwrite one an earlier caller did.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        final_json_path: Absolute path to ``reports/final.json``.
-        final_md_path: Absolute path to ``reports/final.md``.
-        artifact_package_path: Absolute path to the packaged session zip. It is
-            written outside the session tree, so it stays absolute.
+    Only the arguments supplied are written: the singleton merges leaf-by-leaf
+    with no notion of an empty value, so a path this caller does not know would
+    overwrite one an earlier caller did.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
@@ -250,24 +192,10 @@ def record_baseline_progress(
 ) -> None:
     """Record the session's final tally of baseline failures.
 
-    These are the two baseline facts no baseline event can hold. A baseline
-    event closes when its own measurement ends, and the counters are advanced
-    by the write-back that accounts for that measurement afterwards -- so an
-    event can record the count it was dispatched under (which it does, as
-    ``request.failure_streak_before``) but never the count it produced. The
-    session-level total is settled at the close-out, and that is where it is
-    taken.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        failure_streak: Consecutive baseline failures still standing at the
-            close. A non-zero value on a session that finished means the last
-            baseline it tried never landed.
-        total_failures: Every baseline failure the session had, streak or not.
-        arg_error_streak: Consecutive failures rooted in a rejected server
-            arg. Counted apart from the general streak because the two call
-            for different responses -- a bad flag is a configuration error the
-            session can correct, and a dying server is not.
+    No baseline event can hold these: an event closes when its measurement
+    ends, but the counters are advanced afterwards by the write-back.
+    ``arg_error_streak`` is apart because a rejected server arg is a
+    configuration error the session can correct.
     """
     _write(
         session_dir,
@@ -293,30 +221,9 @@ def record_final_recipe(
 ) -> None:
     """Record the configuration the session ended on. Never raises.
 
-    The terminal recipe is a session-level fact for the same reason
-    :func:`record_baseline_progress` is: no event holds it. The stack ledger
-    records every adoption, but a revert takes a layer back off the stack
-    without retracting the row that adopted it, so the ledger cannot say what
-    was still standing at the end. And a session that adopted nothing has no
-    ledger event at all while still ending on a configuration -- its baseline.
-
-    The export used to reconstruct this by re-reading ``current_best`` and
-    ``optimization_stack`` after the fact, and recovered the latency pair by
-    trying three candidate run directories and labelling how far it had to go.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        throughput: The throughput of the configuration that shipped.
-        ttft_mean_ms: The latency the same configuration was measured at,
-            carried here because a session with no whole-stack validation has
-            no other author-time record of it.
-        e2el_mean_ms: As ``ttft_mean_ms``, for end-to-end latency.
-        action_path: The layers still on the stack, in promotion order, each
-            ``action`` or ``action:variant``.
-        extra_server_args: The cumulative server args of the final launch.
-        extra_envs: The cumulative env overrides of the final launch. Recorded
-            beside the args because the two are one recipe: applying either
-            without the other reproduces neither.
+    No event holds the terminal recipe: a revert takes a layer off the stack
+    without retracting the ledger row that adopted it. ``action_path`` is the
+    surviving layers in promotion order, each ``action`` or ``action:variant``.
     """
     _write(
         session_dir,
@@ -341,24 +248,9 @@ def record_geak_candidate(
 ) -> None:
     """Record where the GEAK candidate stood when the session wound down.
 
-    A candidate's own attempts belong to the kernel event that ran them, and
-    that event closes when the phase is left. What it cannot hold is the
-    candidate's standing afterwards: a slot still awaiting a rebench, or one
-    the close drain cancelled, is settled after every kernel event of the
-    session has closed. Recorded here for the same reason
-    :func:`record_baseline_progress` is -- no event can hold it.
-
-    The candidate's self-reported numbers are carried alongside the verdict so
-    a reader can say what was dropped, not merely that something was.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        pending: The candidate slot as it stands at the close. Empty when the
-            session had no GEAK candidate, or when one was adjudicated and the
-            slot released -- the two are told apart by ``status``.
-        revalidation_pending: Whether the accepted stack still needs a recheck
-            against the current tree. Set by a resume that inherited a stack it
-            did not measure itself.
+    A slot awaiting a rebench settles after the kernel event that ran its
+    attempts has closed. ``pending`` is empty both when the session had no
+    candidate and when the slot was released; ``status`` tells the two apart.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
@@ -393,29 +285,10 @@ def record_roofline_progress(
 ) -> None:
     """Record how far the session got against its roofline ceiling.
 
-    This is the one roofline fact that is not a property of any single roofline
-    run: the ceiling comes from the last analysis, the trajectory from every
-    promotion in between, and the streak from the runs that failed. It is
-    recorded at the close-out, after the post-optimization roofline has had its
-    chance to refine the ceiling, because that is the first moment all three
-    are final.
-
-    Snapshots themselves are deliberately absent. Each roofline event now
-    carries its own snapshot in full, so repeating the history here would be
-    two records of one fact, free to disagree.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        baseline_tput: The baseline throughput the trajectory starts from.
-        baseline_ts: When the baseline was measured, dating the first point.
-        optimization_stack: The promoted optimizations, in promotion order.
-        latest_snapshot: The most recent roofline snapshot, supplying the
-            ceiling. Absent when the session never completed an analysis, which
-            is why the ceiling fields are nullable rather than zero.
-        current_best_tput: The session's best measured throughput, used to
-            cross-check the trajectory's own tail.
-        cumulative_gain_pct: The validated cumulative gain.
-        failure_streak: Consecutive failed roofline runs at close.
+    The close-out is the first moment the ceiling, the trajectory and the
+    streak are all final. ``latest_snapshot`` supplies the ceiling and is
+    absent when no analysis completed, which is why the ceiling fields are
+    nullable rather than zero.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
@@ -449,11 +322,9 @@ def record_roofline_progress(
         "latest_snapshot_id": _to_int(snapshot.get("snapshot_id")) or None,
     }
 
-    # Scriptable/diffusion (xDiT) image models decode no tokens, so they have no
-    # tok/s ceiling at all; their roofline is the ideal per-image compute floor
-    # against measured end-to-end latency. ``ceiling_kind`` discriminates the two
-    # domains so a reader does not take the null tok/s fields for a failed
-    # analysis.
+    # Diffusion (xDiT) image models decode no tokens: their roofline is the
+    # ideal per-image compute floor against measured latency. ``ceiling_kind``
+    # keeps a reader from taking the null tok/s fields for a failed analysis.
     if not ceiling_available:
         ideal_ms = _to_float(snapshot.get("roofline_ideal_ms"))
         measured_ms = _to_float(snapshot.get("e2e_mean_ms"))
@@ -465,10 +336,8 @@ def record_roofline_progress(
             # Ideal over measured: higher is nearer the floor.
             payload["current_best_pct_of_latency_ceiling"] = round(ideal_ms / measured_ms * 100.0, 4)
 
-    # A trajectory tail that disagrees with the session's own best means a
-    # promotion never made it onto the stack -- a resume interrupted mid-promote
-    # is the way this happens. Recorded rather than warned about at export, so
-    # the reader learns it from the record instead of from a warnings list.
+    # A tail disagreeing with the session's own best means a promotion never
+    # made it onto the stack, as when a resume interrupted a mid-promote.
     declared = _to_float(current_best_tput)
     if declared and declared > 0 and best > 0 and abs(declared - best) / max(declared, 1.0) > 0.001:
         payload["trajectory_incomplete"] = True
@@ -480,17 +349,8 @@ def record_roofline_progress(
 
 
 def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str, Any]]:
-    """Build the baseline-plus-promotions throughput curve.
-
-    Args:
-        baseline: The baseline throughput; a non-positive value yields no
-            baseline point, because a curve has to start somewhere real.
-        baseline_ts: When the baseline was measured.
-        stack: The optimization stack, in promotion order.
-
-    Returns:
-        list[dict[str, Any]]: One point per measured step, oldest first.
-    """
+    """Build the throughput curve, oldest first; a non-positive ``baseline``
+    yields no baseline point, a curve having to start somewhere real."""
     points: list[dict[str, Any]] = []
     if baseline > 0:
         points.append(
@@ -505,9 +365,8 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
             }
         )
     entries = stack if isinstance(stack, list) else []
-    # Sorted by timestamp rather than trusted in list order: the stack is
-    # already in promotion order, but a legacy prepend would put the newest
-    # first and silently invert the curve.
+    # Sorted by timestamp rather than trusted in list order: a legacy prepend
+    # puts the newest first and would silently invert the curve.
     for entry in sorted((e for e in entries if isinstance(e, Mapping)), key=lambda e: str(e.get("ts") or "")):
         tput = _to_float(entry.get("tput"))
         if tput is None or tput <= 0:
@@ -555,22 +414,10 @@ def record_close_settled(
 ) -> None:
     """Record the sequencer's verdict as its last act.
 
-    The verdict is ``degraded`` when any recorded step reported ``failed`` and
-    ``succeeded`` otherwise. It is derived here, from the rows this session
-    actually wrote, rather than at export: the difference is that reaching this
-    function is itself the evidence that the sequence ran to the end, which is
-    the one fact the export-time projection could never establish.
-
-    A step left un-settled does not count against the verdict. Only
-    ``langfuse_flush`` records nothing on success, so its silence is success;
-    for the rest, an interrupted step means the process died, and a process
-    that died never reached this line to record a verdict at all.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        stop_reason: The settled ``stop_reason``, recorded so the escalation
-            verdict is auditable against the reason it was drawn from.
-        ts: When the sequence finished; defaults to now.
+    ``degraded`` when any recorded step reported ``failed``, ``succeeded``
+    otherwise: reaching this function is itself the evidence that the sequence
+    ran to the end, so an un-settled step does not count against the verdict.
+    ``stop_reason`` is recorded so the escalation verdict stays auditable.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
@@ -594,16 +441,8 @@ def record_close_settled(
 def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
     """Read what the robustness ladder found over the session.
 
-    The escalation verdict beside this is drawn from the stop reason alone, so
-    on its own it says a session was escalated without saying what for -- and
-    an un-escalated session's findings, which are the ones that fired and were
-    judged survivable, had nowhere to be read at all.
-
-    Returns:
-        dict[str, Any]: ``findings`` and ``findings_total``, or an empty
-            mapping when the ladder never wrote anything. An absent key is the
-            honest answer for a session whose ladder never ran; an empty list
-            would claim it ran and found nothing.
+    Returns ``findings`` and ``findings_total``, or an empty mapping when the
+    ladder never wrote: an empty list would claim it ran and found nothing.
     """
     directory = Path(session_dir) / ROBUSTNESS_FINDINGS_SUBDIR
     rows: list[dict[str, Any]] = []
@@ -627,9 +466,8 @@ def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
 def _finding_row(row: dict[str, Any]) -> dict[str, Any]:
     """Project one persisted finding onto what the close-out reports.
 
-    ``intents`` is reduced to the intent types: the payloads are the ladder's
-    own working detail, and carrying them would make one badly-degraded
-    session's close-out larger than the rest of the breakdown.
+    ``intents`` is reduced to the intent types: one badly-degraded session's
+    worth of their payloads would dwarf the rest of the breakdown.
     """
     return {
         "tick_index": _to_int(row.get("tick_index")),
@@ -656,18 +494,10 @@ def record_write_back_opened(
 ) -> None:
     """Open one Recipe KB publication attempt, before the write is tried.
 
-    Opening before the write is what makes a mid-publish death visible: the
-    attempt row stands at ``pending`` until :func:`record_write_back_settled`
-    replaces it, so a session killed here reports an attempt that never
-    settled rather than one that failed. The projection this replaces could
-    not tell those apart -- it read the leftover marker as a failure, which
-    claimed a refusal the KB never issued.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        attempt: The 1-based attempt number, which is also the row's identity.
-        source: Which seam is trying, ``close`` or ``t4_fallback``.
-        ts: When the attempt started; defaults to now.
+    Opening before the write is what makes a mid-publish death visible: the row
+    stands at ``pending`` until :func:`record_write_back_settled` replaces it,
+    so a session killed here reports an unsettled attempt rather than a refusal
+    the KB never issued. ``attempt`` is 1-based and keys the row.
     """
     _write_attempt(
         session_dir,
@@ -700,32 +530,10 @@ def record_write_back_settled(
 ) -> None:
     """Settle one publication attempt and the arc it belongs to.
 
-    ``result_type`` is supplied by the publisher rather than inferred here:
-    every exit it can take already knows which one it is, and a code it states
-    outright cannot be confused by a reason string that happens to read like
-    another exit's.
-
-    ``error_class`` is separate from ``raw_reason`` because the two used to be
-    the same field. The publisher reports transport and build failures as the
-    bare exception class name, so a reader could not tell a class name from a
-    reason token, and the failure block reported the same string twice.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        attempt: The attempt number being settled.
-        source: Which seam settled it, ``close`` or ``t4_fallback``.
-        status: The terminal status, e.g. ``written`` / ``skipped`` /
-            ``disabled`` / ``error``.
-        result_type: A stable code from this module's ``RESULT_*`` set.
-        raw_reason: The publisher's own reason string, kept verbatim.
-        error_class: The exception class name, when the exit was an exception.
-        backend: Which store answered, e.g. ``local`` or ``kb-store``.
-        canonical_id: The recipe identity written under.
-        session_id: The session identity written under.
-        scope: The workload dimensions the recipe is scoped to.
-        optimized_throughput: The throughput being published.
-        validated_gain_pct: The validated cumulative gain being published.
-        ts: When the attempt settled; defaults to now.
+    ``result_type`` is one of this module's ``RESULT_*`` codes, stated by the
+    publisher so no reader has to read it out of ``raw_reason``, which is kept
+    verbatim. ``error_class`` is separate because the publisher reports
+    transport failures as the bare exception class name.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=WRITE_BACK_SECTION)
@@ -762,9 +570,8 @@ def record_write_back_settled(
         ("canonical_id", str(canonical_id or "").strip()),
         ("session_id", str(session_id or "").strip()),
     ):
-        # Only what this exit knows: the singleton merges leaf-by-leaf with no
-        # notion of an empty value, so writing a blank would erase an earlier
-        # attempt's answer.
+        # Only what this exit knows: the singleton merges leaf-by-leaf, so a
+        # blank would erase an earlier attempt's answer.
         if value:
             arc[key] = value
     if scope:
@@ -809,9 +616,8 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
 def _queue_depth(session_dir: Path | str) -> dict[str, int]:
     """Line counts of the local KB write queues, as of this settlement.
 
-    Snapshotted here rather than counted at export because the queues keep
-    moving: a depth read afterwards describes whenever the export happened to
-    run, which is not the moment the publication settled.
+    Snapshotted here because the queues keep moving: a depth read at export
+    describes when the export ran, not when the publication settled.
     """
     from ...session.session_paths import (
         recipe_kb_dead_letter_ndjson,

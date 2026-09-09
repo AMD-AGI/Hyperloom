@@ -53,10 +53,9 @@ log = _logging.getLogger(__name__)
 # carrying no metric it recognises.
 _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
 
-# The phase segment of the warm-replay event id. A literal rather than a read
-# of ``state.phase``: the event id must be identical at the tick that enqueues
-# the replay and the later tick that harvests it, and the replay only ever runs
-# in PRELUDE.
+# The phase segment of the warm-replay event id. A literal rather than a read of
+# ``state.phase``: the id must be identical at the tick that enqueues the replay
+# and the later tick that harvests it, and the replay only ever runs in PRELUDE.
 _WARM_REPLAY_EVENT_PHASE = "prelude"
 
 # The donor's identity, carried flattened on the outcome and re-nested for the
@@ -1604,10 +1603,9 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.debug("combined warm replay pending save failed", exc_info=True)
-        # Opened after the outcome is persisted so the event's request block
-        # reads the donor identity the outcome just stamped, and so a session
-        # killed between the two is recovered as an in-flight replay of a named
-        # recipe rather than an anonymous open event.
+        # Opened after the outcome is persisted so the request block reads the
+        # donor identity the outcome just stamped, and a session killed between
+        # the two is recovered as an in-flight replay of a named recipe.
         self._open_warm_replay_timeline(task=task, session_baseline_tput=state.baseline_tput)
         return task
 
@@ -1762,17 +1760,9 @@ class PreludePhase(PhaseHandler):
     ) -> bool:
         """Rollback or persist a terminal recovery failure without clearing it.
 
-        Args:
-            result: The replay result envelope.
-            task: The originating task.
-            outcome: The warm-replay outcome, stamped on failure.
-            recorder: The replay's timeline recorder, or ``None``. Recorded
-                here rather than at each of the six branches that unwind a
-                rejected replay, because what a reader needs is whether the
-                trees came back -- which is the same question at all six.
-
-        Returns:
-            ``True`` when every tree was restored and the caller may continue.
+        The rollback is recorded here rather than at each of the six branches
+        that unwind a rejected replay: what a reader needs is whether the trees
+        came back. Returns ``True`` when every tree was restored.
         """
         rollback = self._rollback_combined_warm(result, task)
         if recorder is not None:
@@ -1824,29 +1814,14 @@ class PreludePhase(PhaseHandler):
         """Whether a replayed config may be promoted on accuracy grounds.
 
         Every replay is judged, not just the ones touching a knob known to be
-        risky: a KB recipe is evidence from another session and another
-        machine, so reproducing its throughput says nothing about whether it
-        still computes correctly here. The measured score is recorded either
-        way — a promotion that was checked and passed is not the same record as
-        one that was never checked.
+        risky: a KB recipe is evidence from another session, so reproducing its
+        throughput says nothing about whether it still computes correctly here.
+        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent:
+        a score of 0.0 means the model answered nothing, while no score at all
+        means no evidence either way.
 
-        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent.
-        A score of 0.0 means the model answered nothing; no score at all means
-        no evidence either way, and those must not collapse into one state.
-
-        Args:
-            result: The ``replay_warm_recipe`` result envelope.
-            task: The originating task, carrying the replayed args/envs.
-            outcome: The warm-replay outcome dict, stamped either way.
-            recorder: The replay's timeline recorder, or ``None`` when this
-                replay is not recording. The gate writes its own verdict, so a
-                reader no longer has to infer it from the terminal status --
-                which could not tell a score that failed apart from one that
-                was never read.
-
-        Returns:
-            ``True`` when promotion may proceed; ``False`` when the caller must
-            stop (the rollback and outcome have already been recorded).
+        Returns ``True`` when promotion may proceed; ``False`` when the caller
+        must stop (the rollback and outcome have already been recorded).
         """
         from ..actions.executors._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -1899,9 +1874,8 @@ class PreludePhase(PhaseHandler):
                 eval_error or "no reason recorded",
             )
             if recorder is not None:
-                # Ran but could not rule, which is a verdict of its own: the
-                # replay is admitted on no accuracy evidence either way, and
-                # recording that as a pass would claim evidence there is none.
+                # Ran but could not rule, which is a verdict of its own:
+                # recording a pass here would claim evidence there is none.
                 recorder.record_gate(
                     GATE_ACCURACY,
                     passed=None,
@@ -1957,23 +1931,13 @@ class PreludePhase(PhaseHandler):
         return False
 
     # ---- warm-replay timeline recording ----------------------------------
-    #
-    # The replay spans two ticks: one enqueues the task, a later one harvests
-    # its result. The event id is derived from persisted state alone, so the
-    # promote seam rebinds to the event the enqueue seam opened instead of
-    # holding the recorder across a boundary a resume does not survive.
+    # The replay spans two ticks: one enqueues the task, a later one harvests it.
+    # The event id derives from persisted state alone, so the promote seam
+    # rebinds to the event the enqueue seam opened rather than holding a
+    # recorder across a boundary a resume does not survive.
 
     def _warm_replay_donor(self, source: Mapping[str, Any]) -> dict[str, Any]:
-        """Lift the donor's identity out of a flat ``donor_*`` mapping.
-
-        Args:
-            source (Mapping[str, Any]): The outcome or task params carrying the
-                flattened donor fields.
-
-        Returns:
-            dict[str, Any]: The donor block, empty when the recipe was the
-                session's own rather than borrowed.
-        """
+        """Lift the donor block out of a flat ``donor_*`` mapping; empty when not borrowed."""
         return {
             field.removeprefix("donor_"): source[field]
             for field in _WARM_REPLAY_DONOR_FIELDS
@@ -1983,12 +1947,8 @@ class PreludePhase(PhaseHandler):
     def _open_warm_replay_timeline(self, *, task: "Task | None", session_baseline_tput: Any) -> None:
         """Open the replay's event at the moment its task is dispatched.
 
-        Args:
-            task (Task | None): The dispatched task, whose params carry every
-                fact the request block states.
-            session_baseline_tput (Any): The session's recorded baseline, kept
-                beside the enqueue anchor so a reader can see the two diverge
-                across a re-baseline.
+        ``session_baseline_tput`` is kept beside the enqueue anchor so a reader
+        can see the two diverge across a re-baseline.
         """
         params = dict(getattr(task, "params", None) or {})
         try:
@@ -2015,16 +1975,10 @@ class PreludePhase(PhaseHandler):
             log.debug("warm replay timeline: opening the event failed", exc_info=True)
 
     def _warm_replay_timeline(self, task: "Task | None" = None):
-        """Rebind to the in-flight replay's event, or ``None``.
+        """Rebind to the in-flight replay's event, or ``None`` when one could not be built.
 
-        Args:
-            task (Task | None): The originating task, whose params restate the
-                request. Absent params degrade the request block, never the
-                gates and the measurement the promote seam is here to record.
-
-        Returns:
-            The recorder bound to the already-open event, or ``None`` when one
-            could not be built.
+        Absent task params degrade the request block, never the gates and the
+        measurement the promote seam is here to record.
         """
         params = dict(getattr(task, "params", None) or {})
         outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
@@ -2046,9 +2000,8 @@ class PreludePhase(PhaseHandler):
                 min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
                 session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
                 kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-                # Rebinding, not opening: the enqueue seam already put this
-                # event on the timeline, and opening it twice would restate its
-                # start against the wrong tick.
+                # Rebinding, not opening: the enqueue seam already put this event
+                # on the timeline, and opening it twice would restate its start.
                 open_event_on_timeline=False,
             )
         except Exception:  # noqa: BLE001 — observability cannot change replay behavior
@@ -2065,16 +2018,9 @@ class PreludePhase(PhaseHandler):
         """Record the event for a replay refused before it ran.
 
         A skip is a decision, so it closes an event of its own rather than
-        leaving the timeline silent about a replay the session considered. The
-        request block is read off the outcome the caller just built, which is
-        also where the identity fields live at the seams that resolved them --
-        the earliest refusals have none yet, and state an empty request rather
-        than an invented one.
-
-        Args:
-            code (str): Why it was refused (a ``SKIP_*`` value).
-            outcome (Mapping[str, Any]): The outcome the caller settled.
-            details (Mapping[str, Any] | None): What the refusal turned on.
+        leaving the timeline silent. ``code`` is a ``SKIP_*`` value. The
+        earliest refusals have no identity fields on ``outcome`` yet, and state
+        an empty request rather than an invented one.
         """
         try:
             from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
@@ -2110,14 +2056,7 @@ class PreludePhase(PhaseHandler):
         Closes the replay's timeline event on whichever outcome the settling
         below persisted. Done here, around the whole arc, rather than at each
         of the ten branches that can end it: a branch that forgot to close
-        would leave a settled replay reading as still in flight, and the
-        outcome the event must state is the one that reached ``SharedState``.
-
-        Args:
-            result: The ``replay_warm_recipe`` task result dict (status,
-                throughput, workspace, etc.).
-            task: The originating task, used to recover the warm args/envs and
-                the baseline anchor; may be ``None`` (degraded path).
+        would leave a settled replay reading as still in flight.
         """
         recorder = self._warm_replay_timeline(task)
         try:
@@ -2141,17 +2080,9 @@ class PreludePhase(PhaseHandler):
         Measured uplift promotes the warm config onto ``optimization_stack`` and
         ``current_best``. Failures (including a failed required patch timeline)
         roll back both halves fail-closed, set an outcome status, and never
-        propagate.
-
-        Args:
-            result: The ``replay_warm_recipe`` task result dict (status,
-                throughput, workspace, etc.).
-            task: The originating task, used to recover the warm args/envs and
-                the baseline anchor; may be ``None`` (degraded path).
-            recorder: The replay's timeline recorder, or ``None`` when this
-                replay is not recording. Each gate writes its own verdict as it
-                rules, which is what lets a reader see why the arc ended
-                instead of inferring it from the terminal status.
+        propagate. ``task`` may be ``None`` (degraded path). Each gate writes
+        its own verdict onto ``recorder`` as it rules, which is what lets a
+        reader see why the arc ended.
         """
         state = self.shared_state
         outcome = dict(state.warm_replay_outcome or {})
@@ -2238,10 +2169,9 @@ class PreludePhase(PhaseHandler):
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
         if recorder is not None:
-            # The anchor goes on record here, where it is used. The phase held
-            # it in a local and dropped it, which is what forced the event to
-            # back-solve it from the gain -- exact only until a re-baseline
-            # moves the number the replay was never judged against.
+            # The anchor goes on record here, where it is used: back-solving it
+            # from the gain is exact only until a re-baseline moves the number
+            # the replay was never judged against.
             recorder.record_measurement(
                 before_tput=baseline_tput,
                 after_tput=tput,
@@ -2272,24 +2202,18 @@ class PreludePhase(PhaseHandler):
             log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
         # A replayed config lands on ``current_best``, so every later
-        # measurement in the session is taken against it. Promoting one on
-        # throughput alone is how a config that makes the model emit garbage
-        # becomes the session's reference: breaking the numerics is itself a
-        # large throughput win, so the objective actively selects for it.
-        # Every replay is judged here, not only high-risk knobs: a KB recipe is
-        # evidence from another session, so reproducing its throughput says
-        # nothing about whether it still computes correctly here.
+        # measurement in the session is taken against it. Promoting on
+        # throughput alone selects for garbage: breaking the numerics is itself
+        # a large throughput win.
         if recorder is not None and qg is not None:
-            # Only recorded when a gate existed to rule. A replay on a workload
-            # with no quality reference writes no row, which is how a reader
+            # Only recorded when a gate existed to rule, which is how a reader
             # tells "passed quality" from "quality did not apply".
             recorder.record_gate(GATE_QUALITY, passed=True, reason="no quality regression vs baseline reference")
         if not self._warm_replay_accuracy_ok(result, task, outcome, recorder):
             return
         if recorder is not None:
             # Restated now that the gate has read the scores onto the outcome,
-            # so the measurement block carries the replay's score beside the
-            # reference it was judged against.
+            # so the score sits beside the reference it was judged against.
             recorder.record_measurement(
                 before_tput=baseline_tput,
                 after_tput=tput,
@@ -2305,9 +2229,7 @@ class PreludePhase(PhaseHandler):
         combined_current_contract = bool(decision_params.get("combined_current_contract"))
         if recorder is not None:
             # Recorded before the keep ruling, so a replay that measured and
-            # lost still states what lost. The projection could only recover
-            # this from the stack entry a promotion pushed, which meant a
-            # rejected replay left no record of the config it ran.
+            # lost still states what lost.
             recorder.record_applied(
                 extra_server_args=str(decision_params.get("extra_server_args") or ""),
                 extra_envs=dict(decision_params.get("extra_envs") or {}),
@@ -2342,11 +2264,10 @@ class PreludePhase(PhaseHandler):
             )
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce
-            # Advisory, and deliberately not a gate row: falling short of the
-            # claim never rejects a replay that cleared the keep threshold, and
-            # a gate row reading ``passed=False`` would make ``blocked_by``
-            # name it as the reason an arc that actually succeeded ended. The
-            # bar and the verdict on it are stated in the verdict block.
+            # Advisory, and deliberately not a gate row: falling short never
+            # rejects a replay that cleared the keep threshold, and a
+            # ``passed=False`` row would make ``blocked_by`` name it as the
+            # reason an arc that actually succeeded ended.
             if measured_gain > 0 and measured_gain < historical_bar:
                 outcome["below_historical_reproduce_pct"] = True
                 outcome["historical_reproduce_bar_pct"] = round(
@@ -2529,11 +2450,9 @@ class PreludePhase(PhaseHandler):
                 )
             # Publish the reproduced verdict now that the stack entry exists but
             # before the cumulative update (the one step below that can raise and
-            # is swallowed by the caller). The post-ruling mirror reads this
-            # in-memory outcome: persisting it here keeps the canonical adoption
-            # in step with the stack. Placed after the lift on purpose -- if the
-            # lift itself raises, the outcome stays in_flight and both the stack
-            # and the mirror agree there is nothing adopted.
+            # is swallowed by the caller). Placed after the lift on purpose --
+            # if the lift raises, the outcome stays in_flight and both the stack
+            # and the post-ruling mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput, result)

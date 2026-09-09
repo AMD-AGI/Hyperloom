@@ -1069,20 +1069,6 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
-        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
-        # row, which under AgentX are the inert 1024/1024 placeholders -- so anchoring here mis-tags the cross-session
-        # row exactly as the CLOSE-time write would.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_blocked,
-        )
-
-        if agentx_kb_blocked(shared_state):
-            log.info(
-                "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
-                "mode or workload dimension and isl/osl are placeholders here."
-            )
-            return
-
         try:
             kb.put_recipe(
                 canonical_id=cid,

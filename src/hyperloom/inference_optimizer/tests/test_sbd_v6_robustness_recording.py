@@ -3,12 +3,10 @@
 
 """The ``robustness`` key records what the agent raised, when it raised it.
 
-The section this replaces cannot be checked against: it rebuilt each turn from
-``signal.json`` / ``action.json``, filenames nothing writes, so every row it
-produced was blank and "equal to the old value" would only prove both are
-empty. These tests are therefore positive -- a turn that raised intents must
-carry them, and a turn the agent could not complete must say which way it
-failed rather than leaving no trace at all.
+The section this replaces rebuilt each turn from filenames nothing writes, so
+every row it produced was blank and parity against it would prove nothing. These
+tests are therefore positive: a turn that raised intents carries them, and a turn
+the agent could not complete says which way it failed.
 """
 
 from __future__ import annotations
@@ -65,7 +63,6 @@ def test_a_raised_intent_carries_its_type_and_severity(tmp_path: Path) -> None:
 
 
 def test_a_mute_agent_is_distinguishable_from_a_quiet_session(tmp_path: Path) -> None:
-    """The two used to look identical: both produced blank rows or none."""
     record_robustness_turn(
         tmp_path,
         turn_idx=1,

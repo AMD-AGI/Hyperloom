@@ -443,10 +443,8 @@ class EnablementLane(CoordinatorCollaborator):
         if digest in seen:
             return
         seen.append(digest)
-        # A round that never happened is still something the lane spent the
-        # session doing; without this the timeline shows a lane that was
-        # triggered and then did nothing, with no way to tell that apart from
-        # a lane that was never triggered at all.
+        # Without this the timeline cannot tell a lane that was triggered and
+        # then did nothing from one that was never triggered at all.
         enablement_event.record_human_review(
             digest=digest,
             failure_kind=signature.kind,
@@ -720,19 +718,9 @@ def _record_enablement_round(
 
     A function of the lane state rather than a method, because it needs nothing
     of the coordinator: the round's own facts are in ``res`` and the terminal it
-    reached is what the rearm just wrote to ``state``. Reading those two lines
-    above is author time, not a projection -- but reading them inline would
-    bury the recording inside a method whose job is the state machine.
-
-    Args:
-        state: The live SharedState, whose enablement lane the rearm just wrote.
-        res: The ``integrate_patch`` result the rearm scored.
-        setting_script: The reproduction script this round rewrote, when it
-            made progress.
-        stop_reason: The stop reason this round set, when it hit the stall cap.
-        attempt: The round's ordinal, as the dispatch filed it.
-        stall_streak: The round ledger's stalled streak after this round
-            settled.
+    reached is what the rearm just wrote to ``state``. ``stop_reason`` is set
+    only when this round hit the stall cap, and ``attempt`` is the ordinal the
+    dispatch filed it under.
     """
     lane = state.enablement
     round_tid = str(res.get("specialist_task_id") or "").strip() or str(lane.last_specialist_task_id or "")

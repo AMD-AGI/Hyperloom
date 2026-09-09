@@ -128,7 +128,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         lambda: collectors.collect_v6_close(
             v6_warnings,
             recorded=assembled.get("close"),
-            robustness=assembled.get("robustness"),
         ),
         v6_warnings,
         default={},

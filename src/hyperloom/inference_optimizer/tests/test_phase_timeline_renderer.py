@@ -15,8 +15,7 @@ def _phase_event(phase: str, macro_cycle: int, rows: list[dict[str, Any]]) -> di
 
 
 def test_phase_timeline_renderer_renders_capped_histogram() -> None:
-    # Rows arrive spread over the phase events that dispatched them, and the
-    # renderer's job is to read them back as one run-long sequence.
+    # Rows arrive spread over the phase events that dispatched them, and read back as one sequence.
     rows = [
         {
             "settled_at": f"t{i}",
@@ -50,9 +49,8 @@ def test_phase_timeline_renderer_renders_capped_histogram() -> None:
 
 
 def test_a_dispatch_that_never_settled_is_reported_as_still_running() -> None:
-    # The gap this renderer exists to show: the flat projection it replaces held
-    # settled rows only, so an action killed mid-flight read as one that never
-    # happened.
+    # The flat projection this replaces held settled rows only, so an action killed
+    # mid-flight read as one that never happened.
     breakdown = {
         "timeline": [
             _phase_event(

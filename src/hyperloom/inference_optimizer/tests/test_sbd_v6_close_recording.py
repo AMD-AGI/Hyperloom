@@ -3,17 +3,11 @@
 
 """Coverage for the recorded SBD V6 ``close`` section.
 
-The section this replaces was projected, and the defect these tests mostly pin
-is the one the projection could not fix from where it stood: ``close.status``
-was derived at export from which steps were present, but the breakdown is
-written by a step in the middle of the sequence, so the later steps were
-legitimately absent and every healthy session was labelled ``degraded``. The
-word therefore had to mean "the record is incomplete" rather than "the
-close-out went badly", and a reader could not tell the two apart.
-
-Recording splits them: the sequencer's last act records the verdict, so an
-un-settled section says ``running`` and ``degraded`` is free to mean a step
-actually failed.
+Most of these pin the defect the projection could not fix from where it stood:
+``close.status`` was derived at export from which steps were present, but the
+breakdown is written mid-sequence, so every healthy session read ``degraded``.
+The sequencer's last act now records the verdict, so an un-settled section says
+``running`` and ``degraded`` is free to mean a step actually failed.
 """
 
 from __future__ import annotations
@@ -55,7 +49,6 @@ def _close(session_dir: Path, *, warnings: list[str] | None = None) -> dict[str,
     return collect_v6_close(
         warnings if warnings is not None else [],
         recorded=assembled.get("close"),
-        robustness=assembled.get("robustness"),
     )
 
 
@@ -92,12 +85,6 @@ def _run_sequence(session_dir: Path, *, fail: str = "") -> None:
 
 
 def test_mid_sequence_reports_running_not_degraded(sd: Path) -> None:
-    """The defect this conversion exists to fix.
-
-    At the moment the breakdown is written, the steps after it have not run.
-    The projection read that as ``degraded``; the recording has no verdict yet
-    and says so.
-    """
     record_close_opened(sd)
     record_close_step(sd, step="sequencer_started", status="running")
     record_close_step(sd, step="fact_finalize", status="done")
@@ -107,8 +94,7 @@ def test_mid_sequence_reports_running_not_degraded(sd: Path) -> None:
     close = _close(sd)
     assert close["status"] == "running"
     assert close["close_sequence_done"] is False
-    # Not a verdict, and not empty either: the steps that did settle are on
-    # the wire, which is what lets a reader see how far the close-out got.
+    # Not a verdict, and not empty either: the steps that did settle are on the wire.
     assert [row["step"] for row in close["steps"]] == [
         "sequencer_started",
         "fact_finalize",
@@ -128,7 +114,6 @@ def test_settled_clean_sequence_succeeds(sd: Path) -> None:
 
 
 def test_failed_step_settles_degraded(sd: Path) -> None:
-    """``degraded`` now means a step failed, not that the record is partial."""
     _run_sequence(sd, fail="report")
     record_close_settled(sd, stop_reason="time_exhausted")
 
@@ -139,31 +124,18 @@ def test_failed_step_settles_degraded(sd: Path) -> None:
 
 
 def test_unsettled_step_does_not_count_against_the_verdict(sd: Path) -> None:
-    """A step recorded ``running`` is not a failure.
-
-    ``sequencer_started`` is recorded once as ``running`` and never revisited,
-    so counting it as unsettled would have put every session in ``degraded``.
-    The projection needed a special case for it; the verdict does not.
-    """
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
     assert _close(sd)["status"] == "succeeded"
 
 
 def test_never_entered_close_has_no_section(sd: Path) -> None:
-    """No fragment at all is distinguishable from an un-settled close-out."""
     assert assemble_parts(sd, warnings=[]).get("close") is None
-    # The collector falls back to the projection, which reports the session
-    # never reached its close-out.
+    # The collector falls back to the projection, which reports a session that never closed.
     assert _close(sd)["status"] == "failed"
 
 
 def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
-    """Paths come from the step that wrote the file, not an export-time probe.
-
-    Pinned by deleting the file after recording it: a projection that tested
-    for the file would drop it, which is the behaviour being replaced.
-    """
     reports = sd / "reports"
     reports.mkdir()
     final_json = reports / "final.json"
@@ -180,8 +152,7 @@ def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
 
     artifacts = _close(sd)["artifacts"]
     assert artifacts["final_json_path"] == "reports/final.json"
-    # Recorded by a later call that knew nothing about the reports, and the
-    # singleton merge must not have erased them.
+    # Recorded by a later call, so the singleton merge must not have erased the earlier one.
     assert artifacts["artifact_package_path"] == str(package)
     # Never recorded, so it stays absent rather than being invented.
     assert artifacts["final_md_path"] is None
@@ -194,8 +165,7 @@ def test_escalation_comes_from_the_recorded_stop_reason(sd: Path) -> None:
 
     robustness = _close(sd)["robustness"]
     assert robustness["escalated"] is True
-    # Recorded alongside the verdict so the escalation can be checked against
-    # the reason it was drawn from.
+    # Recorded alongside the verdict, so the escalation can be checked against its reason.
     assert robustness["stop_reason"] == "robustness_escalated"
 
 
@@ -206,7 +176,6 @@ def test_ordinary_stop_reason_is_not_an_escalation(sd: Path) -> None:
 
 
 def test_the_close_out_says_what_the_ladder_found_not_just_that_it_escalated(sd: Path) -> None:
-    """The verdict alone says a session was escalated without saying what for."""
     _write_findings(sd, [_finding()])
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="robustness_escalated")
@@ -219,13 +188,11 @@ def test_the_close_out_says_what_the_ladder_found_not_just_that_it_escalated(sd:
     assert finding["tick_index"] == 4
     assert finding["rca_text"] == "the flag is unsupported on this build"
     assert finding["evidence"] == {"crashes": 3}
-    # The payloads are the ladder's own working detail; the types are what the
-    # close-out is reporting.
+    # The payloads are the ladder's working detail; the types are what the close-out reports.
     assert finding["intents"] == ["alert"]
 
 
 def test_an_unescalated_session_still_reports_what_fired(sd: Path) -> None:
-    """These are the findings that were judged survivable, which had nowhere to be read."""
     _write_findings(sd, [_finding(severity="low")])
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
@@ -236,7 +203,6 @@ def test_an_unescalated_session_still_reports_what_fired(sd: Path) -> None:
 
 
 def test_a_session_whose_ladder_never_wrote_reports_no_findings_key(sd: Path) -> None:
-    """An empty list would claim a ladder that ran and found nothing."""
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
 
@@ -244,7 +210,6 @@ def test_a_session_whose_ladder_never_wrote_reports_no_findings_key(sd: Path) ->
 
 
 def test_findings_are_ordered_and_the_total_survives_the_cap(sd: Path) -> None:
-    """A truncated list must never read as the whole of it."""
     _write_findings(sd, [_finding(tick_index=n, timestamp_unix=float(2000 - n)) for n in range(60)])
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
@@ -257,7 +222,6 @@ def test_findings_are_ordered_and_the_total_survives_the_cap(sd: Path) -> None:
 
 
 def test_findings_from_several_sink_files_are_read_together(sd: Path) -> None:
-    """The sink names its file after the session id, and a resume starts another."""
     _write_findings(sd, [_finding(symptom_name="first", timestamp_unix=1.0)], name="s1")
     _write_findings(sd, [_finding(symptom_name="second", timestamp_unix=2.0)], name="s2")
     _run_sequence(sd)
@@ -267,17 +231,18 @@ def test_findings_from_several_sink_files_are_read_together(sd: Path) -> None:
     assert [row["symptom_name"] for row in robustness["findings"]] == ["first", "second"]
 
 
-def test_the_agents_turns_sit_with_the_verdict_drawn_from_them(sd: Path) -> None:
-    """Reading the agent's account used to require knowing to look in two keys."""
+def test_the_agents_turns_exist_only_in_top_level_robustness(sd: Path) -> None:
     from hyperloom.inference_optimizer.breakdown.recorder.robustness_out import record_robustness_turn
 
     record_robustness_turn(sd, turn_idx=0, outcome="intents", intents=[{"type": "alert"}])
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
 
-    turns = _close(sd)["robustness"]["turns"]
+    assembled = assemble_parts(sd, warnings=[])
+    turns = assembled["robustness"]["turns"]
     assert [row["turn_idx"] for row in turns] == [0]
     assert turns[0]["outcome"] == "intents"
+    assert "turns" not in _close(sd)["robustness"]
 
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
@@ -291,7 +256,6 @@ def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
 
 
 def test_step_substream_does_not_leak_into_the_envelope(sd: Path) -> None:
-    """``close_step`` is folded into ``close.steps`` and popped."""
     _run_sequence(sd)
     assembled = assemble_parts(sd, warnings=[])
     assert "close_step" not in assembled
@@ -308,17 +272,7 @@ def test_unknown_step_name_is_passed_through_and_warned(sd: Path) -> None:
     assert any("brand_new_step" in warning for warning in warnings)
 
 
-# ---------------------------------------------------------------------------
-# close.kb_write_back
-# ---------------------------------------------------------------------------
-
-
 def test_no_publication_attempt_leaves_no_write_back_key(sd: Path) -> None:
-    """Absence is the record that it was never tried.
-
-    The key is only there because an attempt was made, so an empty one would
-    claim a publication that never happened.
-    """
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
     assert "kb_write_back" not in _close(sd)
@@ -353,12 +307,6 @@ def test_published_recipe_reports_its_identity_and_verdict(sd: Path) -> None:
 
 
 def test_attempt_opened_and_never_settled_stays_pending(sd: Path) -> None:
-    """The defect this replaces.
-
-    A session killed mid-publish leaves an opened attempt behind. The
-    projection read that leftover marker as ``failed``, which claimed the KB
-    had refused the write when in fact it was never asked to answer.
-    """
     record_close_opened(sd)
     record_write_back_opened(sd, attempt=1, source="close")
 
@@ -373,12 +321,6 @@ def test_attempt_opened_and_never_settled_stays_pending(sd: Path) -> None:
 
 
 def test_t4_fallback_retry_appends_a_second_attempt(sd: Path) -> None:
-    """Two seams try the publication, and the row says which one settled it.
-
-    The CLOSE path attempts it first; if that never settled, the T4 teardown
-    hook tries again. ``source`` lives on the attempt rather than on the arc
-    because the two attempts can disagree about it.
-    """
     record_close_opened(sd)
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
@@ -413,12 +355,6 @@ def test_t4_fallback_retry_appends_a_second_attempt(sd: Path) -> None:
 
 
 def test_failure_keeps_the_error_class_apart_from_the_reason(sd: Path) -> None:
-    """``error_class`` and ``raw_reason`` used to be the same string.
-
-    The publisher reports transport failures as a bare exception class name,
-    so the projection put that one value in both fields and a reader could not
-    tell a class name from a reason token.
-    """
     record_close_opened(sd)
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
@@ -442,13 +378,6 @@ def test_failure_keeps_the_error_class_apart_from_the_reason(sd: Path) -> None:
 
 
 def test_skip_reason_is_a_recorded_code_not_a_matched_substring(sd: Path) -> None:
-    """``agentx`` was the collision the projection's rule order worked around.
-
-    The needle appears both as this skip reason and inside exception class
-    names such as ``configuration:AgentXConfigError``, so the export had to
-    keep its 14 rules in a particular order to stop them claiming each
-    other's cases. The publisher states the code instead.
-    """
     record_close_opened(sd)
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
@@ -468,7 +397,6 @@ def test_skip_reason_is_a_recorded_code_not_a_matched_substring(sd: Path) -> Non
 
 
 def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
-    """Counted at settlement, not at export: the queues keep moving."""
     dead_letter = recipe_kb_dead_letter_ndjson(sd)
     dead_letter.parent.mkdir(parents=True, exist_ok=True)
     dead_letter.write_text('{"a": 1}\n\n{"b": 2}\n', encoding="utf-8")
@@ -485,11 +413,6 @@ def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
 
 
 def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
-    """A resumed session re-enters CLOSE and closes again.
-
-    The second pass describes a second attempt, so its rows are appended; its
-    verdict, which is the one that stands, replaces the first.
-    """
     _run_sequence(sd, fail="report")
     record_close_settled(sd, stop_reason="time_exhausted")
     assert _close(sd)["status"] == "degraded"
@@ -500,18 +423,11 @@ def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
 
     close = _close(sd)
     assert [row["step"] for row in close["steps"]].count("done") == 2
-    # The first pass's failure is still on the record, so the verdict stands
-    # at degraded even though the second pass failed nothing.
+    # The first pass's rows are still on the record after the second pass appended.
     assert close["steps"][0]["step"] == "sequencer_started"
 
 
 def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
-    """The ceiling and the curve are session-level, so the close-out states them.
-
-    Neither belongs to any single roofline run: the ceiling comes from the last
-    analysis and the curve from every promotion between them, which is why this
-    is the one roofline fact recorded outside a roofline event.
-    """
     record_close_opened(sd)
     record_roofline_progress(
         sd,
@@ -539,13 +455,11 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     assert progress["trajectory_incomplete"] is False
     assert [point["label"] for point in progress["trajectory"]] == ["baseline", "chunked", "fused_rms"]
     assert progress["trajectory"][-1]["gain_pct"] == 25.0
-    # The snapshot history stays in the roofline events that recorded it; two
-    # copies of it would be free to disagree.
+    # The snapshot history stays in the roofline events; two copies could disagree.
     assert "snapshots" not in progress
 
 
 def test_progress_reports_the_latency_domain_when_there_is_no_token_ceiling(sd: Path) -> None:
-    """Diffusion models decode no tokens, so a null tok/s ceiling is not a failure."""
     record_close_opened(sd)
     record_roofline_progress(
         sd,
@@ -566,12 +480,6 @@ def test_progress_reports_the_latency_domain_when_there_is_no_token_ceiling(sd: 
 
 
 def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
-    """A resume interrupted mid-promote leaves the stack behind the session's best.
-
-    Recorded rather than left to a warnings list the reader may not be reading:
-    a curve that ends below the session's own headline number is a property of
-    the record, so the record says it.
-    """
     record_close_opened(sd)
     record_roofline_progress(
         sd,
@@ -588,7 +496,6 @@ def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
 
 
 def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: Path) -> None:
-    """Zero would read as a measured ceiling of zero, which is a different claim."""
     record_close_opened(sd)
     record_roofline_progress(sd, baseline_tput=1000.0, optimization_stack=[], latest_snapshot=None)
 
@@ -601,7 +508,6 @@ def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: P
 
 
 def test_a_close_that_never_snapshotted_progress_omits_the_key(sd: Path) -> None:
-    """An empty curve would claim a session that made no progress."""
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="time_exhausted")
 
@@ -609,26 +515,17 @@ def test_a_close_that_never_snapshotted_progress_omits_the_key(sd: Path) -> None
 
 
 def test_the_baseline_failure_tally_is_snapshotted_at_the_close(sd: Path) -> None:
-    """The two baseline facts no baseline event can hold.
-
-    Each baseline event closes when its own measurement ends, and the counters
-    are advanced by the write-back that accounts for it afterwards -- so an
-    event records the count it was dispatched under and the session's total is
-    only final here.
-    """
     record_close_opened(sd)
     record_baseline_progress(sd, failure_streak=2, total_failures=5, arg_error_streak=1)
 
     progress = _close(sd)["baseline_progress"]
     assert progress["failure_streak"] == 2
     assert progress["total_failures"] == 5
-    # Counted apart from the general streak: a rejected server arg is a
-    # configuration error the session can correct, a dying server is not.
+    # Counted apart: a rejected server arg is correctable, a dying server is not.
     assert progress["arg_error_streak"] == 1
 
 
 def test_a_session_whose_baselines_all_landed_reports_zeroes(sd: Path) -> None:
-    """Zero is a claim worth making, so it is recorded rather than omitted."""
     record_close_opened(sd)
     record_baseline_progress(sd)
 
@@ -640,11 +537,6 @@ def test_a_session_whose_baselines_all_landed_reports_zeroes(sd: Path) -> None:
 
 
 def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
-    """The terminal configuration is a close-out fact for the same reason.
-
-    The stack ledger records every adoption and a revert does not retract the
-    row that adopted it, so what was still standing at the end is stated here.
-    """
     record_close_opened(sd)
     record_final_recipe(
         sd,
@@ -660,16 +552,13 @@ def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
     assert recipe["throughput"] == 142.5
     assert recipe["action_path"] == ["baseline", "explore:cuda_graph"]
     assert recipe["extra_server_args"] == "--enable-torch-compile"
-    # Stringified on the way in: the launch applies envs as strings, and a
-    # recipe that reproduces the run must say what was actually exported.
+    # Stringified on the way in, because that is what the launch actually exported.
     assert recipe["extra_envs"] == {"HSA_ENABLE": "1"}
-    # Carried beside the throughput because a session with no whole-stack
-    # validation has no validation row to read the pair off.
+    # Carried here because a session with no whole-stack validation has no row to read the pair off.
     assert (recipe["ttft_mean_ms"], recipe["e2el_mean_ms"]) == (31.2, 980.0)
 
 
 def test_a_close_that_never_settled_a_recipe_omits_the_key(sd: Path) -> None:
-    """An empty recipe would claim a session that shipped a bare config."""
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="time_exhausted")
 
@@ -684,12 +573,6 @@ def test_a_close_that_never_snapshotted_the_tally_omits_the_key(sd: Path) -> Non
 
 
 def test_a_candidate_dropped_at_the_close_says_what_was_dropped(sd: Path) -> None:
-    """The drop narrative outlives the slot the report used to read it from.
-
-    The close drain empties ``geak_pending`` by the same write that settles it,
-    and every kernel event of the session has closed by then, so the verdict
-    has nowhere else to be read from.
-    """
     record_close_opened(sd)
     record_geak_candidate(
         sd,
@@ -722,7 +605,6 @@ def test_a_candidate_still_waiting_is_not_a_candidate_that_was_judged(sd: Path) 
 
 
 def test_a_session_with_no_candidate_records_an_empty_verdict(sd: Path) -> None:
-    """Recorded rather than omitted: "no candidate" and "never looked" differ."""
     record_close_opened(sd)
     record_geak_candidate(sd)
 

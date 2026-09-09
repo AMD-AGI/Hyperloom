@@ -3,20 +3,10 @@
 
 """Coverage for the SBD V6 ``warm_start`` event.
 
-The event this replaces was projected, and these tests pin the three defects
-that projection had.
-
-The status answered the wrong question: a miss was published as
-``not_matched``, so a first-ever session for a workload -- an empty KB
-answering correctly -- was filed under a word that reads as a malfunction.
-
-The reads block described the wrong window. It aggregated the session's whole
-recipe audit log inside an event that covers T0 alone, which pulled in every
-successful write (the log carries those with ``hit: True``) and every
-mid-session amendment read.
-
-And two of its fields could never be populated: ``by_source`` and
-``best_config_by_source`` read keys no producer has ever written.
+Three readings are pinned. The lookup's outcome rides ``match_status`` rather than the event status, so
+a miss is a completed lookup and not a malfunction. The reads block covers T0's own open interval only,
+excluding the writes the audit log records with ``hit: True`` and the mid-session amendment reads. And
+``by_source`` and ``best_config_by_source`` are gone, having read keys no producer ever wrote.
 """
 
 from __future__ import annotations
@@ -126,11 +116,6 @@ def _read(**overrides: Any) -> dict[str, Any]:
     return event
 
 
-# ---------------------------------------------------------------------------
-# the lookup's own outcome, kept apart from what it found
-# ---------------------------------------------------------------------------
-
-
 def test_an_exact_hit_reports_identity_gain_and_origin(_bound_session):
     recorder = _recorder()
     recorder.finish(match_status=MATCH_HIT, matched=_matched())
@@ -148,12 +133,6 @@ def test_an_exact_hit_reports_identity_gain_and_origin(_bound_session):
 
 
 def test_a_miss_is_a_completed_lookup_and_not_a_failure(_bound_session):
-    """The projection published this as ``not_matched``, its own event status.
-
-    A workload nobody has optimized yet has an empty KB, and an empty KB
-    answering "nothing here" is the lookup working. Reporting that in the
-    status field made every cold start read as though a step had gone wrong.
-    """
     _recorder().finish(match_status=MATCH_MISS)
 
     event = _event(_bound_session)
@@ -163,12 +142,6 @@ def test_a_miss_is_a_completed_lookup_and_not_a_failure(_bound_session):
 
 
 def test_a_seed_only_match_is_a_third_state_and_not_a_bad_status(_bound_session):
-    """A record was found and cannot be executed, which is neither of the two.
-
-    It rides ``match_status`` rather than the event status, because T0 stamps
-    its own anchor row before searching and then matches it -- so grading
-    ``seed_only`` in the status would mark every cold start as unhealthy.
-    """
     recorder = _recorder()
     recorder.finish(match_status=MATCH_SEED_ONLY, matched=_matched())
 
@@ -197,18 +170,12 @@ def test_a_degraded_tier_is_not_reported_as_exact(_bound_session):
 
 
 def test_the_queried_identity_is_recorded_as_it_is_queried(_bound_session):
-    """Read rather than rebuilt: the hardware dimension is topology-aware."""
     recorder = _recorder()
     recorder.finish(match_status=MATCH_MISS)
 
     request = _event(_bound_session)["ext"]["request"]
     assert request["canonical_id"] == CID
     assert request["scope"]["conc"] == 64
-
-
-# ---------------------------------------------------------------------------
-# reads: T0's own, one row each
-# ---------------------------------------------------------------------------
 
 
 def test_each_read_is_kept_as_its_own_row_with_the_tallies_over_them(_bound_session):
@@ -225,19 +192,12 @@ def test_each_read_is_kept_as_its_own_row_with_the_tallies_over_them(_bound_sess
     assert len(reads["rows"]) == 2
     assert reads["rows"][0]["matched_canonical_id"] == CID
     assert reads["rows"][0]["exact"] is True
-    # A miss has no result to describe, so it says nothing rather than
-    # reporting a row with everything in it zeroed.
+    # A miss has no result to describe, so it says nothing rather than zeroing every field.
     assert reads["rows"][1]["matched_canonical_id"] is None
     assert reads["rows"][1]["exact"] is None
 
 
 def test_a_write_is_not_counted_as_a_read(_bound_session):
-    """``put_recipe`` logs its success with ``hit: True``.
-
-    The projection aggregated the audit log without filtering by operation, so
-    every recipe the session wrote inflated both the read count and the hit
-    count of a lookup that had already finished.
-    """
     recorder = _recorder()
     record_read(_bound_session, _read())
     record_read(
@@ -261,12 +221,6 @@ def test_a_write_is_not_counted_as_a_read(_bound_session):
 
 
 def test_a_read_served_after_the_lookup_settled_belongs_to_nobody(_bound_session):
-    """``_kb_amend_recipe`` consults the same store mid-session.
-
-    Its reads are real reads through the same audit hook, and the projection
-    counted them into the anchor's tally. The event's own open interval is what
-    separates them.
-    """
     recorder = _recorder()
     record_read(_bound_session, _read())
     recorder.finish(match_status=MATCH_HIT, matched=_matched())
@@ -288,12 +242,6 @@ def test_a_read_served_before_the_lookup_opened_belongs_to_nobody(_bound_session
 
 
 def test_a_lookup_left_open_by_one_session_cannot_claim_another_s_reads(tmp_path, _bound_session):
-    """T0 raising before it settles leaves its window open.
-
-    The window is scoped to the session it was opened in, so the leak cannot
-    cross into the next session and attribute its reads to an anchor that
-    belongs to a different run and never finished.
-    """
     _recorder()  # opened and never settled
 
     other = tmp_path / "other-session"
@@ -316,12 +264,6 @@ def test_a_lookup_that_read_nothing_carries_no_reads_block(_bound_session):
 
 
 def test_the_retired_by_source_fields_are_gone(_bound_session):
-    """They read ``result.sources`` / ``result.best_config_source``.
-
-    No producer in the codebase has ever written either key, so both maps were
-    always empty -- which reads as "no source was involved" rather than as
-    "this was never recorded".
-    """
     recorder = _recorder()
     record_read(_bound_session, _read())
     recorder.finish(match_status=MATCH_HIT, matched=_matched())
@@ -331,13 +273,7 @@ def test_the_retired_by_source_fields_are_gone(_bound_session):
     assert "best_config_by_source" not in reads
 
 
-# ---------------------------------------------------------------------------
-# a lookup that never settled
-# ---------------------------------------------------------------------------
-
-
 def test_a_session_killed_mid_lookup_keeps_the_identity_it_asked_for(_bound_session):
-    """The request rides on the open shell, so the event is not anonymous."""
     _recorder()
 
     event = _event(_bound_session)
@@ -354,5 +290,4 @@ def test_finalize_closes_a_lookup_that_outlived_its_process(_bound_session):
 
     event = _event(_bound_session)
     assert event["status"] == EVENT_STATUS_INTERRUPTED
-    # The reads it did get to make say how far it got.
     assert event["ext"]["reads"]["count"] == 1

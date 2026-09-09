@@ -82,7 +82,6 @@ def test_close_patch_replaces_the_step_two_snapshot_with_the_finished_sequence(t
 
 
 def test_close_patch_touches_nothing_but_the_close_key(tmp_path):
-    """The whole point of a patch over a rebuild: every other key is frozen."""
     target = _session_with_step_two_breakdown(tmp_path)
     before = json.loads(target.read_text(encoding="utf-8"))
 
@@ -112,7 +111,6 @@ def test_close_patch_is_a_no_op_without_a_breakdown(tmp_path):
 
 
 def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
-    """A V5-only breakdown has no ``close`` key, and gaining one is a surface change."""
     target = tmp_path / exporter.BREAKDOWN_FILENAME
     _write_json(target, {"schema_version": "hyperloom.session_breakdown.v5.0", "outcome": {}})
     record_close_opened(tmp_path)
@@ -124,7 +122,6 @@ def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
 
 
 def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
-    """It runs at shutdown and must never mask the session's stop_reason."""
     target = tmp_path / exporter.BREAKDOWN_FILENAME
     target.write_text("{not json", encoding="utf-8")
 
@@ -143,7 +140,6 @@ def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
 
 
 def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
-    """Patching the session copy is not delivery; the package has to be rebuilt."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -160,12 +156,6 @@ def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
 
 
 def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
-    """The regression this guards: the fix reaching the session dir only.
-
-    Without the rebuild the session copy reads ``succeeded`` while both
-    delivered copies still report no verdict and stop four steps in — the state
-    that made the previous round's fix invisible to its consumers.
-    """
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     target = _session_with_step_two_breakdown(session_dir)
@@ -181,7 +171,6 @@ def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
 
 
 def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
-    """A surgical member swap would leave the manifest describing the old file."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -237,11 +226,6 @@ def _baseline_event(*actions: dict) -> dict:
 
 
 def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
-    """The four figures come from the event, latency included.
-
-    Latency used to be parsed out of ``benchmark_report.json`` at export time;
-    the executor reports it, so the event already holds it.
-    """
     outcome = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=800.0))])
 
     assert outcome["baseline"] == {
@@ -253,14 +237,6 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
 
 
 def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():
-    """The discrimination the dispatch kind cannot make.
-
-    The kernel lane's integrate re-baseline and stack validation reach the same
-    executor carrying ``kind="baseline"`` literally, and land actions on the
-    same event. They measure against an already-anchored baseline, so reading
-    the newest ``baseline``-kind action would publish an A/B probe as the
-    session's reference.
-    """
     outcome = _v6_outcome(
         [
             _baseline_event(
@@ -279,7 +255,6 @@ def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():
 
 
 def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
-    """A baseline re-measured after an enablement fix legitimately re-anchors."""
     outcome = _v6_outcome(
         [
             _baseline_event(_baseline_action(task_id="b-1", throughput=800.0, end_time="2026-01-01T00:00:00+00:00")),
@@ -291,11 +266,6 @@ def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
 
 
 def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
-    """``degraded`` is the number the session's gains were read against.
-
-    It stands on the cold warmup round because the budget would not hold the hot
-    pass -- knowingly depressed, but it is what the session actually used.
-    """
     degraded = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="degraded"))])
     failed = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="failed"))])
 
@@ -319,12 +289,6 @@ def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
 # cross-cutting: ordering, isolation and vocabulary
 # ---------------------------------------------------------------------------
 def test_the_timeline_is_ordered_by_when_events_happened_not_when_they_were_read(tmp_path):
-    """Read order is write order, which is not the order the work ran in.
-
-    A phase that opens an event early and settles it late lands behind a
-    shorter one that started after it, so the export sorts on the recorded
-    time rather than shipping the spool as it found it.
-    """
     for start, end, event_type in (
         ("2026-08-27T00:58:00+00:00", "2026-08-27T00:59:00+00:00", "install"),
         ("2026-08-27T00:30:00+00:00", "2026-08-27T00:31:00+00:00", "model_gate"),

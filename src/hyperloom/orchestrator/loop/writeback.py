@@ -102,11 +102,8 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 # Stable ``result_type`` codes for the reasons the remote KB Store returns.
-# The store's reasons are already tokens, so this is an exact lookup rather
-# than the substring matching the breakdown used to do downstream: matching
-# needles against a reason string cannot tell ``agentx`` the skip reason from
-# ``agentx`` inside an exception class name, and the export had to order 14
-# rules around that collision to keep them from claiming each other's cases.
+# An exact lookup, not substring matching: ``agentx`` the skip reason and
+# ``agentx`` inside an exception class name are different things.
 _REMOTE_RESULT_TYPES: dict[str, str] = {
     "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
     "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
@@ -118,20 +115,16 @@ _REMOTE_RESULT_TYPES: dict[str, str] = {
     "champion_not_promoted": _close_out.RESULT_CHAMPION_NOT_PROMOTED,
 }
 
-# The one exception class that means the store rejected the bundle rather than
-# that we never reached the store.
+# The one exception class meaning the store rejected the bundle, rather than
+# that we never reached the store at all.
 _REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
 
 
 def _remote_result_type(status: str, reason: str) -> str:
-    """The stable ``result_type`` for a remote KB Store write result.
+    """The ``close_out.RESULT_*`` code for a remote KB Store write result.
 
-    Args:
-        status: The result's status, used only when the reason is unrecognized.
-        reason: The store's own reason token.
-
-    Returns:
-        A ``close_out.RESULT_*`` code.
+    ``status`` is consulted only when the store's own reason token is
+    unrecognized.
     """
     known = _REMOTE_RESULT_TYPES.get(str(reason or "").strip())
     if known:
@@ -292,9 +285,8 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
     return None
 
 
-#: Explore outcomes that are not an attempt at anything. A variant skipped as
-#: a duplicate was never measured, so recording it as an attempt would put a
-#: row in the funnel that no measurement backs.
+#: Explore outcomes that are not an attempt at anything: a variant skipped as a
+#: duplicate was never measured, so no measurement would back its funnel row.
 _NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
 
 
@@ -307,24 +299,10 @@ def _record_config_attempts(
 ) -> None:
     """Record the configuration arm's measured attempts on the framework event.
 
-    Recorded here rather than inside the executor because the executor runs
-    outside the phase's own object graph and has no recorder to reach; this is
-    the first coordinator-side seam that sees the full per-variant outcome.
-
-    Module-level and self-defending for the same reason as the phase's own
-    helpers: this method gets borrowed onto lightweight stand-ins by tests, and
-    a variant write-back must not fail because its observability did.
-
-    The outcome is recorded verbatim. The journal beside this collapses
-    ``KEEP_UNSTABLE`` and ``KILLED_OVERTIME`` into a plain revert, which is
-    what made a variant that won and was withheld indistinguishable from one
-    that lost on measurement.
-
-    Args:
-        coord: The writeback collaborator, or a stand-in.
-        task: The completed explore task.
-        per_variant: The executor's per-variant outcome rows.
-        result_dict: The task result, read for the round id the rows belong to.
+    The executor has no recorder to reach; this is the first coordinator-side
+    seam that sees the full per-variant outcome. The outcome is recorded
+    verbatim, unlike the journal beside it, which collapses ``KEEP_UNSTABLE``
+    and ``KILLED_OVERTIME`` into a plain revert.
     """
     getter = getattr(coord, "_framework_timeline", None)
     recorder = getter() if callable(getter) else None
@@ -345,9 +323,8 @@ def _record_config_attempts(
         metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
         variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
         fingerprint = str(row.get("fingerprint") or "")
-        # The fingerprint identifies the variant within the round, and the
-        # round within the task, so the three together identify the attempt
-        # without the executor having to mint an id of its own.
+        # The fingerprint identifies the variant within the round and the round
+        # within the task, so the three together identify the attempt.
         attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
         if not attempt_id:
             continue
@@ -367,9 +344,8 @@ def _record_config_attempts(
                 # recognises the variant by.
                 variant_name=str(row.get("variant_name") or ""),
                 measurement={
-                    # Both ends of the pair, as the executor measured them. The
-                    # anchor advances on every KEEP, so a percentage without
-                    # its own denominator cannot be added to anything.
+                    # Both ends of the pair: the anchor advances on every KEEP,
+                    # so a percentage without its denominator adds to nothing.
                     "before_tput": metrics.get("base_tput"),
                     "after_tput": metrics.get("tput"),
                     "gain_pct": metrics.get("gain_pct"),
@@ -391,7 +367,6 @@ def _record_config_attempts(
                 },
                 decision=outcome,
                 adopted=outcome == "KEEP",
-                # The stack it launched on, as the round had it at that moment.
                 # Recorded rather than referenced: every KEEP advances the
                 # stack, so the session's current config is not what this
                 # variant was measured on top of.
@@ -421,10 +396,9 @@ def _record_config_attempts(
     proposal_ref = str(params.get("proposal_msg_id") or "")
     if not (recorded and proposal_ref):
         return
-    # Settled here rather than at materialization, because reaching a bench is
-    # not the same as being measured on one: a grid whose task dies before any
-    # variant runs has no attempt to stand behind an ``attempted`` reading, and
-    # is more honestly left unsettled.
+    # Settled here rather than at materialization: a grid whose task dies before
+    # any variant runs has no attempt to stand behind an ``attempted`` reading,
+    # and is more honestly left unsettled.
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
         DISPOSITION_ATTEMPTED,
         STEP_ATTEMPTED,
@@ -1140,13 +1114,10 @@ class WritebackCollaborator:
     def _record_enablement_eval_trigger(self) -> None:
         """Open the enablement lane's event on the eval failure that triggered it.
 
-        Recorded here rather than derived at export because the fields it reads
-        do not all survive the run: ``origin`` is cleared when the lane
-        succeeds, so the export had to fall back to "``baseline_eval_kind`` is
-        set" -- a disjunction over two fields with different lifetimes standing
-        in for a fact nobody wrote down. The recorder keeps only the first
-        trigger, which is also what makes an eval-less re-baseline unable to
-        downgrade a measured trigger to an empty one.
+        Recorded here rather than derived at export: ``origin`` is cleared when
+        the lane succeeds, so the fields it reads do not all survive the run.
+        Only the first trigger is kept, which is what stops an eval-less
+        re-baseline downgrading a measured trigger to an empty one.
         """
         state = self.shared_state
         enablement_event.record_trigger(
@@ -1165,9 +1136,7 @@ class WritebackCollaborator:
     async def _close_enablement_lane(self, *, outcome: str, reason: str) -> None:
         """Close the enablement lane's event on the terminal it just reached.
 
-        Args:
-            outcome: The lane's own outcome, one of the ``OUTCOME_*`` constants.
-            reason: The stop reason or the terminal's own words.
+        ``outcome`` is one of the ``OUTCOME_*`` constants.
         """
         lane = self.shared_state.enablement
         enablement_event.finish(
@@ -1236,9 +1205,8 @@ class WritebackCollaborator:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             await self._settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
-        # A window the run stopped and a window that failed are recorded as the
-        # different things they are: the first measured nothing, so calling it a
-        # failed revalidation would charge the lane for a clock.
+        # A window the run stopped measured nothing, so recording it as a failed
+        # revalidation would charge the lane for a clock.
         enablement_event.record_revalidation_outcome(
             generation=generation,
             promoted=False,
@@ -1331,12 +1299,9 @@ class WritebackCollaborator:
         )
         any_changed = True
         if task.kind == "conc_sweep":
-            # No audit attempt here: ``record_action_attempt`` returns on its
-            # first line for any kind outside ``_AUDIT_ACTIONS``, and conc_sweep
-            # has never been in it -- the extras this used to assemble were
-            # built and dropped on every failed sweep. They are recorded for
-            # real on the conc_sweep event, whose ``result`` block carries the
-            # skip reason, the budget verdict and the summary.
+            # No audit attempt here: ``record_action_attempt`` returns early for
+            # any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in.
+            # The conc_sweep event carries these facts instead.
             self.shared_state.record_conc_sweep(result_payload)
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
@@ -1470,10 +1435,9 @@ class WritebackCollaborator:
                     self.shared_state.enablement.launch_observation_path = str(
                         result_payload.get("boot_observation_path") or ""
                     )
-                    # The boot-origin trigger. Only the first one is kept, so a
-                    # serial enablement -- where every round makes the baseline
-                    # fail again on purpose, one gap deeper -- does not rewrite
-                    # the reason the lane opened with the gap it is now on.
+                    # Only the first trigger is kept, so a serial enablement does
+                    # not rewrite the reason the lane opened with the gap it is
+                    # now on.
                     if not str(self.shared_state.enablement.origin or ""):
                         enablement_event.record_trigger(
                             origin=enablement_event.ORIGIN_BOOT,
@@ -2383,8 +2347,7 @@ class WritebackCollaborator:
         state.recipe_finalize_attempts = attempts
         state.recipe_finalize_status = "pending"
         # Opened before the write is tried, so an attempt that never settles
-        # is on the record as unsettled instead of being read afterwards as a
-        # refusal the store never issued.
+        # reads as unsettled rather than as a refusal the store never issued.
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
@@ -2431,13 +2394,8 @@ class WritebackCollaborator:
         """Record a settled publication attempt into the breakdown's close-out.
 
         The publisher already stamped the outcome with a stable ``result_type``
-        at whichever exit it took, so this only has to hand it over along with
-        the workload facts the recipe was scoped to.
-
-        Args:
-            outcome: The publisher's observable outcome mapping.
-            attempt: The attempt number being settled.
-            source: Which seam settled it, ``close`` or ``t4_fallback``.
+        at whichever exit it took, so this only adds the workload facts the
+        recipe was scoped to. ``source`` is ``close`` or ``t4_fallback``.
         """
         state = self.shared_state
         current_best = getattr(state, "current_best", {}) or {}
@@ -2462,8 +2420,7 @@ class WritebackCollaborator:
     def _write_back_scope(self) -> dict[str, Any]:
         """The workload dimensions the published recipe is partitioned by.
 
-        Matches the ``RecipeScope`` shape the section already published, so
-        recording changes where the fact comes from without moving it.
+        Matches the ``RecipeScope`` shape the section already published.
         """
         state = self.shared_state
         return {
@@ -2729,20 +2686,9 @@ class WritebackCollaborator:
     def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:
         """Record what a specialist round came back with, on the event that owns it.
 
-        A specialist runs in more than one phase, and the two arms have
-        different owners. The FRAMEWORK arm's dispatch already has a run row on
-        the framework event, keyed by this same task id, so the product merges
-        onto that. Every other round -- the PRELUDE scouts, the plateau
-        trajectory reviewer -- belongs to no framework entry at all, and merges
-        onto the action row its dispatching phase already opened.
-
-        Both are merges onto existing rows rather than new ones: the round's
-        product is more about the dispatch that produced it than a ledger entry
-        of its own, which is what the flat section it replaces was.
-
-        Args:
-            task: The settled specialist task.
-            round_entry: The round summary built for the state ledger.
+        The FRAMEWORK arm's dispatch already has a run row on the framework
+        event keyed by this same task id, so the product merges onto that. Every
+        other round merges onto the action row its dispatching phase opened.
         """
         product = {
             "summary": round_entry.get("summary") or "",
@@ -3369,11 +3315,9 @@ class WritebackCollaborator:
                     new_tput=best_tput,
                     extra_server_args=full_args,
                 )
-                # Record the adoption here rather than reconstructing it at
-                # export. ``graded.reference`` is the anchor this winner had to
-                # beat, and this call is the last moment it exists: the
-                # current_best write below overwrites it. Deriving it afterwards
-                # by pairing up attempt rows is what the legacy ledger did.
+                # ``graded.reference`` is the anchor this winner had to beat,
+                # and this call is the last moment it exists: the current_best
+                # write below overwrites it.
                 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
                 stack_event.record_adoption(
@@ -4047,19 +3991,10 @@ class WritebackCollaborator:
     ) -> None:
         """Record the terminal revalidation verdict on the kernel timeline event.
 
-        Called from each point that stamps a closed verdict onto
-        ``geak_result``. Those points release the candidate slot, so the
-        verdict has nowhere else to be read from afterwards -- the slot the
-        report used to derive it from is emptied by the same write.
-
-        The kernel event may already have closed if the rebench outlived the
-        phase that dispatched it; the recorder declines silently in that case,
-        and the close-out's ``geak_candidate`` is what carries the standing.
-
-        Args:
-            final_status: The revalidation status the result was stamped with.
-            final_error_class: The revalidation failure class, when there is one.
-            final_error: The revalidation failure message, when there is one.
+        The points that stamp a closed verdict onto ``geak_result`` also release
+        the candidate slot, so the verdict has nowhere else to be read from
+        afterwards. The recorder declines silently when the kernel event has
+        already closed, and the close-out's ``geak_candidate`` carries it then.
         """
         recorder = self.phase_kernel._kernel_timeline()
         if recorder is None:
@@ -4814,12 +4749,10 @@ class WritebackCollaborator:
     ) -> None:
         """Promote a conc_sweep result: record_conc_sweep + save; discovery-only.
 
-        No audit attempt is written. ``record_action_attempt`` returns on its
-        first line for any kind outside ``_AUDIT_ACTIONS``, which conc_sweep has
-        never been in, so the extras this used to assemble were built and
-        dropped on every sweep. They are recorded for real on the conc_sweep
-        event, whose ``result`` block carries the skip reason, the budget verdict
-        and the summary.
+        No audit attempt is written: ``record_action_attempt`` returns early for
+        any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in. The
+        conc_sweep event carries the skip reason, the budget verdict and the
+        summary instead.
         """
         outcome.early_return = True
         # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.

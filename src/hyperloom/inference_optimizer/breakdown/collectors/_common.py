@@ -14,7 +14,6 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 
 
 _FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
-_KERNEL_PHASES = frozenset({"KERNEL_AGENT"})
 _AUTHORING_TASK_KINDS = frozenset(
     {
         "explore_apply_retry",
@@ -33,11 +32,6 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _dict_rows(value: Any) -> list[dict[str, Any]]:
     """Keep only dictionary rows from a list-shaped value."""
     return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
-
-
-def _str_or_empty(value: Any) -> str:
-    """Coerce a nullable column or state field to a string, ``""`` when NULL."""
-    return "" if value is None else str(value)
 
 
 def _first(*values: Any) -> Any:
@@ -112,47 +106,6 @@ def _to_int(value: Any) -> int | None:
     """Coerce a value to ``int`` via :func:`_to_float`, never raising."""
     number = _to_float(value)
     return int(number) if number is not None else None
-
-
-def _rel(path: Path | None, session_dir: Path) -> str | None:
-    """Express ``path`` relative to ``session_dir`` as a POSIX string."""
-    if path is None:
-        return None
-    try:
-        return path.resolve().relative_to(session_dir.resolve()).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _benchmark_report_metrics(
-    report: dict[str, Any] | None,
-) -> tuple[float | None, float | None, float | None, float | None]:
-    """Extract (output_throughput, ttft, tpot, e2el) from a benchmark_report.json across schema generations."""
-    if not isinstance(report, dict):
-        return (None, None, None, None)
-    tput_section = report.get("throughput") if isinstance(report.get("throughput"), dict) else None
-    lat_section = report.get("latency") if isinstance(report.get("latency"), dict) else None
-    result_section = report.get("result") if isinstance(report.get("result"), dict) else None
-
-    def _from_lat(metric: str) -> Any:
-        """Read ``latency.<metric>.mean_ms`` from the V2 latency section."""
-        if isinstance(lat_section, dict):
-            sub = lat_section.get(metric)
-            if isinstance(sub, dict):
-                return sub.get("mean_ms")
-        return None
-
-    out_tput = _to_float(
-        (tput_section or {}).get("output_throughput")
-        or (tput_section or {}).get("output_throughput_tok_s")
-        or report.get("output_throughput_tok_s")
-        or report.get("output_throughput")
-        or (result_section or {}).get("output_throughput_tok_s")
-    )
-    ttft = _to_float(_from_lat("ttft") or report.get("mean_ttft_ms") or (result_section or {}).get("mean_ttft_ms"))
-    tpot = _to_float(_from_lat("tpot") or report.get("mean_tpot_ms") or (result_section or {}).get("mean_tpot_ms"))
-    e2el = _to_float(_from_lat("e2el") or report.get("mean_e2el_ms") or (result_section or {}).get("mean_e2el_ms"))
-    return (out_tput, ttft, tpot, e2el)
 
 
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:

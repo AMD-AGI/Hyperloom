@@ -102,7 +102,6 @@ def _failed(**overrides: Any) -> dict[str, Any]:
 
 
 def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) -> None:
-    """The throughput field name is the serving case; the unit is the fact."""
     recorder = _recorder()
     recorder.finish(_measured())
 
@@ -112,7 +111,6 @@ def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) ->
 
 
 def test_an_image_framework_reports_its_own_throughput_unit(tmp_path: Path) -> None:
-    """Reading the unit off the field name would call img/s tokens."""
     recorder = make_baseline_recorder(
         make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
         task_id="t-1",
@@ -125,7 +123,6 @@ def test_an_image_framework_reports_its_own_throughput_unit(tmp_path: Path) -> N
 
 
 def test_the_write_backs_verdict_reaches_the_action_it_ruled_on(tmp_path: Path) -> None:
-    """The decision is settled after the event closed, and still lands on it."""
     recorder = _recorder()
     recorder.finish(_measured())
 
@@ -138,7 +135,6 @@ def test_the_write_backs_verdict_reaches_the_action_it_ruled_on(tmp_path: Path) 
 
 
 def test_a_verdict_for_an_action_this_event_never_had_is_dropped(tmp_path: Path) -> None:
-    """A rebuilt event id that names the wrong event must not mint an action."""
     recorder = _recorder()
     recorder.finish(_measured())
 
@@ -150,7 +146,6 @@ def test_a_verdict_for_an_action_this_event_never_had_is_dropped(tmp_path: Path)
 
 
 def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: Path) -> None:
-    """The capability the projection could not have: a live baseline is visible."""
     _recorder()
 
     events = _events(tmp_path)
@@ -161,7 +156,6 @@ def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: 
 
 
 def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: Path) -> None:
-    """The whole point of recording baseline rather than projecting it."""
     recorder = _recorder()
     opened = _events(tmp_path)[0]["start_time"]
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
@@ -217,7 +211,6 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
 
 
 def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path: Path) -> None:
-    """The cold number is the only thing the adopted one can be weighed against."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_round(
@@ -245,7 +238,6 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
 
 
 def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_path: Path) -> None:
-    """Start stamps are ISO seconds, so they cannot be the only ordering key."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     same_second = "2026-09-02T15:07:09+00:00"
@@ -268,7 +260,6 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
 
 
 def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> None:
-    """A salvage retry re-runs the rounds, and which pass a round belonged to matters."""
     recorder = _recorder()
     first = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_round(
@@ -301,7 +292,6 @@ def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> N
 
 
 def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> None:
-    """The case a round-only model would drop: nothing ran, and that is the fact."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     refused = _failed(error_class="session_time_exhausted", error="the run's clock refused the round")
@@ -316,7 +306,6 @@ def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> N
 
 
 def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) -> None:
-    """The number is usable and knowingly depressed, which is neither pass nor fail."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_round(
@@ -361,7 +350,6 @@ def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> Non
 
 
 def test_an_executor_that_raised_is_not_left_running(tmp_path: Path) -> None:
-    """Otherwise a crash and a killed session both read as a dangling event."""
     recorder = _recorder()
     recorder.finish_crashed(RuntimeError("boom"))
 
@@ -381,7 +369,6 @@ def test_closing_twice_keeps_the_first_verdict(tmp_path: Path) -> None:
 
 
 def test_two_baselines_in_one_cycle_are_one_event_with_two_actions(tmp_path: Path) -> None:
-    """A failure streak re-dispatches, and N timeline entries per cycle is noise."""
     first = _recorder(task_id="t-1")
     first.finish(_failed())
     second = _recorder(task_id="t-2")
@@ -397,7 +384,6 @@ def test_two_baselines_in_one_cycle_are_one_event_with_two_actions(tmp_path: Pat
 
 
 def test_a_success_is_not_erased_by_a_sibling_that_was_skipped(tmp_path: Path) -> None:
-    """``skipped`` ranks below ``succeeded``: a refused retry unmakes no anchor."""
     measured = _recorder(task_id="t-1")
     measured.finish(_measured())
     refused = _recorder(task_id="t-2")
@@ -427,7 +413,6 @@ def test_one_action_can_be_assembled_on_its_own(tmp_path: Path) -> None:
 
 
 def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
-    """Finalize publishes what was recorded and refuses to judge it."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_round(
@@ -486,7 +471,6 @@ def _executor_ctx(tmp_path: Path, **params: Any):
 
 @pytest.mark.asyncio
 async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -> None:
-    """The wiring, not the recorder: rounds land under the pass that ran them."""
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
@@ -527,7 +511,6 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_an_inner_step_measurement_leaves_no_event_of_its_own(tmp_path: Path) -> None:
-    """The kernel phase measures through this executor and records it itself."""
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
@@ -571,12 +554,6 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 # where the latency came from
 # ---------------------------------------------------------------------------
 def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
-    """The label the executor stamps rides through to the wire.
-
-    A benchmark report, a raw InferenceX JSON found in the workspace and one
-    salvaged out of a leaked path all write ``ttft_mean_ms``, so afterwards the
-    numbers are indistinguishable -- and they are not equally trustworthy.
-    """
     recorder = _recorder()
     measured = _measured(ttft_e2el_source="rescued_raw_result", tpot_source="derived_from_e2el_ttft")
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
@@ -616,12 +593,6 @@ def test_the_extraction_labels_the_report_it_read_the_latency_out_of() -> None:
 
 
 def test_a_computed_tpot_is_not_reported_as_a_measured_one() -> None:
-    """The case the label exists for.
-
-    TPOT is derived from the other two when the report omits it, and a reader
-    weighing per-token latency needs to know it was arithmetic rather than a
-    measurement.
-    """
     from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
     measurement = extract_benchmark_measurement(
@@ -640,7 +611,6 @@ def test_a_computed_tpot_is_not_reported_as_a_measured_one() -> None:
 
 
 def test_a_measurement_with_no_latency_at_all_says_so() -> None:
-    """``unavailable`` rather than a source that supplied nothing."""
     from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
     measurement = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
@@ -666,13 +636,6 @@ def _evidence(**overrides: Any) -> dict[str, Any]:
 
 
 def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
-    """The gap this closes: the args were parsed back out of ``server.log``.
-
-    The projection regexed the log for a launch line and fell back to
-    re-parsing the config YAML, five ordered guesses deep, reporting
-    ``unknown`` whenever a framework logged its startup in a shape none of them
-    matched. The launch knows the answer outright.
-    """
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_invocation(
@@ -698,12 +661,6 @@ def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
 
 
 def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> None:
-    """A baseline on the framework's own defaults launched under no extra args.
-
-    The projection had one word for that and for "nothing I tried could tell",
-    which left a reader unable to distinguish a clean default launch from a
-    failed extraction.
-    """
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_invocation(run_index=index, framework_args="", config_path="/w/baseline.yaml")
@@ -715,11 +672,6 @@ def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> N
 
 
 def test_the_observed_flags_do_not_overwrite_what_was_requested(tmp_path: Path) -> None:
-    """A server that booted with flags the session did not ask for.
-
-    That disagreement is the reason both halves are kept: collapsing them onto
-    one field would make it unreportable.
-    """
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_invocation(run_index=index, framework_args="--attention-backend aiter")
@@ -735,7 +687,6 @@ def test_the_observed_flags_do_not_overwrite_what_was_requested(tmp_path: Path) 
 
 
 def test_an_action_that_never_launched_says_the_args_are_unavailable(tmp_path: Path) -> None:
-    """A measurement refused before it materialized a config has none to report."""
     recorder = _recorder()
     recorder.finish(_failed(error_class="bad_param"))
 
@@ -745,11 +696,6 @@ def test_an_action_that_never_launched_says_the_args_are_unavailable(tmp_path: P
 
 
 def test_only_observed_flags_are_reported_as_the_weaker_answer(tmp_path: Path) -> None:
-    """The argv the server logged answers a nearby but different question.
-
-    It is what the server booted with, not what the session asked for, so it
-    fills ``framework_args`` only when no launch report landed -- and says so.
-    """
     recorder = _recorder()
     recorder.finish(_measured(launch_evidence=_evidence()))
 
@@ -759,11 +705,6 @@ def test_only_observed_flags_are_reported_as_the_weaker_answer(tmp_path: Path) -
 
 
 def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> None:
-    """Why the invocation is on the run and not only on the action.
-
-    The MoE-runner fallback drops a flag and launches again, so an action-only
-    record would publish one invocation for a pass that ran under two.
-    """
     recorder = _recorder()
     first = recorder.begin_run(attempt_reason=RUN_INITIAL)
     recorder.record_invocation(run_index=first, framework_args="--moe-runner-backend triton")
@@ -783,12 +724,6 @@ def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> 
 # the failure counters
 # ---------------------------------------------------------------------------
 def test_the_action_says_how_many_baselines_had_already_failed(tmp_path: Path) -> None:
-    """Read at the dispatch, because the event cannot see its own effect.
-
-    The write-back advances the session's counters after this action returns,
-    so the value at the close is the one this attempt produced rather than the
-    one it was dispatched under.
-    """
     recorder = make_baseline_recorder(
         make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
         task_id="t-1",
@@ -830,7 +765,6 @@ async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -
 
 
 def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
-    """A profile borrows this executor's body but is not a measurement."""
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     executor = object.__new__(ProfileExecutor)

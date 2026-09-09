@@ -104,20 +104,11 @@ class EventSink:
     ) -> bool:
         """Whether a row with this identity is already recorded on this event.
 
-        For a caller holding a fact that belongs to a row some earlier stage
-        recorded, and that reconstructed this sink's event id rather than being
-        handed it. :meth:`record` would mint the row if the reconstruction were
-        wrong, so asking first is what keeps a late verdict from inventing the
-        thing it was meant to rule on.
-
-        Args:
-            section (str): The section the row belongs to.
-            row_type (str): The kind of row, as passed to :meth:`record`.
-            natural_ids (str | Sequence[str]): The row's own identity.
-
-        Returns:
-            bool: Whether the row exists. ``False`` when the question itself
-                could not be answered, which keeps the caller's guard closed.
+        For a caller that reconstructed this sink's event id rather than being
+        handed it: :meth:`record` would mint the row if the reconstruction were
+        wrong, so asking first keeps a late verdict from inventing the thing it
+        was meant to rule on. A question that cannot be answered reports
+        ``False``, which keeps the caller's guard closed.
         """
         from .recorder import get_recorder  # local: avoid an import cycle at module load
 
@@ -139,28 +130,13 @@ class EventSink:
     def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
         """Append one row to ``section``, tagged for this sink's event.
 
-        For rows that are observations in time rather than entities: a plateau
-        reading, a lifecycle step. They have nothing to be keyed by, and
-        minting a key for them buys nothing and costs a whole failure mode --
-        two rows that mint the same one silently become a single row. An
-        appended row gets a write-unique fragment instead, so a second row can
-        never land on a first, and a resumed leg needs no knowledge of what an
-        earlier leg already wrote.
-
-        The price is that the fragment carries no identity, so an appended row
-        cannot be revised later. A fact that gets re-ruled -- a gate whose
-        verdict resolves after the fact -- wants :meth:`record` instead.
-
-        Args:
-            section (str): The section the row belongs to, registered in
-                ``SECTION_SHAPES`` with shape ``item``.
-            payload (Mapping[str, Any]): The whole row. Unlike :meth:`record`
-                there is no merging, so this is written as given.
-
-        Returns:
-            Path | None: The fragment written, or ``None`` when nothing was.
-                As with :meth:`record`, recording never breaks the run being
-                recorded, so a failure is logged at warning and ends here.
+        For observations in time rather than entities: a plateau reading, a
+        lifecycle step. They have nothing to be keyed by, and two rows minting
+        the same key silently become one, so an appended row gets a
+        write-unique fragment and a resumed leg needs no knowledge of what an
+        earlier leg wrote. The price is that the fragment carries no identity:
+        ``payload`` is written as given, and a fact that gets re-ruled later
+        wants :meth:`record` instead.
         """
         from .recorder import get_recorder  # local: avoid an import cycle at module load
 
@@ -191,9 +167,6 @@ def make_sink(event: str, *, producer: str) -> EventSink:
     The standalone and inline wrappers of a shared executor both call this;
     they differ only in the event id they pass, which is the whole of the
     difference between the two modes.
-
-    Returns:
-        EventSink: A sink writing into ``event``.
 
     Raises:
         ValueError: If ``event`` is not a well-formed event id.

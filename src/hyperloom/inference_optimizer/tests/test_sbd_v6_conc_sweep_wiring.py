@@ -147,9 +147,6 @@ async def _all_succeed(*, grid: list[GridVariant], **_kw):
     ]
 
 
-# ---------------------------------------------------------------------------
-# The whole sweep
-# ---------------------------------------------------------------------------
 def test_a_sweep_records_both_arms_and_every_rung(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
     with session_scope(session_dir):
@@ -159,14 +156,12 @@ def test_a_sweep_records_both_arms_and_every_rung(session_dir: Path, baseline_ya
     assert payload["status"] == "succeeded"
     assert event["status"] == "succeeded"
     ext = event["ext"]
-    # Both arms, each with the whole ladder, ascending.
     for arm in (ARM_BASELINE, ARM_OPTIMIZED):
         assert [point["conc"] for point in ext["arms"][arm]["points"]] == [4, 16]
     # The optimized arm is the one that carries the session's server args.
     assert ext["arms"][ARM_OPTIMIZED]["extra_server_args"] == "--enable-torch-compile"
     assert ext["arms"][ARM_OPTIMIZED]["extra_envs"]["SGLANG_FOO"] == "1"
     assert ext["arms"][ARM_BASELINE]["extra_server_args"] == ""
-    # The pair table matches the payload the sweep wrote.
     assert [pair["conc"] for pair in ext["comparison"]] == [4, 16]
     assert [pair["speedup"] for pair in ext["comparison"]] == pytest.approx([1.3, 1.3])
     assert ext["result"]["successful_pairs"] == 2
@@ -215,7 +210,6 @@ def test_each_rung_carries_the_load_and_the_cap_it_ran_under(session_dir: Path, 
 
 
 def test_the_arm_says_which_execution_strategy_ran_the_ladder(session_dir: Path, baseline_yaml: Path):
-    """A config with no server lifecycle restarts the server per rung."""
     state = _state(baseline_yaml)
     with session_scope(session_dir):
         _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
@@ -255,7 +249,6 @@ def test_a_lifecycle_capable_arm_boots_once_and_reuses(session_dir: Path, baseli
 
 
 def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: Path, baseline_yaml: Path):
-    """The descend ladder is the diagnosis, and nothing used to keep it."""
     state = _state(baseline_yaml)
 
     async def _top_rung_will_not_boot(*, grid: list[GridVariant], **_kw):
@@ -290,7 +283,6 @@ def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: P
 
 
 def test_a_budget_that_refuses_an_arm_records_the_gate(session_dir: Path, baseline_yaml: Path):
-    """The arm never built anything, so it has no strategy to report."""
     state = _state(baseline_yaml, closing_phase=True)
     with session_scope(session_dir):
         _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
@@ -303,7 +295,6 @@ def test_a_budget_that_refuses_an_arm_records_the_gate(session_dir: Path, baseli
 
 
 def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: Path, baseline_yaml: Path):
-    """A budget that runs out between rungs is not a benchmark failure."""
     state = _state(baseline_yaml)
 
     async def _slow(*, grid: list[GridVariant], **_kw):
@@ -346,9 +337,6 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     assert ext["runtime"]["budget_skip_reason"] == "insufficient_remaining_for_variant"
 
 
-# ---------------------------------------------------------------------------
-# Declines
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "override, reason",
     [
@@ -363,8 +351,6 @@ def test_a_sweep_that_declined_still_reaches_the_timeline(
     override: dict[str, Any],
     reason: str,
 ):
-    """Which prerequisite was missing is all a reader of that phase can be
-    told, and the sweep is the only place that knows."""
     state = _state(baseline_yaml, **override)
     with session_scope(session_dir):
         payload = _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
@@ -394,12 +380,7 @@ def test_a_missing_config_declines_with_the_path_it_looked_for(session_dir: Path
     assert event["ext"]["result"]["skip_reason"] == "baseline_config_missing"
 
 
-# ---------------------------------------------------------------------------
-# No recorder
-# ---------------------------------------------------------------------------
 def test_a_sweep_with_no_recorder_writes_no_event(session_dir: Path, baseline_yaml: Path):
-    """Direct callers -- scripts, tests, the SDK -- bind no session and want no
-    event, and the sweep must run identically for them."""
     state = _state(baseline_yaml)
     with session_scope(session_dir):
         payload = _run(state, session_dir, recorder=None, run_grid=_all_succeed)
@@ -409,9 +390,6 @@ def test_a_sweep_with_no_recorder_writes_no_event(session_dir: Path, baseline_ya
     assert len(payload["optimized"]["points"]) == 2
 
 
-# ---------------------------------------------------------------------------
-# The dispatch
-# ---------------------------------------------------------------------------
 class _Task:
     task_id = "task-77"
     kind = "conc_sweep"
@@ -430,8 +408,6 @@ def _ctx(session_dir: Path) -> _Ctx:
 
 
 def test_the_dispatch_names_the_event_and_binds_the_session_itself(session_dir: Path, baseline_yaml: Path):
-    """The event id is a property of the dispatch, so the sweep cannot pick it,
-    and the executor may be the first thing in the process to touch a session."""
     from hyperloom.orchestrator.actions.executors.conc_sweep import ConcSweepExecutor
 
     state = _state(baseline_yaml)
@@ -459,7 +435,6 @@ def test_the_dispatch_names_the_event_and_binds_the_session_itself(session_dir: 
 
 
 def test_a_sweep_that_raised_leaves_a_closed_failed_event(session_dir: Path, baseline_yaml: Path):
-    """An event left open forever reads as a sweep still running."""
     from hyperloom.orchestrator.actions.executors.conc_sweep import ConcSweepExecutor
 
     state = _state(baseline_yaml)
@@ -500,8 +475,3 @@ def test_a_dispatch_with_no_session_records_nothing_and_still_runs(session_dir: 
 
     assert result["status"] == "succeeded"
     assert not [event for event in read_timeline_events(session_dir) if event.get("type") == "conc_sweep"]
-
-
-# ---------------------------------------------------------------------------
-# The collector
-# ---------------------------------------------------------------------------

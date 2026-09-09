@@ -3,15 +3,10 @@
 
 """Coverage for the SBD V6 ``enablement`` event.
 
-The section this replaces was a projection of ``SharedState.enablement`` at
-export, and most of what these tests pin is a specific thing that projection
-could not say: which round landed the fix, what each round was pointed at, why
-the lane opened at all, and the difference between a round that was refused and
-a round that never happened.
-
-Nothing here holds a recorder object, because the lane does not: its facts are
-produced from six modules on different ticks and every entry point opens the
-event idempotently. That property is itself load-bearing and is pinned below.
+These tests pin what a projection of ``SharedState.enablement`` could not say: which round landed the
+fix, what each round was pointed at, why the lane opened, and the difference between a round that was
+refused and one that never happened. The lane's facts come from six modules on different ticks, so no
+recorder object is held and every entry point opens the event idempotently.
 """
 
 from __future__ import annotations
@@ -47,12 +42,7 @@ def _event(session_dir: Path) -> dict[str, Any]:
 
 
 def _ext(session_dir: Path) -> dict[str, Any]:
-    """The lane's assembled ``ext``, whether or not it has closed yet.
-
-    A running event carries only the open shell on disk -- the facts live in
-    fragments until something closes it -- so a test reading an open lane
-    assembles the same way finalize would.
-    """
+    """Assemble the lane's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = enablement_event.assemble_enablement_ext(
         enablement_event_parts(),
         event=enablement_event.enablement_event_id(),
@@ -85,11 +75,7 @@ def _kept(**overrides: Any) -> dict[str, Any]:
     return result
 
 
-# --- the lane lands on the timeline ---------------------------------------
-
-
 def test_the_lane_lands_on_the_timeline_when_it_is_triggered(_bound_session):
-    """The event opens at the trigger, so a killed lane is still a lane."""
     _boot_trigger()
 
     event = _event(_bound_session)
@@ -98,11 +84,6 @@ def test_the_lane_lands_on_the_timeline_when_it_is_triggered(_bound_session):
 
 
 def test_every_entry_point_writes_into_one_event(_bound_session):
-    """The lane's facts come from six modules and must not become six events.
-
-    A phase-scoped or per-caller event id would split the trigger from the
-    round that settles it, since the two are recorded from different phases.
-    """
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="import_error")
     enablement_event.record_build(task_id="build-1", entry={"ok": True, "action": {"component": "aiter"}})
@@ -113,20 +94,10 @@ def test_every_entry_point_writes_into_one_event(_bound_session):
 
 
 def test_a_lane_nothing_triggered_leaves_no_event(_bound_session):
-    """Recording nothing records nothing: an armed lane is not an engaged one."""
     assert _events(_bound_session) == []
 
 
-# --- the trigger ----------------------------------------------------------
-
-
 def test_the_trigger_that_opened_the_lane_is_the_one_it_keeps(_bound_session):
-    """A later failure of the same gap must not overwrite the opening one.
-
-    The projection let the newest eval failure replace the stored trigger,
-    which is how an eval-less re-baseline reporting ``accuracy_unavailable``
-    could erase a measured ``accuracy_below_floor``.
-    """
     enablement_event.record_trigger(
         origin=enablement_event.ORIGIN_EVAL,
         mode="all",
@@ -152,12 +123,6 @@ def test_the_trigger_that_opened_the_lane_is_the_one_it_keeps(_bound_session):
 
 
 def test_the_origin_survives_the_lane_succeeding(_bound_session):
-    """``origin`` is recorded, not read off a field the success clears.
-
-    State clears ``origin`` on a successful lane and leaves
-    ``baseline_eval_kind`` set, so the export had to reconstruct the origin
-    from a disjunction over two fields with different lifetimes.
-    """
     enablement_event.record_trigger(
         origin=enablement_event.ORIGIN_EVAL,
         mode="all",
@@ -169,14 +134,12 @@ def test_the_origin_survives_the_lane_succeeding(_bound_session):
 
 
 def test_the_admitted_mode_is_recorded_even_when_it_is_off(_bound_session):
-    """An operator opt-out is why a run with no baseline tried nothing."""
     _boot_trigger(mode="off")
 
     assert _ext(_bound_session)["mode"] == "off"
 
 
 def test_a_trigger_log_is_kept_by_its_tail(_bound_session):
-    """The tail of a traceback is the part that names the gap."""
     _boot_trigger(evidence="x" * 5000 + "ImportError: the gap")
 
     excerpt = _ext(_bound_session)["trigger"]["evidence_excerpt"]
@@ -184,16 +147,7 @@ def test_a_trigger_log_is_kept_by_its_tail(_bound_session):
     assert excerpt.endswith("ImportError: the gap")
 
 
-# --- the rounds -----------------------------------------------------------
-
-
 def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
-    """The classified kind and the log exist only at dispatch.
-
-    The projection read a ``failure_kind`` state field that does not exist, so
-    the exported value was always empty; the kind only ever lives in the
-    specialist params the dispatch builds.
-    """
     _boot_trigger()
     enablement_event.record_dispatch(
         task_id="spec-1",
@@ -211,7 +165,6 @@ def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
 
 
 def test_the_dispatch_and_the_verdict_settle_one_row(_bound_session):
-    """One round is one row, written from two ticks in two modules."""
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
     enablement_event.record_round(
@@ -230,11 +183,6 @@ def test_the_dispatch_and_the_verdict_settle_one_row(_bound_session):
 
 
 def test_a_round_dispatched_and_never_ruled_says_so(_bound_session):
-    """A session killed mid-round leaves a round with no verdict, not nothing.
-
-    Folded into counters this was indistinguishable from a round that ran and
-    was reverted, which is the case the stall cap exists to terminate.
-    """
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
 
@@ -249,11 +197,6 @@ def test_a_round_dispatched_and_never_ruled_says_so(_bound_session):
 
 
 def test_the_round_that_landed_the_fix_is_identifiable(_bound_session):
-    """Which round landed is the question counters could not answer.
-
-    ``attempts=5`` plus a flat ``kept_patches`` list reads the same whether the
-    third round landed the fix or nothing landed at all.
-    """
     _boot_trigger()
     for attempt, status in enumerate(
         (
@@ -283,11 +226,6 @@ def test_the_round_that_landed_the_fix_is_identifiable(_bound_session):
 
 
 def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
-    """A serial enablement has one log per round, not one for the lane.
-
-    Every advance replaced the lane's single ``launch_log``, so the export
-    published the newest gap as the reason the lane had opened.
-    """
     _boot_trigger(evidence="gap 1: ImportError fused_moe")
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, launch_log="gap 1: ImportError fused_moe")
     enablement_event.record_round(
@@ -310,11 +248,6 @@ def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
 
 
 def test_a_round_the_lane_synthesised_keeps_its_own_row(_bound_session):
-    """A round with no specialist id must not upsert onto a real one.
-
-    A build routed into the lane, and a round the pump found finished without
-    a rearm, both settle without a specialist task id.
-    """
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
     enablement_event.record_round(
@@ -332,7 +265,6 @@ def test_a_round_the_lane_synthesised_keeps_its_own_row(_bound_session):
 
 
 def test_a_round_records_the_products_it_contributed(_bound_session):
-    """Per-round products, rather than the lane's flattened accumulation."""
     _boot_trigger()
     enablement_event.record_round(
         task_id="spec-1",
@@ -360,15 +292,13 @@ def test_a_round_records_the_products_it_contributed(_bound_session):
     assert row["runtime"]["venv_root"] == "/venv/a"
     assert row["localization_manifest"] == {"files": 3}
     assert row["effective_config"]["extra_server_args"] == "--tp 8"
-    # The backup bookkeeping is how the install was made reversible, not a
-    # fact about the repair.
+    # The backup bookkeeping made the install reversible; it is not a fact about the repair.
     assert row["artifacts_applied"] == [
         {"target": "/fw/layers/moe.py", "rel_target": "layers/moe.py", "kind": "replace"}
     ]
 
 
 def test_the_stall_streak_is_recorded_per_round(_bound_session):
-    """The streak the round was scored on, so a cap hit is traceable to it."""
     _boot_trigger()
     for attempt in (1, 2):
         enablement_event.record_round(
@@ -383,11 +313,7 @@ def test_the_stall_streak_is_recorded_per_round(_bound_session):
     assert [row["stall_streak_after"] for row in rows] == [1, 2]
 
 
-# --- builds ---------------------------------------------------------------
-
-
 def test_a_build_the_lane_ran_is_recorded_with_its_verdict(_bound_session):
-    """The compile the round escalated to, and whether it worked."""
     _boot_trigger()
     enablement_event.record_build(
         task_id="build-1",
@@ -414,7 +340,6 @@ def test_a_build_the_lane_ran_is_recorded_with_its_verdict(_bound_session):
 
 
 def test_a_build_with_no_verdict_is_not_a_failed_build(_bound_session):
-    """A routing sentinel carries no ``ok``, so it is not scored as one."""
     _boot_trigger()
     enablement_event.record_build(task_id="build-1", entry={"action": {"component": "vllm"}})
 
@@ -424,11 +349,7 @@ def test_a_build_with_no_verdict_is_not_a_failed_build(_bound_session):
     assert "ok" not in builds["rows"][0]
 
 
-# --- revalidation ---------------------------------------------------------
-
-
 def test_a_revalidation_window_records_opening_and_closing(_bound_session):
-    """An eval-origin KEEP is provisional until a genuine baseline agrees."""
     enablement_event.record_trigger(
         origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor", accuracy_floor=0.5
     )
@@ -447,7 +368,6 @@ def test_a_revalidation_window_records_opening_and_closing(_bound_session):
 
 
 def test_each_generation_is_its_own_window(_bound_session):
-    """A reopened window must not overwrite the one that failed before it."""
     enablement_event.record_trigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
     enablement_event.record_revalidation(generation=1, task_id="base-1")
     enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="accuracy below floor")
@@ -460,7 +380,6 @@ def test_each_generation_is_its_own_window(_bound_session):
 
 
 def test_a_window_the_run_stopped_is_not_a_window_that_failed(_bound_session):
-    """It measured nothing, so it says nothing about the patch."""
     enablement_event.record_trigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
     enablement_event.record_revalidation(generation=1, task_id="base-1")
     enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="stopped by the run")
@@ -471,11 +390,7 @@ def test_a_window_the_run_stopped_is_not_a_window_that_failed(_bound_session):
     assert "error_class" not in row
 
 
-# --- rounds that never happened -------------------------------------------
-
-
 def test_a_failure_too_unclassifiable_to_dispatch_is_still_recorded(_bound_session):
-    """A lane that declined all session reads, from counters, like an idle one."""
     _boot_trigger()
     enablement_event.record_human_review(
         digest="deadbeef",
@@ -493,7 +408,6 @@ def test_a_failure_too_unclassifiable_to_dispatch_is_still_recorded(_bound_sessi
 
 
 def test_the_same_failure_is_filed_once(_bound_session):
-    """Keyed by the digest the lane itself dedupes on."""
     _boot_trigger()
     for _ in range(3):
         enablement_event.record_human_review(digest="deadbeef", failure_kind="UNKNOWN")
@@ -501,11 +415,7 @@ def test_the_same_failure_is_filed_once(_bound_session):
     assert _ext(_bound_session)["human_review"]["count"] == 1
 
 
-# --- the terminal ---------------------------------------------------------
-
-
 def test_a_lane_that_landed_its_repair_succeeds(_bound_session):
-    """The lane's outcome is the event's status."""
     _boot_trigger()
     enablement_event.record_round(task_id="spec-1", attempt=1, result=_kept(), stall_streak=0, succeeded=True)
     enablement_event.finish(
@@ -529,7 +439,6 @@ def test_a_lane_that_landed_its_repair_succeeds(_bound_session):
 
 
 def test_a_lane_that_hit_the_stall_cap_fails(_bound_session):
-    """``enablement_stalled`` stops the run, so it is a failed event."""
     _boot_trigger()
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_STALLED,
@@ -544,12 +453,6 @@ def test_a_lane_that_hit_the_stall_cap_fails(_bound_session):
 
 
 def test_a_lane_the_session_outlived_is_interrupted_not_judged(_bound_session):
-    """Nothing ruled it, so nothing here rules it either.
-
-    A lane still rearming when the clock ran out is a different fact from one
-    that gave up, and deriving a terminal from rows that look complete is the
-    inference the recording layer exists to remove.
-    """
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
     enablement_event.record_round(
@@ -569,7 +472,6 @@ def test_a_lane_the_session_outlived_is_interrupted_not_judged(_bound_session):
 
 
 def test_the_lane_closes_the_event_it_opened(_bound_session):
-    """One timeline entry, updated in place, not a second one appended."""
     _boot_trigger()
     enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
 
@@ -579,7 +481,6 @@ def test_the_lane_closes_the_event_it_opened(_bound_session):
 
 
 def test_a_lane_that_closed_having_run_no_round_is_skipped(_bound_session):
-    """Admitted, triggered, and settled without dispatching anything."""
     _boot_trigger()
     enablement_event.finish(outcome="", reason="nothing to author against")
 
@@ -587,17 +488,12 @@ def test_a_lane_that_closed_having_run_no_round_is_skipped(_bound_session):
 
 
 def test_engagement_is_a_property_of_the_event_existing(_bound_session):
-    """The projection inferred this from four unrelated signals."""
     _boot_trigger()
 
     assert _ext(_bound_session)["engaged"] is True
 
 
-# --- recording never breaks the lane --------------------------------------
-
-
 def test_nothing_recorded_outside_a_session_raises(tmp_path, monkeypatch):
-    """Every entry point is called from a hot path and must be inert."""
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.session.session_binding.bound_session_or_none",
         lambda: None,
@@ -613,7 +509,6 @@ def test_nothing_recorded_outside_a_session_raises(tmp_path, monkeypatch):
 
 
 def test_a_malformed_result_does_not_cost_the_round_its_row(_bound_session):
-    """A result that is not a mapping still leaves the round on the timeline."""
     _boot_trigger()
     enablement_event.record_round(task_id="spec-1", attempt=1, result=None, stall_streak=0, succeeded=False)
 

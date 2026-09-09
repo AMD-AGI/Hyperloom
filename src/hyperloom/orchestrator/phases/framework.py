@@ -40,40 +40,22 @@ _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
-# The timeline recording helpers below are module-level on purpose. The phase's
-# methods get borrowed onto lightweight stand-ins by tests, which implement
-# only what the method under test needs -- so a ``self._record_*`` call turns
-# adding one recording line into a break for every such stand-in. A function
-# that reads the recorder off whatever it was handed records when there is
-# something to record and does nothing when there is not, which is the same
-# contract the rest of this event already has: observability never changes
-# phase behavior, and a phase running without a bound session has no event.
+# These helpers are module-level because the phase's methods get borrowed onto
+# lightweight test stand-ins, where a ``self._record_*`` call would break every
+# stand-in that does not implement it.
 def _recorder(coord: Any):
-    """Return the framework recorder for this phase entry, or ``None``.
-
-    Args:
-        coord: The phase handler, or anything standing in for one.
-
-    Returns:
-        The recorder, or ``None`` when this entry is not recording.
-    """
+    """Return the framework recorder for this phase entry, or ``None``."""
     return getattr(coord, "_framework_timeline_recorder", None)
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
     """Record one specialist dispatch, or its completion.
 
-    Args:
-        coord: The phase handler.
-        task: The task or its id. A falsy id records nothing rather than
-            keying a row on the empty string.
-        role: The run's position on the chain -- ``discovery``, ``authoring``
-            or ``config``. Not derivable from the arm: the source arm
-            dispatches twice per candidate.
-        status: What is known now -- ``dispatched`` at the seam that created
-            the task, and the terminal status when it is harvested. Both land
-            on one row, keyed by the task id.
-        **fields: Any other ``record_run`` field.
+    ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
+    derivable from the arm, since the source arm dispatches twice per
+    candidate. Dispatch and terminal status land on one row keyed by the task
+    id; a falsy id records nothing rather than keying a row on the empty
+    string.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -110,20 +92,11 @@ def _record_step(
     outcome: str = "",
     reason: str = "",
 ) -> None:
-    """Record one step of a candidate's lifecycle.
+    """Record one step of a candidate's lifecycle, keyed by ``STEP_*`` value.
 
     Steps are recorded as they happen rather than derived from counters: a
     candidate re-authored twice then retried once is three rows a reader can
-    follow, where three integers would have to be reconciled against the
-    attempts to mean anything.
-
-    Args:
-        coord: The phase handler.
-        proposal_id: The candidate that moved.
-        step: A ``STEP_*`` value from the recorder's vocabulary.
-        run_ref: The run that performed it, when a run did.
-        outcome: How the step ended.
-        reason: Why.
+    follow.
     """
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
@@ -150,18 +123,9 @@ def _record_review_outcome(
 ) -> None:
     """Record what the phase did with the Critic's ruling on a candidate.
 
-    The ruling itself is recorded where it is produced, in the Critic's own
-    vocabulary. What the phase adds is the consequence, and it is recorded onto
-    the ruling because on its own a routed candidate does not say what let it
-    through. The ruling is only written here on the deny path, which carries
-    the rationale and is the phase's own reading of a reject.
-
-    Args:
-        coord: The phase handler.
-        proposal_id: The candidate ruled on.
-        verdict: The Critic's ruling, when this path is the one that has it.
-        reason: Its rationale.
-        **outcome: The fields ``record_proposal_review_outcome`` accepts.
+    The consequence is recorded onto the ruling because on its own a routed
+    candidate does not say what let it through. ``verdict`` is only passed on
+    the deny path, which is the only one carrying the rationale.
     """
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
@@ -176,14 +140,7 @@ def _record_review_outcome(
 
 
 def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
-    """Record where a candidate ended up.
-
-    Args:
-        coord: The phase handler.
-        proposal_id: The candidate settled.
-        disposition: ``attempted``, ``dropped`` or ``pending``.
-        reason: Why it landed there.
-    """
+    """Record where a candidate ended up: ``attempted``, ``dropped`` or ``pending``."""
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
@@ -205,20 +162,8 @@ def _record_source_attempt(
 ) -> None:
     """Record one authored patch's measured attempt on the framework event.
 
-    The same uniform row the configuration arm writes: both arms are measured
-    the same way, against whatever the session is currently serving, and the
-    only difference is what identifies the change. Keeping one shape is what
+    The row keeps the same shape the configuration arm writes, which is what
     lets the adoption ledger walk both arms with one reader.
-
-    Args:
-        coord: The phase handler.
-        task: The integrate_patch task that benched the patch.
-        candidate_id: The candidate this patch was authored for; the proposal
-            the attempt hangs under.
-        status: The executor's terminal status, recorded verbatim.
-        result: The executor result, holding both ends of the throughput pair.
-        params: The task params, read for the route and the re-author round.
-        specialist_task_id: The authoring run that produced the patch.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -299,19 +244,10 @@ def _record_source_attempt(
 def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict[str, Any]]) -> None:
     """Record what one discovery round produced, including what it dropped.
 
-    Walks the specialist's own ``proposal_set`` rather than only the candidates
-    that survived, because the ones it audited away are the round's most
-    informative output: a round that found five upstream PRs and judged all
-    five already landed is a very different result from one that found nothing,
-    and the projection reported both as an empty round.
-
-    Args:
-        coord: The phase handler.
-        task: The completed discovery task; its id becomes the run reference
-            every proposal here points at.
-        raw: The specialist's ``proposal_set``, before auditing.
-        candidates: The rows that survived, whose keys are the ids the rest of
-            the phase uses.
+    Walks ``raw`` -- the specialist's ``proposal_set`` before auditing --
+    rather than only the surviving ``candidates``: a round that found five
+    upstream PRs and judged all five already landed is a very different result
+    from one that found nothing.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -382,9 +318,6 @@ class FrameworkPhase(CoordinatorCollaborator):
 
         Read through ``getattr`` because the handler delegates unknown
         attributes to its Coordinator, so an unset recorder must not raise.
-
-        Returns:
-            The recorder, or ``None`` when this entry is not recording.
         """
         return getattr(self, "_framework_timeline_recorder", None)
 
@@ -393,10 +326,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
         The policy is recorded here because this is the first point at which
         every threshold the entry will run under is resolvable: the reprofile
-        has settled the anchor and the macro cycle is fixed. The projection
-        this replaces had to scavenge each field through a chain of candidate
-        locations, answering "what did the phase run under" with wherever a
-        number happened to survive.
+        has settled the anchor and the macro cycle is fixed.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import make_framework_recorder
 
@@ -411,13 +341,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             log.debug("framework timeline: policy record failed", exc_info=True)
 
     def _framework_policy_fields(self) -> dict:
-        """Resolve the thresholds this entry runs under, from their own owners.
+        """Resolve the ``record_policy`` fields this entry runs under.
 
-        Returns:
-            The keyword fields for ``record_policy``. ``force_exit_budget_pct``
-            is deliberately absent: no runtime path resolves it today, and
-            reporting a default the phase never applied would be a fabrication
-            of exactly the kind this recorder exists to remove.
+        ``force_exit_budget_pct`` is deliberately absent: no runtime path
+        resolves it today, so reporting a default would fabricate a threshold
+        the phase never applied.
         """
         from ..framework.client import DISCOVER_FAILURE_RETRY_LIMIT
 
@@ -455,17 +383,9 @@ class FrameworkPhase(CoordinatorCollaborator):
 
         The phase machine has entry hooks only, so the seam in
         ``_on_phase_entered`` calls this before dispatching the next phase's
-        hook. A recorder left open by a killed session stays open, and export
-        recovers the event as interrupted -- which is the honest reading.
-
-        The exit-path plateau rows are written from ``evidence`` rather than
-        recomputed: the exit decision already read both arms, and re-reading
-        them here would report counts over a history that kept growing.
-
-        Args:
-            exit_reason: The phase's own exit reason.
-            evidence: The transition evidence, holding both arms' plateau
-                readings as the exit rule saw them.
+        hook. Plateau rows are written from ``evidence`` rather than
+        recomputed: re-reading both arms here would report counts over a
+        history that kept growing.
         """
         recorder = self._framework_timeline()
         if recorder is None:
@@ -490,13 +410,9 @@ class FrameworkPhase(CoordinatorCollaborator):
     def _record_framework_exit_plateau(recorder, evidence: dict) -> None:
         """Record both arms' plateau readings as the exit rule saw them.
 
-        Skipped entirely when the evidence carries no plateau reading, which is
-        the case for a transition that did not come from the optimize exit rule
-        -- writing rows then would report an evaluation that never ran.
-
-        Args:
-            recorder: The framework recorder.
-            evidence: The transition evidence from the exit rule.
+        Skipped when the evidence carries no plateau reading -- a transition
+        that did not come from the optimize exit rule -- since writing rows
+        then would report an evaluation that never ran.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
             ARM_CONFIG,
@@ -828,10 +744,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             gap_canonical_id=gap_cid,
             parallelism=len(lanes or ()),
         )
-        # The authoring run is a step on the candidate's own lifecycle, not a
-        # link upstream of it: discovery already produced the candidate, and
-        # this run writes a patch for it. A re-author is the same step again
-        # rather than a counter on the proposal.
+        # A re-author is the same lifecycle step again rather than a counter on
+        # the proposal: discovery already produced the candidate.
         _record_step(
             self,
             cand_id,
@@ -1795,9 +1709,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        # The candidate is keyed by its own id throughout the phase, so the
-        # review-bus message id is recorded as a field rather than becoming a
-        # second identity for the same proposal.
+        # The review-bus message id is a field, not a second identity: the
+        # candidate is keyed by its own id throughout the phase.
         _record_step(
             self,
             cand_id,
@@ -1928,11 +1841,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             for k, v in extra.items():
                 row.setdefault(str(k), v)
         progress.append(row)
-        # This is the single terminal-row writer for every path that ends a
-        # candidate without a benched result, and it is idempotent -- the same
-        # two properties the proposal's disposition needs. Settling here rather
-        # than at each of the dozen callers is what keeps a newly added dead
-        # end from silently leaving its proposal ``pending`` forever.
+        # The single idempotent terminal-row writer for every path that ends a
+        # candidate without a benched result: settling here rather than at each
+        # caller keeps a new dead end from leaving its proposal ``pending``.
         _settle(
             self,
             cand_id,

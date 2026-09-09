@@ -62,13 +62,6 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
     action, or a phase whose event is not open. Recording is read off the
     collaborator defensively because this module's methods get borrowed onto
     lightweight stand-ins in tests, which carry no recorder.
-
-    Args:
-        coll: The proposals collaborator, or a stand-in.
-        pending: The proposal being moved.
-
-    Returns:
-        The recorder, or ``None`` when there is nothing to record onto.
     """
     if str(getattr(pending, "action_name", "") or "") != "explore":
         return None
@@ -86,10 +79,6 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
     beside it on the same phase event says what was run. Without the task id
     they sit on one event with nothing connecting them, and the join has to be
     rebuilt from a sidecar map at export.
-
-    Args:
-        proposal_msg_id (str): The proposal that materialized.
-        task_id (str): The task it became.
     """
     if not proposal_msg_id or not task_id:
         return
@@ -108,10 +97,7 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
 def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
     """Record that one config-arm grid reached a bench.
 
-    Args:
-        coll: The proposals collaborator, or a stand-in.
-        pending: The proposal materialised.
-        task_id: The task it became, which its attempts also carry.
+    ``task_id`` is the task it became, which its attempts also carry.
     """
     recorder = _framework_recorder(coll, pending)
     if recorder is None:
@@ -140,11 +126,6 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
     the proposal and then named no variant that survived the filter, so the
     arm spent a review and benched nothing. Without a settled row that reads
     as a proposal still under way.
-
-    Args:
-        coll: The proposals collaborator, or a stand-in.
-        pending: The proposal dropped.
-        reason: Why it never ran.
     """
     recorder = _framework_recorder(coll, pending)
     if recorder is None:

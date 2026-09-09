@@ -171,11 +171,9 @@ def finish_event(
 
 
 def _opened_sequence(event: str, *, event_section: str) -> int | None:
-    """Return the sequence an earlier :func:`open_event` took for this event.
+    """The sequence an earlier :func:`open_event` took, from the event-level fragment.
 
-    Returns:
-        int | None: The sequence on the event-level fragment, or ``None`` when
-            the event has not been opened yet or the spool cannot be read.
+    ``None`` when the event has not been opened yet or the spool cannot be read.
     """
     from ...session.sbd_v6 import timeline_sequence
 

@@ -6,36 +6,16 @@
 A warm replay takes a recipe another session validated, measures it here, and
 either promotes it onto ``current_best`` or rolls it back. The arc is a chain
 of gates -- throughput validity, image quality, accuracy, the keep threshold,
-the presence of replayable params, and the checkout promotion -- and any one of
-them can end it.
+replayable params, and the checkout promotion -- any one of which can end it.
+Each gate writes its own row as it is evaluated, so a gate that never ran is
+absent rather than false.
 
-Projecting that arc was lossy in two specific ways this recorder removes.
-
-The gate verdicts were not recorded, so ``accuracy.passed`` had to be *guessed
-from the terminal status*: a replay rejected on accuracy and one rejected on
-quality both surfaced as "not reproduced", and a replay whose eval ran but
-returned no usable score was indistinguishable from one that scored and failed.
-Each gate now writes its own row when it is evaluated, so the reason the arc
-ended is read rather than inferred, and the gates that never ran are absent
-rather than false.
-
-The measurement's own anchor was never persisted. ``_promote_warm_replay``
-computes the gain against the baseline captured at enqueue time, holds it in a
-local, and drops it -- so the event had to back-solve the before-throughput
-from the after-throughput and the gain. That is exact only while the session
-baseline never moves; after a re-baseline it reconstructs an anchor the replay
-was never judged against. The anchor is recorded here at the moment it is used.
-
-The anchor is deliberately *not* the same number the adoption row chains from.
-An adoption chains from the recorded session baseline so the ledger and
-``cumulative_gain_validated`` stay one number, while this event states what the
-replay was actually measured against. Recording both is what lets a reader see
-when they diverged, which is precisely the re-baseline case.
-
-The event cites the baseline action that produced its numbers rather than
-restating them: a warm replay is measured through the baseline executor, so the
-rounds, retries and report paths already live in that event's action, keyed by
-the same task id.
+The measurement's anchor is the baseline captured at enqueue time, recorded at
+the moment it is used because the phase holds it in a local and drops it. It is
+deliberately *not* the number the adoption row chains from, which is the
+recorded session baseline; recording both is what lets a reader see when they
+diverged, the re-baseline case. The event cites the baseline action that
+produced its numbers rather than restating them, keyed by the same task id.
 """
 
 from __future__ import annotations
@@ -62,14 +42,13 @@ log = logging.getLogger(__name__)
 EVENT_TYPE = "warm_replay"
 EVENT_KIND = "warm_replay"
 
-#: The component segment of a warm-replay event id. The phase segment is the
-#: phase the replay was dispatched in, which is why it is a parameter.
+#: The component segment of a warm-replay event id; the phase segment is the
+#: phase the replay was dispatched in, hence a parameter.
 EVENT_COMPONENT = "warm_replay"
 
 PRODUCER = "orchestrator"
 
-#: The event-level section, one fragment per event, holding the request, the
-#: measurement, the verdict and the timeline sequence the two writes share.
+#: One fragment per event: the request, measurement, verdict and sequence.
 SECTION_EVENT = "warm_replay_event"
 
 #: One row per gate evaluated, keyed by the gate's name.
@@ -77,16 +56,11 @@ SECTION_GATE = "warm_replay_gate"
 
 ROW_GATE = "gate"
 
-# The gates the arc can end on, in the order the settling applies them. Named
-# constants rather than prose because assembly selects on them and a consumer
-# reading "which gate ended this" must not match on wording.
-#
-# The historical reproduce bar is not among them. It reads a measured gain
-# against a fraction of the claimed one, but it never rejects: a replay that
-# cleared the keep threshold is promoted whether or not it reproduced the
-# claim. A gate row for it would make ``blocked_by`` name the reason an arc
-# that succeeded ended, so the bar and the verdict on it are stated in the
-# verdict block instead.
+# The gates the arc can end on, in the order the settling applies them.
+# Constants because assembly selects on them, so a consumer reading "which gate
+# ended this" must not match on wording. The historical reproduce bar is not
+# among them: it never rejects, so a gate row for it would make ``blocked_by``
+# name the reason a successful arc ended. It lives in the verdict block.
 GATE_TPUT_VALID = "tput_valid"
 GATE_QUALITY = "quality"
 GATE_ACCURACY = "accuracy"
@@ -94,11 +68,9 @@ GATE_KEEP_THRESHOLD = "keep_threshold"
 GATE_PARAMS_PRESENT = "params_present"
 GATE_PROMOTION = "promotion"
 
-# Why a replay never ran. Recorded at the seam that refused it, because the
-# reason is a decision the session made and not something a reader can recover
-# from the state it left behind: the projection had to bucket these by
-# substring-matching prose, which meant rewording a log line silently
-# reclassified the skip.
+# Why a replay never ran, recorded at the seam that refused it: the reason is a
+# decision the session made, not something recoverable from the state it left
+# behind, and bucketing by substring lets a reworded log line reclassify it.
 SKIP_DISABLED_BY_FLAG = "disabled_by_flag"
 SKIP_NO_WARM_START_RECIPE = "no_warm_start_recipe"
 SKIP_RECIPE_NOT_REPLAYABLE = "recipe_not_replayable"
@@ -111,28 +83,24 @@ SKIP_KERNEL_ROOT_MISSING = "kernel_root_missing"
 SKIP_KERNEL_PREPARATION_FAILED = "kernel_preparation_failed"
 SKIP_ENQUEUE_FAILED = "enqueue_failed"
 
-#: The terminal statuses the event reports, mapped from the outcome status the
-#: phase settles on. A replay that reproduced is ``succeeded``; one that was
-#: measured and judged not to reproduce is ``rejected``, which is a completed
-#: arc rather than a failure; one that never got a usable measurement is
-#: ``failed``.
+#: The terminal statuses the event reports, keyed by the outcome status the
+#: phase settles on. ``rejected`` is a completed arc rather than a failure: the
+#: replay was measured and judged not to reproduce.
 STATUS_BY_OUTCOME: dict[str, str] = {
     "reproduced": "succeeded",
     "quality_failed": "rejected",
     "accuracy_failed": "rejected",
-    # The phase's word for "measured, and it came in under the keep
-    # threshold". A judged rejection, not a failure: the replay produced a
-    # real number and the number lost.
+    # "Measured, and under the keep threshold": a judged rejection, not a
+    # failure -- the replay produced a real number and the number lost.
     "drift": "rejected",
     "reproduced_but_no_params": "degraded",
     "promotion_failed": "failed",
-    # The replay lost and the attempt to undo it also lost, which leaves the
-    # session's trees in a state nothing here vouches for.
+    # The replay lost and the undo lost too, leaving the session's trees in a
+    # state nothing here vouches for.
     "rollback_failed": "failed",
     "failed": "failed",
-    # Refused before a task existed. A skip is a completed decision, not an
-    # absence, which is why it closes an event of its own rather than leaving
-    # the timeline silent about a replay the session considered and declined.
+    # Refused before a task existed. A completed decision, not an absence, so
+    # it closes an event of its own rather than leaving the timeline silent.
     "skipped": "skipped",
     "kernel_preparation_failed": "failed",
     "enqueue_failed": "failed",
@@ -171,38 +139,19 @@ __all__ = [
 
 
 def warm_replay_event_id(phase: str, macro_cycle: Any) -> str:
-    """Build the event id of the warm replay one phase ran in one cycle.
-
-    Returns:
-        str: The event id, ``{phase}:{macro_cycle}:warm_replay``.
-
-    Raises:
-        ValueError: If either segment is malformed.
-    """
+    """Build ``{phase}:{macro_cycle}:warm_replay``; raises :exc:`ValueError`
+    if either segment is malformed."""
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
 def _derived_status(outcome: Mapping[str, Any]) -> str:
-    """Map a settled outcome onto the status the event closes on.
-
-    Args:
-        outcome (Mapping[str, Any]): The settled ``warm_replay_outcome``.
-
-    Returns:
-        str: The event status. An outcome status the map does not know closes
-            the event ``failed`` rather than inventing a reading for it: a
-            status this module has not been taught is a replay whose arc it
-            cannot vouch for.
-    """
+    """Map a settled ``warm_replay_outcome`` onto the event's status; one the
+    map does not know closes ``failed``, being an arc it cannot vouch for."""
     return STATUS_BY_OUTCOME.get(str(outcome.get("status") or ""), "failed")
 
 
 def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract the terminal ruling shared by every way an event can close.
-
-    Args:
-        settled (Mapping[str, Any]): The settled ``warm_replay_outcome``.
-    """
+    """Extract the terminal ruling shared by every way an event can close."""
     return {
         "outcome_status": str(settled.get("status") or ""),
         "reason": str(settled.get("reason") or ""),
@@ -217,10 +166,9 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
 class WarmReplayEventRecorder:
     """Records one warm replay's facts into its own event.
 
-    Holds a sink and no state beyond the timeline bookkeeping: every method
-    states the whole of what it knows, so a replay recorded across a resume
-    assembles from both halves. Nothing written is read back until
-    :meth:`finish`, which assembles the event out of the fragments.
+    Holds a sink and no state beyond timeline bookkeeping: every method states
+    the whole of what it knows, so a replay recorded across a resume assembles
+    from both halves.
     """
 
     def __init__(
@@ -241,42 +189,13 @@ class WarmReplayEventRecorder:
     ):
         """Bind a recorder to one replay's event.
 
-        A warm recipe has no single id. It is identified by the tier it was
-        stamped at, the canonical record the config came from, and the donor
-        that record belongs to -- three separate facts, because a replay can
-        take its config from one place and its kernel section from another,
-        and because a low-confidence config is suppressed while the kernel
-        half of the same record still runs.
-
-        Args:
-            sink (RecordSink): Where the rows go, which decides the event they
-                belong to.
-            task_id (str): The dispatched task id. Also the key of the baseline
-                action that measured this replay, which is how the event cites
-                its own numbers instead of restating them.
-            tier (str): The warm-recipe tier stamped at warm start.
-            config_source (str): The canonical id of the record the config came
-                from. Empty when the config was suppressed.
-            config_donor_tier (str): Where that config came from -- ``self``
-                when the session's own identity match owned it, the donor's
-                tier when it was borrowed, or
-                ``suppressed_low_confidence`` when it was withheld and only
-                the kernel section was replayed.
-            donor (Mapping[str, Any] | None): The donor record's identity, when
-                the recipe was borrowed from another session.
-            expected_gain_pct (Any): The gain the recipe claimed, which the
-                historical reproduce bar is a fraction of.
-            confidence (Any): The confidence the recipe was admitted on.
-            min_reproduce_pct (Any): The fraction of the claimed gain the
-                replay must reproduce to clear the historical bar.
-            session_baseline_tput (Any): The session's recorded baseline.
-                Recorded beside the enqueue anchor because the adoption chains
-                from this one while the replay is judged against that one, and
-                a reader comparing the two needs both on record.
-            kernel_count (Any): How many kernel entries the replay carried.
-            recipe_suppressed (Any): Whether the config half was withheld for
-                low confidence, which is what makes an empty ``config_source``
-                a decision rather than a missing read.
+        A warm recipe has no single id: it takes ``tier``, the record
+        ``config_source`` came from, and that record's ``donor``. Three facts,
+        because a replay can take its config from one place and its kernel
+        section from another, and a low-confidence config is suppressed --
+        ``recipe_suppressed`` -- while the kernel half still runs, which is
+        what makes an empty ``config_source`` a decision. ``config_donor_tier``
+        is ``self``, the donor's tier, or ``suppressed_low_confidence``.
         """
         self._sink = sink
         self._t0 = time.monotonic()
@@ -284,11 +203,9 @@ class WarmReplayEventRecorder:
         self._sequence: int | None = None
         self._closed = False
         self._task_id = str(task_id or "")
-        # Gates are stamped at seconds precision and several of them rule
-        # inside one second, so the row's own timestamp cannot order the arc.
-        # The ordinal is assigned once per gate, so a gate that re-rules on
-        # better evidence settles in the place it was first evaluated rather
-        # than jumping to the end of the arc.
+        # Gates are stamped at seconds precision and several rule inside one
+        # second, so timestamps cannot order the arc. Assigned once per gate,
+        # so a gate that re-rules keeps its original place.
         self._gate_ordinals: dict[str, int] = {}
         self._request = {
             "task_id": self._task_id,
@@ -321,10 +238,8 @@ class WarmReplayEventRecorder:
     def begin(self) -> None:
         """Put the event on the timeline.
 
-        The request rides on the open shell so an in-flight replay is readable
-        as the replay of a named recipe rather than as an anonymous event that
-        has not finished yet -- which is the state a session killed mid-replay
-        is read in.
+        The request rides on the open shell, so a session killed mid-replay
+        reads as the replay of a named recipe, not an anonymous unfinished one.
         """
         self._sequence = open_event(
             event_type=EVENT_TYPE,
@@ -350,24 +265,10 @@ class WarmReplayEventRecorder:
     ) -> None:
         """Record the numbers the replay was judged on, as it is judged.
 
-        ``before_tput`` is the anchor captured at enqueue time -- the number
-        the gain was actually computed against. It is recorded here because the
-        phase holds it in a local and drops it, which is what forced the event
-        to back-solve it from the gain.
-
-        Args:
-            before_tput (Any): The anchor the gain was measured against.
-            after_tput (Any): The throughput the replay measured.
-            gain_pct (Any): The measured gain over the anchor.
-            hot_tput (Any): The measured hot pass.
-            cold_tput (Any): The discarded cold warmup, kept for audit.
-            accuracy (Any): The score the replay was gated on, when one could
-                be read.
-            baseline_accuracy (Any): The score the gate compared it against.
-                Recorded beside it because a replay's score only means
-                something next to the reference it was judged against.
-            eval_ran (Any): Whether the accuracy eval ran at all, which is what
-                separates "scored nothing" from "no score could be read".
+        ``before_tput`` is the enqueue-time anchor the gain was computed
+        against, recorded here because the phase drops it. ``cold_tput`` is the
+        discarded warmup, kept for audit; ``eval_ran`` separates "scored
+        nothing" from "no score could be read".
         """
         self._sink.record(
             SECTION_EVENT,
@@ -394,23 +295,11 @@ class WarmReplayEventRecorder:
     ) -> None:
         """Record the config the replay actually ran with.
 
-        The projection had to recover this from the stack entry the promotion
-        pushed, which meant a replay that measured and lost left no record of
-        *what* lost. Recorded here at the moment it is measured, so a rejected
-        replay states its config too.
-
-        The config and the kernel disposition are known at different points --
-        the config when the replay is judged, the kernel half only once the
-        ruling decides whether to keep or revert it. Only the arguments given
-        are written, because rows deep-merge: passing a default for a fact this
-        call does not know would overwrite what an earlier call did know.
-
-        Args:
-            extra_server_args (str | None): The combined server args the replay
-                ran. ``None`` leaves any already-recorded value standing.
-            extra_envs (Mapping[str, Any] | None): The combined envs it ran.
-            kernel (Mapping[str, Any] | None): The kernel half's disposition --
-                status, total, kept, reverted.
+        Recorded as the config is measured, so a replay that lost still states
+        *what* lost. The config is known when the replay is judged and the
+        kernel disposition only once the ruling decides whether to revert it,
+        so only the arguments given are written: rows deep-merge, and a default
+        would overwrite what an earlier call knew.
         """
         applied: dict[str, Any] = {}
         if extra_server_args is not None:
@@ -426,11 +315,7 @@ class WarmReplayEventRecorder:
     def record_rollback(self, *, ok: Any, errors: Any = None) -> None:
         """Record the attempt to undo a replay that did not survive its gates.
 
-        Args:
-            ok (Any): Whether every tree the replay touched was restored. A
-                false reading is why a session stops: the trees are in a state
-                nothing vouches for.
-            errors (Any): What failed to unwind.
+        A false ``ok`` is why a session stops: some tree was not restored.
         """
         self._sink.record(
             SECTION_EVENT,
@@ -453,20 +338,10 @@ class WarmReplayEventRecorder:
     ) -> None:
         """Record one gate's verdict at the moment it is evaluated.
 
-        A gate that was never reached writes no row, which is how assembly
-        tells "did not pass" apart from "did not apply" -- the distinction the
-        status-guessing projection could not make.
-
-        Args:
-            gate (str): The gate's name (a ``GATE_*`` value).
-            passed (bool | None): Whether it passed. ``None`` is a gate that
-                ran but could not rule, which is a verdict of its own: an
-                accuracy eval that ran and returned no usable score neither
-                passed nor failed, and recording it as ``False`` would read as
-                a failed score that never existed.
-            reason (str): Why it ruled that way.
-            observed (Any): The value the gate read.
-            threshold (Any): The bar it was read against.
+        A gate never reached writes no row, which is how assembly tells "did
+        not pass" apart from "did not apply". A ``None`` ``passed`` is a gate
+        that ran and could not rule: an eval returning no usable score neither
+        passed nor failed, and ``False`` would read as a score that never was.
         """
         name = str(gate or "")
         ordinal = self._gate_ordinals.setdefault(name, len(self._gate_ordinals) + 1)
@@ -492,15 +367,8 @@ class WarmReplayEventRecorder:
         replayed_patch_refs: Any = None,
         stack_entry: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record what promoting the replay actually changed.
-
-        Args:
-            promoted_checkout (str): The framework checkout the replay was
-                promoted onto, when the promotion moved one.
-            replayed_patch_refs (Any): The patch files the replay applied.
-            stack_entry (Mapping[str, Any] | None): The entry pushed onto
-                ``optimization_stack``.
-        """
+        """Record what promoting the replay actually changed: the checkout it
+        moved, the patches it applied, and the ``optimization_stack`` entry."""
         refs = [str(ref) for ref in (replayed_patch_refs or []) if str(ref or "")]
         self._sink.record(
             SECTION_EVENT,
@@ -514,12 +382,7 @@ class WarmReplayEventRecorder:
         )
 
     def finish(self, outcome: Mapping[str, Any] | None) -> None:
-        """Close the event on the outcome the phase settled.
-
-        Args:
-            outcome (Mapping[str, Any] | None): The settled
-                ``warm_replay_outcome``.
-        """
+        """Close the event on the ``warm_replay_outcome`` the phase settled."""
         settled = _as_dict(outcome)
         self._close(status=_derived_status(settled), payload={"verdict": _verdict(settled)})
 
@@ -532,16 +395,9 @@ class WarmReplayEventRecorder:
     ) -> None:
         """Close an event for a replay that was refused before it ran.
 
-        Args:
-            code (str): Why it was refused (a ``SKIP_*`` value). Recorded
-                separately from the outcome's prose reason so a consumer
-                selects on the code and reads the prose only for detail.
-            outcome (Mapping[str, Any] | None): The settled
-                ``warm_replay_outcome``, which carries the prose reason and
-                any rollback the refusal had to perform.
-            details (Mapping[str, Any] | None): What the refusal turned on --
-                the roots it could not resolve, the confidence it read against
-                its threshold, the workload shape it found incompatible.
+        ``code`` is a ``SKIP_*`` value, apart from the outcome's prose reason
+        so a consumer selects on the code. ``details`` is what the refusal
+        turned on -- an unresolvable root, a confidence, a workload shape.
         """
         settled = _as_dict(outcome)
         # An unrecognised status on this path is still a refusal: the replay
@@ -564,8 +420,7 @@ class WarmReplayEventRecorder:
         """Close an event whose replay raised instead of settling an outcome.
 
         Distinguishes "the replay blew up" from "the session was killed
-        mid-replay", which would otherwise both read as a dangling
-        ``status="running"`` event.
+        mid-replay", which both read as a dangling ``running`` event.
         """
         if self._closed:
             return
@@ -617,16 +472,8 @@ def assemble_warm_replay_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble one warm-replay event's ``ext`` out of its recorded rows.
 
-    Args:
-        parts (Mapping[str, list[dict[str, Any]]]): The warm-replay sections as
-            read back from the spool, section name to row list.
-        event (str): The event id to assemble; rows of every other event in the
-            same session are ignored.
-
-    Returns:
-        tuple[dict[str, Any], str]: The ``ext`` payload and the status the
-            recorded verdict settled on. The status is empty when no write has
-            closed the event, which leaves the caller's own reading standing.
+    Rows of every other event in the session are ignored. The returned status
+    is empty when no write has closed the event, leaving the caller's reading.
     """
     event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = event_rows[0] if event_rows else {}
@@ -639,11 +486,9 @@ def assemble_warm_replay_ext(
         "request": _as_dict(header.get("request")),
         "measurement": _as_dict(header.get("measurement")),
         "gates": gates,
-        # The gate that ended the arc, named rather than left to a consumer to
-        # re-derive by scanning for the first non-pass. An arc that succeeded
-        # was ended by nothing, so it names nothing: a replay is admitted on an
-        # accuracy eval that ran and could not rule, and reporting that gate as
-        # the blocker would say a promoted replay was held up by it.
+        # The gate that ended the arc, named rather than re-derived by a
+        # consumer. A successful arc names nothing: a replay is admitted on an
+        # eval that could not rule, which is no blocker.
         "blocked_by": None if status == "succeeded" else _text_or_none(_blocking_gate(gates)),
         "applied": _as_dict(header.get("applied")) or None,
         "verdict": _as_dict(header.get("verdict")),
@@ -659,11 +504,9 @@ def assemble_warm_replay_ext(
 def _blocking_gate(gates: list[dict[str, Any]]) -> str:
     """Name the first gate that did not pass, or ``""`` when all of them did.
 
-    Returns:
-        str: The gate's name. A gate that ruled ``None`` counts as blocking
-            only if nothing after it failed outright, so a replay admitted on
-            an unscored eval and then rejected on the keep threshold reports
-            the threshold rather than the eval.
+    A gate that ruled ``None`` blocks only if nothing after it failed, so a
+    replay admitted on an unscored eval and then rejected on the keep threshold
+    reports the threshold.
     """
     unresolved = ""
     for row in gates:
@@ -695,17 +538,9 @@ def make_warm_replay_recorder(
     """Build a recorder, or ``None`` when one cannot be constructed.
 
     Replay behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
-    declines too: writing the timeline into whatever the working directory
-    happens to be is worse than not recording.
-
-    A false ``open_event_on_timeline`` rebinds to an event a previous tick
-    already opened, which is how the promote seam records onto the arc the
-    enqueue seam started without opening it a second time.
-
-    Returns:
-        WarmReplayEventRecorder | None: The recorder, already opened on the
-            timeline, or ``None`` when it could not be built.
+    failures degrade to "no event", and an unbound session declines too. A
+    false ``open_event_on_timeline`` rebinds to an event a previous tick
+    opened, which is how the promote seam records onto the enqueue seam's arc.
     """
     from ...session.session_binding import session_is_bound
 

@@ -3,17 +3,11 @@
 
 """The enablement event, recorded by the real lane rather than by hand.
 
-:mod:`test_sbd_v6_enablement_timeline` drives the recorder directly. These
-tests drive the production code paths -- the dispatch, the rearm, the eval
-writeback, the build executor, the revalidation enqueue -- and assert on what
-lands on the timeline, so a call site that stops recording is a failure here
-even when the recorder itself is still correct.
-
-That matters more for this event than for the others. Nothing owns the lane's
-lifetime: its facts come from five modules on different ticks, each opening the
-event idempotently, so there is no single recorder object whose absence would
-be obvious. The way a fact goes missing is one call site quietly not making a
-call.
+:mod:`test_sbd_v6_enablement_timeline` drives the recorder directly; these tests drive the production
+paths -- the dispatch, the rearm, the eval writeback, the build executor, the revalidation enqueue --
+so a call site that stops recording fails here even when the recorder is still correct. Nothing owns
+the lane's lifetime, so there is no recorder object whose absence would be obvious: the way a fact
+goes missing is one call site quietly not making a call.
 """
 
 from __future__ import annotations
@@ -184,10 +178,8 @@ def _lane(session_dir: Path, **overrides: Any):
         _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
         _time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
-        # The host preflight stats a checkpoint named by the ambient
-        # ``MODEL_PATH``, which belongs to whichever test ran before this one.
-        # These tests are about what the lane records, so the host is asked and
-        # answers that it cannot tell.
+        # The host preflight would stat a checkpoint named by the ambient ``MODEL_PATH``, which belongs
+        # to whichever test ran before this one, so the host answers that it cannot tell.
         _environment_verdict=lambda: None,
     )
     for name in (
@@ -203,8 +195,7 @@ def _lane(session_dir: Path, **overrides: Any):
         "_open_round_past_spent_generations",
     ):
         setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
-    # The round ledger's own surface, which the dispatch and the rearm both
-    # reach through: the cap, the lease and the settle all live on it.
+    # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
         "_refused_argv_is_terminal",
         "_environment_fault_is_terminal",
@@ -242,17 +233,8 @@ def _writeback(session_dir: Path, **overrides: Any):
     return fake
 
 
-# --- the dispatch ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_real_dispatch_records_the_kind_it_classified(_bound_session):
-    """The classified kind comes from the params the real builder produced.
-
-    The projection read a ``failure_kind`` state field that does not exist, so
-    the export published nothing here; the kind only ever lives in the
-    specialist params, which is why the dispatch is where it is recorded.
-    """
     lane = _lane(_bound_session)
 
     task_id = await lane._maybe_enqueue_enablement_specialist()
@@ -268,12 +250,6 @@ async def test_the_real_dispatch_records_the_kind_it_classified(_bound_session):
 
 @pytest.mark.asyncio
 async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
-    """A lane whose trigger went unrecorded is still on the timeline.
-
-    The boot trigger is stashed by the baseline writeback, which a resumed
-    session may have run in a previous process. The dispatch carries mode and
-    origin for exactly that case.
-    """
     lane = _lane(_bound_session, mode="launch")
 
     await lane._maybe_enqueue_enablement_specialist()
@@ -287,7 +263,6 @@ async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
 
 @pytest.mark.asyncio
 async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
-    """Rotation through attempts is a sequence of rows, not a counter."""
     lane = _lane(_bound_session)
     first = await lane._maybe_enqueue_enablement_specialist()
     await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
@@ -299,12 +274,8 @@ async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
     assert [row["attempt"] for row in rows] == [1, 2]
 
 
-# --- the rearm ------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
-    """A boot-origin KEEP is the terminal, and the event says which round it was."""
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
@@ -332,7 +303,6 @@ async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
 
 @pytest.mark.asyncio
 async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
-    """Serial enablement: the round's own gap and the next one are both kept."""
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
@@ -351,18 +321,11 @@ async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
     assert row["advanced"] is True
     assert "Glm5ForCausalLM" in row["launch_log_excerpt"]
     assert "not initialized from checkpoint" in row["next_launch_log_excerpt"]
-    # An advance is not a terminal, so the lane is still open.
     assert _events(_bound_session)[0]["status"] == "running"
 
 
 @pytest.mark.asyncio
 async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
-    """The cap stops the run, so the lane failed.
-
-    The cap is read where the next round would be dispatched, not where the
-    last one was scored, so the lane only closes on the dispatch that finds
-    the ledger already exhausted.
-    """
     lane = _lane(_bound_session)
     for _ in range(_ENABLEMENT_MAX_ATTEMPTS):
         task_id = await lane._maybe_enqueue_enablement_specialist()
@@ -380,7 +343,6 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
 
 @pytest.mark.asyncio
 async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
-    """The patch is provisional until a genuine baseline re-measures accuracy."""
     lane = _lane(_bound_session, origin="eval")
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
@@ -405,18 +367,9 @@ async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
 
 @pytest.mark.asyncio
 async def test_a_round_still_open_leaves_one_unruled_row(_bound_session):
-    """A round nobody rearmed keeps its row, and the pump opens no second one.
-
-    Ending such a round is the reconciler's, not the pump's: the pump sees the
-    ledger still holding one and declines. What the timeline must not do is
-    invent a verdict for it -- the row stays as the dispatch left it, carrying
-    the kind and the log the round was pointed at and no status, which is the
-    honest account of a round the lane never learned the outcome of.
-    """
     lane = _lane(_bound_session)
     first = await lane._maybe_enqueue_enablement_specialist()
-    # The specialist row is gone from the registry, but the round it holds is
-    # still open, so this pump declines rather than dispatching over it.
+    # The specialist row is gone from the registry, but the round it holds is still open.
     assert await lane._maybe_enqueue_enablement_specialist() == ""
 
     rows = _ext()["attempts"]["rows"]
@@ -425,18 +378,8 @@ async def test_a_round_still_open_leaves_one_unruled_row(_bound_session):
     assert rows[0].get("status") in (None, "")
 
 
-# --- rounds that never happened -------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_an_unclassifiable_failure_is_recorded_without_a_round(_bound_session):
-    """A lane that declines to dispatch is not a lane that was never triggered.
-
-    Driven through the real one-shot recorder rather than through the pump: a
-    non-blank log dispatches whatever it classifies to, because the kind is
-    advisory, so the pump only reaches this path for a log it was handed no
-    params for at all.
-    """
     lane = _lane(_bound_session)
     enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
 
@@ -452,7 +395,6 @@ async def test_an_unclassifiable_failure_is_recorded_without_a_round(_bound_sess
 
 @pytest.mark.asyncio
 async def test_the_same_unclassifiable_failure_is_filed_once(_bound_session):
-    """Keyed by the digest the lane itself dedupes the observation on."""
     lane = _lane(_bound_session)
     for _ in range(3):
         await lane._maybe_record_enablement_human_review("Segmentation fault (core dumped)")
@@ -460,11 +402,7 @@ async def test_the_same_unclassifiable_failure_is_filed_once(_bound_session):
     assert _ext()["human_review"]["count"] == 1
 
 
-# --- the eval trigger -----------------------------------------------------
-
-
 def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session):
-    """The real writeback records the trigger it just persisted to state."""
     writeback = _writeback(_bound_session)
 
     writeback._persist_eval_failure(
@@ -492,12 +430,6 @@ def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session)
 
 
 def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
-    """The measured trigger stands, in state and on the timeline alike.
-
-    ``RUN_EVAL`` is itself a contract field, so a fingerprint cannot gate this:
-    the eval-less run's fingerprint never matches the measured one. The
-    recorder keeps the opening trigger for the same reason the state does.
-    """
     writeback = _writeback(_bound_session)
     writeback._persist_eval_failure(
         {
@@ -515,7 +447,6 @@ def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
 
 
 def test_a_failed_revalidation_closes_the_window_it_was_opened_for(_bound_session):
-    """A revalidation that comes back sub-floor reopens the authoring loop."""
     writeback = _writeback(
         _bound_session,
         validation_pending=True,
@@ -540,13 +471,6 @@ def test_a_failed_revalidation_closes_the_window_it_was_opened_for(_bound_sessio
 
 
 def test_a_failed_revalidation_is_not_itself_the_lanes_terminal(_bound_session):
-    """The cap belongs to the round ledger, so a window's failure cannot call it.
-
-    A sub-floor revalidation reopens the authoring loop; whether that loop has
-    any ground left is a question only the ledger can answer, and it is asked
-    at the next dispatch. Closing the lane here would end it on a round the
-    ledger had not yet charged.
-    """
     writeback = _writeback(
         _bound_session,
         validation_pending=True,
@@ -566,12 +490,8 @@ def test_a_failed_revalidation_is_not_itself_the_lanes_terminal(_bound_session):
     assert _events(_bound_session)[0]["status"] == "running"
 
 
-# --- the revalidation enqueue --------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_session):
-    """The window is what holds the lane open, so it is on the timeline."""
     lane = _lane(
         _bound_session,
         origin="eval",
@@ -591,11 +511,7 @@ async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_sess
     assert "closed_at" not in rows[0]
 
 
-# --- the targeted build ---------------------------------------------------
-
-
 def test_the_build_executor_records_the_build_it_ran(_bound_session):
-    """A compile the lane escalated to, recorded where its result is classified."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 
     result = types.SimpleNamespace(
@@ -625,12 +541,8 @@ def test_the_build_executor_records_the_build_it_ran(_bound_session):
     assert builds["rows"][0]["ref"] == "abc123"
 
 
-# --- recording never breaks the lane --------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypatch):
-    """Every call site is on a hot path; none of them may need a session."""
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.session.session_binding.bound_session_or_none",
         lambda: None,

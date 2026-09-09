@@ -3,12 +3,9 @@
 
 """Author-time recording of the v6 ``metadata`` section.
 
-Metadata used to be re-derived at export from ``state.json`` and
-``manifest.json``, which meant the exporting process had to re-probe its own
-environment for facts the launching process already knew. These pin the
-recorded path: each producer writes only the keys it owns, the singleton
-deep-merges rather than replaces, and the exporter prefers a recorded leaf over
-a projected one without losing the projection's fallbacks.
+Each producer writes only the keys it owns, the singleton deep-merges rather than replaces, and the
+exporter prefers a recorded leaf over a projected one without losing the projection's fallbacks -- so
+the exporting process never has to re-probe an environment the launching process already knew.
 """
 
 from __future__ import annotations
@@ -88,15 +85,8 @@ def _state(**overrides):
     return SimpleNamespace(**base)
 
 
-# ---- section registration ----
-
-
 def test_metadata_is_a_registered_singleton():
-    """An unregistered section is silently dropped by the recorder."""
     assert section_shape(SECTION) == "singleton"
-
-
-# ---- identity ----
 
 
 def test_the_manifest_stamp_records_identity_and_image(tmp_path):
@@ -119,7 +109,6 @@ def test_identity_carries_the_launch_shape(tmp_path):
 
 
 def test_a_save_does_not_erase_the_framework_version_from_launch(tmp_path):
-    """The state field stays empty until the framework reports one, if ever."""
     record_metadata_identity(tmp_path, _MANIFEST)
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(framework_version=""))
@@ -139,26 +128,17 @@ def test_an_empty_manifest_records_nothing(tmp_path):
 
 
 def test_the_workload_contract_is_digested_once_for_the_session(tmp_path):
-    """The digest belongs to the session, not to each variant that quotes it.
-
-    The explore executor stamps it on every ``explore_search.tested`` row so a
-    resume can tell an old KEEP was measured under a different contract. It is
-    a pure function of (CONC, ISL, OSL, precision, TP), so recording it here
-    once is what lets the per-variant copies go away.
-    """
     record_metadata_identity(tmp_path, _MANIFEST)
     from_manifest = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
     assert from_manifest
 
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state())
-    # Same contract from the other writer, so the singleton merge is a no-op
-    # rather than two writers fighting over one key.
+    # Same contract from the other writer, so the singleton merge is a no-op.
     assert assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"] == from_manifest
 
 
 def test_a_different_concurrency_is_a_different_contract(tmp_path):
-    """The digest has to move, or a cross-workload resume cannot be caught."""
     record_metadata_identity(tmp_path, _MANIFEST)
     baseline = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
 
@@ -168,18 +148,9 @@ def test_a_different_concurrency_is_a_different_contract(tmp_path):
 
 
 def test_an_unknown_contract_records_no_signature(tmp_path):
-    """A digest of five blanks is a stable string the merge would never replace.
-
-    So absence has to stay absent: the key is omitted rather than carrying the
-    digest of nothing, which a later writer with a real contract could not
-    overwrite.
-    """
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(tp=None, conc=None, isl=None, osl=None, precision=""))
     assert "workload_signature" not in assemble_parts(tmp_path)[SECTION]["task_config"]
-
-
-# ---- lifecycle snapshot ----
 
 
 def test_a_state_snapshot_carries_the_budget_anchor_and_its_end(tmp_path):
@@ -192,7 +163,6 @@ def test_a_state_snapshot_carries_the_budget_anchor_and_its_end(tmp_path):
 
 
 def test_a_running_session_records_no_end(tmp_path):
-    """The end is only stamped alongside a reason, so a resume cannot leave a stale one."""
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(stop_reason=""))
     assert assemble_parts(tmp_path)[SECTION]["session"]["ended_at_utc"] == ""
@@ -207,14 +177,12 @@ def test_a_stopped_session_records_the_time_it_ran(tmp_path):
 
 
 def test_a_resumed_leg_is_measured_from_its_own_start(tmp_path):
-    """Measuring from ``start_ts`` would charge the leg with the gap before it."""
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(resumed_ts="2026-09-01T01:00:00+00:00"))
     assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] == 60.0
 
 
 def test_the_total_reports_the_budget_the_session_was_charged(tmp_path):
-    """The live leg is one leg; the total is what every leg together has spent."""
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(
         rec,
@@ -226,7 +194,6 @@ def test_the_total_reports_the_budget_the_session_was_charged(tmp_path):
 
 
 def test_a_stale_stop_stamp_does_not_zero_a_live_leg(tmp_path):
-    """A clean-stop resume keeps the previous leg's reason and stamp, and neither ends this leg."""
     rec = recorder_for(tmp_path, producer="coordinator")
     # ``stop_ts`` predates the resume, so it is the previous leg's end.
     snapshot_metadata(rec, _state(resumed_ts="2026-09-01T03:00:00+00:00"))
@@ -251,7 +218,6 @@ def test_a_non_transformers_model_records_only_the_derived_class(tmp_path):
 
 
 def test_crash_timestamps_are_recorded_as_iso(tmp_path):
-    """State keeps epoch seconds; every reader would otherwise convert them itself."""
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(crash_count=2, crash_timestamps=[1_788_220_800.0, "bogus"]))
     recovery = assemble_parts(tmp_path)[SECTION]["session"]["recovery"]
@@ -280,9 +246,6 @@ def test_a_state_without_a_session_id_records_nothing(tmp_path):
     assert SECTION not in assemble_parts(tmp_path)
 
 
-# ---- langfuse ----
-
-
 def test_a_disabled_emitter_still_records_why(tmp_path):
     record_metadata_langfuse(tmp_path, {"enabled": False, "disabled_reason": "no_credentials"})
     langfuse = assemble_parts(tmp_path)[SECTION]["langfuse"]
@@ -300,11 +263,7 @@ def test_the_trace_url_is_resolved_from_host_and_trace_id(tmp_path):
     assert langfuse["counts"] == {"spans": 12}
 
 
-# ---- singleton merge across producers ----
-
-
 def test_each_producer_contributes_only_its_own_keys(tmp_path):
-    """A later partial write must not erase what an earlier one recorded."""
     record_metadata_identity(tmp_path, _MANIFEST)
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state())
@@ -314,9 +273,6 @@ def test_each_producer_contributes_only_its_own_keys(tmp_path):
     assert metadata["session"]["image_id"] == "hyperloom:v3"
     assert metadata["session"]["tick_count"] == 37
     assert metadata["langfuse"]["trace_id"] == "tr-1"
-
-
-# ---- export overlay ----
 
 
 def _collect(recorded=None, **overrides):
@@ -341,7 +297,6 @@ def test_a_recorded_leaf_beats_the_projection(tmp_path):
 
 
 def test_an_empty_recorded_leaf_does_not_erase_a_projected_one():
-    """Absence of evidence is not evidence of absence."""
     metadata = _collect(recorded={"session": {"pid": 0, "code_revision": ""}})
     assert metadata["session"]["pid"] == 1
     assert metadata["session"]["code_revision"] == "abc1234"
@@ -354,14 +309,12 @@ def test_the_projection_supplies_blocks_the_fragment_never_wrote():
 
 
 def test_versions_does_not_restate_the_envelope():
-    """The schema version and the optimizer revision are carried elsewhere."""
     versions = _collect()["versions"]
     assert "schema_version" not in versions
     assert "hyperloom" not in versions
 
 
 def test_tool_provenance_keeps_commit_and_root_dir():
-    """A bare version string cannot tell you which checkout produced a result."""
     recorded = {"versions": {"tools": {"geak": {"tool": "geak", "commit": "dead", "root_dir": "/opt/geak"}}}}
     tools = _collect(recorded=recorded)["versions"]["tools"]
     assert tools["geak"]["commit"] == "dead"
@@ -375,14 +328,12 @@ def test_export_facts_are_never_taken_from_a_fragment():
 
 
 def test_recorded_elapsed_is_taken_verbatim():
-    """Re-exporting a stopped session must report what it ran, not the span since."""
     metadata = _collect(recorded={"session": {"elapsed_minutes": 90.0, "total_elapsed_minutes": 150.0}})
     assert metadata["session"]["elapsed_minutes"] == 90.0
     assert metadata["session"]["total_elapsed_minutes"] == 150.0
 
 
 def test_elapsed_falls_back_to_the_collected_window():
-    """A session with no fragment still reports the window the collector measured."""
     metadata = _collect(session={"session_id": "sess-1", "elapsed_minutes": 42.0})
     assert metadata["session"]["elapsed_minutes"] == 42.0
     # No per-leg history to add up, so the total can only be the one window.

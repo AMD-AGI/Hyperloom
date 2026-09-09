@@ -4,11 +4,9 @@
 """The integrate gate's verdict against the real production writer.
 
 ``test_sbd_v6_kernel_timeline.py`` pins what the recorder does with a verdict;
-these pin that the orchestrator actually hands it one. The seam is
-``SharedState.record_kernel_integrate_result``, which every one of the three
-settle sites funnels through -- so a verdict that stops reaching the timeline
-stops reaching it everywhere at once, and that is what these tests would
-catch.
+these pin that the orchestrator hands it one. All three settle sites funnel
+through ``SharedState.record_kernel_integrate_result``, so a verdict that stops
+reaching the timeline stops reaching it everywhere at once.
 """
 
 from __future__ import annotations
@@ -70,7 +68,6 @@ def _result(**overrides: Any) -> dict[str, Any]:
 
 
 def test_a_settled_keep_reaches_the_kernel_event(tmp_path: Path) -> None:
-    """The gate runs after the visit closed, and the verdict still lands."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(_result())
@@ -85,7 +82,6 @@ def test_a_settled_keep_reaches_the_kernel_event(tmp_path: Path) -> None:
 
 
 def test_the_verdict_also_reaches_the_rewrite_row_it_ruled_on(tmp_path: Path) -> None:
-    """The lane row's e2e block is the projection of these rows, not a second copy."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(_result())
@@ -98,7 +94,6 @@ def test_the_verdict_also_reaches_the_rewrite_row_it_ruled_on(tmp_path: Path) ->
 
 
 def test_the_adoptions_server_args_reach_the_verdict_that_carried_them(tmp_path: Path) -> None:
-    """The stack entry an adoption introduces is part of what the gate kept."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(_result(extra_server_args="--enable-chunked-prefill"))
@@ -107,7 +102,6 @@ def test_the_adoptions_server_args_reach_the_verdict_that_carried_them(tmp_path:
 
 
 def test_a_gain_the_queue_did_not_qualify_is_taken_as_this_kernels_own(tmp_path: Path) -> None:
-    """The integrate queue measures one patch at a time, so its gain is pinned."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(_result())
@@ -116,7 +110,6 @@ def test_a_gain_the_queue_did_not_qualify_is_taken_as_this_kernels_own(tmp_path:
 
 
 def test_a_revert_is_recorded_as_a_verdict_not_as_a_dropped_patch(tmp_path: Path) -> None:
-    """``decision`` rules on the patch; ``rejected_reason`` is an exhausted budget."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(_result(decision="REVERT", gain_pct=0.2))
@@ -128,7 +121,6 @@ def test_a_revert_is_recorded_as_a_verdict_not_as_a_dropped_patch(tmp_path: Path
 
 
 def test_an_integration_fault_is_counted_apart_and_stays_retryable(tmp_path: Path) -> None:
-    """A fault never measured the patch, so it is not a verdict against it."""
     _visited_kernel(macro_cycle=2)
 
     _state(macro_cycle=2).record_kernel_integrate_result(

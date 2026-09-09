@@ -1,20 +1,15 @@
 """Author-time recording of external tool versions into ``metadata.versions``.
 
 Which build of tracelens, GEAK, forge or a CLI agent produced a session's
-results is a static property of the run: probed once when the tool is first
-used and unchanged thereafter. Recording it at author time keeps the exported
-provenance to what the run actually resolved rather than a re-derivation from
-whatever the environment looks like at export time.
+results is recorded when the tool is first used, so the exported provenance is
+what the run resolved rather than a re-derivation at export time. Probing is
+best-effort and cached per (tool, root).
 
 Each tool owns one row in the ``versions`` item stream, keyed by its name, and
 the assembler folds the stream into ``metadata.versions.tools``. The rows
-cannot be written into the ``metadata`` singleton directly: a singleton is one
-file per producer and assembly keeps only the newest, so these writes would be
-dropped whole by the Coordinator's own metadata write, which is reissued on
-every state save and is therefore always the newer of the two.
-
-Probing is best-effort and cached per (tool, root): a tool that cannot be
-resolved contributes an empty version rather than blocking the caller.
+cannot go into the ``metadata`` singleton directly: assembly keeps only the
+newest file per producer, so these writes would be dropped whole by the
+Coordinator's own metadata write, which is reissued on every state save.
 """
 
 from __future__ import annotations
@@ -42,16 +37,11 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
-    # The bypass trace reader ships inside this distribution, like forge below:
-    # there is no checkout to ``git rev-parse``, so its version is Hyperloom's.
-    # Without this entry a bypass run mints an all-empty ``versions["bypass"]``.
+    # bypass and forge ship inside this distribution: no checkout to
+    # ``git rev-parse``, so their version is Hyperloom's own. Both keys stay
+    # even so -- downstream provenance JSON reads them by name.
     "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
-    # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
-    # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # forge (the Kernel-Forge autonomous loop) ships inside this distribution,
-    # so there is no checkout to ``git rev-parse``: its version is Hyperloom's.
-    # The "forge" key stays -- downstream provenance JSON reads it by name.
     "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
@@ -61,12 +51,7 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
 
 
 def _run_first_line(argv: list[str]) -> str:
-    """Run ``argv`` and return the trimmed first output line (never raises).
-
-    Returns:
-        str: the trimmed first line of output (capped at 120 chars), or ``""``
-            on failure / non-zero exit.
-    """
+    """Trimmed first output line of ``argv``, capped at 120 chars; ``""`` on any failure."""
     import subprocess  # local: keep module import cost off the common path
 
     try:
@@ -86,34 +71,21 @@ def _run_first_line(argv: list[str]) -> str:
 
 
 def _git_short_commit(root: Path) -> str:
-    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises).
-
-    Returns:
-        str: the short commit hash, or ``""`` when it cannot be resolved.
-    """
+    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
     return _run_first_line(
         ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
     )
 
 
 def _git_describe(root: Path) -> str:
-    """Best-effort ``git describe --tags --always --dirty`` (never raises).
-
-    Returns:
-        str: the ``git describe`` output, or ``""`` when it cannot be resolved.
-    """
+    """Best-effort ``git describe --tags --always --dirty`` (never raises)."""
     return _run_first_line(
         ["git", "-C", str(root), "describe", "--tags", "--always", "--dirty"],
     )
 
 
 def _dist_version(names: tuple[str, ...]) -> str:
-    """First resolvable ``importlib.metadata`` version among ``names`` ("" if none).
-
-    Returns:
-        str: the first resolvable distribution version (rejecting a stale
-            ``0.0.0``), or ``""`` when none resolve.
-    """
+    """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
     try:
         from importlib.metadata import version as _dist_ver
     except Exception:  # noqa: BLE001
@@ -130,16 +102,7 @@ def _dist_version(names: tuple[str, ...]) -> str:
 
 
 def _probe_tool_version(strategy: Any, root_dir: str) -> str:
-    """Resolve a tool's human version per its provenance ``strategy``.
-
-    Args:
-        strategy (Any): the provenance strategy (``"git_describe"`` /
-            ``"git_short"`` / a ``("cmd", argv)`` or ``("dist", names)`` tuple).
-        root_dir (str): the tool install root for git-based strategies.
-
-    Returns:
-        str: the resolved version string, or ``""`` when it cannot be derived.
-    """
+    """Resolve a tool's human version per its ``_TOOL_PROVENANCE`` strategy."""
     try:
         if strategy == "git_describe":
             return _git_describe(Path(root_dir)) if root_dir else ""
@@ -167,19 +130,8 @@ def _tool_metadata(
 
     Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
     registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
-    root. ``version`` is the caller-supplied value, else a cached per-tool probe
-    following ``_TOOL_PROVENANCE``. Best-effort: never raises into the optimizer.
-
-    Args:
-        tool (str): the external tool name (keys into ``_TOOL_PROVENANCE``).
-        root (str | None): an explicit install root, highest precedence.
-        root_env (str | None): a caller-supplied env var naming the root.
-        version (str | None): a caller-supplied version, preferred over the
-            probe.
-
-    Returns:
-        dict[str, Any]: the resolved ``{tool, root_dir, commit, version}``
-            metadata.
+    root, and ``version`` is the caller's value, else a cached ``_TOOL_PROVENANCE``
+    probe. Best-effort: never raises into the optimizer.
     """
     import os
 
@@ -227,17 +179,8 @@ def record_tool_version(
     """Record one external tool's resolved provenance under ``metadata.versions.tools``.
 
     Idempotent per tool: the row is keyed by the tool name, so re-recording the
-    same tool overwrites its own row and leaves the other tools alone.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value
-            is a no-op.
-        tool (str): the external tool name; keys the recorded entry.
-        root (str | None): an explicit install root, highest precedence.
-        root_env (str | None): a caller-supplied env var naming the root.
-        version (str | None): a caller-supplied version, preferred over the
-            probe.
-        producer (str): the breakdown producer label.
+    same tool overwrites its own row and leaves the other tools alone. A falsy
+    ``session_dir`` or ``tool`` is a no-op.
     """
     name = str(tool or "").strip().lower()
     if not session_dir or not name:

@@ -95,7 +95,6 @@ def _close_step(row: dict[str, Any]) -> dict[str, Any]:
 def collect_v6_close(
     warnings: list[str],
     recorded: Any = None,
-    robustness: Any = None,
 ) -> dict[str, Any]:
     """Put the sequencer's own recording of the close-out on the wire.
 
@@ -104,11 +103,6 @@ def collect_v6_close(
         recorded (Any): The recorder's ``close`` fragment. The sequencer states
             what it did as it does it, so this is the only account of the
             close-out there is.
-        robustness (Any): The assembled robustness view, whose turns join the
-            close-out's robustness block. The agent's turns and the verdict
-            drawn from them are one account of one thing, and reading them
-            required knowing to look in two places.
-
     Returns:
         dict[str, Any]: The ``close`` object. Always a full object — unlike a
         timeline event, ``close`` has a fixed place in the payload, so an
@@ -116,17 +110,16 @@ def collect_v6_close(
         than vanishing.
     """
     if isinstance(recorded, dict) and recorded:
-        return _recorded_close(recorded, warnings=warnings, robustness=robustness)
-    return _unclosed(robustness)
+        return _recorded_close(recorded, warnings=warnings)
+    return _unclosed()
 
 
-def _robustness_block(recorded: dict[str, Any], robustness: Any) -> dict[str, Any]:
-    """Assemble the close-out's robustness block from both of its sources.
+def _robustness_block(recorded: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the close-out's robustness verdict.
 
     Args:
         recorded (dict[str, Any]): The close fragment, holding the escalation
             verdict and the findings read at close time.
-        robustness (Any): The assembled robustness view, holding the turns.
 
     Returns:
         dict[str, Any]: The block. ``findings`` is present only when the ladder
@@ -134,13 +127,11 @@ def _robustness_block(recorded: dict[str, Any], robustness: Any) -> dict[str, An
             found nothing.
     """
     block = _mapping(recorded.get("robustness"))
-    view = _mapping(robustness)
     assembled: dict[str, Any] = {
         "escalated": bool(block.get("escalated")),
         # Recorded alongside the verdict so a reader can check the escalation
         # against the reason it was drawn from.
         "stop_reason": str(recorded.get("stop_reason") or ""),
-        "turns": _dict_rows(view.get("turns")),
     }
     if block.get("findings") is not None:
         assembled["findings"] = _dict_rows(block.get("findings"))
@@ -152,7 +143,6 @@ def _recorded_close(
     recorded: dict[str, Any],
     *,
     warnings: list[str],
-    robustness: Any = None,
 ) -> dict[str, Any]:
     """Put the recorded close-out on the wire.
 
@@ -172,7 +162,7 @@ def _recorded_close(
         "end_time": str(recorded.get("end_time") or ""),
         "close_sequence_done": bool(recorded.get("close_sequence_done")),
         "steps": steps,
-        "robustness": _robustness_block(recorded, robustness),
+        "robustness": _robustness_block(recorded),
         "artifacts": {
             "final_json_path": artifacts.get("final_json_path") or None,
             "final_md_path": artifacts.get("final_md_path") or None,
@@ -218,7 +208,7 @@ def _warn_unknown_vocabulary(steps: list[dict[str, Any]], warnings: list[str]) -
         )
 
 
-def _unclosed(robustness: Any) -> dict[str, Any]:
+def _unclosed() -> dict[str, Any]:
     """The close-out of a session that never recorded one.
 
     Reached by a run that died before CLOSE, and by the ``cli.finally`` safety
@@ -233,11 +223,6 @@ def _unclosed(robustness: Any) -> dict[str, Any]:
     mid-sequence session ``degraded``, which is why the sequencer records its
     own verdict now.
 
-    Args:
-        robustness (Any): The assembled robustness view. Its turns are the
-            agent's own record and survive the close-out never running; the
-            findings do not, because they are read at close time.
-
     Returns:
         dict[str, Any]: The ``close`` object for a session with no close-out.
     """
@@ -250,7 +235,6 @@ def _unclosed(robustness: Any) -> dict[str, Any]:
         "robustness": {
             "escalated": False,
             "stop_reason": "",
-            "turns": _dict_rows(_mapping(robustness).get("turns")),
         },
         "artifacts": {
             "final_json_path": None,
