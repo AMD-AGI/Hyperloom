@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from typing import Any
+from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
 from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..state.shared_state import resolve_graded_comparison
@@ -412,6 +413,7 @@ class KernelStackPhase(PhaseHandler):
             graded = None
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
+                graded_verdict = VERDICT_REVERT
                 new_tput = 0.0
                 gain_pct = -100.0
                 incremental_gain_pct = -100.0
@@ -421,21 +423,36 @@ class KernelStackPhase(PhaseHandler):
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
                 # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
                 # current_best rather than the total gain over the baseline.
-                graded = resolve_graded_comparison(self.shared_state, bench_result)
-                if not graded.comparable:
-                    log.info(
-                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
-                    )
+                # The verdict is the chokepoint's: it already applies the AgentX keep-threshold floor and the
+                # throughput guard, so the stack lane must not re-derive a KEEP from the raw incremental gain.
+                graded = resolve_graded_comparison(
+                    self.shared_state,
+                    bench_result,
+                    keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+                )
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
-                if graded.vetoed:
-                    log.info("stack-validate: %s failed the interactivity constraint", stack_id)
-                clears = incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                if graded.verdict != VERDICT_KEEP:
+                    log.info(
+                        "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
+                        stack_id,
+                        graded.verdict,
+                        graded.reference,
+                        graded.candidate,
+                        graded.tput_reference,
+                        graded.tput_candidate,
+                    )
+                graded_verdict = graded.verdict
+                decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
                 if not graded.comparable:
+                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
+                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
+                    # is a call for a human, and the revert path below still leaves the tree clean either way.
+                    log.info(
+                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
+                    )
                     decision = "NEEDS_REVIEW"
-                else:
-                    decision = "KEEP" if clears and not graded.vetoed else "REVERT"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
@@ -497,6 +514,9 @@ class KernelStackPhase(PhaseHandler):
                 "bench_result": bench_result,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
+                # A stack cannot be left half-applied, so RECORDED reverts like
+                # REVERT does; the verdict says which one it was.
+                "graded_verdict": graded_verdict,
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
                 "apply_result": {"status": "ok", "stack_apply_results": apply_results},

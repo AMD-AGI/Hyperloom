@@ -1495,7 +1495,7 @@ async def _run_subprocess(
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
         env.setdefault("PYTHONUNBUFFERED", "1")
-        # run_with_session_kill reaps the whole descendant tree on every exit path.
+        # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
             env=env,
@@ -7085,7 +7085,7 @@ async def integrate_handler(
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
-    if graded.vetoed:
+    if graded.graded_on_intvty and graded.verdict == "REVERT":
         result["decision_reason"] = "intvty_regression"
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"

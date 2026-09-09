@@ -813,10 +813,38 @@ def count_anchor_hits(text: str, anchor: str) -> int:
 def verify_patch_anchors(
     inferencex_path: Path | str | None = None,
 ) -> list[AnchorStatus]:
-    """Report, per patch and per discovered file, whether the anchor still holds."""
+    """Report, per patch and per discovered file, whether the anchor still holds.
+
+    Read-only: this never writes to the checkout, so it is safe to call before
+    patching, after patching, or from preflight. Files that do not exist are
+    omitted rather than reported as failures -- a tree without
+    ``benchmark_serving.py`` has nothing to patch, which the ``ensure_*``
+    functions already treat as a skip.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        One :class:`AnchorStatus` per (patch, existing file) pair, in
+        ``_ANCHOR_CONTRACT`` order. Empty when no InferenceX tree resolves.
+    """
+    return _verify_anchors(lambda parts: _resolve_inferencex_files(inferencex_path, *parts))
+
+
+def _verify_anchors(resolve: Callable[[tuple[str, ...]], list[Path]]) -> list[AnchorStatus]:
+    """Report anchor status for whichever files ``resolve`` names per patch.
+
+    Args:
+        resolve: Maps a patch's relative path parts to the files to inspect.
+
+    Returns:
+        One :class:`AnchorStatus` per (patch, readable file) pair, in
+        ``_ANCHOR_CONTRACT`` order.
+    """
     out: list[AnchorStatus] = []
     for name, rel_parts, sentinel, anchor in _ANCHOR_CONTRACT:
-        for path in _resolve_inferencex_files(inferencex_path, *rel_parts):
+        for path in resolve(rel_parts):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -840,6 +868,38 @@ def failed_patch_anchors(
     return [status for status in verify_patch_anchors(inferencex_path) if not status.ok]
 
 
+def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
+    """Return the anchors that no longer hold in exactly one checkout.
+
+    :func:`failed_patch_anchors` reports the union across every root the
+    environment can reach, which is what patching needs and what a gate must
+    not use: Magpie benchmarks the single tree named by
+    ``benchmark.inferencex_path``, so rot in an unrelated site-packages copy
+    says nothing about the run being launched.
+
+    Args:
+        root: The checkout the run will execute.
+
+    Returns:
+        The failing subset for that root alone.
+    """
+    base = Path(root)
+
+    def _resolve(parts: tuple[str, ...]) -> list[Path]:
+        """Name the one file under ``base`` a patch targets, when it exists.
+
+        Args:
+            parts: The patch's relative path components.
+
+        Returns:
+            A single-entry list, or ``[]`` when the file is absent.
+        """
+        path = base.joinpath(*parts)
+        return [path] if path.is_file() else []
+
+    return [status for status in _verify_anchors(_resolve) if not status.ok]
+
+
 __all__ = [
     "AnchorStatus",
     "count_anchor_hits",
@@ -849,5 +909,6 @@ __all__ = [
     "ensure_benchmark_serving_patched",
     "ensure_eval_probe_patched",
     "failed_patch_anchors",
+    "failed_patch_anchors_in",
     "verify_patch_anchors",
 ]

@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.perf_metric import GRADED_OUTPUT, GRADED_TOTAL
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, GRADED_TOTAL
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ..agent_ownership import (
@@ -25,6 +25,7 @@ from ..agent_ownership import (
     patch_lever_kind,
 )
 from ..critic_reviews import normalize_framework_reviews
+from ..stop_reasons import outcome_status as derive_outcome_status
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ log = logging.getLogger(__name__)
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-_GRADED_METRIC_BASIS = {GRADED_OUTPUT: "output", GRADED_TOTAL: "total"}
+# Graded objective -> the short basis label stamped on a measurement. An unrecognised objective falls back to
+# ``output`` at the call sites, so a new axis has to be listed here or its gains are recorded as output gains.
+_GRADED_METRIC_BASIS = {GRADED_OUTPUT: "output", GRADED_TOTAL: "total", GRADED_INTVTY: "intvty"}
 
 # kernel-agent backend -> invocation section.
 _GEAK_BACKENDS = frozenset({"geak"})
@@ -887,13 +890,8 @@ def _snapshot_v4_run(rec, st: Any) -> None:
         },
     }
     stop_reason = str(getattr(st, "stop_reason", "") or "")
-    outcome_status = "running"
-    if stop_reason:
-        outcome_status = (
-            "failed"
-            if any(marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort"))
-            else "completed"
-        )
+    # Shared with the session projection so both report the same outcome.
+    outcome_status = derive_outcome_status(stop_reason) if stop_reason else "running"
     rec.record_upsert_singleton(
         "run_snapshot",
         {

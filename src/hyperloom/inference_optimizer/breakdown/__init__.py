@@ -8,6 +8,8 @@ from __future__ import annotations
 from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
+    FINAL_PRODUCER_COORDINATOR,
+    FINAL_PRODUCER_SUPERVISOR,
     build,
     patch_breakdown_close,
     patch_breakdown_langfuse,
@@ -22,6 +24,8 @@ __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "SCHEMA_VERSION",
+    "FINAL_PRODUCER_COORDINATOR",
+    "FINAL_PRODUCER_SUPERVISOR",
     "build",
     "package_session_artifacts",
     "patch_breakdown_close",

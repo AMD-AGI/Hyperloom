@@ -8,13 +8,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from hyperloom.common.perf_metric import GRADED_OUTPUT, GRADED_TOTAL
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, GRADED_TOTAL
 
 from ..agent_ownership import UNATTRIBUTED, patch_author
 
 
-#: ``5`` means the recorder-first shape: ``attempts``, ``summary_by_agent``,
-#: and the reconciliation fields under ``validation``. This tracked the
+#: This section's own wire shape, independent of the envelope's version:
+#: ``5`` means the recorder-first shape -- ``attempts``, ``summary_by_agent``,
+#: and the reconciliation fields under ``validation``. It tracked the
 #: envelope's major version until the envelope went to v6.0 for the recorded
 #: timeline, which reshaped nothing here -- so the two numbers now differ, and
 #: a consumer has to read this one for this section rather than infer it.
@@ -519,15 +520,23 @@ def _latest_measurement_per_name(
     return [measurement_id for measurement_id in measurement_ids if measurement_id in chosen]
 
 
+# Short basis labels for the graded axes. ``intvty`` is the AgentX objective and ``total`` is now its guard axis;
+# both are session-wide aggregates, unlike the per-request ``output`` reading.
+_METRIC_BASES = frozenset({"output", "total", "intvty"})
+_SESSION_WIDE_BASES = frozenset({"total", "intvty"})
+
+
 def _metric_basis(value: Any) -> str:
-    return {GRADED_OUTPUT: "output", GRADED_TOTAL: "total"}.get(str(value or ""), str(value or ""))
+    return {GRADED_OUTPUT: "output", GRADED_TOTAL: "total", GRADED_INTVTY: "intvty"}.get(
+        str(value or ""), str(value or "")
+    )
 
 
 def _attempt_gain_basis(attempt: dict[str, Any], operation: dict[str, Any]) -> str:
     for measurement in attempt.get("measurements") or []:
         if measurement["name"] in _GAIN_NAMES and _to_float(measurement.get("value")) is not None:
             basis = _metric_basis(measurement.get("metric_basis"))
-            if basis in {"total", "output"}:
+            if basis in _METRIC_BASES:
                 return basis
     outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
     return _metric_basis(outputs.get("graded_objective")) or "output"
@@ -950,10 +959,12 @@ def collect_recorded_optimizations(
             chain_continuous = False
         else:
             # Collective gain is local to its integrate anchor. Output-only readings cannot prove continuity for a
-            # second total-axis KEEP.
+            # second KEEP graded on a session-wide axis, whichever of the two that session was graded on.
             gain = (
                 None
-                if attempt["kind"] == "kernel_collective" and gain_basis == "total" and gain_basis in seen_gain_bases
+                if attempt["kind"] == "kernel_collective"
+                and gain_basis in _SESSION_WIDE_BASES
+                and gain_basis in seen_gain_bases
                 else local_gain
             )
             gain_method = "recorded_adoption" if gain is not None else "missing"

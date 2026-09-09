@@ -8,12 +8,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_json, atomic_write_text
-from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
+from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
     enablement_round_dir,
     runs_dir,
+)
+from hyperloom.orchestrator.delivery.archive import (
+    ROLE_ARTIFACT_PREIMAGE,
+    ROLE_ARTIFACT_SOURCE,
+    ROLE_LAUNCH_CONFIG,
+    ROLE_PATCH,
+    ROLE_PATCH_EVIDENCE,
+    ROLE_PROMPT,
+    ROLE_SERVER_LOG,
+    ROLE_SPECIALIST_RESULT,
+    RoundArchive,
 )
 
 if TYPE_CHECKING:
@@ -28,8 +38,6 @@ _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
 
 _LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
 
-_LAUNCH_LOG_EXCERPT_CHARS = 1200
-
 
 def _copy(src: Path, dest: Path) -> bool:
     """Copy ``src`` to ``dest`` when it exists and is under the size limit."""
@@ -38,6 +46,15 @@ def _copy(src: Path, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(src.read_bytes())
     return True
+
+
+def _artifact_archive_name(idx: int, target: str) -> str:
+    """Archive filename for the ``idx``-th artifact a round installed.
+
+    Derived from the round-local index so ``write_setting_script`` addresses a
+    copy by name rather than by position in the archive directory.
+    """
+    return f"{idx:03d}_{Path(target).name}"
 
 
 def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -> bool:
@@ -58,23 +75,29 @@ def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -
     return True
 
 
-def role_path(files: list[dict[str, str]], role: str) -> str:
-    """The session-relative path recorded for ``role``, or ``\"\"`` when absent."""
-    return next((entry["path"] for entry in files if entry["role"] == role), "")
+def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive:
+    """Archive one enablement round's deliverables and report what landed.
 
+    Rounds the phase synthesises carry no task id and no deliverables, and are
+    skipped rather than colliding on a shared directory.
 
-def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[str, str]]:
-    """Archive one enablement round's patches, specialist result and launch config."""
+    Args:
+        session_dir: The session root directory.
+        res: The ``integrate_patch`` result for an enablement round.
+
+    Returns:
+        RoundArchive: One record per deliverable that landed. A copy the size
+        ceiling refused leaves no record, so no consumer is handed a path that
+        resolves to nothing. Patches the round never applied are recorded under
+        :data:`ROLE_PATCH_EVIDENCE`, never :data:`ROLE_PATCH`.
+    """
     task_id = str(res.get("specialist_task_id") or "").strip()
-    if not task_id:
-        return []
     root = Path(session_dir)
+    archive = RoundArchive(root)
+    if not task_id:
+        return archive
     round_dir = enablement_round_dir(root, task_id)
     round_dir.mkdir(parents=True, exist_ok=True)
-    written: list[dict[str, str]] = []
-
-    def _record(role: str, dest: Path) -> None:
-        written.append({"path": dest.relative_to(root).as_posix(), "role": role})
 
     patches_dir = round_dir / "patches"
     copied: set[str] = set()
@@ -82,15 +105,15 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         src = Path(str(applied))
         dest = patches_dir / src.name
         if _copy(src, dest):
-            _record("patch", dest)
+            archive.record(ROLE_PATCH, dest)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 
     workspace = runs_dir(root, "specialist", task_id)
-    for name, role in (("specialist_done.json", "specialist_result"), ("prompt.md", "prompt")):
+    for name, role in (("specialist_done.json", ROLE_SPECIALIST_RESULT), ("prompt.md", ROLE_PROMPT)):
         dest = round_dir / name
         if _copy(workspace / name, dest):
-            _record(role, dest)
+            archive.record(role, dest)
 
     # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
@@ -100,14 +123,24 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
                     continue
                 dest = round_dir / "attempted_patches" / src.name
                 if _copy(src, dest):
-                    _record("patch_evidence", dest)
+                    archive.record(ROLE_PATCH_EVIDENCE, dest)
                 copied.add(src.name)
+
+    artifacts_dir = round_dir / "artifacts"
+    for idx, art in enumerate(res.get("artifacts_applied") or []):
+        name = _artifact_archive_name(idx, str(art.get("target") or ""))
+        source = str(art.get("source") or "").strip()
+        backup = str(art.get("backup") or "").strip()
+        if source and _copy(Path(source), artifacts_dir / name):
+            archive.record(ROLE_ARTIFACT_SOURCE, artifacts_dir / name)
+        if backup and _copy(Path(backup), artifacts_dir / f"{name}.orig"):
+            archive.record(ROLE_ARTIFACT_PREIMAGE, artifacts_dir / f"{name}.orig")
 
     accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_config:
         dest = round_dir / "launch_config.yaml"
         if _copy(Path(accepted_config), dest):
-            _record("launch_config", dest)
+            archive.record(ROLE_LAUNCH_CONFIG, dest)
 
     # Only a round that reached a bench has one: a rejected patch or a broken build never started a server, so an
     # absent log is normal.
@@ -116,32 +149,9 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
     if server_log:
         dest = round_dir / "server.log"
         if _copy_log_tail(Path(server_log), dest):
-            _record("server_log", dest)
+            archive.record(ROLE_SERVER_LOG, dest)
 
-    launch_log = str(res.get("enablement_launch_log") or "")
-    # Written last so the config path it names is the copy that just landed under ``reports/``, not the ``runs/``
-    # original the collector drops.
-    atomic_write_json(
-        round_dir / "round.json",
-        {
-            "status": res.get("status"),
-            "specialist_task_id": task_id,
-            "patches_applied": res.get("patches_applied") or [],
-            "config_changes_applied": res.get("config_changes_applied") or {},
-            "extra_envs_applied": res.get("extra_envs_applied") or {},
-            "dropped_env_overrides": res.get("dropped_env_overrides") or [],
-            "extra_server_args_applied": res.get("extra_server_args_applied") or "",
-            # Redacted HERE and not where the list is built: the same field is the replay channel -- ``lane.py``
-            # stacks it into ``state.enablement.setup_commands`` and the next round EXECUTES what it finds there.
-            "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
-            "framework_switch_problems": res.get("framework_switch_problems") or [],
-            "after_signature": res.get("after_signature") or {},
-            "enablement_accepted_config_path": role_path(written, "launch_config"),
-            "enablement_effective_config": res.get("enablement_effective_config") or {},
-            "launch_log_excerpt": launch_log[:_LAUNCH_LOG_EXCERPT_CHARS],
-        },
-    )
-    return written
+    return archive
 
 
 def write_setting_script(
@@ -156,10 +166,12 @@ def write_setting_script(
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state."""
     from hyperloom.inference_optimizer.reference_script import render_reference_script
+    from hyperloom.orchestrator.bringup.trees import tree_kind
 
+    root = Path(session_dir)
     framework_root = str(enablement.framework_root or "").strip()
-    patches_dest = enablement_dir(Path(session_dir)) / "patches"
-    artifacts_dest = enablement_dir(Path(session_dir)) / "artifacts"
+    patches_dest = enablement_dir(root) / "patches"
+    artifacts_dest = enablement_dir(root) / "artifacts"
 
     patch_counter = 0
     artifact_counter = 0
@@ -169,22 +181,29 @@ def write_setting_script(
         rnd_script_patches: list[str] = []
         rnd_script_artifacts: list[dict[str, str]] = []
 
-        if framework_root:
-            for patch_str in rnd.get("patches") or []:
+        task_id = str(rnd.get("task_id") or "").strip()
+        round_dir = enablement_round_dir(root, task_id) if task_id else None
+
+        if framework_root and round_dir is not None:
+            patches_archive = round_dir / "patches"
+            archived_patches = sorted(patches_archive.glob("*.patch")) if patches_archive.is_dir() else []
+            for src in archived_patches:
                 patch_counter += 1
-                src = Path(str(patch_str))
                 name = f"{patch_counter:03d}_{src.name}"
                 if _copy(src, patches_dest / name):
                     rnd_script_patches.append(f"patches/{name}")
 
-        for art in rnd.get("artifacts") or []:
-            artifact_counter += 1
-            target = str(art.get("target") or "")
-            name = f"{artifact_counter:03d}_{Path(target).name}"
-            if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
-                continue
-            _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
-            rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
+        if round_dir is not None:
+            art_archive = round_dir / "artifacts"
+            for idx, art in enumerate(rnd.get("artifacts") or []):
+                artifact_counter += 1
+                target = str(art.get("target") or "")
+                archived = art_archive / _artifact_archive_name(idx, target)
+                name = f"{artifact_counter:03d}_{Path(target).name}"
+                if not _copy(archived, artifacts_dest / name):
+                    continue
+                _copy(archived.parent / f"{archived.name}.orig", artifacts_dest / f"{name}.orig")
+                rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
 
         if rnd_script_patches or rnd_script_artifacts:
             script_rounds.append({"patches": rnd_script_patches, "artifacts": rnd_script_artifacts})
@@ -206,6 +225,7 @@ def write_setting_script(
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
         framework_root=framework_root if any(r.get("patches") for r in script_rounds) else None,
+        framework_root_vcs=tree_kind(framework_root) if framework_root else "",
         runtime=runtime_path or None,
         rounds=script_rounds or None,
     )
@@ -215,4 +235,4 @@ def write_setting_script(
     return str(out.relative_to(session_dir))
 
 
-__all__ = ["role_path", "snapshot_round", "write_setting_script"]
+__all__ = ["snapshot_round", "write_setting_script"]

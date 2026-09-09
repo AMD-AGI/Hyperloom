@@ -38,7 +38,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    _stamp_server_ready,
+    stamp_server_ready,
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -143,7 +143,7 @@ def _cold_then_hot_fake_run(
                 clock.advance(boot_sec)
                 if server_log_path:
                     Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                    _stamp_server_ready(server_log_path, boot_sec)
+                    stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         state["calls"] += 1
         _fake_workspace(slot, tput=tput)
@@ -2635,7 +2635,7 @@ def _capturing_fake_run(
             server_log_path = kwargs.get("server_log_path")
             if server_log_path:
                 Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                _stamp_server_ready(server_log_path, boot_sec)
+                stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         if state is not None:
             state.charge(charge_sec if charge_sec is not None else ran_sec)

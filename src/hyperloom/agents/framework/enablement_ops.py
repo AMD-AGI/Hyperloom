@@ -291,7 +291,7 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
 # capability gap rarely becomes fully runnable inside a single budget window.
 # The integrate side REWARDS partial progress: a patch that only advances the
 # boot to a *new, deeper* failure is KEPT and stacked as a base for the next
-# round (see ``enablement.enablement_made_progress`` and ``integrate_patch``
+# round (see ``bringup.observe.round_advanced`` and ``integrate_patch``
 # ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
 # valid deliverable rather than grounds for returning an empty ``proposal_set``.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
@@ -300,9 +300,9 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "have to reach full end-to-end runnability in this one budget window.",
     "If you cannot make the combo fully run, apply the SMALLEST CHANGE that "
     "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
-    "new, different failure then appears. The change is KEPT and stacked as a "
-    "base; the next round resumes from the deeper failure. One step forward is "
-    "strictly better than returning nothing. The change may be a source patch, "
+    "new, different failure then appears. The change is kept permanently in the "
+    "tree; the next round builds on it from the deeper failure. One step forward "
+    "is strictly better than returning nothing. The change may be a source patch, "
     "a serve flag, an env var, or a dependency install — whichever is simplest.",
     "Record the change: a source patch in ``patches_written``, serve-flag or "
     "env-var changes in ``proposal_set`` (each entry as ``extra_server_args`` "
@@ -313,6 +313,28 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "Return ``proposal_set=[]`` ONLY when you cannot advance past the CURRENT failure "
     "by even one step — NOT merely because full runnability is out of reach this "
     "round.",
+)
+
+
+# Loader-path and other blocked environment names: the benchmark env layer
+# drops them, and a round that needs one asks for that exact name/value pair.
+ENABLEMENT_ENV_GRANT_GUIDANCE: tuple[str, ...] = (
+    "A small set of environment names is BLOCKED from your ordinary `extra_envs` "
+    "layer because setting one redirects what the server process loads or makes "
+    "it execute a script before its own entrypoint. `PYTHONPATH` and "
+    "`LD_LIBRARY_PATH` are blocked but GRANTABLE; `LD_PRELOAD`, `LD_AUDIT`, "
+    "`PATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `BASH_ENV` and their kin are never "
+    "granted at all — find another fix.",
+    "To ask for one, add an `env_grant_requests` array to your final "
+    '`specialist_done`, each entry `{"name": ..., "value": ..., '
+    '"reason": ...}`. The grant covers that exact NAME AND VALUE pair for '
+    "THIS round only: a different value is not covered, and the next round starts "
+    "with no grant.",
+    "Ask for the narrowest value that works — for a loader search path, the ONE "
+    "directory that has to be searched, not a rebuilt whole path. It is "
+    "PREPENDED to what the launch config already carries, so the framework's own "
+    "search order survives; a value that tries to replace the path will still "
+    "only be prepended.",
 )
 
 
@@ -362,7 +384,7 @@ _LADDER_TWO_AXES: tuple[str, ...] = (
     "merely un-wired needs only the cheap top rungs (a flag / a small patch) — do "
     "NOT pull code or compile for it. A genuinely-new architecture climbs higher.",
     "After each cleared boot failure, RE-DIAGNOSE the new (deeper) failure and pick "
-    "a rung again — enablement is serial and progress is stacked.",
+    "a rung again — enablement is serial and each round's fix is cumulative.",
 )
 
 _LADDER_RUNGS: tuple[str, ...] = (
@@ -454,6 +476,10 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     lines.append("")
     lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("BLOCKED ENVIRONMENT NAMES (ask for a grant; a loader path is prepended, never replaced):")
+    for g in ENABLEMENT_ENV_GRANT_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
@@ -591,6 +617,7 @@ def build_mandate(
 
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
+    "ENABLEMENT_ENV_GRANT_GUIDANCE",
     "ENABLEMENT_HEURISTICS",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",

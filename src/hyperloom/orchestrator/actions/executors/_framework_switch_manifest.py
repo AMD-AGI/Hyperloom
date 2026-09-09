@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import logging
-import re
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import (
@@ -23,52 +21,8 @@ log = logging.getLogger(__name__)
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
 
-# Environment reads a patch may legitimately add without declaring a switch: rank topology and the framework's own
-# already-documented configuration.
-_NON_SWITCH_ENV: frozenset[str] = frozenset(
-    {
-        "RANK",
-        "LOCAL_RANK",
-        "WORLD_SIZE",
-        "LOCAL_WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "CUDA_VISIBLE_DEVICES",
-        "HIP_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
-)
-
-# ``os.environ.get("NAME"`` / ``os.getenv("NAME"`` / ``os.environ["NAME"]`` on an added line.
-_ENV_READ_RE = re.compile(
-    r"""os\.(?:environ\.get|getenv)\(\s*["']([A-Z][A-Z0-9_]*)["']|os\.environ\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]"""
-)
-
-
-def undeclared_switch_gates(
-    patch_paths: "list[Path] | tuple[Path, ...]",
-    switches: list[dict[str, Any]],
-) -> list[str]:
-    """Return environment switches a patch gates on but the manifest never declares."""
-    declared = {str(s.get("switch") or "").strip() for s in switches}
-    found: set[str] = set()
-    for path in patch_paths or ():
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            log.warning("undeclared_switch_gates: cannot read %s: %s", path, exc)
-            continue
-        for line in text.splitlines():
-            if not line.startswith("+") or line.startswith("+++"):
-                continue
-            for match in _ENV_READ_RE.finditer(line):
-                name = match.group(1) or match.group(2)
-                if name and name not in _NON_SWITCH_ENV and name not in declared:
-                    found.add(name)
-    return sorted(found)
-
-
-# Default value assigned to a switch whose manifest entry omits one.
+# Default value assigned to a switch whose manifest entry omits one. The
+# rewrites are boolean fast paths, so "on" is the only value that matters.
 DEFAULT_SWITCH_VALUE = "1"
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
@@ -92,10 +46,6 @@ MAX_SWITCHES = 24
 # Env names a manifest may never claim: setting one of these from a "rewrite switch" would silently retarget the
 # benchmark rather than toggling a code path.
 FORBIDDEN_SWITCHES: frozenset[str] = BLOCKED_EXTERNAL_ENV_NAMES
-
-
-class SwitchManifestError(ValueError):
-    """Raised when a manifest is structurally unusable."""
 
 
 def _clean_list(raw: Any) -> list[str]:
@@ -385,7 +335,6 @@ __all__ = [
     "KNOWN_CATEGORIES",
     "MANIFEST_KEY",
     "MAX_SWITCHES",
-    "SwitchManifestError",
     "additive_variants",
     "dependency_closure",
     "dependents_closure",

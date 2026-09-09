@@ -18,12 +18,28 @@ async def run_lease_and_db_reclaim(
     *,
     reason: str,
 ) -> None:
-    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB."""
+    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
+
+    Shared by the periodic maintenance tick and the cycle soft-restart. The
+    task reclaim is the R6 watchdog: a running task whose execution lease
+    expired is failed so a dead worker never wedges a lane indefinitely. Every
+    step is individually best-effort — maintenance never aborts the run loop.
+
+    The serving-lease sweep is not one of the steps: it runs in the reconciler,
+    at the top of every tick, because an open bring-up round holds one of those
+    leases and can only be settled there. This pass reports what that sweep did
+    rather than running a second one behind its back.
+
+    Args:
+        host: Anything exposing the Coordinator's ``reconciler``,
+            ``gpu_specialist_pool``, ``tasks`` and ``db``.
+        summary: Mutated in place with the per-step counts.
+        reason: Reclaim reason recorded on the tasks and used as the log prefix.
+    """
     try:
-        reaped = await host.locks.reap_expired()
-        summary["leases_reaped"] = len(reaped or [])
+        summary["leases_reaped"] = host.reconciler.last_report.leases_reaped
     except Exception:  # noqa: BLE001
-        log.exception("%s: serving-lease reap failed", reason)
+        log.exception("%s: reading the reconciler's lease sweep failed", reason)
     try:
         summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
     except Exception:  # noqa: BLE001

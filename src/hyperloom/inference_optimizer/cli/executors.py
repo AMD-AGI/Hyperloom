@@ -157,7 +157,6 @@ def _build_specialist_executor(
             "model": selected_model,
             "framework_source_roots": framework_source_roots,
             "mcp_config_path": mcp_config_path,
-            "per_turn_max_seconds": per_turn_max_seconds,
         }
         if specialist_permission_mode:
             sub_config_kwargs["permission_mode"] = specialist_permission_mode

@@ -333,9 +333,16 @@ def test_kept_artifacts_reach_the_replay_script(tmp_path):
     backup = tmp_path / "server_args.py.bak"
     backup.write_text("# original\n", encoding="utf-8")
 
+    # Populate the round archive as snapshot_round would.
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    (art_dir / "000_server_args.py").write_text("# fixed\n", encoding="utf-8")
+    (art_dir / "000_server_args.py.orig").write_text("# original\n", encoding="utf-8")
+
     enablement = EnablementRound()
     enablement.kept_rounds = [
         {
+            "task_id": "s1",
             "patches": [],
             "artifacts": [
                 {
@@ -356,14 +363,19 @@ def test_kept_artifacts_reach_the_replay_script(tmp_path):
 def test_artifact_only_repair_renders_a_replay_script(tmp_path):
     """101901 shipped two artifacts and no diff; its script had no install lines."""
     sources = []
-    for name in ("server_args.py", "quark_w4a4_mxfp4_moe.py"):
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    for idx, name in enumerate(("server_args.py", "quark_w4a4_mxfp4_moe.py")):
         src = tmp_path / name
         src.write_text(f"# {name}\n", encoding="utf-8")
         sources.append(src)
+        # Populate the archive as snapshot_round would.
+        (art_dir / f"{idx:03d}_{name}").write_text(f"# {name}\n", encoding="utf-8")
 
     enablement = EnablementRound()
     enablement.kept_rounds = [
         {
+            "task_id": "s1",
             "patches": [],
             "artifacts": [
                 {"target": f"/sgl-workspace/sglang/python/sglang/srt/{s.name}", "source": str(s)} for s in sources
@@ -409,9 +421,22 @@ def test_generated_artifact_script_installs_and_launches(tmp_path):
     source = tmp_path / "patched.py"
     source.write_text("# patched\n", encoding="utf-8")
     target = tmp_path / "tree" / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# original\n", encoding="utf-8")
+
+    # Populate the round archive as snapshot_round would.
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    (art_dir / "000_mod.py").write_text("# patched\n", encoding="utf-8")
 
     enablement = EnablementRound()
-    enablement.kept_rounds = [{"patches": [], "artifacts": [{"target": str(target), "source": str(source)}]}]
+    enablement.kept_rounds = [
+        {
+            "task_id": "s1",
+            "patches": [],
+            "artifacts": [{"target": str(target), "source": str(source)}],
+        }
+    ]
     rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M")
 
     proc = subprocess.run(
@@ -468,7 +493,7 @@ def test_replay_script_is_valid_bash(tmp_path):
 
 
 def test_state_without_the_new_fields_still_loads():
-    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"], "attempts": 3})
+    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"]})
     assert enablement.kept_patches == ["/patch1"]
     assert enablement.kept_artifacts == []
     assert enablement.last_grounding_drop_reason == []

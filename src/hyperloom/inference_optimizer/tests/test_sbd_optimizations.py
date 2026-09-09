@@ -492,25 +492,28 @@ def test_session_validation_checkpoint_does_not_reconcile_against_later_keeps(tm
     assert not any("but the run promoted" in warning for warning in warnings)
 
 
-@pytest.mark.parametrize("explicit_output", [False, True], ids=["total", "explicit_output"])
+@pytest.mark.parametrize("explicit_output", [False, True], ids=["intvty", "explicit_output"])
 @pytest.mark.parametrize("provenance", ["e2e_rebench", "e2e_decision_round"])
 def test_session_validation_records_objective_without_replacing_provenance(
     tmp_path, monkeypatch, explicit_output, provenance
 ):
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     if explicit_output:
-        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", GRADED_OUTPUT)
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
         benchmark_mode="agentx",
         baseline_tput=100.0,
-        baseline_perf={"total_throughput": 1000.0, "intvty_p90": 100.0},
+        baseline_perf={"total_throughput": 1000.0, GRADED_INTVTY: 200.0},
     )
-    measurement = {"output_throughput": 150.0, "total_token_throughput": 1200.0, "intvty_p90": 100.0}
+    # The interactivity axis carries figures unlike either throughput axis, so the recorded pair names which one the
+    # run was graded on rather than matching by coincidence.
+    measurement = {"output_throughput": 150.0, "total_token_throughput": 1200.0, GRADED_INTVTY: 240.0}
 
     assert coord.writeback._update_cumulative_gain_validated(
         150.0, measurement, source="recorder_objective_test", measurement_basis=provenance
@@ -519,13 +522,13 @@ def test_session_validation_records_objective_without_replacing_provenance(
     parts = assemble_parts(tmp_path)
     [operation] = parts["operations"]
     gain = 50.0 if explicit_output else 20.0
-    objective = "output_throughput" if explicit_output else "total_throughput"
+    objective = GRADED_OUTPUT if explicit_output else GRADED_INTVTY
     assert operation["outputs"]["validated_gain_pct"] == pytest.approx(gain)
     assert operation["outputs"]["measurement_basis"] == provenance
     assert operation["outputs"].get("graded_objective") == objective
     measurements = {row["name"]: row for row in parts["measurements"]}
-    assert measurements["baseline_throughput"]["value"] == (100.0 if explicit_output else 1000.0)
-    assert measurements["throughput"]["value"] == (150.0 if explicit_output else 1200.0)
+    assert measurements["baseline_throughput"]["value"] == (100.0 if explicit_output else 200.0)
+    assert measurements["throughput"]["value"] == (150.0 if explicit_output else 240.0)
     assert measurements["gain"]["value"] == pytest.approx(gain)
     result = collect_recorded_optimizations("s1", parts["operations"], parts["measurements"], [], [], [], [], [])
     assert result["validation"]["validated_total_gain_pct"] == pytest.approx(gain)

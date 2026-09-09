@@ -14,6 +14,8 @@ from hyperloom.common.git_safety import safe_directory_args
 from pathlib import Path
 from typing import Any
 
+from ...delivery.ledger import append_record, merge_records
+from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
@@ -91,11 +93,33 @@ def _is_git_tree(path: Path) -> bool:
 
 
 def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
-    """True when ``patch_path`` is already fully applied in ``framework_root``."""
+    """True when ``patch_path`` is already fully applied in ``framework_root``.
+
+    A reverse dry-run (``patch -R --dry-run``) is the only probe POSIX
+    ``patch`` offers: its forward exit code is non-zero for both "does not
+    apply" and "previously applied". On its own it is not proof of exactness:
+    ``patch`` matches with fuzz and at an offset, so it answers yes for a tree
+    that merely resembles the post-state. Fuzz is disabled, and a hunk that
+    only matched by shifting is rejected -- an offset means the surrounding
+    lines are not the ones the patch was written against, so the tree is not
+    the post-image even though every hunk found a home.
+
+    Strictly a probe: ``--dry-run`` is passed at every level, so the tree is
+    never mutated.
+
+    Args:
+        framework_root: The source-tree root the patch targets.
+        patch_path: The unified-diff patch file to probe.
+
+    Returns:
+        ``True`` when the tree exactly holds the patch's post-state.
+    """
     for lvl in _P_LEVELS:
         try:
             cp = subprocess.run(
-                ["patch", f"-p{lvl}", "-R", "--dry-run", "-i", str(patch_path)],
+                # ``--fuzz=0``: an approximate context match would answer yes
+                # for a tree that only resembles the post-state.
+                ["patch", f"-p{lvl}", "-R", "--fuzz=0", "--dry-run", "-i", str(patch_path)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -106,6 +130,13 @@ def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         if cp.returncode == 0:
+            if "offset" in cp.stdout:
+                log.info(
+                    "nogit patch: %s reverses only at an offset in %s; not treating it as applied",
+                    patch_path.name,
+                    framework_root,
+                )
+                return False
             return True
     return False
 
@@ -184,7 +215,22 @@ def _apply_patch_no_git(
             detected_level = lvl
             break
     if detected_level is None:
-        # Before reporting failure, distinguish "does not apply" from "already applied".
+        # Before reporting failure, distinguish "does not apply" from "already
+        # applied". A specialist commonly writes a superset patch AND the subset
+        # it contains (e.g. an FLA-layout revert plus that same revert bundled
+        # with a config fix). Applying the superset makes every later subset
+        # hunk a no-op, and POSIX ``patch`` reports that as "Reversed (or
+        # previously applied) patch detected ... Skipping patch" with a non-zero
+        # exit -- indistinguishable, at the exit code, from a patch that simply
+        # does not fit. Treating it as a hard failure aborted the whole apply and
+        # reverted a combo that was in fact fully and correctly applied.
+        #
+        # A clean *reverse* dry-run is the unambiguous already-applied probe: it
+        # succeeds only when every hunk's post-state is already present in the
+        # tree, which is exactly the state a forward apply would produce. In that
+        # case the apply is a satisfied no-op -- report success with no backups
+        # (the patch that really made those edits owns the backups needed for a
+        # correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
@@ -235,6 +281,18 @@ def _apply_patch_no_git(
             return None, None, f"patch target escapes framework root: {raw}"
         return rel, abs_path, ""
 
+    def _record(record: dict[str, Any]) -> str:
+        """Persist a backup record and add it to the in-memory list.
+
+        Returns:
+            An error string when the record could not be persisted; the caller
+            must then abort rather than mutate an unrecorded file.
+        """
+        if not append_record(backup_root, record):
+            return f"backup ledger write failed for {record.get('target')}"
+        backups.append(record)
+        return ""
+
     def _backup_existing(abs_path: Path, rel: Path, action: str) -> tuple[dict[str, Any] | None, str]:
         """Copy ``abs_path`` to a uniquely named backup and return the record."""
         seq = seq_offset + len(backups)
@@ -250,6 +308,7 @@ def _apply_patch_no_git(
             "backup_path": str(bak),
             "revert_action": action,
             "mode": mode,
+            "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
     for old_raw, new_raw in patch_file_targets(patch_text):
@@ -264,7 +323,7 @@ def _apply_patch_no_git(
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
-            backups.append(
+            err = _record(
                 {
                     "target": str(abs_new),
                     "existed": False,
@@ -272,6 +331,8 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 }
             )
+            if err:
+                return _fail(err, backups)
 
         elif is_delete:
             # Existing file deleted by patch: back it up to restore on revert.
@@ -284,9 +345,9 @@ def _apply_patch_no_git(
                 rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
             else:
-                backups.append(
+                err = _record(
                     {
                         "target": str(abs_old),
                         "existed": False,
@@ -294,6 +355,8 @@ def _apply_patch_no_git(
                         "revert_action": "delete",
                     }
                 )
+            if err:
+                return _fail(err, backups)
 
         elif is_rename:
             # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
@@ -303,14 +366,36 @@ def _apply_patch_no_git(
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
+            if rel_old == rel_new:
+                # Both header prefixes resolve to one file at this strip level,
+                # so this is a plain modification, not a rename.
+                if abs_old.exists():  # type: ignore[union-attr]
+                    rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
+                    if err:
+                        return _fail(err, backups)
+                    err = _record(rec)  # type: ignore[arg-type]
+                else:
+                    err = _record(
+                        {
+                            "target": str(abs_old),
+                            "existed": False,
+                            "backup_path": None,
+                            "revert_action": "delete",
+                        }
+                    )
+                if err:
+                    return _fail(err, backups)
+                continue
             # Back up old source so it can be restored on revert.
             if abs_old.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
+                if err:
+                    return _fail(err, backups)
             # Track new destination for deletion on revert.
-            backups.append(
+            err = _record(
                 {
                     "target": str(abs_new),
                     "existed": False,
@@ -318,6 +403,8 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 }
             )
+            if err:
+                return _fail(err, backups)
 
         else:
             # Modification: back up existing target to restore on revert.
@@ -331,9 +418,9 @@ def _apply_patch_no_git(
                 rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
-                backups.append(rec)  # type: ignore[arg-type]
+                err = _record(rec)  # type: ignore[arg-type]
             else:
-                backups.append(
+                err = _record(
                     {
                         "target": str(abs_t),
                         "existed": False,
@@ -341,6 +428,8 @@ def _apply_patch_no_git(
                         "revert_action": "delete",
                     }
                 )
+            if err:
+                return _fail(err, backups)
 
     # Apply for real.
     rej_dir = backup_root / "rej"
@@ -409,10 +498,30 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
 
 def _revert_patches_no_git(
     backups: list[dict[str, Any]],
+    *,
+    backup_root: Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`)."""
+    """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
+
+    Iterates in reverse so multi-file patches unwind in the correct order.
+    Dispatches on the ``revert_action`` field when present; falls back to the
+    legacy heuristic (``backup_path`` present → restore, absent → delete) for
+    records produced by older code. Every path is re-read after the restore, so
+    a partial restore is reported rather than mistaken for success.
+
+    Args:
+        backups: The per-file backup records the caller still holds.
+        backup_root: The apply's backup directory. When given, the persisted
+            ledger under it is merged in first, so a mutation whose record
+            never reached the caller is still reverted.
+
+    Returns:
+        A ``(ok, errors)`` tuple; ``ok`` is ``True`` only when every record
+        restored and verified, and ``errors`` carries one entry per failure.
+    """
+    records = merge_records(backups, backup_root) if backup_root is not None else list(backups)
     errors: list[str] = []
-    for record in reversed(backups):
+    for record in reversed(records):
         target = Path(record["target"])
         bak = record.get("backup_path")
         action = record.get("revert_action")

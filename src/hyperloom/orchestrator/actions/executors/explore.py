@@ -20,11 +20,13 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
-    passes_intvty_gate,
+    GRADED_INTVTY,
+    GRADED_OUTPUT,
+    VERDICT_RECORDED,
+    VERDICT_REVERT,
+    intvty_serving_grading_enabled,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
-    total_tput_of,
-    total_tput_serving_grading_enabled,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -35,9 +37,11 @@ from ...state.failure_evidence import (
     tail_excerpt,
 )
 from ...state.shared_state import (
+    ANCHOR_DEGRADED,
     first_positive_tput,
     framework_is_scriptable,
     resolve_anchor_with_drift,
+    resolve_graded_comparison,
     stack_base_params,
 )
 from ..stop_attribution import (
@@ -131,6 +135,29 @@ def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
     if is_truthy(params.get("disable_run_eval")):
         return True
     return bool(getattr(shared_state, "eval_disabled", False))
+
+
+def _variant_with_eval_off(gv: Any) -> Any:
+    """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
+
+    The variant layer is the last one :func:`run_grid` applies over the
+    accumulated stack, so forcing the key here is what makes a session-level
+    ``--no-eval`` hold whatever the stack carries.
+    """
+    envs = dict(gv.extra_envs)
+    envs["RUN_EVAL"] = "false"
+    return _carry_variant_metadata(
+        gv,
+        GridVariant(
+            name=gv.name,
+            extra_server_args=gv.extra_server_args,
+            extra_envs=envs,
+            note=gv.note,
+            remove_args=to_str_list(getattr(gv, "remove_args", [])),
+            unset_envs=to_str_list(getattr(gv, "unset_envs", [])),
+            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+        ),
+    )
 
 
 def _carry_variant_metadata(src: Any, dst: Any) -> Any:
@@ -827,18 +854,17 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
-        grade_on_total = total_tput_serving_grading_enabled(
+        # Round-local grading anchor. Variants stack within a round, so a KEEP
+        # advances the figure the next variant is graded against; the session
+        # anchor would grade every variant against the round's opening state.
+        grade_on_intvty = intvty_serving_grading_enabled(
             scriptable=framework_is_scriptable(framework),
             benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
         )
-        _anchor_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_total else (None, "")
-        if grade_on_total and _anchor_reason:
-            log.info(
-                "explore: total-throughput grading unavailable (%s); "
-                "variants cannot KEEP without the required anchor axes",
-                _anchor_reason,
-            )
-        running_base_perf = _anchor_perf
+        running_base_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_intvty else (None, "")
+        if grade_on_intvty and running_base_perf is None:
+            log.info("explore: grading this round on output throughput (%s)", _anchor_reason)
+            running_base_perf = ANCHOR_DEGRADED
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin script / profiler-on falls back to a cold
         # decision round instead of one that re-attaches to the warmup's server).
@@ -922,45 +948,14 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
-                if stack_base_args_mode == "replace":
-                    run_remove_args = to_str_list(getattr(gv, "remove_args", []))
-                else:
-                    run_remove_args = list(
-                        dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", [])))
-                    )
-                run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
-                run_extra_envs = dict(stack_extra_envs)
-                run_extra_envs.update(gv.extra_envs)
-                if eval_disabled:
-                    run_extra_envs["RUN_EVAL"] = "false"
-                run_gv = GridVariant(
-                    name=gv.name,
-                    extra_server_args=gv.extra_server_args,
-                    extra_envs=run_extra_envs,
-                    note=gv.note,
-                    remove_args=run_remove_args,
-                    unset_envs=run_unset_envs,
-                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-                )
-                _carry_variant_metadata(gv, run_gv)
-                # The decision round is timed against a throughput-only anchor, so it measures throughput only: the
-                # warmup round already evaluated accuracy and ``parse_eval_results`` falls back to that score.
-                decision_gv = run_gv
-                if use_warm_decision:
-                    decision_envs = dict(run_extra_envs)
-                    decision_envs["RUN_EVAL"] = "false"
-                    decision_gv = _carry_variant_metadata(
-                        run_gv,
-                        GridVariant(
-                            name=gv.name,
-                            extra_server_args=gv.extra_server_args,
-                            extra_envs=decision_envs,
-                            note=gv.note,
-                            remove_args=run_remove_args,
-                            unset_envs=run_unset_envs,
-                            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-                        ),
-                    )
+                # ``--no-eval`` opted the session out of accuracy entirely, so it
+                # holds for every round. The decision round additionally skips
+                # eval when a warmup preceded it: it is timed against a
+                # throughput-only anchor, and ``parse_eval_results`` falls back
+                # to the score the warmup took. Without a warmup there is nothing
+                # to fall back to, so the decision round keeps its own eval.
+                warmup_gv = _variant_with_eval_off(gv) if eval_disabled else gv
+                decision_gv = _variant_with_eval_off(gv) if (use_warm_decision or eval_disabled) else gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
@@ -979,7 +974,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[run_gv],
+                            grid=[warmup_gv],
                             output_root=warmup_slot,
                             variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
@@ -989,6 +984,9 @@ class ExploreExecutor:
                             soft_deadline_sec=None,
                             server_lifecycle=variant_lifecycle,
                             base_args_mode=stack_base_args_mode,
+                            base_extra_envs=dict(stack_extra_envs),
+                            base_remove_args=list(stack_remove_args),
+                            base_unset_envs=list(stack_unset_envs),
                             serving_lease=variant_lease,
                             session_deadline_sec=session_deadline_sec,
                             variant_expected_sec=warmup_expected_sec,
@@ -1081,6 +1079,9 @@ class ExploreExecutor:
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=variant_lifecycle,
                         base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
@@ -1197,45 +1198,52 @@ class ExploreExecutor:
                         )
                         continue
 
-                    # Decision-round gain is the gate: a variant KEEPs when it clears keep_threshold and the accuracy
-                    # gate.
-                    cand_snap = perf_snapshot_from_mapping(
-                        {
-                            "output_throughput": r.output_throughput,
-                            "input_throughput": r.input_throughput,
-                            "total_throughput": r.total_token_throughput,
-                            "intvty_p90": r.intvty_p90,
-                            "tpot_p90_ms": r.tpot_p90_ms,
-                        }
+                    # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the
+                    # threshold floor belong to resolve_graded_comparison, which every lane shares.
+                    variant_meas = {
+                        GRADED_OUTPUT: r.output_throughput,
+                        "input_throughput": r.input_throughput,
+                        "total_throughput": r.total_token_throughput,
+                        GRADED_INTVTY: r.intvty_p90,
+                        "tpot_p90_ms": r.tpot_p90_ms,
+                    }
+                    graded = resolve_graded_comparison(
+                        ss,
+                        variant_meas,
+                        keep_threshold_pct=keep_threshold_pct,
+                        anchor_perf=running_base_perf,
+                        anchor_tput=running_base_tput,
+                    )
+                    _graded_on_intvty = graded.graded_on_intvty
+                    if graded.degrade_reason:
+                        log.info(
+                            "explore: variant %r graded on output throughput (%s)",
+                            gv.name,
+                            graded.degrade_reason,
+                        )
+                    axes = (
+                        f"intvty {graded.reference:.1f}->{graded.candidate:.1f} "
+                        f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
                     )
                     gain: float | None
                     outcome = "FAILED"
                     reason: str = ""
-                    _graded_on_total = False
-                    if grade_on_total and running_base_perf and cand_snap:
-                        _graded_on_total = True
-                        if passes_intvty_gate(cand_snap, running_base_perf):
-                            gain = gain_pct(total_tput_of(cand_snap), total_tput_of(running_base_perf))
+                    if r.status != "succeeded":
+                        gain = None
+                        reason = (r.error or "")[-1200:] or "no_measurement"
+                    elif graded.verdict == VERDICT_REVERT:
+                        gain = None
+                        outcome = "REVERT"
+                        if _graded_on_intvty:
+                            reason = f"both_axes_regressed ({axes})"
                         else:
-                            gain = None
-                            outcome = "REVERT"
-                            reason = "intvty_regression"
-                    else:
-                        gain = gain_pct(r.output_throughput, running_base_tput)
-                        if grade_on_total and r.status == "succeeded":
-                            outcome = "REVERT"
-                            reason = _anchor_reason or "candidate_axes_missing"
-                            log.info(
-                                "explore: variant %r cannot KEEP (%s); output gain is diagnostic only",
-                                gv.name,
-                                reason,
-                            )
-                    if not reason:
-                        if r.status != "succeeded" or gain is None:
-                            reason = (r.error or "")[-1200:] or "no_measurement"
-                        elif gain < keep_threshold_pct:
-                            outcome = "REVERT"
                             reason = "gain_below_threshold"
+                    elif graded.verdict == VERDICT_RECORDED:
+                        gain = gain_pct(graded.candidate, graded.reference)
+                        outcome = "RECORDED"
+                        reason = f"neither_dominates ({axes})"
+                    else:
+                        gain = gain_pct(graded.candidate, graded.reference)
                     if outcome == "FAILED" and not reason:
                         # Accuracy gate.
                         from hyperloom.inference_optimizer import framework_registry
@@ -1246,7 +1254,11 @@ class ExploreExecutor:
                         # Serving still needs a measured baseline to compare against; scriptable compares against a
                         # fixed 1.0.
                         if scriptable or baseline_accuracy > 0:
-                            eval_out = parse_eval_results(slot, framework=framework)
+                            eval_out = parse_eval_results(
+                                slot,
+                                framework=framework,
+                                benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+                            )
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
                                 # Scriptable maps gate pass→1.0 / fail→0.0, so compare against a perfect reference
@@ -1279,10 +1291,10 @@ class ExploreExecutor:
                         "decision_tput": decision_tput,
                         "input_throughput": r.input_throughput,
                         "total_throughput": r.total_token_throughput,
-                        "intvty_p90": r.intvty_p90,
+                        "e2e_norm_intvty_p90": r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
-                        "graded_objective": "total_throughput" if _graded_on_total else "output_throughput",
+                        "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1302,12 +1314,23 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack.
+                        # Layer onto the running stack. For
+                        # removal variants, next_args/next_envs are the
+                        # effective launch config that must persist if the KEEP
+                        # survives; gv.extra_* remain only the candidate delta.
+                        _keep_remove_args = (
+                            to_str_list(getattr(gv, "remove_args", []))
+                            if stack_base_args_mode == "replace"
+                            else list(dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", []))))
+                        )
+                        _keep_unset_envs = list(
+                            dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
+                        )
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=run_remove_args,
+                            remove_args=_keep_remove_args,
                             args_mode="replace"
                             if stack_base_args_mode == "replace"
                             else getattr(gv, "args_mode", "append"),
@@ -1320,16 +1343,16 @@ class ExploreExecutor:
                             args_mode=getattr(gv, "args_mode", "append"),
                         )
                         next_envs = dict(stack_extra_envs)
-                        for k in run_unset_envs:
+                        for k in _keep_unset_envs:
                             next_envs.pop(str(k), None)
                         next_envs.update(gv.extra_envs)
                         effective_control_fields = dict(control_fields)
-                        if run_remove_args:
-                            effective_control_fields["remove_args"] = list(run_remove_args)
-                        if run_unset_envs:
-                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        if _keep_remove_args:
+                            effective_control_fields["remove_args"] = list(_keep_remove_args)
+                        if _keep_unset_envs:
+                            effective_control_fields["unset_envs"] = list(_keep_unset_envs)
                         persist_effective_args = bool(
-                            run_remove_args
+                            _keep_remove_args
                             or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
                             or stack_base_args_mode == "replace"
                         )
@@ -1354,8 +1377,9 @@ class ExploreExecutor:
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
-                            "graded_objective": "total_throughput" if _graded_on_total else "output_throughput",
-                            # The verdict this KEEP rests on.
+                            "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
+                            # The verdict this KEEP rests on. ``None`` means the variant was not gated (not
+                            # high-risk, or no baseline) rather than that it scored nothing.
                             "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
@@ -1363,7 +1387,7 @@ class ExploreExecutor:
                             # anchor, and an anchor without them degrades the session.
                             "input_throughput": r.input_throughput,
                             "total_throughput": r.total_token_throughput,
-                            "intvty_p90": r.intvty_p90,
+                            "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
@@ -1375,13 +1399,25 @@ class ExploreExecutor:
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                         stack_extra_envs = next_envs
-                        stack_remove_args = list(run_remove_args)
-                        stack_unset_envs = list(run_unset_envs)
+                        stack_remove_args = list(_keep_remove_args)
+                        stack_unset_envs = list(_keep_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
-                        if grade_on_total and cand_snap and _graded_on_total:
-                            running_base_perf = cand_snap
+                        if grade_on_intvty:
+                            # The KEEP's own axes become the next variant's
+                            # anchor. A KEEP that could not supply them holds
+                            # the round on the output axis, rather than letting
+                            # the session anchor grade later variants on
+                            # interactivity while they stack on top of it.
+                            running_base_perf = perf_snapshot_from_mapping(variant_meas)
+                            if running_base_perf is None:
+                                log.info(
+                                    "explore: KEEP %r had no graded axes; grading the rest of "
+                                    "this round on output throughput",
+                                    gv.name,
+                                )
+                                running_base_perf = ANCHOR_DEGRADED
 
                         winners.append(keep_entry)
                         winners_history_update.append(
