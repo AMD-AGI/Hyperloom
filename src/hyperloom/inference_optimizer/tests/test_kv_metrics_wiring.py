@@ -531,7 +531,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
         ]
     )
     monkeypatch.setattr(sk, "_scan_logs_increment", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
-    monkeypatch.setattr(sk, "_stamp_server_ready", lambda *_a, **_k: None)
+    monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
     monkeypatch.setattr(sk, "_server_log_shows_death", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")
