@@ -33,6 +33,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
 
+#: Turns the authoring session may take. The default of one is unusable: the
+#: mandate itself tells the author to explore what is callable before committing
+#: to a search, and enumerating a backend's identifiers, reading the answer and
+#: then writing the script is several turns at minimum. ``timeout_s`` remains
+#: the real limit.
+MAX_AUTHORING_TURNS = 120
+
 _SYSTEM_PROMPT = """\
 You author one GPU kernel tuning script, to a fixed contract, and nothing else.
 
@@ -99,7 +106,7 @@ def generate_tuner(
     script_path = work_dir / "tuner.py"
 
     try:
-        from kernelforge.agent_backends.base import AgentRunSpec
+        from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
         from kernelforge.agent_backends.registry import (
             create_registered_backend,
             resolve_agent_runtime,
@@ -132,6 +139,21 @@ def generate_tuner(
         cwd=str(work_dir),
         writable=True,
         timeout_sec=timeout_s,
+        # Without a policy the backend sets no allowed_tools at all, so nothing
+        # is pre-approved and the session stops to ask. Measured on an MI355X:
+        # it asked for Write and for python3, explained at length why it could
+        # not enumerate hipBLASLt solutions without them, and ended its turn
+        # waiting for an answer nobody was there to give. `agent_stopped`,
+        # no script, a whole GPU run spent.
+        #
+        # Shell is not optional here, and not a widening of what this tier
+        # already does. Three of the five backends it may propose take
+        # identifiers only the installed library can supply -- a solidx, an ASM
+        # kernel name, an opus kernel id -- and the mandate tells the author
+        # that inventing one kills the process. Enumerating them means running
+        # python on this box. The script it writes is then executed anyway, by
+        # `sandbox.run_generated_tuner`, in the same container.
+        tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=MAX_AUTHORING_TURNS),
         target_files=[str(script_path)],
         allow_untracked=True,
     )
@@ -144,10 +166,18 @@ def generate_tuner(
     provider = str(getattr(backend, "name", "") or "")
     session = str(getattr(result, "session_id", "") or "")
     if not script_path.is_file():
+        # Quote the agent. Without this the failure reads "the session ended
+        # (agent_stopped) without writing tuner.py" whatever went wrong, and
+        # the one thing that explains it -- the agent saying which permission
+        # it was missing -- is thrown away. That cost a full GPU run to
+        # rediscover by hand, and the same text is also what the retry note
+        # would need to be useful.
+        said = " ".join(str(getattr(result, "text", "") or "").split())[-600:]
         return GeneratedTuner(
             False,
             None,
-            f"the session ended ({getattr(result, 'end_reason', '?')}) without writing {script_path.name}",
+            f"the session ended ({getattr(result, 'end_reason', '?')}) without writing {script_path.name}"
+            + (f"; it said: {said}" if said else "; it said nothing"),
             provider,
             session,
         )

@@ -756,3 +756,88 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
             tmp_path / "w",
         )
         assert not out.ok and "sandbox worktree" in out.reason
+
+
+class TestTheAuthoringSessionIsAllowedToDoTheJob:
+    """It asked for permission and there was nobody there.
+
+    Measured on an MI355X with a working provider and a sandbox worktree: the
+    session could reach the model, and then stopped to request Write access and
+    permission to run python3, explaining that it could not enumerate hipBLASLt
+    solutions without them. `end_reason=agent_stopped`, no script, a GPU run
+    spent. `tool_policy` was None, so the backend set no allowed_tools at all
+    and nothing was pre-approved.
+    """
+
+    def _spec(self, monkeypatch, tmp_path):
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        seen = {}
+
+        class Backend:
+            name = "fake"
+
+            def run(self, spec):
+                seen["spec"] = spec
+                Path(spec.cwd, "tuner.py").write_text("# authored", encoding="utf-8")
+                return type("R", (), {"text": "done", "end_reason": "agent_stopped", "session_id": "s"})()
+
+        monkeypatch.setattr(generate, "_isolate", lambda _w: None)
+        import kernelforge.agent_backends.registry as reg
+
+        monkeypatch.setattr(reg, "select_default_agent_provider", lambda _m: type("P", (), {"name": "fake"})())
+        monkeypatch.setattr(reg, "resolve_agent_runtime", lambda *a, **k: object())
+        monkeypatch.setattr(reg, "create_registered_backend", lambda _r: Backend())
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path,
+        )
+        assert out.ok, out.reason
+        return seen["spec"]
+
+    def test_the_tools_it_needs_are_pre_approved(self, monkeypatch, tmp_path):
+        policy = self._spec(monkeypatch, tmp_path).tool_policy
+        assert policy is not None, "a None policy leaves allowed_tools unset and the session asks"
+        assert policy.write, "it cannot deliver tuner.py without Write"
+        # solidx, ASM kernel names and opus kernel ids only exist in the
+        # installed library; the mandate says inventing one kills the process.
+        assert policy.shell, "it cannot enumerate what is callable without running python"
+
+    def test_it_gets_more_than_one_turn(self, monkeypatch, tmp_path):
+        policy = self._spec(monkeypatch, tmp_path).tool_policy
+        assert policy.max_turns is None or policy.max_turns > 1, (
+            "the mandate tells it to explore before searching, which is several turns"
+        )
+
+    def test_what_the_agent_said_survives_into_the_reason(self, monkeypatch, tmp_path):
+        """Otherwise every failure reads the same and explains nothing."""
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        class Silent:
+            name = "fake"
+
+            def run(self, _spec):
+                return type(
+                    "R",
+                    (),
+                    {
+                        "text": "Please grant Bash python3 execution and write access.",
+                        "end_reason": "agent_stopped",
+                        "session_id": "s",
+                    },
+                )()
+
+        monkeypatch.setattr(generate, "_isolate", lambda _w: None)
+        import kernelforge.agent_backends.registry as reg
+
+        monkeypatch.setattr(reg, "select_default_agent_provider", lambda _m: type("P", (), {"name": "fake"})())
+        monkeypatch.setattr(reg, "resolve_agent_runtime", lambda *a, **k: object())
+        monkeypatch.setattr(reg, "create_registered_backend", lambda _r: Silent())
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path / "w",
+        )
+        assert not out.ok
+        assert "write access" in out.reason, "the agent named its own blocker and we dropped it"
