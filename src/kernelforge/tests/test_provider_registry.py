@@ -24,20 +24,8 @@ from kernelforge.config import Config
 
 
 @pytest.fixture(autouse=True)
-def isolated_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry.
-
-    ``register_agent_provider`` writes into module-level state that outlives
-    the test that called it, and the registry offers no way to unregister. Each
-    fake registered below would therefore stay visible to every later test in
-    the same worker process, which is how these tests came to depend on the
-    order xdist happened to shard them in. Discovery runs first so the snapshot
-    already holds the built-ins and any installed plugin; the module globals
-    are then rebound to copies that monkeypatch drops during teardown.
-    """
-    registry.discover_agent_providers()
-    monkeypatch.setattr(registry, "_providers", dict(registry._providers))
-    monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 @pytest.fixture

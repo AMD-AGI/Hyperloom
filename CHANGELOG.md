@@ -5,6 +5,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **The `learning/` tuning database, the tracker's scoring layer, and the
+  fusion reachability island are gone — KernelForge loses ~1.4k lines of
+  production code.**
+  Each had been superseded in place rather than deleted: `learning/` (4 files)
+  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
+  `False` since `knowledge/experience_sink.py` took over the same job, and its
+  output files had no reader — `IterationLoop`'s `evolver` parameter and
+  `resources.writable_knowledge_root()` go with it. The tracker's
+  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
+  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
+  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
+  carries its own `_is_gate_met` and `best_mean_case_speedup`.
+  `fusion/validate.py` held a closed seven-function island
+  (`unreached_fusion_symbols` and its six private helpers) whose only
+  references were each other's definitions; `fused_symbol_invocation_evidence`,
+  which `fusion/command.py` does call, is untouched.
+
+  The one observable difference is at the end of a `forge-loop` run: it no
+  longer writes lesson markdown under the writable knowledge base's `learned/`
+  directory, and no longer prints `Lessons learned: N`. Nothing read that
+  directory, and the `Transfer rules discovered: N` line beside it was already
+  unreachable because it derives from the tuning DB whose writes are disabled.
+  Everything else here has no reachable call site.
+
+  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
+  it unreachable — its gate fires only for tables the dispatcher has no entry
+  for, while the dispatcher admits exactly one table, so the two predicates
+  accept disjoint sets, and on the path where the gate does fire the runner
+  discards the model-authored tuner at the referee stage. That is a defect in a
+  tier that is supposed to run, not a dead subsystem, and it is being fixed
+  rather than removed.
+
+- **The deprecated `kernel-agents` console script is gone.** The rename to
+  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
+  nothing in this repository, the docs, or the example scripts invoked it, and
+  the orchestrator dispatches `python -m kernelforge.cli` directly. The
+  `kernel_agents.agent_providers` entry-point group stays: it is how
+  third-party provider plugins published before the rename are still
+  discovered, and it is not a CLI surface.
+
 ## [v1.1.0] - 2026-09-09
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
