@@ -1,6 +1,6 @@
 ---
 name: hyperloom-llm-report
-description: Render the per-LLM-call report for a finished Hyperloom session — every API call's ISL/OSL, tokens (input/thinking/output), wall-clock, USD cost and tool calls, arranged as a phase → task → subtask → sub-sub-task tree, including the GEAK subprocess spend. Use when asked where a run's time or money went, to compare two models' runs, or to audit the trace ledgers' coverage.
+description: Render the per-LLM-call report for a finished Hyperloom session — every API call's ISL/OSL, tokens (input/thinking/output), wall-clock, USD cost and tool calls, arranged as a phase → task → subtask → sub-sub-task tree, including the GEAK subprocess spend. Use when asked where a run's time or money went, to compare two models' runs, or to audit the trace ledgers' coverage. Also renders a self-contained HTML page joining that spend against the session's measured outcome.
 ---
 
 # Hyperloom per-LLM-call report
@@ -41,7 +41,24 @@ Everything comes from `<session_dir>/reports/trace/`:
    `USER_DATA_PATH` is unset). `--output-dir` overrides; `--max-depth N` trims
    the tree without changing any total.
 
-3. **Read the Coverage section before quoting any number**, and carry its
+3. **Render the HTML page too** when the answer is for a person rather than for
+   a computation:
+
+   ```bash
+   PYTHONPATH=src python3 -m hyperloom.inference_optimizer.tools.render_hyperloom_html_report \
+       --session-dir <SESSION_DIR> --output <SESSION_DIR>/reports/hyperloom_report.html
+   ```
+
+   It reads the same two ledgers plus `session_breakdown.json`, and adds what
+   the markdown tree cannot show: the outcome ladder (baseline to final, every
+   KEEP/REJECT decision), spend joined against measured gain as dollars per
+   +1 %, the ISL growth curve across a conversation, and the model mix. The
+   join is by a declared phase map, so **a phase outside that map renders "not
+   attributed" rather than being credited**, and a session with no
+   `session_breakdown.json` renders "not recorded" rather than "+0.00 %".
+   Self-contained, no network, no assets.
+
+4. **Read the Coverage section before quoting any number**, and carry its
    caveats into whatever you tell the user:
 
    - **Unpriced calls.** Excluded from every USD figure. If any exist, the cost
@@ -61,7 +78,7 @@ Everything comes from `<session_dir>/reports/trace/`:
      bill — is missing, and the session total is badly understated. Check that
      `reports/trace/ext/geak-*.jsonl` exists and that the harvester ran.
 
-4. **Answer the question that was asked.** The markdown tree is the artifact;
+5. **Answer the question that was asked.** The markdown tree is the artifact;
    the JSON (`tree` → `totals` per node) is what to compute from when comparing
    two runs. When comparing models, compare `usd_total` and `ms_total` per
    phase, not session totals alone — a cheaper session that spent it all in one
