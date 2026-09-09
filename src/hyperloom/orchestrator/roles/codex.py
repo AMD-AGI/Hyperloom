@@ -1,28 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CodexBackend — a reactor role driven by the Codex Agent SDK.
-
-Hyperloom issues no bare LLM API calls: every agent runs inside an agent
-runtime, so auth, sandboxing, turn timeouts and usage accounting have exactly
-one owner. This backend is the OpenAI-side half of that contract for the
-Coordinator, the mirror of :class:`ClaudeBackend` on the Anthropic side.
-
-The intent transport is a provider-enforced structured output rather than
-prose the model is asked to imitate. Each turn ships the JSON schema
-:func:`build_intent_envelope_schema` renders from the *role's own* intent set,
-so the legal ``intent_type`` values are the role record's — never a literal
-that can fall behind it. Strict structured outputs cannot express a free-form
-object, so the payload arrives as a JSON string; decoding it and handing the
-result to :func:`validate_envelope` keeps payload checking identical to the
-Claude path.
-
-One :class:`CodexSession` is held across ticks, which is what makes the
-backend honestly ``conversational``: the Coordinator can then push a thin
-delta instead of the full session state every turn, and compaction has a
-conversation to compact. The session owns a child process and a private state
-directory, so the Coordinator closes it (:meth:`aclose`) when the run ends.
-"""
+"""CodexBackend — a reactor role driven by the Codex Agent SDK."""
 
 from __future__ import annotations
 
@@ -61,9 +40,7 @@ from .mcp_emit_intent import (
     payload_contract,
 )
 
-# Prepended to a turn that runs without the enforced schema. Thread developer
-# instructions are fixed at thread_start, so the standing OUTPUT FORMAT block
-# cannot be scoped out for one turn and has to be overridden in the user turn.
+# Prepended to a turn that runs without the enforced schema.
 _PER_TURN_SCHEMA_OVERRIDE = (
     "THIS TURN ONLY: ignore the OUTPUT FORMAT block in your instructions. "
     "Do not emit an intent envelope. Reply exactly as the message below asks."
@@ -71,20 +48,7 @@ _PER_TURN_SCHEMA_OVERRIDE = (
 
 
 def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
-    """Render the transport contract for one role's intent set.
-
-    The schema is enforced by the provider, so this text only has to explain
-    the two things a schema cannot: that the payload is a serialized object,
-    and that a turn with nothing to report still owes an intent. It is scoped
-    to ``allowed_intents`` so no role is ever handed another role's contract.
-
-    Args:
-        allowed_intents: The intent types the role may emit.
-
-    Returns:
-        The output-format block appended to the thread's developer
-        instructions.
-    """
+    """Render the transport contract for one role's intent set."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
 
     contract = payload_contract(allowed_intents)
@@ -118,23 +82,7 @@ output schema — no prose, no code fences, nothing around it:
 
 
 def decode_intent_envelope(text: str) -> dict[str, Any]:
-    """Decode a schema-enforced reply into a :func:`validate_envelope` input.
-
-    Inflates every JSON-string payload back into the object the shared
-    validator expects. The reply shape is provider-enforced, so anything
-    unparseable here means the structured-output constraint did not hold and
-    the turn produced nothing usable.
-
-    Args:
-        text: The model's final response.
-
-    Returns:
-        The envelope with object payloads.
-
-    Raises:
-        NoIntentEmitted: If the reply or any payload is not decodable JSON of
-            the expected shape.
-    """
+    """Decode a schema-enforced reply into a :func:`validate_envelope` input."""
     try:
         envelope = json.loads(text)
     except (TypeError, ValueError) as exc:
@@ -143,10 +91,8 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("codex reply is valid JSON but carries no 'intents' list")
-    # An empty list satisfies validate_envelope, so without this the tick is
-    # recorded as a success that did nothing and the backend's error streak is
-    # reset. The schema's ``minItems`` is the provider-side belt; this is the
-    # braces, because a gateway that drops the keyword must not go unnoticed.
+    # An empty list satisfies validate_envelope, so without this the tick is recorded as a success that did nothing
+    # and the backend's error streak is reset.
     if not envelope["intents"]:
         raise NoIntentEmitted("codex reply carried an empty 'intents' list")
     decoded: list[Any] = []
@@ -167,40 +113,7 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
 
 @dataclass
 class CodexBackend:
-    """Production Codex reactor backend. Implements :class:`Backend`.
-
-    One behaviour differs from the Claude path and cannot be made to match. A
-    thread's developer instructions are fixed when it starts, so a phase re-scope
-    has to open a new thread, and the model's own reasoning and plan go with the
-    old one. :meth:`needs_seed_for` makes the Coordinator push a full SEED across
-    that seam, and the seam checkpoint that normally runs first carries the
-    distilled memory over -- but that checkpoint is skipped when checkpointing is
-    disabled or the conversation was never seeded, and then only SharedState
-    survives. Claude resumes by ``session_id`` and keeps everything.
-
-    Args:
-        allowed_intents: The emitting role's intent set; becomes the enforced
-            ``intent_type`` enum. Required, because a backend that guesses it
-            is exactly the drift this transport exists to prevent.
-        model: Codex model id.
-        cwd: Session-private working directory for the agent's own scratch
-            files. Deliberately not the session directory: under the
-            ``workspace-write`` sandbox the model may read the whole
-            filesystem but write only its declared roots, so session state
-            stays out of reach.
-        writable_roots: Extra roots the session may write; ``cwd`` is always
-            included.
-        sandbox_mode: One of ``CODEX_SANDBOX_MODES``; blank defers to the
-            deployment's ``HYPERLOOM_CODEX_SANDBOX_MODE``.
-        codex_bin: Optional Codex runtime path; the SDK resolves its own when
-            empty.
-        call_timeout_s: Wall-clock cap for one ``run()``. Env override:
-            ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
-        env: Values overlaid on ``os.environ`` for the child process.
-        retry_policy: Bounded backoff for transient SDK/gateway failures; env
-            override via ``INFERENCE_OPTIMIZER_LLM_RETRY_*`` (ATTEMPTS=1
-            disables), shared with the Claude path.
-    """
+    """Production Codex reactor backend. Implements :class:`Backend`."""
 
     allowed_intents: frozenset[IntentType]
     model: str = DEFAULT_CODEX_MODEL
@@ -208,8 +121,8 @@ class CodexBackend:
     writable_roots: tuple[Path, ...] = ()
     sandbox_mode: str = ""
     codex_bin: str = ""
-    # An agent turn carries a tool loop, so it needs the conversational budget
-    # the Claude orchestration path also floors at, not a completion's 120s.
+    # An agent turn carries a tool loop, so it needs the conversational budget the Claude orchestration path also
+    # floors at, not a completion's 120s.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -217,38 +130,26 @@ class CodexBackend:
         )
     )
     env: dict[str, str] | None = None
-    # Bounded transient-failure retry/backoff, on the same
-    # INFERENCE_OPTIMIZER_LLM_RETRY_* knobs the Claude path reads.
+    # Bounded transient-failure retry/backoff, on the same INFERENCE_OPTIMIZER_LLM_RETRY_* knobs the Claude path
+    # reads.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    # Every turn runs on one held SDK thread, so the Coordinator's delta gating
-    # and checkpoint compaction both apply. Not a dataclass field: a
-    # session-scoped backend has no stateless mode to fall back to.
+    # Every turn runs on one held SDK thread, so the Coordinator's delta gating and checkpoint compaction both apply.
     conversational = True
-    # Which prompt modules describe a surface this backend actually has. Read
-    # by the prompt builder, which cannot infer it from the role: the
-    # orchestration role is Claude on paper and Codex in an OpenAI-only run.
+    # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_STRUCTURED_OUTPUT
 
     _session: CodexSession | None = field(default=None, init=False, repr=False)
-    # Developer instructions the open thread was started with. The orchestration
-    # system prompt is re-scoped on phase entry, and thread instructions are
-    # fixed at thread_start, so a change has to open a new thread.
+    # Developer instructions the open thread was started with.
     _thread_instructions: str = field(default="", init=False, repr=False)
-    # Whether the open thread has carried a turn. A fresh thread holds no
-    # history, so the caller owes it a full push rather than a delta.
+    # Whether the open thread has carried a turn.
     _thread_seeded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Normalize and secure the session-private runtime root.
-
-        Raises:
-            BackendError: If ``allowed_intents`` is empty or the working
-                directory cannot be prepared.
-        """
+        """Normalize and secure the session-private runtime root."""
         if not self.allowed_intents:
             raise BackendError("CodexBackend requires the emitting role's allowed_intents")
         self.cwd = Path(self.cwd).expanduser().resolve()
@@ -272,42 +173,11 @@ class CodexBackend:
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Run one Codex Agent SDK turn and parse its enforced intent envelope.
-
-        Args:
-            prompt: The composed turn prompt; sent as the user turn.
-            system_prompt: The role's system prompt; sent as thread developer
-                instructions alongside the transport contract.
-            tools: Unused. The Codex session mounts the SDK's own tool surface;
-                the Claude tool names PolicyGate returns have no counterpart
-                here.
-            max_turns: Unused. The SDK owns the agent loop within one turn.
-            allow_no_intent: When ``True`` the turn is not schema-constrained
-                and its text is returned unparsed. Checkpoint/compaction turns
-                ask for a free-form summary, which the intent envelope cannot
-                carry.
-
-        Returns:
-            BackendTurnResult: The validated intents plus raw reply text and
-            model/usage metadata.
-
-        Raises:
-            BackendError: If the session's config or sandbox policy is
-                unusable. Not retried: a misconfigured deployment does not
-                become usable on the second attempt.
-            LLMCallFailed: If the SDK turn kept failing once the retry budget
-                was spent, or the turn reported an in-band error.
-            NoIntentEmitted: If the reply did not honour the enforced schema or
-                failed intent validation.
-        """
+        """Run one Codex Agent SDK turn and parse its enforced intent envelope."""
         output_schema = None if allow_no_intent else build_intent_envelope_schema(self.allowed_intents)
-        # Dropping the schema is not enough on its own: the thread's developer
-        # instructions carry the OUTPUT FORMAT block for the life of the thread
-        # and cannot be scoped out for one turn, so a checkpoint turn asking for
-        # a different JSON shape would be answered with an intent envelope. The
-        # compaction parser reads that as degenerate, skips the compaction, and
-        # leaves the conversation growing -- the failure this backend exists to
-        # end. An explicit per-turn override is the only channel available.
+        # Dropping the schema is not enough on its own: the thread's developer instructions carry the OUTPUT FORMAT
+        # block for the life of the thread and cannot be scoped out for one turn, so a checkpoint turn asking for a
+        # different JSON shape would be answered with an intent envelope.
         turn_prompt = f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
 
         async def _one_attempt() -> Any:
@@ -365,22 +235,13 @@ class CodexBackend:
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": cache_read_tokens,
             "reasoning_output_tokens": reasoning_tokens,
-            # Codex reports per-turn counts, so the input side already is this
-            # request's context size — the figure the checkpoint policy compares
-            # against the model's window. The cached tokens are part of that
-            # count, not an addition to it: Codex reports 5152 input / 3072
-            # cached / 16 output as 5168 total. Adding them back inflated the
-            # water level by the cache hit rate, which on a long conversation is
-            # most of the prompt, so the policy compacted early — and compaction
-            # resets the conversation this backend exists to keep.
+            # Codex reports per-turn counts, so the input side already is this request's context size — the figure the
+            # checkpoint policy compares against the model's window.
             "context_tokens_peak": input_tokens,
-            # Stated by Codex per turn, and better than any table this side
-            # keeps: the compaction trigger is a fraction of it. Written
-            # unconditionally — 0 means "not reported", which is what
-            # adopt_context_window ignores.
+            # Stated by Codex per turn, and better than any table this side keeps: the compaction trigger is a
+            # fraction of it.
             "model_context_window": safe_int(usage.get("model_context_window")),
-            # Full conversation text for conversations.jsonl, handed up for
-            # the caller to persist.
+            # Full conversation text for conversations.jsonl, handed up for the caller to persist.
             "prompt": prompt,
             "response": sdk_result.text,
         }
@@ -397,29 +258,11 @@ class CodexBackend:
     # ------------------------------------------------------------------
     @property
     def needs_seed(self) -> bool:
-        """True when the open conversation has no history to build a delta on.
-
-        The caller decides between a full push and a delta, but only this
-        backend knows when the thread underneath was replaced — by a reset, by
-        a re-scoped system prompt, or by a turn that never landed.
-
-        This is the question a backend can answer without knowing what the turn
-        will carry. The Coordinator reads it only from backends that cannot
-        answer :meth:`needs_seed_for`, so this backend's own answer is never the
-        one used; it stays because the attribute is the fallback half of that
-        protocol, and a backend implementing only this half must still work.
-        """
+        """True when the open conversation has no history to build a delta on."""
         return not self._thread_seeded
 
     def needs_seed_for(self, system_prompt: str | None) -> bool:
-        """True when the turn about to run will start on an empty thread.
-
-        :attr:`needs_seed` can only describe the thread as it stands, but the
-        caller has to choose SEED or DELTA *before* the turn, and a re-scoped
-        system prompt replaces the thread inside the turn itself. Answering for
-        the prompt that is about to be sent is what keeps a thin delta out of a
-        thread that holds none of the state the delta omits.
-        """
+        """True when the turn about to run will start on an empty thread."""
         if not self._thread_seeded:
             return True
         return self._instructions_for(system_prompt) != self._thread_instructions
@@ -431,11 +274,7 @@ class CodexBackend:
         )
 
     def reset_conversation(self) -> None:
-        """Start the next turn on a fresh conversation.
-
-        The conversation is the SDK thread; the client and its private state
-        directory stay up, so a compaction cannot leak a child process.
-        """
+        """Start the next turn on a fresh conversation."""
         self._thread_seeded = False
         if self._session is not None:
             self._session.reset_thread()
@@ -448,15 +287,7 @@ class CodexBackend:
             await session.aclose()
 
     async def _session_for(self, system_prompt: str | None) -> CodexSession:
-        """Return the held session, opening it (or re-scoping it) as needed.
-
-        Raises:
-            BackendError: If the session's config or sandbox policy is unusable,
-                which is the same on every attempt.
-            CodexSessionError: If the SDK client could not be opened. Raised as
-                it is, so the caller's retry wrapper treats a refused connection
-                the way it treats one that drops mid-turn.
-        """
+        """Return the held session, opening it (or re-scoping it) as needed."""
         instructions = self._instructions_for(system_prompt)
         if self._session is None:
             self._session = CodexSession(
@@ -478,11 +309,7 @@ class CodexBackend:
                 self._session = None
                 raise BackendError(redact_secret_values(str(exc))) from exc
             except CodexSessionError:
-                # Left as it is so the retry wrapper around the attempt can see
-                # it. Opening the client is the first leg of the turn and fails
-                # for the same transient reasons the turn does; converting it
-                # here meant a gateway that refused one connection ended the
-                # turn, while the identical error from turn() was retried.
+                # Left as it is so the retry wrapper around the attempt can see it.
                 self._session = None
                 raise
         elif instructions != self._thread_instructions:

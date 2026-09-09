@@ -17,12 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, ins
 
 
 def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
-    """The collective lane settles its own verdict, outside the integrate queue.
-
-    No kernel recorder fires for it, so without a record of its own the change
-    is invisible to the read model: the patch lands, the workload moves, and
-    every point it earned reports as belonging to no step.
-    """
+    """The collective lane settles its own verdict, outside the integrate queue."""
     instrument.record_collective_promotion(
         tmp_path,
         integration_id="integration-1",
@@ -93,13 +88,7 @@ def test_collective_stack_entry_keeps_campaign_evidence():
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
-    """The declared shape must cover the keys the collector actually writes.
-
-    ``session_breakdown.json`` is a published contract, and the TypedDict is
-    what downstream code reads it through, so a bucket the producer emits but
-    the schema omits shows up as an empty section rather than an error. The
-    KERNEL_AGENT bucket sat in exactly that state.
-    """
+    """The declared shape must cover the keys the collector actually writes."""
     from hyperloom.inference_optimizer.breakdown.schema import PhaseBreakdown
 
     state = {
@@ -127,12 +116,7 @@ def test_phase_breakdown_schema_declares_every_emitted_bucket():
 
 
 def test_a_session_whose_records_never_arrived_says_so(tmp_path):
-    """An optimized session with no recorder parts is a gap, not a zero.
-
-    Rebuilding the section from ``state.json`` made a run whose fragments went
-    missing look exactly like a run that adopted nothing. The stack in
-    ``state.json`` is read only to tell those two apart.
-    """
+    """An optimized session with no recorder parts is a gap, not a zero."""
     state = {
         "session_id": "export",
         "baseline_tput": 100.0,
@@ -171,12 +155,7 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
 
 
 def test_the_key_that_says_records_are_missing_is_there_when_they_are_not(tmp_path):
-    """``available`` has to answer on both paths to be worth asking.
-
-    Distinguishing a session whose records never landed from one that adopted
-    nothing is what this section is for, and a consumer cannot make that call
-    against a key that only appears when the answer is no.
-    """
+    """``available`` has to answer on both paths to be worth asking."""
     instrument.record_collective_promotion(
         tmp_path,
         integration_id="integration-1",
@@ -375,12 +354,7 @@ def test_recorded_optimizations_exclude_ineligible_keeps_from_entries():
 
 
 def test_entries_are_a_gain_ledger_that_points_back_at_its_attempt():
-    """``entries`` must not restate what its attempt already says.
-
-    Descriptive detail lives on the attempt and is reached through
-    ``adopted_attempt_id``. A field present in both places has to carry the
-    same value in both, so that reading either one gives the same answer.
-    """
+    """``entries`` must not restate what its attempt already says."""
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
     result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
@@ -412,12 +386,7 @@ def test_attempt_gain_is_never_named_like_the_baseline_relative_one():
 
 
 def test_recorded_optimizations_report_gain_against_the_session_baseline():
-    """Two adoptions from the gemma session, with its real measured numbers.
-
-    Each executor measures against whatever it started from, so the two local
-    gains (7.09% and 10.95%) cannot simply be added. Reported gain is measured
-    against the session baseline, which is itself a recorded measurement.
-    """
+    """Two adoptions from the gemma session, with its real measured numbers."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -453,9 +422,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
             "validated": True,
             "agent": "kernel_agent",
             "gain_pct": 7.0904327726706935,
-            # An earlier PRELUDE patch had already moved the workload off the
-            # baseline before this kernel started, which is why the kernel's
-            # own starting point is not 4726.94.
+            # An earlier PRELUDE patch had already moved the workload off the baseline before this kernel started,
+            # which is why the kernel's own starting point is not 4726.94.
             "throughput_before": 4744.5975753,
             "throughput_after": 5081.0100767,
             "adopted_at": "2026-08-08T06:56:21+00:00",
@@ -483,9 +451,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     assert second["gain_pct"] == 11.769809
     assert second["local_gain_pct"] == 10.949641
     assert second["cumulative_gain_pct"] == 19.260175
-    # Per-agent totals add up to what the attempts claim, not to the session's
-    # end-to-end move; the difference is stated instead of being handed to the
-    # kernel that happened to run next.
+    # Per-agent totals add up to what the attempts claim, not to the session's end-to-end move; the difference is
+    # stated instead of being handed to the kernel that happened to run next.
     assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 7.116912
     assert result["summary_by_agent"]["framework_agent"]["attributable_gain_pct"] == 11.769809
     validation = result["validation"]
@@ -493,8 +460,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     assert validation["attributed_total_gain_pct"] == 18.886722
     assert validation["unattributed_gain_pct"] == 0.373453
     assert validation["attribution_gap_pct"] == 0.373453
-    # The audit identity that has to survive rounding: what the session moved
-    # is what the attempts claim plus what nobody claims.
+    # The audit identity that has to survive rounding: what the session moved is what the attempts claim plus what
+    # nobody claims.
     assert (
         validation["attributed_total_gain_pct"] + validation["unattributed_gain_pct"]
         == validation["validated_total_gain_pct"]
@@ -503,12 +470,7 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
 
 
 def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
-    """The 0.37pp that started the leaderboard argument, in isolation.
-
-    A patch moves the workload off the baseline and is never adopted. The
-    kernel that runs next must report what it itself added, not what it
-    inherited.
-    """
+    """The 0.37pp that started the leaderboard argument, in isolation."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -541,8 +503,8 @@ def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
     result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     entry = result["entries"][0]
-    # It started at 1100 and left at 1210, so it added 11pp of the baseline —
-    # not the 21pp it would inherit by being measured from the baseline.
+    # It started at 1100 and left at 1210, so it added 11pp of the baseline — not the 21pp it would inherit by being
+    # measured from the baseline.
     assert entry["gain_pct"] == 11.0
     assert entry["cumulative_gain_pct"] == 21.0
     assert result["validation"]["unattributed_gain_pct"] == 10.0
@@ -550,13 +512,7 @@ def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
 
 
 def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
-    """A step with no finishing throughput used to be paid for twice.
-
-    Its own figure went into the total, and then the next step's head start —
-    which is that same figure — was booked again as drift. The percentage is
-    measured against where the step started, so the missing reading can be put
-    back and the chain carried on.
-    """
+    """A step with no finishing throughput used to be paid for twice."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -596,8 +552,7 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
             "throughput_before": 1000.0,
             "throughput_after": 1100.0,
         },
-        # A GEMM adoption carries the speedup it was decided on and no
-        # throughput at all.
+        # A GEMM adoption carries the speedup it was decided on and no throughput at all.
         {
             "adoption_id": "ad-gemm",
             "operation_id": "op-gemm",
@@ -625,20 +580,14 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
     assert middle["gain_pct"] == 5.5
     assert middle["chain_continuous"] is False
     assert last["gain_pct"] == 9.5
-    # The session moved 1000 -> 1250. Booking the middle step's effect once
-    # gives exactly that; booking it again as the last step's drift gave 30.
+    # The session moved 1000 -> 1250.
     assert last["cumulative_gain_pct"] == 25.0
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert any("recorded no finishing throughput" in warning for warning in warnings)
 
 
 def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
-    """A total summed from the ledger can never be found to disagree with it.
-
-    The run promotes an end-to-end figure of its own when it validates. That
-    figure is the one the section reports, and the ledger's sum is kept beside
-    it so the two can be seen to part company.
-    """
+    """A total summed from the ledger can never be found to disagree with it."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -694,11 +643,7 @@ def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
 
 
 def test_each_promotion_leaves_its_own_checkpoint(tmp_path):
-    """Two checkpoints that measure the same number are still two checkpoints.
-
-    Keying on the value would collapse them, which is the trap an earlier fix
-    already had to dig the measurement ids out of.
-    """
+    """Two checkpoints that measure the same number are still two checkpoints."""
     for stack_len, ts in ((1, "2026-01-01T01:00:00+00:00"), (2, "2026-01-01T02:00:00+00:00")):
         instrument.record_session_validation(
             tmp_path,
@@ -778,12 +723,7 @@ def test_a_keep_no_accuracy_gate_ruled_on_is_counted_as_such():
 
 
 def test_both_sides_of_the_record_name_a_patch_author_the_same_way():
-    """The rule used to exist twice, and a copy that drifts moves gain.
-
-    The write side stamps an owner when the patch lands; the read side has to
-    name one for sessions recorded before it did. They answer with the same
-    function or they eventually answer differently.
-    """
+    """The rule used to exist twice, and a copy that drifts moves gain."""
     from hyperloom.inference_optimizer.breakdown.recorder.instrument import _resolve_agent
 
     cases = [
@@ -905,11 +845,7 @@ def test_an_adoption_whose_operation_was_never_recorded_is_reported():
 
 
 def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_path):
-    """A singleton fragment is named for its producer, so two mean two claims.
-
-    Only the newest survives, and the loser does not merge into it: its whole
-    payload goes. Nothing downstream can see that it was ever written.
-    """
+    """A singleton fragment is named for its producer, so two mean two claims."""
     for producer, ts in (("coordinator", "2026-01-01T01:00:00+00:00"), ("kernel-agent", "2026-01-01T02:00:00+00:00")):
         instrument.record_run_snapshot(
             tmp_path,
@@ -924,12 +860,7 @@ def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_
 
 
 def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_path):
-    """Merging partial updates is the point; disagreeing on a field is not.
-
-    Repeated updates from one producer merge into its own fragment long before
-    assembly, so two payloads for one id are two producers, and the later
-    timestamp decides the value with nothing said about the one it replaced.
-    """
+    """Merging partial updates is the point; disagreeing on a field is not."""
     for producer, decision in (("coordinator", "KEEP"), ("kernel-agent", "REVERT")):
         instrument.record_adoption(
             tmp_path,
@@ -946,13 +877,7 @@ def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_p
 
 
 def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
-    """The mirror of an orphan adoption, and the one that moves a number.
-
-    The step is skipped by the gain walk, but the workload still moved, so the
-    next adopted step starts higher than the ledger expects and the difference
-    is booked as gain belonging to nobody. Unreported, that reads as ordinary
-    drift rather than as a record that never arrived.
-    """
+    """The mirror of an orphan adoption, and the one that moves a number."""
     operations = [
         {
             "operation_id": "op-base",
@@ -1119,13 +1044,7 @@ def test_adoption_throughput_outranks_overwritten_measurements():
 
 
 def test_an_adoption_citing_overwritten_evidence_says_so():
-    """Archives predating per-occurrence ids cannot be repaired, only labelled.
-
-    The frozen values still stand, but the readings the adoption points at were
-    written over by a later re-measure. Presenting the two side by side without
-    a word is what made this look like the numbers had been edited after the
-    fact.
-    """
+    """Archives predating per-occurrence ids cannot be repaired, only labelled."""
     operations = [
         {
             "operation_id": "op-k1",
@@ -1191,13 +1110,7 @@ def test_intact_pinned_evidence_is_not_called_stale():
 
 
 def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
-    """Recorded ids are unreadable by necessity, so the ordinal is added here.
-
-    An id has to be reproducible from the record being written, since several
-    producers replay their records after a resume, which rules out numbering
-    them as they arrive. The plain ordinal a reader wants is therefore assigned
-    on the way out, where every reading is in hand at once.
-    """
+    """Recorded ids are unreadable by necessity, so the ordinal is added here."""
     operations = [
         {
             "operation_id": "op-k1",
@@ -1243,8 +1156,8 @@ def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
     attempt = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])["attempts"][0]
     numbered = {row["value"]: row for row in attempt["measurements"]}
 
-    # The reading the decision was made on is the first of its name, even
-    # though the operation happens to reference the later one first.
+    # The reading the decision was made on is the first of its name, even though the operation happens to reference
+    # the later one first.
     assert numbered[5081.01]["occurrence"] == 0
     assert numbered[5100.76]["occurrence"] == 1
     assert numbered[5081.01]["occurrences_of_name"] == 2
@@ -1273,15 +1186,7 @@ def _ledger_with_baseline(tmp_path, baseline_tput: float):
 
 
 def test_a_reproduced_warm_replay_is_an_adopted_step_in_the_ledger(tmp_path):
-    """A replay the run promoted has to reach the ledger as an adopted step.
-
-    The keep decision belongs to the promote path, not to the replay executor,
-    which settles on ``succeeded`` either way. Mirroring the action before that
-    ruling recorded every replay as discarded, so a reproduced one was pushed
-    onto the stack and moved ``cumulative_gain_validated`` while the canonical
-    streams held no adoption for it: ``entries`` came back empty on a session
-    that had measurably gained, and its whole gain read as unattributed.
-    """
+    """A replay the run promoted has to reach the ledger as an adopted step."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",
@@ -1307,19 +1212,14 @@ def test_a_reproduced_warm_replay_is_an_adopted_step_in_the_ledger(tmp_path):
     assert entry["source"] == "warm_replay"
     assert entry["gain_method"] == "baseline_chain"
     assert entry["gain_pct"] == pytest.approx(198.94, abs=0.01)
-    # The ledger and the gain the run promoted are the same number, so the
-    # session reports no reconciliation gap.
+    # The ledger and the gain the run promoted are the same number, so the session reports no reconciliation gap.
     assert result["validation"]["ledger_total_gain_pct"] == pytest.approx(198.94, abs=0.01)
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert result["validation"]["keep_count"] == 1
 
 
 def test_a_replay_that_did_not_reproduce_stays_out_of_the_ledger(tmp_path):
-    """Drift is a measured non-result, and must not be credited as a keep.
-
-    The fix for the discarded-reproduced replay must not reach the other way
-    and let a replay that missed the bar claim gain it never earned.
-    """
+    """Drift is a measured non-result, and must not be credited as a keep."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",
@@ -1345,11 +1245,7 @@ def test_a_replay_that_did_not_reproduce_stays_out_of_the_ledger(tmp_path):
 
 
 def test_a_replay_promoted_without_an_accuracy_verdict_says_so(tmp_path):
-    """Adopting on a keep verdict alone is a different record from passing a gate.
-
-    A replay is admitted when its eval could not be scored, so the ledger has to
-    carry that it was never checked rather than report it as validated.
-    """
+    """Adopting on a keep verdict alone is a different record from passing a gate."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",

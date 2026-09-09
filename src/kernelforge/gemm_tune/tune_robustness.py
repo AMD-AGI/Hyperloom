@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Robustness helpers for aiter tuner invocation (Forge-side; no aiter changes).
-
-Two problems this addresses, entirely from the Forge side:
-
-1. **Hang on a faulting candidate.** aiter's ``mp_tuner`` only activates its
-   GPU-fault isolation when the tuner is invoked with ``--timeout``. Forge did
-   not pass it, so a single faulting kernel candidate (e.g. an asm fmoe tile on
-   gfx950) hung the whole run until the outer subprocess cap (up to an hour),
-   losing every shape. We now always inject ``--timeout`` (see
-   :func:`with_task_timeout`) so aiter's per-candidate recovery kicks in.
-
-2. **No isolation / no record of faulting shapes.** Per-candidate isolation
-   lives inside ``mp_tuner`` (aiter) and is out of scope. What we *can* do from
-   Forge is **per-shape** process isolation: split the untuned CSV and invoke
-   the tuner once per shape, so one shape's fault storm cannot disrupt another's
-   benchmark, and record shapes that fail even with ``--timeout`` into a
-   provenance-keyed blocklist so future runs skip them (see
-   :class:`FaultBlocklist` and :func:`run_isolated`).
-
-Per-shape isolation is **opt-in** (env ``FORGE_ISOLATE_SHAPES=1``); the default
-path is unchanged except for the always-on ``--timeout`` injection. Pure stdlib;
-reuses ``utils.run_subprocess`` / ``utils.check_gpu_status``.
-"""
+"""Robustness helpers for aiter tuner invocation (Forge-side; no aiter changes)."""
 
 from __future__ import annotations
 
@@ -72,15 +50,13 @@ _DEFAULT_BLOCKLIST = os.path.expanduser(
     os.environ.get("FORGE_FAULTED_BLOCKLIST", "~/.forge_gemm_tune/faulted_shapes.json")
 )
 
-# Fault signatures in tuner output. A run that trips these on a shape means that
-# shape could not be tuned even with per-candidate recovery -> blocklist it.
+# Fault signatures in tuner output.
 _HARD_FAULT_RE = re.compile(
     r"Memory access fault|GPU core ?dump|coredump|HIP error|hipError|"
     r"illegal memory access|Segmentation fault",
     re.IGNORECASE,
 )
-# Recovered-but-noted: a candidate task timed out or a respawned worker lost its
-# GPU map. These are survivable (aiter continues); we count them, not blocklist.
+# Recovered-but-noted: a candidate task timed out or a respawned worker lost its GPU map.
 _SOFT_FAULT_RE = re.compile(
     r"\[!\] Task \d+ timed out|Mapping Error|Process PID not in GPU map",
     re.IGNORECASE,
@@ -93,32 +69,18 @@ def is_isolation_enabled() -> bool:
 
 
 def with_task_timeout(cmd: list[str], task_timeout_s: int = DEFAULT_TASK_TIMEOUT_S) -> list[str]:
-    """Return ``cmd`` with an aiter ``--timeout`` appended if not already present.
-
-    This is the one always-on fix: it activates aiter mp_tuner's per-candidate
-    GPU-fault isolation. Idempotent (no double ``--timeout``).
-    """
+    """Return ``cmd`` with an aiter ``--timeout`` appended if not already present."""
     if "--timeout" in cmd:
         return cmd
     return [*cmd, "--timeout", str(int(task_timeout_s))]
 
 
 def classify_fault(rc: int, stdout: str, stderr: str) -> str | None:
-    """Classify a per-shape tuner run outcome.
-
-    Returns ``"outer_timeout"`` (rc 124 -> whole run killed by the subprocess
-    cap, i.e. hung even with ``--timeout``), ``"hard_fault"`` (GPU memory fault /
-    coredump), or ``None`` when the run completed acceptably (soft, recovered
-    faults do not count). Soft faults are logged by the caller, not returned.
-    """
+    """Classify a per-shape tuner run outcome."""
     if rc == 124:
         return "outer_timeout"
     blob = f"{stdout}\n{stderr}"
-    # Only a NON-ZERO exit means the run itself failed on a hard fault. With
-    # aiter --timeout (mp_tuner), per-candidate memory-access / HIP faults are
-    # recovered (rc==0) and merely printed under -v; classifying those as a
-    # hard fault would blocklist a shape that actually tuned fine -- exactly the
-    # "recovered faults do not count" contract this function documents.
+    # Only a NON-ZERO exit means the run itself failed on a hard fault.
     if rc != 0 and _HARD_FAULT_RE.search(blob):
         return "hard_fault"
     return None
@@ -130,8 +92,7 @@ def count_soft_faults(stdout: str, stderr: str) -> int:
 
 
 def read_untuned_csv(path: str | Path) -> tuple[str, list[str]]:
-    """Read an untuned CSV into (header_line, data_lines). Never raises on a
-    missing/short file -> returns ("", [])."""
+    """Read an untuned CSV into (header_line, data_lines)."""
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -143,23 +104,13 @@ def read_untuned_csv(path: str | Path) -> tuple[str, list[str]]:
 
 
 def shape_signature(row: str) -> str:
-    """Stable short signature for one untuned-CSV data row (order-preserving).
-
-    Works for both dense (``M,N,K[,q_dtype_w]``) and MoE
-    (``token,model_dim,inter_dim,expert,...``) rows: the whole normalized row is
-    the shape identity.
-    """
+    """Stable short signature for one untuned-CSV data row (order-preserving)."""
     norm = ",".join(tok.strip() for tok in row.split(","))
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
 
 
 class FaultBlocklist:
-    """Provenance-keyed record of shapes that fault even with ``--timeout``.
-
-    Keyed by (gpu_type, quant_type, tp, tuner) so a blocklist entry only applies
-    to the exact regime it was observed in -- a tile that faults on gfx950 fp8
-    must not suppress tuning on a different arch/quant.
-    """
+    """Provenance-keyed record of shapes that fault even with ``--timeout``."""
 
     def __init__(self, path: str | Path | None, key: dict[str, Any]):
         self.path = Path(path) if path else Path(_DEFAULT_BLOCKLIST)
@@ -200,13 +151,7 @@ class FaultBlocklist:
 
 
 def gpu_healthy(gpu_ids: str = "") -> bool:
-    """Best-effort: rocm-smi responds and the target GPU(s) are not wedged.
-
-    A GPU memory fault can transiently wedge the device; we probe before moving
-    to the next shape. Returns True when rocm-smi returns any GPU data (we treat
-    an unreadable rocm-smi as unhealthy). ``gpu_ids`` (comma list) narrows the
-    check; empty means any GPU.
-    """
+    """Best-effort: rocm-smi responds and the target GPU(s) are not wedged."""
     gpus = check_gpu_status(skip=False)
     if not gpus:
         return False
@@ -229,14 +174,7 @@ def run_isolated(
     gpu_ids: str,
     blocklist: FaultBlocklist | None,
 ) -> tuple[int, str, str, Path | None]:
-    """Run the aiter tuner once per shape (process isolation), merge results.
-
-    ``base_args`` are the flags shared by every shape (everything except
-    ``-i``/``-o``; must NOT already contain them). Returns
-    ``(rc, merged_stdout, merged_stderr, merged_candidate_path)`` shaped exactly
-    like a single :func:`run_subprocess` call so the caller's existing stdout /
-    candidate-CSV parsing is unchanged. ``rc`` is 0 unless *every* shape faulted.
-    """
+    """Run the aiter tuner once per shape (process isolation), merge results."""
     header, rows = read_untuned_csv(input_csv)
     if not rows:
         return 1, "", f"no data rows in {input_csv}", None
@@ -255,12 +193,7 @@ def run_isolated(
     n_ok = 0
     compare_dir = Path("/tmp/aiter_compare")
 
-    # ``base_args`` carries a single shared ``-o2`` profile path. Reusing it
-    # verbatim for every shape makes each shape overwrite the same file, so only
-    # the LAST shape's candidates survive -> the serve-safe split-K cap
-    # downstream then drops (falls back to default) every other shape's
-    # over-cap splitK rows, silently losing the split-K gain. Give each shape
-    # its own profile and merge them all back into the shared path.
+    # ``base_args`` carries a single shared ``-o2`` profile path.
     try:
         profile_idx = base_args.index("-o2")
         shared_profile: Path | None = Path(base_args[profile_idx + 1])
@@ -294,8 +227,8 @@ def run_isolated(
         merged_out.append(out)
         merged_err.append(err)
 
-        # Accumulate this shape's profile candidates (best-effort) so the merged
-        # profile downstream carries every shape, not just the last.
+        # Accumulate this shape's profile candidates (best-effort) so the merged profile downstream carries every
+        # shape, not just the last.
         if profile_idx >= 0 and shape_profile.is_file():
             try:
                 plines = [ln for ln in shape_profile.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -318,9 +251,8 @@ def run_isolated(
                 break
             continue
         if rc != 0:
-            # Non-zero exit with no recognized fault (bad args / Python
-            # traceback): a real failure, not a tuned shape -- do not count it
-            # as ok (otherwise a whole run of these reports final_rc=0).
+            # Non-zero exit with no recognized fault (bad args / Python traceback): a real failure, not a tuned shape
+            # -- do not count it as ok (otherwise a whole run of these reports final_rc=0).
             log.warning(
                 "shape %d/%d exited rc=%d with no recognized fault; treating as failed",
                 idx + 1,
@@ -346,8 +278,8 @@ def run_isolated(
     if blocklist is not None:
         blocklist.save()
 
-    # Merge every shape's profile back into the shared -o2 path so the
-    # serve-safe split-K cap sees candidates for ALL shapes, not just the last.
+    # Merge every shape's profile back into the shared -o2 path so the serve-safe split-K cap sees candidates for ALL
+    # shapes, not just the last.
     if profile_idx >= 0 and shared_profile is not None and profile_header is not None:
         try:
             shared_profile.write_text(profile_header + "\n" + "\n".join(merged_profile_rows) + "\n", encoding="utf-8")
@@ -367,14 +299,7 @@ def run_isolated(
 
 
 def _latest_candidate(compare_dir: Path, tuned_stem: str, start: float) -> Path | None:
-    """Newest ``*.candidate.csv`` under compare_dir for this stem, newer than start.
-
-    The stem must appear as a whole token, not a substring: the dense tuner names
-    nest by prefix (``tuned_a8w8_blockscale`` is a prefix of
-    ``tuned_a8w8_blockscale_bpreshuffle``), so a plain ``in`` test would let a
-    shorter tuner steal a longer sibling's candidate. Require the stem to be
-    followed by ``.`` (extension) or ``_<digit>`` (the per-shape index).
-    """
+    """Newest ``*.candidate.csv`` under compare_dir for this stem, newer than start."""
     if not compare_dir.is_dir():
         return None
     boundary = re.compile(re.escape(tuned_stem) + r"(?:\.|_\d)")

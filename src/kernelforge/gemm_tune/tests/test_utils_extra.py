@@ -66,8 +66,8 @@ def test_resolve_aiter_csrc_ok(tmp_path, monkeypatch):
 
 
 def test_utils_still_exports_the_aiter_resolvers():
-    # They moved to a leaf module to break the utils/script_discovery import
-    # cycle; tuners import them from here and must keep working.
+    # They moved to a leaf module to break the utils/script_discovery import cycle; tuners import them from here and
+    # must keep working.
     assert utils.resolve_aiter_root is aiter_script_map.resolve_aiter_root
     assert utils.resolve_aiter_csrc is aiter_script_map.resolve_aiter_csrc
 

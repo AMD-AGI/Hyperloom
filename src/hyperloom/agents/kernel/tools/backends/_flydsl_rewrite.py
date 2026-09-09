@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Route gate for KernelForge's source-to-FlyDSL rewrite of one Forge attempt.
-
-The generic per-kernel route optimizes a kernel in its own language and
-consumes a schema-1 ``best_result.json``. The rewrite route instead asks
-KernelForge to port the kernel to FlyDSL and publish a framework apply-back
-patch. That is a different producer contract, so an attempt may only switch
-routes when the operator opted in, the candidate matches the supported MVP
-shape, and the installed producer advertises the protocol/schema/driver
-versions this consumer knows how to read.
-
-Every verdict carries a stable reason code. A negative verdict is never a
-kernel skip: the attempt stays on the generic forge-loop route untouched.
-"""
+"""Route gate for KernelForge's source-to-FlyDSL rewrite of one Forge attempt."""
 
 from __future__ import annotations
 
@@ -41,23 +29,20 @@ REWRITE_ENV = "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL"
 REWRITE_COMMAND = "forge-rewrite-by-flydsl"
 CAPABILITIES_FLAG = "--capabilities-json"
 
-# Consumer-side halves of the cross-repo contract. Bumping any of these means
-# this module can no longer read what an older producer emits. The producer
-# declares one scalar protocol version and lists for schema/driver versions.
+# Consumer-side halves of the cross-repo contract.
 PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
 RESULT_SENTINEL = "__FORGE_RESULT__"
 
-# Which source languages can be rewritten is the producer's to declare, so it
-# arrives through the capability handshake rather than living here.
+# Which source languages can be rewritten is the producer's to declare, so it arrives through the capability handshake
+# rather than living here.
 SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
 
-# Mirrors kernelforge.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
-# --max-hours outright, so a budget that cannot reach it is ineligible rather
-# than a child-process hard failure.
+# Mirrors kernelforge.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter --max-hours outright, so a budget that
+# cannot reach it is ineligible rather than a child-process hard failure.
 PRODUCER_MIN_BUDGET_SEC = 3600
-# Head-room reserved on top of the producer's own budget so the apply-back
-# commit is published before Hyperloom's absolute deadline kills the child.
+# Head-room reserved on top of the producer's own budget so the apply-back commit is published before Hyperloom's
+# absolute deadline kills the child.
 APPLYBACK_RESERVE_SEC = 900
 MIN_BUDGET_SEC = PRODUCER_MIN_BUDGET_SEC + APPLYBACK_RESERVE_SEC
 
@@ -76,13 +61,11 @@ class RewriteCapabilities:
     reason: str
     detail: str = ""
     frameworks: tuple[str, ...] = ()
-    # The file languages and the curated kinds the producer can port from. Kept
-    # apart in the payload because they disagree: a traced Triton kernel is
-    # ``python`` with ``kernel_kind=triton``.
+    # The file languages and the curated kinds the producer can port from.
     source_languages: tuple[str, ...] = ()
     source_kinds: tuple[str, ...] = ()
-    # Optional and additive: a producer predating driver preparation simply
-    # omits it, which keeps the route on its own synthesized driver.
+    # Optional and additive: a producer predating driver preparation simply omits it, which keeps the route on its own
+    # synthesized driver.
     driver_preparation: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -119,8 +102,8 @@ class RewriteCandidateSpec:
     driver: str
     branch: str
     attempt_id: str
-    # Resolved from the trace, which knows more than the file: a traced Triton
-    # kernel lives in a ``.py`` that names no language.
+    # Resolved from the trace, which knows more than the file: a traced Triton kernel lives in a ``.py`` that names no
+    # language.
     source_language: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -167,14 +150,7 @@ class RewriteDecision:
 
 
 def rewrite_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Report whether the operator opted this session into the rewrite route.
-
-    Args:
-        env: Environment mapping to read; defaults to ``os.environ``.
-
-    Returns:
-        ``True`` when ``$HYPERLOOM_FORGE_REWRITE_BY_FLYDSL`` is truthy.
-    """
+    """Report whether the operator opted this session into the rewrite route."""
     source = os.environ if env is None else env
     return str(source.get(REWRITE_ENV) or "").strip().lower() in _TRUE_VALUES
 
@@ -293,16 +269,7 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
 
 
 def probe_capabilities() -> RewriteCapabilities:
-    """Ask the installed producer what rewrite contract it speaks.
-
-    The answer is cached for the process: it describes the installed
-    KernelForge, not the candidate, and the probe must not cost a subprocess
-    per attempt. ``--capabilities-json`` is an eager short-circuit option, so a
-    failure here is reported as-is and never re-tried with guessed arguments.
-
-    Returns:
-        The validated :class:`RewriteCapabilities` for this process.
-    """
+    """Ask the installed producer what rewrite contract it speaks."""
     cache_key = "<installed>"
     cached = _CAPABILITY_CACHE.get(cache_key)
     if cached is not None:
@@ -338,11 +305,8 @@ def probe_capabilities() -> RewriteCapabilities:
     return capabilities
 
 
-# The producer requires --driver to name an existing file before it will decide
-# whether to prepare one, so an attempt with no synthesizable contract still has
-# to hand over something. This exits non-zero without printing a timing or a
-# rejected-argument phrase, which is exactly the non-conforming answer that
-# sends the producer into driver preparation.
+# The producer requires --driver to name an existing file before it will decide whether to prepare one, so an attempt
+# with no synthesizable contract still has to hand over something.
 REWRITE_DRIVER_SEED_TEMPLATE = '''#!/usr/bin/env python3
 """Placeholder rewrite driver, replaced by the producer's preparation stage.
 
@@ -366,16 +330,7 @@ def build_rewrite_driver_seed(
     workspace: str,
     writer: Callable[[str, str], str],
 ) -> str:
-    """Write the placeholder driver the producer's preparation stage replaces.
-
-    Args:
-        workspace: The prepared Forge workspace the driver must live in.
-        writer: Allocator for a driver file inside ``workspace``, sharing the
-            naming and cleanup contract of every other generated driver.
-
-    Returns:
-        str: The path of the generated placeholder.
-    """
+    """Write the placeholder driver the producer's preparation stage replaces."""
     return writer(workspace, REWRITE_DRIVER_SEED_TEMPLATE)
 
 
@@ -401,35 +356,12 @@ def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
 
 
 def _rewritable_source(language: str, kind: str, accepted: Container[str]) -> str:
-    """Resolve which rewrite source a candidate is, kind first then language.
-
-    A traced Triton kernel reports its *language* as ``python`` and records that
-    it is Triton in ``kernel_kind``, so the curated kind is the authoritative
-    signal -- the precedence ``_invocation_spec._effective_kernel_kind`` already
-    applies, and the one ``_SOURCE_TYPE_TO_KERNEL_BACKEND`` follows when it routes
-    ``python`` to the Triton kernel_backend. Reading the language alone declined every
-    Triton kernel the tracer resolved.
-
-    Args:
-        language: Normalized ``source_type`` (the file's language).
-        kind: Normalized curated kernel kind.
-        accepted: The names a source may resolve to, which the producer
-            advertises rather than this consumer fixing them.
-
-    Returns:
-        str: The resolved source identity to check against ``accepted``.
-    """
+    """Resolve which rewrite source a candidate is, kind first then language."""
     return kind if kind in accepted else language
 
 
 def _is_multi_node() -> bool:
-    """Report multi-node fan-out through the apply-side authority.
-
-    Returns:
-        ``True`` when the session fans out over several nodes, and also when
-        that cannot be determined: the route runs only where single-node apply
-        is proven.
-    """
+    """Report multi-node fan-out through the apply-side authority."""
     tools_dir = str(Path(__file__).resolve().parent.parent)
     inserted = tools_dir not in sys.path
     if inserted:
@@ -479,34 +411,7 @@ def evaluate_rewrite_route(
     invocation_spec_file: str = "",
     capability_probe: Callable[..., RewriteCapabilities] | None = None,
 ) -> RewriteDecision:
-    """Decide whether one prepared Forge attempt may take the rewrite route.
-
-    Local candidate facts are checked before the producer is probed, so an
-    ineligible candidate never spends a subprocess or any rewrite budget.
-
-    Args:
-        candidate: The kernel candidate payload.
-        source_type: Detected source language of the candidate.
-        kernel_kind: Curated kernel kind that refines ``source_type``.
-        logical_operator: Stable workload/KB operator identity.
-        source_kernel: Workspace path of the kernel to rewrite.
-        workspace: Prepared Forge workspace root.
-        implementation_sources: Declared sources remapped into the workspace.
-        implementation_symbols: Target functions the rewrite must cover.
-        framework: Resolved apply-back framework identity.
-        gpu_target: Resolved gfx target.
-        shape_cases: Grouped shape cases from the task group.
-        shapes: Single-case shape mapping used when no group exists.
-        branch: Unique branch created for this attempt.
-        attempt_id: Unique attempt identity.
-        timeout_s: Remaining wall-clock budget for the attempt.
-        invocation_spec_file: Recorded invocation evidence the producer's
-            driver-preparation stage authors the measurement driver from.
-        capability_probe: Injection point for the capability probe.
-
-    Returns:
-        A :class:`RewriteDecision`; ineligible verdicts keep the generic route.
-    """
+    """Decide whether one prepared Forge attempt may take the rewrite route."""
     if not rewrite_enabled():
         return RewriteDecision(False, "route_disabled", f"{REWRITE_ENV} is not set")
 
@@ -514,8 +419,8 @@ def evaluate_rewrite_route(
     language = str(source_type or "").strip().lower()
     if "flydsl" in kind or language == "flydsl":
         return RewriteDecision(False, "already_flydsl_source", "candidate is already a FlyDSL kernel")
-    # Ahead of the handshake: there is nothing to port without readable source, so
-    # widening the producer's advertised languages must never reach this.
+    # Ahead of the handshake: there is nothing to port without readable source, so widening the producer's advertised
+    # languages must never reach this.
     if "asm" in kind or "prebuilt" in kind:
         return RewriteDecision(False, "prebuilt_binary_unsupported", f"kernel_kind={kernel_kind}")
 
@@ -529,8 +434,8 @@ def evaluate_rewrite_route(
     if canonical_framework not in SUPPORTED_FRAMEWORKS:
         return RewriteDecision(False, "framework_unsupported", f"framework={framework or 'unresolved'}")
 
-    # Multi-node apply runs a separate stdlib path-safety allowlist that this
-    # route does not feed, so it must fail here rather than at apply time.
+    # Multi-node apply runs a separate stdlib path-safety allowlist that this route does not feed, so it must fail
+    # here rather than at apply time.
     if _is_multi_node():
         return RewriteDecision(False, "multi_node_unsupported", "apply-back is single-node only")
 
@@ -564,8 +469,8 @@ def evaluate_rewrite_route(
             f"producer frameworks {list(capabilities.frameworks)} exclude {canonical_framework}",
             capabilities=capabilities,
         )
-    # Which languages are portable is the producer's to state: it owns the port
-    # prompt and the entry resolution that have to read the source.
+    # Which languages are portable is the producer's to state: it owns the port prompt and the entry resolution that
+    # have to read the source.
     resolved_source = capabilities.resolved_source(language=language, kind=kind)
     if resolved_source not in capabilities.accepted_sources():
         return RewriteDecision(
@@ -576,10 +481,9 @@ def evaluate_rewrite_route(
             f"{list(capabilities.source_kinds)}",
             capabilities=capabilities,
         )
-    # An operator's real invocation cannot be rebuilt from traced shapes alone --
-    # quantized and routed operands carry scale and index meanings the trace does
-    # not describe -- so the producer authors the driver from the invocation spec.
-    # Without that, this route has no way to measure anything.
+    # An operator's real invocation cannot be rebuilt from traced shapes alone -- quantized and routed operands carry
+    # scale and index meanings the trace does not describe -- so the producer authors the driver from the invocation
+    # spec.
     if not capabilities.driver_preparation:
         return RewriteDecision(
             False,
@@ -587,10 +491,8 @@ def evaluate_rewrite_route(
             "the producer does not advertise driver preparation",
             capabilities=capabilities,
         )
-    # Preparation needs the invocation evidence; without it the producer keeps the
-    # placeholder driver, which exits 1 after burning the whole budget. A spec the
-    # builder marked `partial` is just as unusable, so it is declined here too
-    # rather than admitted on the strength of the file merely existing.
+    # Preparation needs the invocation evidence; without it the producer keeps the placeholder driver, which exits 1
+    # after burning the whole budget.
     from hyperloom.common.invocation_spec_readiness import (  # noqa: PLC0415 - keep module import-light
         evaluate_spec_readiness,
     )

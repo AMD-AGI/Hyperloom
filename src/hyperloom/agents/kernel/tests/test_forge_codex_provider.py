@@ -1,13 +1,4 @@
-"""Provider selection for the forge-loop child under each credential shape.
-
-KernelForge ships both a ``claude`` and a ``codex`` agent provider, and its
-``Config.agent_backend`` defaults to ``auto``, which resolves to ``claude``. An
-OpenAI-only deployment has no Anthropic credential and no Claude CLI auth, so
-leaving the selection at ``auto`` sends every forge attempt to a provider that
-cannot authenticate. These tests lock the selection to the credential shape and
-lock out the silent provider fallback that would otherwise turn a missing Codex
-SDK back into an unauthenticated Claude run.
-"""
+"""Provider selection for the forge-loop child under each credential shape."""
 
 from __future__ import annotations
 
@@ -264,13 +255,7 @@ def test_flydsl_rewrite_omits_model_without_configured_ids(tmp_path, monkeypatch
 
 
 def test_openai_only_disables_the_silent_claude_fallback(tmp_path, monkeypatch):
-    """A missing Codex SDK must fail loudly, not degrade into unauthenticated Claude.
-
-    KernelForge's ``agent_fallback_provider`` defaults to ``claude``, so without
-    this flag an OpenAI-only run whose Codex SDK is absent silently produces a
-    ClaudeBackend whose availability probe passes (it checks the binary, not the
-    auth) and only fails at the first real turn, as "Not logged in".
-    """
+    """A missing Codex SDK must fail loudly, not degrade into unauthenticated Claude."""
     _use_openai_only(monkeypatch)
 
     command = _capture_forge_loop_argv(tmp_path, monkeypatch)
@@ -331,25 +316,7 @@ def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
 
 
 def test_install_sh_installs_the_codex_runtime():
-    """install.sh must install the codex agent runtime, and verify it.
-
-    Without it ``FORGE_AGENT_BACKEND=codex`` raises CodexUnavailableError
-    ("Codex Python SDK is not installed"), which the provider fallback then
-    converts into a silent Claude run.
-
-    This used to assert on a ``kernelforge[claude,codex]`` install line, from
-    when forge was a separate distribution installed from a checkout. forge now
-    ships in this distribution: the editable path gets ``openai-codex`` through
-    ``[test]`` -> ``[runtime]`` -> ``[llm]``, and the packaged-wheel path pulls
-    the same extras by name. Both then run the same readiness probe.
-
-    The assertion follows the extra rather than the pin. It used to look for the
-    literal ``openai-codex>=0.144`` in install.sh, which only passed because
-    install.sh restated pyproject's specifiers verbatim -- so the test was
-    pinning the duplication instead of catching it, and would have gone green on
-    a stale copy. What must hold is the *chain*: the packaged path names an
-    extra, and that extra reaches openai-codex.
-    """
+    """install.sh must install the codex agent runtime, and verify it."""
     install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
@@ -371,11 +338,7 @@ def test_install_sh_installs_the_codex_runtime():
 
 
 def test_forge_loop_cli_accepts_the_provider_flags():
-    """Guard the contract: these flags must exist in the installed KernelForge CLI.
-
-    Passing an unknown option makes click exit 2 and every forge attempt REVERT,
-    so a KernelForge upgrade that renames them must fail here, not in a session.
-    """
+    """Guard the contract: these flags must exist in the installed KernelForge CLI."""
     proc = subprocess.run(
         [sys.executable, "-m", "kernelforge.cli", "forge-loop", "--help"],
         capture_output=True,

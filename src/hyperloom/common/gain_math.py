@@ -38,25 +38,7 @@ def conc_pair_comparison(
     *,
     metric_key: str = "output_throughput",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Pair curve points by CONC (outer join), compute per-conc speedup, and aggregate.
-
-    Shared by the conc-sweep post-hook and the breakdown collector, which must
-    produce byte-identical rows/summary from the same curves on the same
-    ``metric_key`` -- the collector reads its key off the report it recovers
-    for. Stdlib-only so the collector never drags in Magpie/torch at report
-    time.
-
-    Args:
-        baseline_points: Curve rows for the baseline arm.
-        optimized_points: Curve rows for the optimized arm.
-        metric_key: The point field the speedup is measured on. It has to be
-            the axis the session is ranked by, or the summary reports a
-            different quantity from the curve drawn beside it.
-
-    Returns:
-        A tuple of ``(per_conc_rows, summary_dict)``; the summary names the
-        metric it used.
-    """
+    """Pair curve points by CONC (outer join), compute per-conc speedup, and aggregate."""
 
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
         raw = p.get("conc")

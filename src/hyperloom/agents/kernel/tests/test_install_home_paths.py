@@ -2,20 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for install.sh home-directory resolution.
-
-The Claude Code CLI credentials are written by install.sh but read back through
-``Path.home()`` by ``inference_optimizer/cli/credentials.py`` and
-``agents/kernel/tools/backends/forge_submit.py``. A hardcoded ``/root/.claude``
-on the writing side either aborts the installer (``/root`` unwritable under
-``set -euo pipefail``) or strands the credentials where no reader looks.
-
-``_home_dir()`` must therefore resolve exactly what ``Path.home()`` resolves.
-The differential tests below run both sides under identical environments,
-including the unintuitive cases (an empty ``HOME`` resolves to ``/`` rather
-than to the passwd entry, because ``posixpath.expanduser`` only consults
-``pwd`` when ``HOME`` is absent from the environment).
-"""
+"""Regression tests for install.sh home-directory resolution."""
 
 from __future__ import annotations
 
@@ -36,13 +23,7 @@ _BASE_PATH = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
 
 def _extract_func(name: str, *, required: bool = True) -> str:
-    """Return the top-level ``name() { ... }`` block from install.sh.
-
-    The block is bounded by the next top-level definition and then trimmed to
-    its last line-initial ``}``, because a heredoc body can open a line with
-    ``}`` too. An optional block returns "" when absent, so a harness can still
-    exercise its caller and fail on that caller's own behaviour.
-    """
+    """Return the top-level ``name() { ... }`` block from install.sh."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     header = re.search(rf"(?m)^{re.escape(name)}\(\) \{{", text)
     if header is None:
@@ -147,16 +128,11 @@ def test_credentials_land_under_home(tmp_path: Path) -> None:
 
 
 def test_npm_prefix_avoids_usr_local_when_it_is_unwritable(tmp_path: Path) -> None:
-    """A global npm install needs a writable prefix.
-
-    ``run`` executes bare under ``set -euo pipefail``, so a failed
-    ``npm install -g /usr/local`` aborts the installer exactly as an unwritable
-    /root did -- in the same function, for the same reason.
-    """
+    """A global npm install needs a writable prefix."""
     home = tmp_path / "home" / "hluser"
     home.mkdir(parents=True)
-    # Pinning the version takes the branch that installs unconditionally, so the
-    # test does not depend on whether the host already has a claude binary.
+    # Pinning the version takes the branch that installs unconditionally, so the test does not depend on whether the
+    # host already has a claude binary.
     proc = _run_credential_write(tmp_path, home=str(home), extra_env={"HYPERLOOM_CLAUDE_CODE_VERSION": "1.2.3"})
     combined = proc.stdout + proc.stderr
 
@@ -173,8 +149,8 @@ def test_installer_has_no_hardcoded_root_home() -> None:
     """No home-relative path may bypass the resolver via /root or a bare $HOME."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "/root/.claude" not in text, "credential paths must derive from _home_dir"
-    # _home_dir owns the only HOME reference and guards presence with ${HOME+x};
-    # anywhere else a bare ${HOME} is fatal under set -u.
+    # _home_dir owns the only HOME reference and guards presence with ${HOME+x}; anywhere else a bare ${HOME} is fatal
+    # under set -u.
     outside_resolver = text.replace(_extract_func("_home_dir", required=False), "")
     # Both spellings: $HOME reads the same to the shell and slips a ${...}-only check.
     bare = re.findall(r"\$\{?HOME\b", outside_resolver)

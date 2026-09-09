@@ -191,8 +191,8 @@ class TestHarnessKernelRunner:
             "skipped": False,
             "skip_reason": "",
         }
-        # Emit the JSON payload verbatim on stdout (avoid embedding JSON true/false
-        # literals in Python source, which are not valid Python identifiers).
+        # Emit the JSON payload verbatim on stdout (avoid embedding JSON true/false literals in Python source, which
+        # are not valid Python identifiers).
         harness.write_text("print(%r)\n" % json.dumps(payload), encoding="utf-8")
         runner = HarnessKernelRunner(str(harness), workdir=str(tmp_path))
         vr = validate_recipe(_recipe(), runner, target_speedup=1.03)

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist_done bookkeeping tests.
-
-Exercises ``_record_specialist_result``, the intent-routing path, the
-dispatcher exit hook, round_id idempotence, and the stalled-domain
-hard-trigger's round-counter semantics.
-"""
+"""Specialist_done bookkeeping tests."""
 
 from __future__ import annotations
 
@@ -478,8 +473,8 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
 
 @pytest.mark.asyncio
 async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
-    # In a later macro-cycle the forced-specialist key carries the cycle suffix
-    # so it does not dedup-match the prior cycle's task.
+    # In a later macro-cycle the forced-specialist key carries the cycle suffix so it does not dedup-match the prior
+    # cycle's task.
     state = force_coord.shared_state
     state.macro_cycle = 2
     for _ in range(10):

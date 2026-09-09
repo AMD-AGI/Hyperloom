@@ -36,7 +36,7 @@ bridging patch, gated on *does it run correctly* rather than *is it faster*:
    candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
    `fix` / `port`).
 3. **Author** — `hyperloom.agents.framework.enablement_ops.build_mandate(...)`
-   produces the `EnablementMandate` (allowed source roots + task description +
+   produces the `EnablementMandate` (source roots to search + task description +
    patch invariants) handed to Hyperloom's `enablement_specialist` /
    `SpecialistRunner`, which writes the patch into an isolated worktree.
 4. **Verify** — `hyperloom.agents.framework.enablement.runnable_decision(...)` is the

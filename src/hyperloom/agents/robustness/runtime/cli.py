@@ -1,48 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Robustness runtime CLI.
-
-Hosts (Coordinator, smoke harness, operator tooling) drive the reactor
-through a single subprocess command::
-
-    python -m hyperloom.agents.robustness.runtime.cli tick \\
-        --request request.json [--out emit.json]
-
-``request.json`` carries the same fields the critic-agent runtime
-accepts on its ``coordinator_inbox`` shape::
-
-    {
-        "kind": "coordinator_inbox",
-        "session_id": "<session id>",
-        "raw_prompt": "=== Shared session state ===\\n...",
-        "context":   {"tick_index": 0, "now_unix": 1700000000.0},
-        "options":   {"session_dir": "/tmp/sess-1",
-                      "llm_rca_enabled": false,
-                      "disable_local_probe": false}
-    }
-
-``raw_prompt`` is parsed by :func:`from_coordinator_prompt`; ``context``
-provides a deterministic ``tick_index`` / ``now_unix`` for repeatable
-host-driven ticks; ``options`` are non-default :class:`Config` overrides
-the host wants to apply (env-var equivalents are honoured for
-production paths).
-
-``emit.json`` carries the validated envelope plus per-tick metadata so
-hosts can audit what each tick did without rerunning the reactor::
-
-    {
-        "intent_envelope": {"intents": [{"intent_type": "alert",
-                                         "payload": {...}}, ...]},
-        "session_id":   "<session id>",
-        "tick_index":   <int>,
-        "parse_warnings": ["..."]
-    }
-
-Exit codes (mirror critic-agent contract):
-    0 — logical success (zero or more intents emitted)
-    2 — adapter / configuration bug (caller should treat as fatal)
-"""
+"""Robustness runtime CLI."""
 
 from __future__ import annotations
 
@@ -71,23 +30,7 @@ REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
-    """Validate and normalise a raw request payload.
-
-    Enforces the ``coordinator_inbox`` contract: the payload must be an
-    object with a recognised ``kind``, a non-empty ``session_id`` and
-    ``raw_prompt``, and optional object-typed ``context`` / ``options``.
-
-    Args:
-        raw (Any): The parsed request payload to validate.
-
-    Returns:
-        dict[str, Any]: The validated request dictionary (returned
-        unchanged).
-
-    Raises:
-        RuntimeAdapterError: If any required field is missing or has the
-            wrong type.
-    """
+    """Validate and normalise a raw request payload."""
     if not isinstance(raw, dict):
         raise RuntimeAdapterError(f"request top-level must be an object, got {type(raw).__name__}")
     kind = raw.get("kind")
@@ -111,21 +54,7 @@ def _coerce_request(raw: Any) -> dict[str, Any]:
 
 
 async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
-    """Drive a single reactor tick from a normalised ``request`` dict.
-
-    Discovers configuration, applies any host-supplied ``options``
-    overrides, builds the reactor components, runs one tick, and returns
-    the resulting emit payload.
-
-    Args:
-        request (dict[str, Any]): Validated request dict carrying
-            ``session_id``, ``raw_prompt``, and optional ``context`` /
-            ``options``.
-
-    Returns:
-        dict[str, Any]: Emit payload with ``intent_envelope``,
-        ``session_id``, ``tick_index``, and ``parse_warnings``.
-    """
+    """Drive a single reactor tick from a normalised ``request`` dict."""
     session_id = str(request["session_id"]).strip()
     raw_prompt = str(request["raw_prompt"])
     context = dict(request.get("context") or {})
@@ -203,26 +132,14 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_tick(args: argparse.Namespace) -> None:
-    """Handle the ``tick`` subcommand.
-
-    Reads and validates the request file, runs a single reactor tick,
-    and emits the resulting envelope JSON.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments with ``request``
-            and ``out`` attributes.
-    """
+    """Handle the ``tick`` subcommand."""
     request = _coerce_request(read_json(args.request))
     emit = asyncio.run(_run_tick(request))
     emit_json(emit, args.out)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the runtime CLI argument parser.
-
-    Returns:
-        argparse.ArgumentParser: The parser carrying the ``tick`` subcommand.
-    """
+    """Build the runtime CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="robustness-agent-runtime",
         description="Robustness reactor runtime CLI (subprocess transport).",
@@ -248,19 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Runtime CLI process entry point.
-
-    Configures logging, parses arguments, dispatches to the selected
-    subcommand handler, and maps failures to the contract exit codes.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse. Defaults to
-            ``None``, which uses ``sys.argv``.
-
-    Returns:
-        int: ``0`` on logical success, ``2`` on adapter/configuration
-        errors.
-    """
+    """Runtime CLI process entry point."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

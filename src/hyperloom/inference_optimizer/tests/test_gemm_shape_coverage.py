@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for aiter tuned-GEMM shape alignment and coverage reporting.
-
-Also covers the fail-open guards around that reporting: its verdict can block a
-KEEP, so every way it can fail to reach one has to degrade to "undetermined"
-rather than to "the artifact did not apply".
-"""
+"""Unit tests for aiter tuned-GEMM shape alignment and coverage reporting."""
 
 from __future__ import annotations
 
@@ -140,9 +135,7 @@ class TestServerLogParsing:
         "[aiter] shape is M:1082, N:5120, K:17408, found padded_M: 1088, N:5120, "
         "K:17408 is tuned on cu_num = 256 in /x/candidate.csv , kernel name is k!"
     )
-    # Verbatim from a production Qwen3 vLLM server.log. The dispatch kwargs sit
-    # between ``K:`` and ``found padded_M:``, which an earlier pattern did not
-    # allow -- it matched none of that log's 5024 hit lines.
+    # Verbatim from a production Qwen3 vLLM server.log.
     HIT_WITH_KWARGS = (
         "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 "
         "dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, "
@@ -326,8 +319,7 @@ class TestTunedCsvCoverage:
         assert tuned_csv_shapes(tmp_path / "nope.csv") == set()
 
     def test_an_fmoe_csv_yields_no_dense_shapes(self, tmp_path):
-        """An MoE table has no M,N,K columns; reading one as dense would invent
-        shapes and report coverage against a schema it never described."""
+        """An MoE table has no M,N,K columns; reading one as dense would invent shapes and report coverage against a schema it never described."""
         path = tmp_path / "tuned_fmoe.csv"
         path.write_text(
             "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
@@ -394,14 +386,7 @@ class TestTunedCsvCoverage:
 
 
 class TestCoverageGateDoesNotBlockOnMissingEvidence:
-    """The coverage report can block a KEEP, so it must never guess.
-
-    A report of 0% is a claim the runtime could not reach the tuned rows. When
-    the CSV yields no keys at all, we have not established that -- we have
-    failed to read our own artifact. Reporting it as 0% lets an unreadable file
-    revert a candidate whose throughput genuinely improved, which is the exact
-    conflation this change set exists to remove.
-    """
+    """The coverage report can block a KEEP, so it must never guess."""
 
     ENVS = {"AITER_CONFIG_GEMM": ""}
     LOOKUP_LINE = (
@@ -528,12 +513,7 @@ class TestSafeMtime:
 
 
 class TestE2EValidationFailsOpen:
-    """E2E validation owns the coverage check, so its own failure cannot escape.
-
-    Both entrypoints into gemm tuning guard only the tuning call, not the
-    validation that follows it. An exception escaping here takes the KERNEL
-    phase down over a candidate that simply went unmeasured.
-    """
+    """E2E validation owns the coverage check, so its own failure cannot escape."""
 
     def _phase(self, tmp_path, validate):
         from types import MethodType, SimpleNamespace
@@ -555,10 +535,8 @@ class TestE2EValidationFailsOpen:
             _sync_profile_state_after_gemm_roofline=lambda _r: None,
             _validate_gemm_tuning_e2e=validate,
         )
-        # ``record_gemm_tuning`` stores a shallow copy, so the neutralising
-        # rewrites on the exception path only reach state (and result.json)
-        # through these two. Bind the real implementations rather than stubbing
-        # them out, so the test covers what actually runs.
+        # ``record_gemm_tuning`` stores a shallow copy, so the neutralising rewrites on the exception path only reach
+        # state (and result.json) through these two.
         for name in ("_replace_latest_gemm_tuning_attempt", "_writeback_gemm_result_json"):
             setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
         return phase, recorded
@@ -582,11 +560,7 @@ class TestE2EValidationFailsOpen:
 
     @pytest.mark.asyncio
     async def test_the_unmeasured_envelope_is_neutralised(self, tmp_path):
-        """An arm that raised was never measured, so it must not read as a KEEP.
-
-        Recording the fault while leaving the bridge's KEEP envelope in place
-        would let Orchestration bundle an integrate against it.
-        """
+        """An arm that raised was never measured, so it must not read as a KEEP."""
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         async def _boom(_result):

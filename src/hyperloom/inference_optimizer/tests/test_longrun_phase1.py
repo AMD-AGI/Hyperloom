@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cyclic phase machine acceptance tests.
-
-Covers ``compute_next_phase`` SWEEP back-edge branches, the per-cycle budget
-window, Coordinator loopback application, PolicyGate re-entry after a loopback,
-and short-run macro-loop behaviour. All deterministic + offline.
-"""
+"""Cyclic phase machine acceptance tests."""
 
 from __future__ import annotations
 
@@ -121,6 +116,76 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     assert reason == "robustness_escalated"
 
 
+def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) -> SharedState:
+    now = datetime.now(timezone.utc)
+    return SharedState(
+        session_id="t",
+        phase=ps.PHASE_FRAMEWORK_AGENT,
+        start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
+        max_minutes=max_minutes,
+        cumulative_gain_validated=5.0,
+    )
+
+
+def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
+    """A budget-driven close is time_exhausted, not a robustness abort."""
+    # 3h budget, ~2h39m spent -> ~1260s left, under the 1800s reloop floor.
+    st = _framework_state(max_minutes=180, started_hours_ago=2.65)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert evidence["session_remaining_seconds"] < 1800.0
+
+
+def test_framework_skip_to_close_with_budget_left_stays_escalated():
+    """With budget to spare, skip_to_close is still a genuine early abandonment."""
+    st = _framework_state(max_minutes=180, started_hours_ago=1.0)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "robustness_escalated"
+    assert evidence["session_remaining_seconds"] >= 1620.0
+
+
+def test_cycle_reloop_floor_covers_one_variant_grant():
+    """The floor prices a cycle at what one variant round is actually granted."""
+    st = _framework_state(max_minutes=180)
+    # 15% of a 3h budget is 1620s, below the 1800s a variant round is granted.
+    assert ps._cycle_reloop_min_remaining_sec(st) == float(st.conc_sweep_variant_timeout_sec)
+
+
+def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
+    """Budget that cannot fund one variant round is exhausted, not a robustness abort."""
+    # 3h budget, ~1699s left: above the old 15% floor, below one variant grant.
+    st = _framework_state(max_minutes=180, started_hours_ago=2.528)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert 1620.0 < evidence["session_remaining_seconds"] < 1800.0
+
+
+def test_escalate_evidence_records_crash_count():
+    """A genuine escalation must carry the crash evidence that justifies its label."""
+    st = _framework_state(max_minutes=180, started_hours_ago=1.0)
+    st.crash_count = 4
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    _target, reason, evidence = nxt
+    assert reason == "robustness_escalated"
+    assert evidence["crash_count"] == 4
+
+
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
     """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
@@ -140,8 +205,7 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
 
 
 def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
-    # 12h bounded run: macro-loop is available even though budget accounting
-    # stays in short-run charge-back mode.
+    # 12h bounded run: macro-loop is available even though budget accounting stays in short-run charge-back mode.
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
@@ -176,7 +240,6 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
 def test_reloop_blocked_when_insufficient_budget_remains():
     # 12h session: effective floor = min(10800, 12*3600*0.15) = min(10800, 6480) = 6480s.
-    # Reloop is blocked when remaining < 6480s, i.e. elapsed > 12h - 1.8h = 10.2h.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
@@ -238,8 +301,8 @@ def test_per_cycle_budget_shrinks_phase_window():
     budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
     pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
 
-    # Long bounded runs charge back (base * pct / denom); the per-cycle window
-    # caps the base, so a 6h cycle plans a smaller EXPLORE than the 96h run.
+    # Long bounded runs charge back (base * pct / denom); the per-cycle window caps the base, so a 6h cycle plans a
+    # smaller EXPLORE than the 96h run.
     denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :] if budget[p] > 0)
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
@@ -265,8 +328,8 @@ def test_long_run_chargeback_cap_and_tail():
         for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :]
         if ps.DEFAULT_PHASE_BUDGET_PCT[p] > 0
     )
-    # A 48h long bounded run with a 24h cycle window: early on, remaining session
-    # (>24h) exceeds the window, so the window caps the charge-back base.
+    # A 48h long bounded run with a 24h cycle window: early on, remaining session (>24h) exceeds the window, so the
+    # window caps the charge-back base.
     early_start = datetime.fromtimestamp(now - 1 * 3600.0, tz=timezone.utc).isoformat()
     early = SharedState(
         session_id="t",
@@ -279,8 +342,8 @@ def test_long_run_chargeback_cap_and_tail():
     total_early = ps._phase_budget_total_seconds(early, now_unix=now)
     assert total_early == pytest.approx(24 * 3600 * pct / denom)  # capped at the window
 
-    # Near the tail (only 3h of session left, < the 24h window), the remaining
-    # session time — not the window — is the charge-back base.
+    # Near the tail (only 3h of session left, < the 24h window), the remaining session time — not the window — is the
+    # charge-back base.
     tail_start = datetime.fromtimestamp(now - 45 * 3600.0, tz=timezone.utc).isoformat()
     tail = SharedState(
         session_id="t",
@@ -303,8 +366,8 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase
-    # budgets stay anchored on the whole session even if cycle_minutes was pinned.
+    # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase budgets stay anchored on the whole
+    # session even if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=600, cycle_minutes=360.0)
     assert ps._budget_minutes(st) == 600.0
 
@@ -466,10 +529,18 @@ def test_unbounded_run_uses_absolute_floor():
 
 
 def test_short_bounded_run_scales_floor():
-    # 2h session: effective = min(10800, 2*3600*0.15) = min(10800, 1080) = 1080s.
+    # 2h session: the 1080s share is below one 1800s variant grant, so the grant wins.
     st = _sweep_state(max_minutes=2 * 60, started_hours_ago=0.0)
     _, ev = ps.should_reloop_to_explore(st)
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1080.0, abs=1.0)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
+
+
+def test_very_short_run_caps_the_floor_at_half_the_budget():
+    """A run too short to fund a variant round must not read as exhausted at tick one."""
+    # 30min session: the 1800s grant exceeds the budget, so it is capped at 900s.
+    st = _sweep_state(max_minutes=30, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(900.0, abs=1.0)
 
 
 def test_long_bounded_run_caps_at_absolute_floor():

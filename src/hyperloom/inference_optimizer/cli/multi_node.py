@@ -21,18 +21,7 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``mn_backend``).
-
-    Returns:
-        str: The resolved multi-node backend (``rayjob`` or ``infera``).
-
-    Raises:
-        SystemExit: With code 2 when the resolved backend is invalid.
-    """
+    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
@@ -49,28 +38,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
 
 
 def _prepare_multi_node_state(args: argparse.Namespace) -> None:
-    """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run.
-
-    The cluster — RayJob head+workers, or an idle InferaDeployment whose pods run
-    sshd — is provisioned by the platform before the optimizer starts and handed
-    over through the ``HYPERLOOM_MN_EXT_*`` env vars. This synthesizes
-    ``multi_node_state.json`` from them so every downstream step
-    (``restart-server``, SSH fan-out, GPU sampling, Magpie client mode) reads one
-    stable source, and points benchmarks at the cluster's frontend.
-
-    Nothing here creates or releases a cluster; that is the platform's job. The
-    session-side setup the adopted cluster still needs runs in
-    :func:`_prepare_adopted_cluster`. No-op when ``--nodes < 2``.
-
-    Args:
-        args: Parsed CLI namespace (reads ``nodes`` and ``mn_backend``).
-
-    Raises:
-        SystemExit: With code 2 when ``--nodes >= 2`` but no cluster was handed
-            over, when an infera cluster arrives without SSH control, or when the
-            synthesized state cannot be written; with the bootstrap return code
-            when that fails.
-    """
+    """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
@@ -105,12 +73,9 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    # The mirror image, and the one that used to pass. --mn-backend defaults to
-    # rayjob, so an infera-shaped hand-off whose operator forgot the flag was
-    # rewritten to rayjob here and reported server_control=yes -- SSH control is
-    # real, it is simply not the control this backend uses. The run then died
-    # minutes later inside a per-round restart, on a head_pod_ip nobody asked
-    # for. Say it now, and name the flag that was meant.
+    # The mirror image, and the one that used to pass. --mn-backend defaults to rayjob, so an infera-shaped hand-off
+    # whose operator forgot the flag was rewritten to rayjob here and reported server_control=yes -- SSH control is
+    # real, it is simply not the control this backend uses.
     if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
         if external_has_ssh_control():
             print(
@@ -134,11 +99,10 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
     os.environ["MAGPIE_RUN_PHASE"] = "client"
     export_ray_address_to_os()
-    # Report server *control*, not SSH specifically: rayjob restarts through the
-    # Ray dashboard with no SSH at all, so keying this on SSH labelled a fully
-    # controllable rayjob cluster "benchmark-only" and gave the genuinely
-    # uncontrollable one the same words -- exactly backwards on the one line an
-    # operator reads to find out whether the run can tune anything.
+    # Report server *control*, not SSH specifically: rayjob restarts through the Ray dashboard with no SSH at all, so
+    # keying this on SSH labelled a fully controllable rayjob cluster "benchmark-only" and gave the genuinely
+    # uncontrollable one the same words -- exactly backwards on the one line an operator reads to find out whether the
+    # run can tune anything.
     has_control = external_has_server_control()
     print(
         "multi-node: adopted the platform-provisioned cluster. "
@@ -148,9 +112,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
     )
     if not has_control:
-        # Loud, not fatal: benchmark-only is a documented mode (multi_node/SKILL.md),
-        # but without a restart every candidate re-measures the one unchanged
-        # server, so the run still reports gains that no config produced.
+        # Loud, not fatal: benchmark-only is a documented mode (multi_node/SKILL.md), but without a restart every
+        # candidate re-measures the one unchanged server, so the run still reports gains that no config produced.
         print(
             "WARNING: no server control -- per-round restarts will be skipped, so every "
             "candidate config measures the SAME unchanged server and the reported gains "
@@ -167,33 +130,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
 
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
-    """Make an adopted cluster usable by this session.
-
-    Adopting only records where the cluster is. These steps are what the run
-    still needs from it, and none of them provision anything -- they went on
-    working against a handed-over cluster once the create path was removed:
-
-    * rayjob: the BYOI bootstrap renders ``/etc/profile.d/hyperloom-env.sh`` in
-      the head pod, which every later Ray Dashboard REST job sources to find the
-      framework venv. It is submitted rather than tracked in the state file: the
-      synthesized state carries no submission id, and ``bootstrap.sh`` already
-      self-skips on its pod-side marker. Skipped without a head IP: that is the
-      documented benchmark-only hand-off, where there is no head pod to address
-      and no later dashboard job to prepare, and ``cmd_bootstrap`` would abort
-      the whole run on the ``head_pod_ip`` it requires.
-    * infera: GEAK is installed on the GPU pods over SSH so the kernel agent
-      finds it on PATH. Best-effort, and the helper no-ops for other backends.
-    * both: kernel patches applied earlier in this session are replayed, so a
-      cluster adopted mid-session does not serve from the pre-patch state.
-
-    Args:
-        args: Parsed CLI namespace (reads ``nodes`` and ``no_kernel``).
-        backend: The resolved multi-node backend.
-        head_ip: The handed-over Ray head IP; empty means benchmark-only.
-
-    Raises:
-        SystemExit: With the bootstrap return code when the head pod fails it.
-    """
+    """Make an adopted cluster usable by this session."""
     from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
 
     if backend == "rayjob":
@@ -209,8 +146,8 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
                 force=False,
                 print_logs=False,
                 poll_interval=6,
-                # Adoption runs in-process, so it is not bound by the foreground/MCP
-                # 120s ceiling; a slow head pod should not abort the run.
+                # Adoption runs in-process, so it is not bound by the foreground/MCP 120s ceiling; a slow head pod
+                # should not abort the run.
                 poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
             )
             rc_boot = cmd_bootstrap(ns_boot)
@@ -224,14 +161,7 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
 
 
 def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
-    """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
-
-    Idempotent ``apply-patch`` fan-out, run only when ``--nodes>=2``. Best-effort: per-patch failures warn.
-
-    Args:
-        args: Parsed CLI arguments; reads ``nodes`` and resolves the session
-            workspace to locate applied-patch manifests.
-    """
+    """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods."""
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
         return

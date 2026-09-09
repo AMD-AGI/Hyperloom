@@ -1,33 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a generated tuner may be attempted at all.
-
-Four conditions, and every one has to hold. They are separate on purpose: each
-answers a different question, and collapsing them into one switch would let a
-single misconfiguration open the whole path.
-
-1. **Nobody turned it off.** On by default, with a kill switch and an optional
-   table list. This was the reverse until it was pointed out that condition 2
-   already restricts it to the cases where nothing else can do anything at
-   all: when no tuner owns the table, the time a generated one spends is not
-   time taken from a tuner that would have covered it, because there is none.
-   Keeping it shut then buys nothing and costs the one case it exists for.
-2. **Nothing else can do the job.** Only a ``no_tuner`` gap qualifies. A tuner
-   that exists and was skipped, or exists and was not routed to, is a bug in
-   routing or a legitimate refusal -- generating a second tuner would paper over
-   the first.
-3. **There is enough demand to be worth it.** A table asked for twice is not a
-   reason to write code; the floor keeps machine time proportional to what the
-   runtime actually wants.
-4. **The keys are describable.** A mandate with no shapes and no key schema
-   cannot be written against, and asking anyway produces a plausible script for
-   an imagined problem.
-
-The decision is returned with its reasons rather than as a boolean, because the
-useful artefact when this says no is *why* -- that is what tells you whether to
-fix routing, widen the whitelist, or leave it alone.
-"""
+"""Whether a generated tuner may be attempted at all."""
 
 from __future__ import annotations
 
@@ -40,11 +14,9 @@ from .coverage import CoverageGap
 
 log = logging.getLogger(__name__)
 
-# Comma-separated table names to restrict generation to. Empty -- the default --
-# means every table that clears the other three conditions.
+# Comma-separated table names to restrict generation to.
 ALLOW_ENV = "FORGE_TIER3_ALLOW"
-# The kill switch. Set to 1/true/yes to stop generation being attempted at all,
-# without having to know which tables are in play.
+# The kill switch.
 DISABLE_ENV = "FORGE_TIER3_DISABLE"
 MIN_MISSES_ENV = "FORGE_TIER3_MIN_MISSES"
 DEFAULT_MIN_MISSES = 25

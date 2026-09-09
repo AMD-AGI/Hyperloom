@@ -122,10 +122,7 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     manifest = payload.get("manifest")
     if not isinstance(manifest, dict):
         raise ControllerPublicationError("manifest must be a JSON object")
-    # The scope the Controller says its patch has. Checked here so a declared path
-    # cannot escape the repository, and carried on so integration stages the paths
-    # the patch actually changes rather than the ones the optimizer claims it
-    # edited. Absent on a publication written before the field existed.
+    # The scope the Controller says its patch has.
     changed_files_raw = payload.get("changed_files", [])
     if not isinstance(changed_files_raw, list):
         raise ControllerPublicationError("changed_files must be a JSON list")

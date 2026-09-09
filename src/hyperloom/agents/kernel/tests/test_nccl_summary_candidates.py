@@ -44,8 +44,7 @@ class ItaniumParsingTests(unittest.TestCase):
         self.assertEqual(_itanium_components("ncclDevKernel_Generic_1"), [])
 
     def test_truncated_length_prefix_does_not_overrun(self) -> None:
-        # Length 99 exceeds what remains, so parsing stops instead of slicing
-        # past the end of the string.
+        # Length 99 exceeds what remains, so parsing stops instead of slicing past the end of the string.
         self.assertEqual(_itanium_components("_ZN99short"), [])
 
     def test_zero_length_component_stops_parsing(self) -> None:
@@ -83,8 +82,7 @@ class SymbolLocationTests(unittest.TestCase):
         return path
 
     def test_exact_symbol_wins_over_suffixed_neighbour(self) -> None:
-        # A prefix match on cross_device_reduce_2stage_naive must not be
-        # mistaken for the real kernel.
+        # A prefix match on cross_device_reduce_2stage_naive must not be mistaken for the real kernel.
         self._write(
             "include/custom_all_reduce.cuh",
             "__global__ void cross_device_reduce_2stage_naive(RankData* d) {}\n"
@@ -391,11 +389,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self.assertEqual(warnings[0]["scanned_file_limit"], 1)
 
     def test_a_skipped_injection_is_reported_as_a_trace_health_warning(self) -> None:
-        """A dirty summary must not look like a workload with no collective.
-
-        Injection is the only path a collective has into the candidate pool, so
-        a skip silently disables the entire lane unless it reaches the report.
-        """
+        """A dirty summary must not look like a workload with no collective."""
         from tracelens_analysis import _inject_collective_candidates
 
         self._write_metrics(self._summary(total_time_ms="not-a-number"))
@@ -587,8 +581,8 @@ class CollectiveContractTests(unittest.TestCase):
         self.enrich = _enrich_kernel_contract
 
     def test_cross_device_reduce_maps_to_all_reduce(self) -> None:
-        # A bare "reduce" match would pick torch.distributed.reduce, whose
-        # result only lands on rank 0, silently voiding the parity gate.
+        # A bare "reduce" match would pick torch.distributed.reduce, whose result only lands on rank 0, silently
+        # voiding the parity gate.
         item = {"name": AITER_2STAGE}
         self.enrich(item, {"TP_SIZE": 8})
         contract = item["kernel_contract"]

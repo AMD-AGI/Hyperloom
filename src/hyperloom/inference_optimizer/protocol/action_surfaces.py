@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared action-surface constants and the action catalogue.
-
-Keep ownership, transport, and prompt-visibility classifications here so
-PolicyGate, prompt rendering, and CLI wiring do not grow separate
-action-name lists.
-
-:data:`ACTION_CATALOGUE` models only the fields production code reads:
-
-* ``requires_lanes`` / ``lease_ttl_sec`` -- dispatch gate and GPU lease TTL
-* ``side_effects`` -- stamped onto the dispatched task
-* ``pipeline_phase`` -- runs-workspace ownership plus prompt grouping
-* ``verdict_class`` -- selects the Critic prompt rule set
-* the rest -- rendered into the Orchestration prompt catalogue
-"""
+"""Shared action-surface constants and the action catalogue."""
 
 from __future__ import annotations
 
@@ -32,9 +19,8 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# Kernel-owned action name -> the request ``kind`` its handler is registered
-# under in ``request_handlers.KERNEL_REQUEST_HANDLERS``. The two differ, so the
-# prompt must advertise the kind.
+# Kernel-owned action name -> the request ``kind`` its handler is registered under in
+# ``request_handlers.KERNEL_REQUEST_HANDLERS``.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
         "gemm_tuning": "run_gemm_tuning",
@@ -45,19 +31,16 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
-# Request-kind aliases that route to a kernel-owned handler. apply_patch is
-# an alias of integrate (both dispatch to integrate_handler); PolicyGate
-# resolves the alias to its canonical owned action so the phase-action gate
-# applies identically.
+# Request-kind aliases that route to a kernel-owned handler. apply_patch is an alias of integrate (both dispatch to
+# integrate_handler); PolicyGate resolves the alias to its canonical owned action so the phase-action gate applies
+# identically.
 KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
     "apply_patch": "integrate",
 }
 
 
-# Request ``kind`` -> the kernel-owned action it gates as, derived from the two
-# tables above so a new kind cannot fall out of sync with the catalogue.
-# ``trace_analyze`` is absent by design: it owns no action and no phase, and
-# mapping it onto one would deny it everywhere.
+# Request ``kind`` -> the kernel-owned action it gates as, derived from the two tables above so a new kind cannot fall
+# out of sync with the catalogue.
 REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
     {
         **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
@@ -66,26 +49,18 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 )
 
 
-# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
-# once their own gate passes. A direct request would skip that gate. An
-# unregistered kind is not listed here: the handler lookup auto-rejects it with
-# the valid-kind vocabulary, which is the better answer for a typo.
+# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and once their own gate passes.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_collective",
         "run_fusion",
-        # Dispatched once at phase entry from a lane budget. An LLM re-issuing it
-        # per tick would spend budget the allocation never granted.
+        # Dispatched once at phase entry from a lane budget.
         "run_gemm_tuning",
     }
 )
 
 
-# Request kinds an LLM may address to the kernel agent. Derived from the action
-# table minus the Coordinator-owned lanes: those two are still kernel-owned
-# *actions* (they keep their catalogue entry and their handler), but the
-# Coordinator is the only caller, so advertising them here would invite a
-# request PolicyGate then denies.
+# Request kinds an LLM may address to the kernel agent.
 LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
     frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
     | {
@@ -105,11 +80,7 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "roofline",
         "profile",
         "replay_warm_recipe",
-        # Off-loop compiled-component builds; dispatched by the Coordinator,
-        # never by an LLM agent.  Not in ACTION_CATALOGUE to avoid pulling the
-        # kind into PHASE_LLM_PROPOSABLE_ACTIONS or _RUNS_ACTIONS (which would
-        # create a runs/ workspace and collide with the enablement/builds/
-        # attempt-root contract).
+        # Off-loop compiled-component builds; dispatched by the Coordinator, never by an LLM agent.
         "targeted_build",
     }
 )
@@ -118,8 +89,7 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
-# Robustness-only actions (driven via its action-ladder); Orchestration must
-# ALERT instead. ``recover`` walks SIGTERM/SIGKILL against server owners.
+# Robustness-only actions (driven via its action-ladder); Orchestration must ALERT instead.
 ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
     {
         "recover",
@@ -128,7 +98,6 @@ ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
 
 
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
-# Prompt visibility only; phase_state and PolicyGate decide legality per tick.
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",
@@ -142,8 +111,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 )
 
 
-# Prompt-visible actions for --no-kernel runs. Kernel-owned request actions
-# and analysis actions that only feed kernel optimization stay hidden.
+# Prompt-visible actions for --no-kernel runs.
 NO_KERNEL_AGENT_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",

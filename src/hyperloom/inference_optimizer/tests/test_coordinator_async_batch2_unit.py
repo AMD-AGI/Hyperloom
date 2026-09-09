@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Batch 2 coverage for Coordinator: synchronous context readers, the
-no-progress circuit-breaker signal, resume replay, orchestration-conversation
-reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
+"""Batch 2 coverage for Coordinator: synchronous context readers, the no-progress circuit-breaker signal, resume replay, orchestration-conversation reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -172,12 +170,7 @@ def coord(session_dir) -> Coordinator:
 
 
 def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
-    """A map entry naming a method its collaborator never defined is a crash at first call, not at import.
-
-    A field run lost every EXPLORE variant-failure record to exactly that: the
-    entry was there, the method was not, and ``__getattr__`` raised only once
-    the reap loop reached for it.
-    """
+    """A map entry naming a method its collaborator never defined is a crash at first call, not at import."""
     unresolved = []
     for name in Coordinator._DELEGATED:
         try:
@@ -336,8 +329,8 @@ async def test_resume_restores_promoted_inferencex_checkout(
     active.mkdir()
     coord._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
-    # setenv, not delenv: delenv of an absent name arms no undo, so the value
-    # the resume pass exports below would leak into every later test.
+    # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
+    # into every later test.
     monkeypatch.setenv("INFERENCEX_PATH", "")
 
     await coord._resume_consistency_pass()
@@ -591,13 +584,7 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
 
 @pytest.mark.asyncio
 async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
-    """A landed framework KEEP reconciles against its own stack entry.
-
-    The stack records the ``framework`` family label plus the canonical
-    candidate key, while the event log records the ``framework_agent`` task
-    kind. Comparing the two without translating flagged every landed KEEP as
-    an orphan on every single resume.
-    """
+    """A landed framework KEEP reconciles against its own stack entry."""
     coord._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
@@ -1386,8 +1373,8 @@ def test_research_scout_seed_block_keeps_findings_and_questions_only(coord: Coor
     assert "question one" in block
     assert "question two" in block
     assert "ignore-me" not in block
-    # Proposals moved to the shared untested-proposal queue, which also drops
-    # the ones already benched; rendering them here as well would double them.
+    # Proposals moved to the shared untested-proposal queue, which also drops the ones already benched; rendering them
+    # here as well would double them.
     assert "Untested executable proposals" not in block
     assert '"name": "first"' not in block
     assert '"name": "second"' not in block
@@ -1626,13 +1613,7 @@ def _ptask(tid: str, kind: str):
 # -- specialist visibility contract -----------------------------------------
 @pytest.mark.asyncio
 async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator) -> None:
-    """No periodic specialist block: it can never observe a live specialist.
-
-    The prompt renders only between blocking actions, so a running specialist
-    is structurally absent from it. Reporting "none running" there would
-    manufacture a false belief; in-flight work reaches the agent via
-    ``specialist_progress`` observations and ``get_running_tasks`` instead.
-    """
+    """No periodic specialist block: it can never observe a live specialist."""
     spec = await coord.tasks.create(
         kind="specialist",
         params={"domain": "serving_specialist"},
@@ -1722,7 +1703,8 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from hyperloom.orchestrator.framework import paths as fp
 
-    monkeypatch.setattr(fp, "resolve_source_file_allowlist", lambda: ["/src/root"])
+    monkeypatch.setattr(fp, "resolve_kernel_search_roots", lambda: ["/src/root"])
+    monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
 
     params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
     await coord._warm_specialist_params(params)
@@ -1731,6 +1713,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert params["research_hints"] == "HINTS-TEXT"
     assert params["arch_notes"] == "ARCH-NOTES"
     assert params["framework_source_roots"] == ["/src/root"]
+    assert params["session_framework_tree"] == "/src/root/vllm/"
     assert params["gap_symptom"] == "mem bound"
     assert "roofline_evidence" in params
 
@@ -1853,12 +1836,34 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinator) -> None:
+    """A patch nobody could ground has to reach the durable failure log.
+
+    The specialist's own notes reach the prompt only through the single inbox
+    line for its task, which is rendered once.
+    """
+    task = _ptask("rec-spec-ug", "specialist")
+    await coord._record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "kernel_agent",
+            "gap_canonical_id": "g1",
+            "proposal_set": [],
+            "patches_ungrounded": ["missing_target: vllm/nope.py"],
+        },
+        source="specialist:rec-spec-ug",
+    )
+    failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-ug"]
+    assert [f["error_class"] for f in failures] == ["patch_targets_ungrounded"]
+    assert "vllm/nope.py" in failures[0]["error_excerpt"]
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
 ) -> None:
-    """Successful specialist recording must not emit the
-    research-evidence failure log."""
+    """Successful specialist recording must not emit the research-evidence failure log."""
     import logging
 
     task = _ptask("rec-spec-dead", "specialist")
@@ -2084,12 +2089,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 @pytest.mark.asyncio
 async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A hint set during PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT.
-
-    ``exit_normal_optimize`` is the hint's only consumer and it runs in
-    FRAMEWORK_AGENT, so discarding on the transition that arrives there drops
-    the hint on the doorstep of the rule that reads it.
-    """
+    """A hint set during PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT."""
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "PRELUDE"
@@ -2107,14 +2107,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A pending hint is genuinely stale once the target is not the phase whose
-    exit rule reads it -- it can never reach that check again -- so this is the
-    one case the unrelated-transition cleanup should still clear it.
-
-    A discard is not a consumption: it must land in last_discarded_escalate_hint,
-    not last_consumed_escalate_hint, which specifically means "this hint drove
-    a transition" and this one never did.
-    """
+    """A pending hint is genuinely stale once the target is not the phase whose exit rule reads it -- it can never reach that check again -- so this is the one case the unrelated-transition cleanup should still clear it."""
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"
@@ -2135,8 +2128,8 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
 
 @pytest.mark.asyncio
 async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
-    """The complementary case: a hint-driven transition must record consumption,
-    not a discard, so the two are distinguishable in the breakdown.
+    """The complementary case: a hint-driven transition must record consumption, not a discard, so the two are
+    distinguishable in the breakdown.
     """
     import hyperloom.orchestrator.phases.machine_state as ps
 
@@ -2294,8 +2287,8 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator) -> None:
-    # Regression: explore must inherit current_best.extra_envs as its env base,
-    # else the accepted stack's envs collapse to the last variant's delta.
+    # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
+    # collapse to the last variant's delta.
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.current_best = {
         "tput": 900.0,
@@ -2565,12 +2558,11 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     from hyperloom.orchestrator.framework import client as _fa_client
 
     _enter_framework(coord)
-    # Arm disabled: discovery exhaustion falls back to the historical exit
-    # (the enabled arm pivots to local exploration instead — covered separately).
+    # Arm disabled: discovery exhaustion falls back to the historical exit (the enabled arm pivots to local
+    # exploration instead — covered separately).
     coord.shared_state.framework_local_explore_enabled = False
     coord.shared_state.framework_agent_discover_failures = 0
-    # Discovery has spent its retry budget, so the upstream lane declines and
-    # the tick reaches the terminal rung.
+    # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
     coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
     monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
@@ -2709,9 +2701,8 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator, monkeypatch, caplog) -> None:
-    # Defensive audit (log-only): invoking the run_action_now sync bridge on
-    # the coordinator loop thread must emit a log-only audit.
-    # run_coroutine_threadsafe is stubbed so the test never actually blocks.
+    # Defensive audit (log-only): invoking the run_action_now sync bridge on the coordinator loop thread must emit a
+    # log-only audit. run_coroutine_threadsafe is stubbed so the test never actually blocks.
     import asyncio
     import logging
 

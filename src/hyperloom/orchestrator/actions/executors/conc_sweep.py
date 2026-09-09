@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ActionRunner for the ``conc_sweep`` SWEEP-phase action.
-
-Thin shell around ``orchestrator.kernel.conc_sweep.run_conc_sweep``. The
-Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
-``_enqueue_internal_conc_sweep_task`` (when ``conc_sweep_enabled``, which is
-on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed
-``conc_sweep`` delegate is denied by PolicyGate.
-
-Inputs (``task.params``): ``concs`` (CONC ladder), ``variant_timeout_sec``,
-``total_budget_sec`` (``None`` disables the gate; ``<=0`` means no time is left
-and the sweep skips without booting a server).
-
-Reloads ``SharedState`` from ``ctx.extra['session_dir']`` to pick up the
-live current_best / baseline_tput / isl / osl / baseline_config_path,
-which would be stale if pinned at enqueue time.
-"""
+"""ActionRunner for the ``conc_sweep`` SWEEP-phase action."""
 
 from __future__ import annotations
 
@@ -28,18 +13,10 @@ from ...state.shared_state import SharedState
 
 
 class ConcSweepExecutor:
-    """ActionRunner for ``conc_sweep``. See module docstring."""
+    """Run the coordinator-owned concurrency sweep action."""
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        """Run the concurrency sweep action for the given context.
-
-        Args:
-            ctx: Action context; ``ctx.extra['session_dir']`` is required.
-
-        Returns:
-            A result dict with a ``status`` field (and error metadata on
-            failure, such as a missing ``session_dir``).
-        """
+        """Run the concurrency sweep action for the given context."""
         extra = getattr(ctx, "extra", None) or {}
         session_dir_str = str(extra.get("session_dir") or "").strip()
         if not session_dir_str:
@@ -59,9 +36,8 @@ class ConcSweepExecutor:
             }
 
         params = ctx.task.params or {}
-        # ``None`` falls back to the ladder run_conc_sweep resolves for this
-        # workload; an empty list short-circuits (respects an explicit "no
-        # concs" choice).
+        # ``None`` falls back to the ladder run_conc_sweep resolves for this workload; an empty list short-circuits
+        # (respects an explicit "no concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
             concs: list[int] | None = list(state.conc_sweep_concs) if state.conc_sweep_concs else None
@@ -69,8 +45,8 @@ class ConcSweepExecutor:
             concs = [int(c) for c in concs_raw]
 
         variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
-        # An explicit ``None`` means "no budget gate" and must survive as None:
-        # coercing it to 0 would instead read as "no time left" and skip.
+        # An explicit ``None`` means "no budget gate" and must survive as None: coercing it to 0 would instead read as
+        # "no time left" and skip.
         budget_raw = params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
         total_budget = None if budget_raw is None else int(budget_raw)
 
@@ -81,8 +57,8 @@ class ConcSweepExecutor:
             variant_timeout_sec=variant_timeout,
             total_budget_sec=total_budget,
         )
-        # Map run_conc_sweep's skip envelope onto the SubAgentRunner contract:
-        # a skip is not an executor failure, so surface as succeeded+was_skipped.
+        # Map run_conc_sweep's skip envelope onto the SubAgentRunner contract: a skip is not an executor failure, so
+        # surface as succeeded+was_skipped.
         if payload.get("status") == "skipped":
             payload = dict(payload)
             payload["status"] = "succeeded"

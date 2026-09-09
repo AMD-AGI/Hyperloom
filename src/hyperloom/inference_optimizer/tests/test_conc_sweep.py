@@ -369,8 +369,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like
-    every other executor — not state.gpu_type's real type."""
+    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -584,13 +583,7 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
 
 class TestTheAgentXLadderIsDefaultOn:
-    """The sweep is what an agentic session produces; it used to default off.
-
-    It was disabled under AgentX because sixteen synthetic rungs would spend the
-    whole session without tuning a server parameter. The ladder is now the
-    deliverable rather than a postscript to one, and it is seven rungs, not
-    sixteen.
-    """
+    """The sweep is what an agentic session produces; it used to default off."""
 
     def test_the_state_default_is_on(self):
         assert SharedState().conc_sweep_enabled is True
@@ -757,8 +750,7 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     assert payload["skip_reason"] == "no_time_budget_remaining"
     assert payload["total_budget_sec"] == 0
     assert mock_run.call_count == 0
-    # Nothing ran, so this reads as a sweep that declined rather than one that
-    # spent its budget.
+    # Nothing ran, so this reads as a sweep that declined rather than one that spent its budget.
     assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
 
 
@@ -1148,13 +1140,12 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     assert coord.shared_state.save.call_count >= 2
 
 
-# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``;
-# covered by test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
+# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``; covered by
+# test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 2 extras: _order_concs_desc / _build_arm_grid
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 2 extras: _order_concs_desc /
+# _build_arm_grid ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_order_concs_desc_deduplicates_and_sorts():
@@ -1201,9 +1192,8 @@ def test_build_arm_grid_optimized_arm_carries_args():
     assert int(grid[0].extra_envs["NUM_PROMPTS"]) >= 4
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: soft switch + arm-major orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: soft switch + arm-major
+# orchestration ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_single_server_arm_major_order(
@@ -1263,9 +1253,8 @@ def test_run_conc_sweep_single_server_concs_descending(
     assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 5: _flush_conc_sweep_report / _flush_partial_conc_sweep_report
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report /
+# _flush_partial_conc_sweep_report ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
@@ -1292,11 +1281,7 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
 
 
 class TestTheSummaryIsTakenOnTheChartsAxis:
-    """The headline speedup and the curve beside it have to be one quantity.
-
-    On the agentic corpus output throughput is about 1% of the token budget, so
-    a summary left on that axis reports a number the chart contradicts.
-    """
+    """The headline speedup and the curve beside it have to be one quantity."""
 
     def _pts(self, arm: str, out: float, total: float) -> list[dict[str, Any]]:
         return [
@@ -1373,13 +1358,7 @@ class TestAnUnreportedTotalComesFromItsHalves:
 
 
 class TestTheCurveCarriesBothAxisPairs:
-    """A point has to carry whichever pair its mode is plotted on.
-
-    Synthetic is plotted on output throughput against ``output_throughput/conc``;
-    an agentic run on token throughput per chip against p90 interactivity. Both
-    pairs live on the same record because the mode is a property of the session,
-    not of the point.
-    """
+    """A point has to carry whichever pair its mode is plotted on."""
 
     def _variant(self, **kw: Any) -> VariantResult:
         base: dict[str, Any] = {
@@ -1497,8 +1476,7 @@ def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
     assert loaded["status"] == "in_progress"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 3: plotting
+# ───────────────────────────────────────────────────────────────────────────── Change 3: plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1560,11 +1538,7 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
 
 
 class TestTheChartFollowsTheGradedAxis:
-    """The chart has to show the ranking the session was scored by.
-
-    A chart drawn on a different axis from the summary beside it invites
-    reading off a rung the grading did not pick.
-    """
+    """The chart has to show the ranking the session was scored by."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -1619,8 +1593,7 @@ class TestTheChartFollowsTheGradedAxis:
         ],
     )
     def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
-        """Binds both sides: whichever way the session resolved its axis, the
-        curve reads the same point field the summary took its speedups on."""
+        """Binds both sides: whichever way the session resolved its axis, the curve reads the same point field the summary took its speedups on."""
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -1650,8 +1623,7 @@ class TestTheChartFollowsTheGradedAxis:
 
 
 class TestTheRooflineNeedsBothItsAxisAndARealShape:
-    """``_ceiling_series`` returns a decode-only output-throughput bound, in the
-    output pair's units, computed from the session's ISL/OSL."""
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the output pair's units, computed from the session's ISL/OSL."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -1754,11 +1726,7 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
 
 
 def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Render through a stand-in pyplot and return what the chart asked it to do.
-
-    Lets a chart's decisions be asserted where matplotlib is not installed,
-    which is most CI shards.
-    """
+    """Render through a stand-in pyplot and return what the chart asked it to do."""
     calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
 
     class _FakePatch:
@@ -1870,16 +1838,14 @@ def test_format_conc_sweep_curve_section_with_png():
 
     lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
     embed = next(line for line in lines if line.startswith("!["))
-    # final.md lives in reports/, so the embed must use the basename, not the
-    # session-root-relative "reports/conc_sweep_curve.png" (which would resolve
-    # to reports/reports/... and 404).
+    # final.md lives in reports/, so the embed must use the basename, not the session-root-relative
+    # "reports/conc_sweep_curve.png" (which would resolve to reports/reports/... and 404).
     assert embed == "![Concurrency sweep curve](conc_sweep_curve.png)"
     assert "reports/conc_sweep_curve.png" not in embed
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Change 1: single-server Option A boot/reuse path (lifecycle-eligible)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 1: single-server Option A
+# boot/reuse path (lifecycle-eligible) ─────────────────────────────────────────────────────────────────────────────
 
 
 def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
@@ -2223,12 +2189,7 @@ def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
 
 
 def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
-    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for.
-
-    The round is then clamped back to the remaining budget and killed mid-warmup
-    -- the failure the cap-raise exists to prevent, moved into the sweep's own
-    admission check.
-    """
+    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for."""
     from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
 
     for k in (
@@ -2252,9 +2213,8 @@ def test_the_admission_price_never_lowers_an_operator_raised_cap(
     assert _granted_cap_sec(99_999) == 99_999.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
+# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
@@ -2262,11 +2222,7 @@ def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """After both arms finish (happy path), run_conc_sweep must reap any
-    lingering server via the same broad /proc scan used elsewhere: a
-    per-variant timeout that fires before a server_lifecycle pidfile is
-    written leaves nothing for that pidfile-based teardown to find, so this
-    is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
+    """After both arms finish (happy path), run_conc_sweep must reap any lingering server via the same broad /proc scan used elsewhere: a per-variant timeout that fires before a server_lifecycle pidfile is written leaves nothing for that pidfile-based teardown to find, so this is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2294,11 +2250,7 @@ def test_run_conc_sweep_reaps_stale_servers_even_when_an_arm_raises(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The reap must fire from a ``finally`` -- even when an arm blows up
-    with an exception that escapes its own internal handling, not just on
-    the happy path. ``_sweep_one_arm_single_server`` itself is mocked out
-    (rather than the ``run_grid`` it calls) so its own per-variant error
-    handling can't swallow the exception before it reaches run_conc_sweep."""
+    """The reap must fire from a ``finally`` -- even when an arm blows up with an exception that escapes its own internal handling, not just on the happy path."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2325,9 +2277,7 @@ def test_run_conc_sweep_skips_reap_under_pytest(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
-    set (pytest always sets it for a running test), mirroring the guard on
-    the per-launch preclean in ``_grid_runner.py``."""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):

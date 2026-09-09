@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 5: export the authored change as a JSON change-manifest + a git patch.
-
-The Hyperloom handoff: besides the fused-kernel file(s), a source-level fusion also
-edits the framework model file (wiring the fused path in behind the env gate). This
-captures BOTH: a single ``fusion.patch`` (git diff of the framework repo) and a
-per-file change list classifying each path as a new kernel vs a framework-wiring
-edit, so the caller can apply/review deterministically.
-"""
+"""Stage 5: export the authored change as a JSON change-manifest + a git patch."""
 
 from __future__ import annotations
 
@@ -38,20 +31,14 @@ def _is_git_repo(repo_root: str) -> bool:
     return False
 
 
-# Word-boundary aware so we do NOT match unrelated framework files such as
-# ``diffusion*.py`` / ``confusion*.py`` (they contain the bare substring
-# "fusion" mid-word but are not author-created fusion kernels).
+# Word-boundary aware so we do NOT match unrelated framework files such as ``diffusion*.py`` / ``confusion*.py`` (they
+# contain the bare substring "fusion" mid-word but are not author-created fusion kernels).
 _FUSED_MODULE_MARKERS = ("_fused", "_fusion")
 _FUSED_MODULE_PREFIXES = ("fused", "fusion")
 
 
 def _is_fused_module_name(name: str) -> bool:
-    """Whether ``name`` marks an author-created fused-kernel module.
-
-    Matches ``*_fused*``/``*_fusion*`` (underscore-bounded) or a stem starting with
-    ``fused``/``fusion`` (e.g. ``fusion_helper.py``, ``fused_moe.py``), but NOT
-    ``diffusion.py``/``confusion.py`` where "fusion" is only a mid-word substring.
-    """
+    """Whether ``name`` marks an author-created fused-kernel module."""
     stem = Path(name).stem
     if any(m in name for m in _FUSED_MODULE_MARKERS):
         return True
@@ -59,22 +46,7 @@ def _is_fused_module_name(name: str) -> bool:
 
 
 def _fused_module_candidates(source_file: str, fused_module: str = "") -> list[Path]:
-    """The fused modules an export may ship, beside ``source_file``.
-
-    With ``fused_module`` given, the answer is exactly that one file: the caller
-    knows which module THIS recipe authored (:func:`campaign.fused_module_path`
-    derives it up front), so nothing else in the directory belongs in the patch.
-    That scoping is load-bearing for sibling nomination -- the fusion loop keeps
-    running after a keeper, so by the time the second recipe exports, the FIRST
-    recipe's module is still sitting in the shared tree. A directory glob would
-    sweep it into sibling #2's patch, and the applier then refuses the patch
-    outright ("snapshot missing content"), because sibling #2's pristine snapshot
-    predates a file it never created.
-
-    Without it (salvage / compile-pass / single-recipe callers, which have no
-    recipe in hand) fall back to discovering by name, since an author-created
-    module is otherwise unknowable.
-    """
+    """The fused modules an export may ship, beside ``source_file``."""
     if fused_module:
         f = Path(fused_module)
         return [f] if f.is_file() else []
@@ -85,13 +57,7 @@ def _fused_module_candidates(source_file: str, fused_module: str = "") -> list[P
 
 
 def _git_tracks(repo_root: str, source_file: str) -> bool:
-    """True only when ``source_file`` is a git-TRACKED file under ``repo_root``.
-
-    Broader-correct than ``_is_git_repo``: a pip-installed framework can live under
-    a git work tree (e.g. a project-local ``.venv``/``site-packages``) yet be
-    untracked, so ``git diff`` is empty. In that case the snapshot (non-git) path
-    must be taken, not the git path.
-    """
+    """True only when ``source_file`` is a git-TRACKED file under ``repo_root``."""
     if not repo_root or not source_file:
         return False
     try:
@@ -105,11 +71,7 @@ def _git_tracks(repo_root: str, source_file: str) -> bool:
 
 
 def _unified_file_diff(rel: str, old_text: str, new_text: str, *, created: bool) -> str:
-    """git-apply-compatible unified diff for one file (empty when unchanged).
-
-    ``created`` says the file is absent from the base, which an empty ``old_text``
-    does not: an existing empty file declared as a creation fails to apply.
-    """
+    """git-apply-compatible unified diff for one file (empty when unchanged)."""
     if old_text == new_text:
         return ""
     body = "".join(
@@ -122,8 +84,8 @@ def _unified_file_diff(rel: str, old_text: str, new_text: str, *, created: bool)
     )
     if not body:
         return ""
-    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`;
-    # `new file mode` + `--- /dev/null` is how a creation is declared.
+    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`; `new file mode` + `--- /dev/null` is
+    # how a creation is declared.
     new_file = "new file mode 100644\n" if created else ""
     return f"diff --git a/{rel} b/{rel}\n{new_file}{body}"
 
@@ -136,24 +98,16 @@ def _export_nongit(
     patch_name: str = "fusion.patch",
     fused_module: str = "",
 ) -> FusionArtifacts:
-    """Export ``patch_name`` without git, using a pre-authoring pristine snapshot.
-
-    Needed when the framework is a plain pip install (not a git checkout), where
-    ``git diff`` yields nothing so the KEPT fusion would otherwise ship
-    ``patch=null`` and never reach e2e integrate. Diffs the snapshot vs the live
-    edited source (unified diff); new ``*_fused*`` / ``*fusion*`` modules beside it
-    are emitted as whole-file additions.
-    """
+    """Export ``patch_name`` without git, using a pre-authoring pristine snapshot."""
     arts = FusionArtifacts()
     root = Path(repo_root).resolve() if repo_root else None
     parts: list[str] = []
     names: list[str] = []
 
     def _rel(p: Path) -> str:
-        # POSIX separators always: this string is interpolated straight into the
-        # ``diff --git a/<rel>`` header, and git rejects a backslash path as
-        # "invalid path" on every platform, so a Windows-side export would
-        # otherwise produce a patch nobody can apply.
+        # POSIX separators always: this string is interpolated straight into the ``diff --git a/<rel>`` header, and
+        # git rejects a backslash path as "invalid path" on every platform, so a Windows-side export would otherwise
+        # produce a patch nobody can apply.
         if root:
             with contextlib.suppress(ValueError):
                 return p.resolve().relative_to(root).as_posix()
@@ -171,11 +125,7 @@ def _export_nongit(
             parts.append(d)
             names.append(rel)
 
-    # 2) fused modules beside the source: diff snapshot-vs-current. A pre-existing
-    #    framework file (snapshotted, unchanged) yields an empty diff and is NOT
-    #    emitted; an author-created module has no snapshot so its whole content is
-    #    the "new file" add. This avoids emitting/deleting unrelated framework files
-    #    that merely match the *_fused*/*fusion* glob.
+    # 2) fused modules beside the source: diff snapshot-vs-current.
     src_resolved = Path(source_file).resolve() if source_file else None
     for f in _fused_module_candidates(source_file, fused_module):
         if src_resolved is not None and f.resolve() == src_resolved:
@@ -223,23 +173,13 @@ def _classify(rel_path: str, source_file: str) -> str:
 
 
 def _fusion_scoped_paths(repo_root: str, source_file: str, fused_module: str = "") -> list[str]:
-    """Repo-relative paths that belong to THIS fusion (not the whole dirty tree).
-
-    Scopes the exported patch to: the edited model source file, plus any untracked
-    new module in the SAME directory whose name marks it a fused kernel
-    (``*_fused*`` / ``*fusion*``). This avoids the earlier whole-repo ``git diff``
-    that swept in dozens of unrelated pre-existing dirty files.
-
-    ``fused_module`` narrows that second set to the one module THIS recipe
-    authored -- see :func:`_fused_module_candidates` for why a sibling's leftover
-    module must not ride along.
-    """
+    """Repo-relative paths that belong to THIS fusion (not the whole dirty tree)."""
     root = Path(repo_root).resolve()
     paths: list[str] = []
     if source_file:
         with contextlib.suppress(ValueError):
-            # POSIX form to match what git itself reports, so the manifest's
-            # changed-file paths are comparable across platforms.
+            # POSIX form to match what git itself reports, so the manifest's changed-file paths are comparable across
+            # platforms.
             paths.append(Path(source_file).resolve().relative_to(root).as_posix())
     # Untracked fused-kernel modules next to the source file.
     model_dir = Path(source_file).parent if source_file else root
@@ -266,33 +206,7 @@ def export_artifacts(
     patch_name: str = "fusion.patch",
     fused_module: str = "",
 ) -> FusionArtifacts:
-    """Export ``patch_name`` + a classified change list, scoped to the fusion.
-
-    Best-effort: returns an empty ``FusionArtifacts`` when the repo is unavailable
-    or there are no fusion-scoped changes. Only the fusion files (the edited model
-    source + new fused modules beside it) are diffed, NOT the whole repo.
-
-    When the framework source is NOT a git checkout (e.g. a plain pip install), git
-    diff yields nothing, so fall back to diffing a pre-authoring ``pristine_dir``
-    snapshot — otherwise a KEPT fusion would ship ``patch=null`` and never reach
-    e2e integrate.
-
-    ``snapshot_diff_only`` forces the snapshot route even for a tracked file. The
-    git route diffs against HEAD, so on a checkout carrying unrelated uncommitted
-    edits it would sweep them into the patch; callers that must ship exactly the
-    change THIS run made (the compile-pass flip) require the snapshot baseline.
-
-    ``patch_name`` is the file the diff is written to under ``out_dir``. It
-    defaults to the legacy ``fusion.patch`` so single-patch (combine) callers and
-    the salvage/timeout paths that read that literal name are unchanged; the
-    multi-patch caller passes a distinct name per sibling (``fusion_0.patch`` ...)
-    so N keepers do not overwrite each other.
-
-    ``fused_module`` is the module THIS recipe authored. Passing it confines the
-    patch to that one new file; omitting it falls back to discovering fused
-    modules by name in the source directory. Sibling nomination MUST pass it --
-    see :func:`_fused_module_candidates`.
-    """
+    """Export ``patch_name`` + a classified change list, scoped to the fusion."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     arts = FusionArtifacts()
@@ -304,10 +218,7 @@ def export_artifacts(
             )
         return None
 
-    # Take the git path ONLY when the source file is actually git-TRACKED. A pip
-    # install can sit under a git work tree (project-local venv/site-packages) yet
-    # be untracked, so `git diff` would be empty and ship patch=null. In that case
-    # fall through to the pristine-snapshot path instead.
+    # Take the git path ONLY when the source file is actually git-TRACKED.
     if snapshot_diff_only or not (_is_git_repo(repo_root) and _git_tracks(repo_root, source_file)):
         return _nongit() or arts
     if not repo_root:
@@ -337,8 +248,8 @@ def export_artifacts(
         return arts
 
     if not diff:
-        # Tracked-but-empty (edits reverted, or CRLF/whitespace-only churn git
-        # ignores): try the pristine snapshot before giving up on the patch.
+        # Tracked-but-empty (edits reverted, or CRLF/whitespace-only churn git ignores): try the pristine snapshot
+        # before giving up on the patch.
         return _nongit() or arts
 
     patch_path = out / patch_name
@@ -355,16 +266,7 @@ def restore_exported_changes(
     artifacts: FusionArtifacts,
     pristine_dir: str | Path | None = None,
 ) -> None:
-    """Restore live framework repo changes after a successful export.
-
-    forge-fuse is an author/export tool; Hyperloom is responsible for applying
-    the emitted patch during e2e integrate. Leaving authored bytes in the live
-    framework repo lets later explore rounds consume them without attribution.
-
-    Non-git framework (pip install): git checkout cannot revert, so restore each
-    edited file from the pre-authoring ``pristine_dir`` snapshot (and delete new
-    fused modules that have no snapshot).
-    """
+    """Restore live framework repo changes after a successful export."""
     if not repo_root or not artifacts.patch:
         return
     is_git = _is_git_repo(repo_root)
@@ -384,9 +286,7 @@ def restore_exported_changes(
         rel = str(change.get("path") or "")
         if not rel:
             continue
-        # Per-file: only git-checkout files git actually TRACKS. A pip framework
-        # under a git work tree (venv in a git project) is untracked, so restore it
-        # from the pristine snapshot instead of deleting it via the git branch.
+        # Per-file: only git-checkout files git actually TRACKS.
         if is_git and _git(repo_root, "ls-files", "--error-unmatch", rel).returncode == 0:
             _git(repo_root, "checkout", "--", rel)
             continue

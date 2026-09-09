@@ -157,11 +157,7 @@ async def test_a_withheld_stall_is_observed_not_alerted():
 
 
 async def test_medium_agent_stall_emits_a_medium_alert():
-    """The rung a healthy long phase must not reach: MEDIUM is an alert.
-
-    Documented in SKILL.md as ``alert(medium)``, which is why the withheld note
-    stays on the observation tier however long the phase runs.
-    """
+    """The rung a healthy long phase must not reach: MEDIUM is an alert."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -422,8 +418,7 @@ async def test_critic_runtime_stuck_alert_only():
 
 
 async def test_ray_pending_starvation_alert_only():
-    """Kernel pipeline is wedged — alert + suggestion only.
-    The auto prune_branch was dropped."""
+    """Kernel pipeline is wedged — alert + suggestion only."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("ray_pending_starvation", SymptomSeverity.HIGH, evidence={"pending_tasks": 50}, subject={})],
@@ -1176,8 +1171,8 @@ def _server_unreachable_symptom(url: str, evidence: dict | None = None) -> Sympt
 
 
 async def test_local_server_unreachable_emits_alert_and_delegate_recover():
-    """``local_server_unreachable`` must route to the real ``recover`` action,
-    not the non-dispatchable ``server_lifecycle`` its own suggestion text names.
+    """``local_server_unreachable`` must route to the real ``recover`` action, not the non-dispatchable
+    ``server_lifecycle`` its own suggestion text names.
     """
     ladder = ActionLadder()
     out = await ladder.decide(
@@ -1196,9 +1191,9 @@ async def test_local_server_unreachable_emits_alert_and_delegate_recover():
 
 
 async def test_local_server_unreachable_idempotency_key_disambiguates_targets():
-    """Two unreachable targets in the same tick must not collide on idempotency_key,
-    or the second delegate comes back as a duplicate-idempotency PolicyDenied
-    that pollutes repeated_policy_denied tracking instead of just recovering.
+    """Two unreachable targets in the same tick must not collide on idempotency_key, or the second delegate comes back
+    as a duplicate-idempotency PolicyDenied that pollutes repeated_policy_denied tracking instead of just
+    recovering.
     """
     ladder = ActionLadder()
     out = await ladder.decide(
@@ -1216,10 +1211,7 @@ async def test_local_server_unreachable_idempotency_key_disambiguates_targets():
 
 
 async def test_local_server_unreachable_idempotency_key_stable_for_same_target():
-    """The same target re-firing (e.g. a later tick after cooldown) must derive
-    the same per-target suffix, since that's what makes the disambiguator
-    deterministic rather than a source of new spurious duplicates.
-    """
+    """The same target re-firing (e.g. a later tick after cooldown) must derive the same per-target suffix, since that's what makes the disambiguator deterministic rather than a source of new spurious duplicates."""
     ladder = ActionLadder()
     first = await ladder.decide(
         [_server_unreachable_symptom("http://127.0.0.1:8000/health")],

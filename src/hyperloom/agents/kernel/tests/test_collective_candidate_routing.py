@@ -5,18 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Routing rules for multi-GPU collective kernels.
-
-Two populations must not be confused:
-
-* **aiter / framework collectives** ship editable device source (``csrc/*.cu``),
-  so they are legitimate optimization targets. TraceLens labels them
-  ``AITER (vendor)`` in the source column, which is a placeholder rather than a
-  path -- once that is rejected, the symbol resolves by name like any other
-  kernel.
-* **nccl / rccl collectives** are precompiled vendor binaries with no rewritable
-  source. They must stay non-patchable.
-"""
+"""Routing rules for multi-GPU collective kernels."""
 
 from __future__ import annotations
 
@@ -61,8 +50,8 @@ def test_aiter_vendor_label_is_not_a_source_path():
 
 def test_vendor_label_is_zeroed_so_name_resolution_can_run():
     item = _candidate(_AITER_RS, "AITER (vendor)")
-    # Placeholder rejection lives in reject_non_path_source, called once at the
-    # top of _finalize_candidates so the trace and grep tiers still get a turn.
+    # Placeholder rejection lives in reject_non_path_source, called once at the top of _finalize_candidates so the
+    # trace and grep tiers still get a turn.
     assert tl.reject_non_path_source(item) is True
     assert item["source_file"] == ""
     assert item["source_file_rejected"] == "AITER (vendor)"
@@ -139,14 +128,7 @@ def _nccl_summary_row(name: str, source_file: str) -> dict:
 
 
 def test_lane_resolved_collective_is_not_unresolved_by_its_name():
-    """A name the heuristic reads as single-GPU must not clobber the lane's verdict.
-
-    _nccl_summary_candidates sets is_multigpu=True from TraceLens' nccl_summary
-    table plus a resolved device symbol. Re-deriving from the name flips these
-    rows to False, and is_collective_candidate then refuses them because it
-    gates on candidate_source == "nccl_summary" AND is_multigpu -- the lane
-    rejecting its own output.
-    """
+    """A name the heuristic reads as single-GPU must not clobber the lane's verdict."""
     for name in ("small_collective", "EpDispatchIntraNodeKernel_bf16", "ncclDevKernel_Generic_1"):
         assert tl.is_multigpu_kernel(name, "") is False, f"{name} should be a name-heuristic miss"
         item = _nccl_summary_row(name, "/sgl-workspace/aiter/csrc/include/other.cuh")
@@ -175,10 +157,8 @@ def test_the_name_heuristic_still_runs_without_a_lane_verdict():
     assert item["is_multigpu"] is False
     assert item["num_gpus_recommended"] == 1
 
-    # ...and the derivation still RUNS for such a row rather than being skipped:
-    # the lane left is_multigpu False, but the name is an unmistakable collective,
-    # so the heuristic must be allowed to raise it. Without the is_multigpu
-    # qualifier on `authoritative` this row would stay False.
+    # ...and the derivation still RUNS for such a row rather than being skipped: the lane left is_multigpu False, but
+    # the name is an unmistakable collective, so the heuristic must be allowed to raise it.
     item = _candidate("ncclDevKernel_AllReduce_Sum_bf16_RING_LL", "/w/nccl.cu", candidate_source="nccl_summary")
     item["is_multigpu"] = False
     tl._stamp_candidate_metadata(item, None)

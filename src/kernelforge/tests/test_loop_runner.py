@@ -90,11 +90,6 @@ from kernelforge.orchestrator.specialists import (
 from kernelforge.tracker import ExperimentTracker
 
 
-class _NoopEvolver:
-    def on_experiment_complete(self, experiment):
-        return {}
-
-
 # The stand-in for "budget is not what this test is about". It has to clear the
 # round admission guard, which prices a whole round -- planning, a session worth
 # starting, the canonical measurement and the finalize reserve -- so a value near
@@ -155,7 +150,6 @@ def _make_loop(
         config,
         tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=resume,
     )
     monkeypatch.setattr(
@@ -2276,7 +2270,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._case_times = {}
     loop._last_pmc_diagnosis = ""
     loop._last_pmc_full = ""
-    loop.evolver = SimpleNamespace(on_benchmark=lambda **_kwargs: None)
     loop.config = SimpleNamespace(gpu_target="gfx942")
     # No round is open around these iterations, so the measurement they run is
     # charged to nothing -- which is also what a drain iteration does.
@@ -5795,7 +5788,6 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         first.ic,
         first.tracker,
         config=runtime_config,
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5823,7 +5815,6 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         first.ic,
         first.tracker,
         config=runtime_config,
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5880,7 +5871,6 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -5924,7 +5914,6 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     monkeypatch.setattr(
@@ -6196,7 +6185,6 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
@@ -6231,7 +6219,6 @@ def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
         ),
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
@@ -6319,7 +6306,6 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
         bad_config,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     with pytest.raises(ValueError, match=error):
@@ -6353,7 +6339,6 @@ def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypa
         first.ic,
         first.tracker,
         config=object(),
-        evolver=_NoopEvolver(),
         resume=True,
     )
     with pytest.raises(ValueError, match="HEAD mismatch"):
@@ -6454,7 +6439,6 @@ def test_case_metric_fails_closed_on_incomplete_candidate_coverage():
         ),
         tracker=object(),
         config=object(),
-        evolver=object(),
     )
     loop._baseline_case_times = {"small": 2.0, "large": 8.0}
     bench = {
@@ -6488,7 +6472,6 @@ def test_mean_case_speedup_metric_preserves_raw_mean_for_diagnostics():
         ),
         tracker=object(),
         config=object(),
-        evolver=object(),
     )
     loop._baseline_case_times = {"small": 1.0, "large": 9.0}
     bench = {

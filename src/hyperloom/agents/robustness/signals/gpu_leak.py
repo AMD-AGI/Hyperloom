@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU memory leak detector.
-
-Fires when every visible GPU is near-full AND no known inference-server owner process
-is live — the classic ROCm KFD leak fingerprint after a crashed EngineCore. Stateful
-(requires ``min_consecutive_ticks`` to skip the baseline cold-start VRAM ramp) and
-cross-correlates ``local_gpu`` + ``local_processes``.
-"""
+"""GPU memory leak detector."""
 
 from __future__ import annotations
 
@@ -42,11 +36,7 @@ _DEFAULT_OWNER_PATTERNS: tuple[str, ...] = (
 
 @dataclass
 class GpuLeakConfig:
-    """Tunables for :class:`GpuLeakDetector`.
-
-    Either threshold marks a GPU "full"; ``min_consecutive_ticks`` (default 2) is the
-    anti-flap gate that skips the baseline VRAM ramp.
-    """
+    """Tunables for :class:`GpuLeakDetector`."""
 
     util_mem_pct_threshold: float = 99.0
     free_mb_threshold: float = 500.0
@@ -55,9 +45,7 @@ class GpuLeakConfig:
 
 
 class GpuLeakDetector:
-    """Stateful per-tick rule emitting ``gpu_memory_leaked``; the counter resets on any
-    non-matching tick so a one-tick cold-start blip can't accumulate a false positive.
-    """
+    """Stateful per-tick rule emitting ``gpu_memory_leaked``; the counter resets on any non-matching tick so a one-tick cold-start blip can't accumulate a false positive."""
 
     def __init__(
         self,
@@ -65,14 +53,7 @@ class GpuLeakDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore the persisted hit counter.
-
-        Args:
-            config (GpuLeakConfig | None): Tunables; defaults to
-                :class:`GpuLeakConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view used
-                to load/persist ``consecutive_hits`` across ticks.
-        """
+        """Initialise the detector and restore the persisted hit counter."""
         self._config = config or GpuLeakConfig()
         self._state_view = state_view
         # Disk-backed counter so the multi-tick threshold survives ticks.
@@ -90,20 +71,7 @@ class GpuLeakDetector:
         self._state_view.save({"consecutive_hits": self._consecutive_hits})
 
     def evaluate(self, ctx: ReactorContext, data: SourceData) -> list[Symptom]:
-        """Advance the leak counter and emit a symptom once it crosses threshold.
-
-        Resets the counter on any tick whose conditions aren't met (missing GPU
-        data, not all GPUs full, or a live owner process present).
-
-        Args:
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data including ``local_gpu`` and
-                ``local_processes``.
-
-        Returns:
-            list[Symptom]: A single ``gpu_memory_leaked`` symptom once the
-                consecutive-tick threshold is crossed, otherwise an empty list.
-        """
+        """Advance the leak counter and emit a symptom once it crosses threshold."""
         gpus = self._extract_gpu_snapshots(data)
         if not gpus:
             # No GPU data → reset.
@@ -132,36 +100,16 @@ class GpuLeakDetector:
 
         return [self._build_symptom(gpus, ctx)]
 
-    # ------------------------------------------------------------------
     # internals
-    # ------------------------------------------------------------------
     def _extract_gpu_snapshots(self, data: SourceData) -> list[dict[str, Any]]:
-        """Pull the list of per-GPU snapshot dicts from the source data.
-
-        Args:
-            data (SourceData): Collected source data.
-
-        Returns:
-            list[dict[str, Any]]: Per-GPU snapshot dicts, or an empty list when
-                no usable GPU data is present.
-        """
+        """Pull the list of per-GPU snapshot dicts from the source data."""
         gpus = data.local_gpu.get("gpus") if isinstance(data.local_gpu, dict) else None
         if not isinstance(gpus, list):
             return []
         return [snap for snap in gpus if isinstance(snap, dict)]
 
     def _is_full(self, snap: dict[str, Any]) -> bool:
-        """Decide whether a single GPU snapshot counts as memory-full.
-
-        A GPU is full when its memory utilization meets the configured percent
-        threshold, or when its free VRAM falls to/under the free-MiB threshold.
-
-        Args:
-            snap (dict[str, Any]): A single per-GPU snapshot dict.
-
-        Returns:
-            bool: ``True`` if the GPU is considered full, otherwise ``False``.
-        """
+        """Decide whether a single GPU snapshot counts as memory-full."""
         cfg = self._config
         util_mem = snap.get("util_mem_pct")
         if isinstance(util_mem, (int, float)) and util_mem >= cfg.util_mem_pct_threshold:
@@ -175,16 +123,7 @@ class GpuLeakDetector:
         return False
 
     def _live_owners(self, data: SourceData) -> list[dict[str, Any]]:
-        """Find live processes that legitimately own GPU memory.
-
-        Args:
-            data (SourceData): Collected source data including
-                ``local_processes``.
-
-        Returns:
-            list[dict[str, Any]]: Process dicts whose command line matches any
-                configured owner pattern, possibly empty.
-        """
+        """Find live processes that legitimately own GPU memory."""
         if not data.local_processes:
             return []
         owners: list[dict[str, Any]] = []
@@ -203,16 +142,7 @@ class GpuLeakDetector:
         gpus: list[dict[str, Any]],
         ctx: ReactorContext,
     ) -> Symptom:
-        """Construct the ``gpu_memory_leaked`` symptom from current snapshots.
-
-        Args:
-            gpus (list[dict[str, Any]]): Per-GPU snapshot dicts for this tick.
-            ctx (ReactorContext): Reactor context for the current tick.
-
-        Returns:
-            Symptom: A HIGH-severity symptom describing the suspected KFD/VRAM
-                leak with per-GPU evidence and a recover suggestion.
-        """
+        """Construct the ``gpu_memory_leaked`` symptom from current snapshots."""
         cfg = self._config
         per_gpu: list[dict[str, Any]] = []
         for snap in gpus:

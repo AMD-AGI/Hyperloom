@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Map Critic confidence / verdict signals to KB ``importance`` floats.
-
-Critic may not write the top tier (``>= 0.85``), reserved for Alchemist
-promotion; the service guards downgrades so we emit honest in-range values
-via :func:`importance_for_verdict` and :func:`importance_for_kb_draft`.
-"""
+"""Map Critic confidence / verdict signals to KB ``importance`` floats."""
 
 from __future__ import annotations
 
@@ -28,18 +23,7 @@ def importance_for_verdict(
     confidence: str | None = None,
     has_measurement: bool = False,
 ) -> float:
-    """Choose KB ``importance`` for a review_verdict-derived KB write.
-
-    Args:
-        verdict: One of the contract verdicts (``approve`` / ``reject`` / ...).
-        confidence: ``high`` / ``medium`` / ``low`` (Critic schema). ``None``
-            falls back to ``medium``.
-        has_measurement: True when the packet carries a comparable
-            before/after benchmark or reproducer evidence.
-
-    Returns:
-        float: The chosen importance within Critic's allowed range.
-    """
+    """Choose KB ``importance`` for a review_verdict-derived KB write."""
     confidence_label = (confidence or "medium").lower()
     # ``advise`` / ``needs_review`` are informational — keep them low.
     if verdict in ("advise", "needs_review"):
@@ -52,19 +36,7 @@ def importance_for_verdict(
 
 
 def importance_for_kb_draft(*, confidence: float | None) -> float:
-    """Choose KB ``importance`` for a Critic kb_draft entry.
-
-    The Critic SKILL emits ``confidence`` as a float in ``[0.0, 1.0]``; we
-    promote drafts that pass ``0.8`` to ``0.6`` and otherwise default to
-    ``0.5``.
-
-    Args:
-        confidence (float | None): Draft confidence in ``[0.0, 1.0]``;
-            ``None`` uses the default.
-
-    Returns:
-        float: The chosen draft importance.
-    """
+    """Choose KB ``importance`` for a Critic kb_draft entry."""
     if confidence is None:
         return _DRAFT_DEFAULT
     if confidence >= 0.8:
@@ -73,14 +45,7 @@ def importance_for_kb_draft(*, confidence: float | None) -> float:
 
 
 def cap_importance(value: float) -> float:
-    """Clamp ``value`` to Critic's allowed write range.
-
-    Args:
-        value (float): The proposed importance value.
-
-    Returns:
-        float: ``value`` clamped to ``[0.0, CRITIC_IMPORTANCE_CEILING]``.
-    """
+    """Clamp ``value`` to Critic's allowed write range."""
     return min(max(0.0, float(value)), CRITIC_IMPORTANCE_CEILING)
 
 

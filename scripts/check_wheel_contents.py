@@ -26,25 +26,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _excluded_dir_names(cfg: dict) -> set[str]:
-    """Literal directory names in the packages.find exclude patterns.
-
-    Derived rather than hardcoded so this cannot narrow while the exclude list
-    widens: ``*.testing.*`` contributes ``testing``, the ``*`` segments nothing.
-
-    Patterns under a shipped package-data *subtree* are skipped.
-    ``kernelforge.data`` is excluded from *package* discovery -- its resource
-    trees contain .py sample kernels that must not be handed out as importable
-    modules -- but its files do ship, declared as ``kernelforge =
-    ["data/**/*"]``. Reading its segments literally would put "kernelforge" and
-    "data" in the leak vocabulary and flag the entire package as a test tree.
-
-    The skip is keyed on the subtree the globs actually name (``kernelforge`` +
-    ``data/**/*`` -> ``kernelforge.data``), not on the package-data key alone.
-    A bare ``startswith("kernelforge.")`` would also swallow a future
-    ``kernelforge.tests`` exclusion -- narrowing this function while the exclude
-    list widened, which is the exact failure the paragraph above says it is
-    written to prevent.
-    """
+    """Literal directory names in the packages.find exclude patterns."""
     patterns = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
     shipped = tuple(
         f"{key}.{glob.split('/', 1)[0]}"
@@ -108,27 +90,10 @@ def _check_data_files_are_present(cfg: dict, names: list[str]) -> list[str]:
 #: an empty knowledge base produces no error, just worse kernels. Absorbed from
 #: KernelForge's deleted ``test_wheel_content.py``, which built its own wheel.
 _NON_EMPTY_TREES = {
-    # kernelforge/data/knowledge_base/ used to be listed here with a floor of
-    # 100. The tree was removed after an audit found no reader: nothing consumed
-    # config.knowledge_dir, no prompt pointed at it, and it was never granted to
-    # an agent sandbox.
-    # Was 700, when local_knowledge still carried per-operator cards duplicated
-    # across every language folder. That duplication was removed deliberately
-    # (the same card existed 3-5 times over, and operator-level facts go stale
-    # faster than they can be maintained), taking the tree from 720 .md files to
-    # 213. Then languages/asm/ went too (117 files: AMD RAD's vendored IntelliKit
-    # ASM skills plus the CDNA4 ISA extracts), when the intellikit kernel backend
-    # it served was removed -- no other backend maps to that language folder.
-    # The floor is a "did the tree get wiped" guard, not a size assertion --
-    # 120 keeps that guard meaningful against the current 134 files.
+    # kernelforge/data/knowledge_base/ used to be listed here with a floor of 100.
     "kernelforge/data/local_knowledge/": 120,
     "kernelforge/data/examples/": 40,
-    # 1, not 3. The tree holds exactly three files today, so a floor of 3 was
-    # really "all of them", and the two non-patch files (a README and a
-    # SUPPORTED_VERSIONS.txt) are documentation whose legitimate removal would
-    # have turned this check red for no packaging reason. What must actually
-    # ship is the patch itself, and _REQUIRED_FILES asserts that by name --
-    # a floor cannot, since three READMEs would satisfy it.
+    # 1, not 3.
     "kernelforge/data/serving_patches/": 1,
 }
 

@@ -1,8 +1,4 @@
-"""Coverage completion tests for kernel_backends/base.py.
-
-Covers the single prompt builder, AITER-operator detection, and the
-gbrain-combination branches of the combined-KB builder (gbrain mocked).
-"""
+"""Coverage completion tests for kernel_backends/base.py."""
 
 from __future__ import annotations
 
@@ -25,8 +21,7 @@ def test_is_aiter_operator_true():
 def test_is_aiter_operator_false_cases():
     # Wrong task type.
     assert not _is_aiter_operator("snippet", ["/work/aiter/ops/x.py"])
-    # Right task type but no aiter path component (substring 'aiter' in name
-    # must not count).
+    # Right task type but no aiter path component (substring 'aiter' in name must not count).
     assert not _is_aiter_operator("repository", ["/work/aiter_pa_decode/x.py"])
     assert not _is_aiter_operator("repository", None)
     assert not _is_aiter_operator("", ["/work/aiter/ops/x.py"])

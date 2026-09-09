@@ -169,11 +169,7 @@ def _write_report(root, rel, tput):
 
 
 def test_target_baseline_falls_back_to_a_warmup_only_reference(tmp_path):
-    """A budget-dropped measure round leaves the warmup as the only report.
-
-    Raising there refuses to start a session against a reference the earlier
-    run really did produce.
-    """
+    """A budget-dropped measure round leaves the warmup as the only report."""
     workspace = tmp_path / "warmup-only"
     _write_report(workspace, "warmup_round/bench", 800.0)
     assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(800.0)
@@ -272,8 +268,8 @@ async def test_run_routes_a_met_objective_through_sweep(session_dir):
         )
         assert c.shared_state.target_reached_at
         assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
-        # The ladder never ran in this harness, so SWEEP names its own failure
-        # rather than borrowing the target's success.
+        # The ladder never ran in this harness, so SWEEP names its own failure rather than borrowing the target's
+        # success.
         assert reason == "sweep_failed"
     finally:
         await c.stop()
@@ -310,8 +306,8 @@ async def test_run_stops_on_time_exhausted(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         reason = await c.run(max_minutes=0.001, max_ticks=1000)
-        # The 60 ms budget can expire before or after PRELUDE depending on the
-        # runner's speed; both reasons prove that the session bound stopped it.
+        # The 60 ms budget can expire before or after PRELUDE depending on the runner's speed; both reasons prove that
+        # the session bound stopped it.
         assert reason in {"time_exhausted", "time_exhausted_during_prelude"}
     finally:
         await c.stop()
@@ -403,8 +399,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
             tick_interval_sec=0.0,
         )
         assert calls_at_closing, "expected closing phase to be entered"
-        # A spent bound cancels phase-enter and skips reactors on the tick
-        # that trips CLOSE. CLOSE itself must still not add LLM turns.
+        # A spent bound cancels phase-enter and skips reactors on the tick that trips CLOSE.
         assert spy.calls == calls_at_closing[0]
     finally:
         await c.stop()
@@ -589,8 +584,7 @@ def _state_with_within(value: object) -> SharedState:
 
 
 class TestARooflineTargetOnlyCountsAMeasuredRoofline:
-    """The objective has no separate "was it profiled" gate; an unmeasured
-    ceiling simply reads as zero progress."""
+    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero progress."""
 
     def test_no_snapshot_reads_as_unmeasured(self):
         st = SharedState(session_id="s")
@@ -626,8 +620,7 @@ class TestARooflineTargetOnlyCountsAMeasuredRoofline:
 
 
 class TestEitherTargetEndsTheRun:
-    """Gain and roofline measure different axes, so they compose rather than
-    compete."""
+    """Gain and roofline measure different axes, so they compose rather than compete."""
 
     def _both(self) -> AnyObjective:
         return AnyObjective([TargetGainObjective(300.0), TargetRooflineObjective(80.0)])
@@ -648,13 +641,7 @@ class TestEitherTargetEndsTheRun:
         assert self._both().reached(st) is False
 
     def test_the_gap_comes_from_the_closest_member_not_the_smaller_number(self):
-        """The two gaps are percentage points of different quantities, so the
-        smaller number is not the nearer target.
-
-        Gain is 100 points short of 300 and roofline 40 short of 80, yet gain is
-        the two-thirds-done one and roofline only half. A numeric minimum would
-        report 40 and hand the specialists the wrong target to chase.
-        """
+        """The two gaps are percentage points of different quantities, so the smaller number is not the nearer target."""
         st = _state_with_within(40.0)
         st.cumulative_gain_validated = 200.0
         both = self._both()

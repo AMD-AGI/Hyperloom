@@ -1,34 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Record a forge-loop run's best solution in the KB Store.
-
-Called after each durable best and during graceful finalization. One run's
-result becomes one record under the kernel five-tuple
-(``kernel:<op>:<framework>:<framework_version>:<backend>:<gpu>``):
-
-  * the record carries the metrics, the LLM-distilled strategy/recipe/lessons,
-    and the implementation signature a later run gates reuse on;
-  * the cumulative diff travels beside it as a ``solution.patch`` artifact, so a
-    reader can rank candidates before deciding to pull a patch;
-  * the store's champion pointer follows the best speedup recorded so far.
-
-Identity is deterministic and never LLM-inferred. Only the free-text experience
-(strategy / recipe / lessons) and the coarse ``category`` bucket come from a
-single best-effort LLM call.
-
-Write policy: record any run that produced a diff and improved on the start it
-was given. Losing to the source baseline is not a reason to discard the
-evidence -- an operator that cannot yet beat its baseline is exactly the one
-whose progress has to survive to the next run, and withholding it made every
-such run restart from the same losing seed. Only the champion pointer is gated
-on speedup, and a run that merely reproduces the solution it warm-started from
-is still refused: that is a second copy, not progress.
-
-Everything here is best-effort: if the store is unavailable, or the LLM
-summarization fails, the run is simply not mirrored - it never raises into the
-forge-loop.
-"""
+"""Record a forge-loop run's best solution in the KB Store."""
 
 from __future__ import annotations
 
@@ -60,37 +33,16 @@ _LLM_TIMEOUT_SEC = 150
 # Frameworks whose kernels are detected from package-relative paths.
 _FRAMEWORKS = ("aiter", "sglang", "vllm")
 
-# Explicit "no framework" values for --framework: a standalone kernel file that
-# belongs to no framework package. Treated identically to an undetected path.
+# Explicit "no framework" values for --framework: a standalone kernel file that belongs to no framework package.
 _NO_FRAMEWORK_SENTINELS = {"standalone", "none", "unknown"}
 
 _C_LIKE_LANGS = {"hip", "cuda", "cpp", "c"}
 
 
-# --------------------------------------------------------------------------- #
-# slug / value normalization
+# --------------------------------------------------------------------------- # slug / value normalization
 # --------------------------------------------------------------------------- #
 def resolve_operation(kernel_source: str, kernel_path: str, target_functions: list[str] | None = None) -> str:
-    """Return the operation identity (the entry function name, not the file name).
-
-    Uses ``derive_kernel_names`` (parses ``@triton.jit`` / ``@*.kernel`` defs and
-    HIP/CUDA ``__global__`` entries) on the anchor source, preferring a
-    compute-kernel name over a host launcher/wrapper.
-
-    Repository tasks whose anchor file is only a host wrapper (the real
-    ``@triton.jit`` kernels live in OTHER files it imports) declare no GPU kernel
-    in the anchor, so ``derive_kernel_names`` finds nothing. In that case fall
-    back to ``target_functions`` before the last-resort file stem.
-
-    The fallback selection is ORDER-INDEPENDENT: a producer with hand-declared
-    ``--target-functions`` and a consumer deriving target functions from the
-    source set may hand the same set of names in a different order.
-    Picking ``target_functions[0]`` would then diverge and split the slug, so the
-    candidate set is de-duplicated and sorted, preferring a compute kernel over a
-    launcher/wrapper, before the first is chosen. Single-file tasks are
-    unaffected: the anchor derive succeeds and ``target_functions`` is never
-    consulted.
-    """
+    """Return the operation identity (the entry function name, not the file name)."""
 
     def _pick(names: list[str]) -> str | None:
         preferred = [n for n in names if not n.lower().startswith(("launch", "main", "wrapper", "run_"))]
@@ -101,15 +53,15 @@ def resolve_operation(kernel_source: str, kernel_path: str, target_functions: li
     try:
         from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 
-        # Anchor source order is stable for the same file, so keep it (the first
-        # compute kernel is usually the primary one, helpers come later).
+        # Anchor source order is stable for the same file, so keep it (the first compute kernel is usually the primary
+        # one, helpers come later).
         picked = _pick(derive_kernel_names(kernel_source or ""))
         if picked:
             return picked
     except Exception as exc:  # noqa: BLE001 - best-effort; fall back below
         log.debug("resolve_operation: derive_kernel_names failed: %r", exc)
-    # Fallback: order-independent (sorted, de-duplicated) so producer/consumer
-    # converge even when their target-function lists are ordered differently.
+    # Fallback: order-independent (sorted, de-duplicated) so producer/consumer converge even when their
+    # target-function lists are ordered differently.
     cand = sorted({fn.strip() for fn in (target_functions or []) if fn and fn.strip()})
     picked = _pick(cand)
     if picked:
@@ -124,18 +76,7 @@ def detect_backend_language(kernel_backend: str) -> str:
 
 
 def detect_framework(kernel_path: str, framework_override: str = "") -> str:
-    """Detect the owning framework.
-
-    ``framework_override`` (an explicit ``--framework`` passed by the caller) is
-    AUTHORITATIVE when given: relying on scanning ``Path(kernel_path).parts`` for
-    a framework directory name is fragile across producer/consumer workspaces
-    (e.g. a flattened scratch copy drops the ``vllm/`` directory), which would
-    split the slug. A "no framework" sentinel (``standalone``/``none``/
-    ``unknown``) explicitly means a standalone file.
-
-    Without an override, fall back to the deterministic path scan. A standalone
-    file with no known framework directory yields ``unknown``.
-    """
+    """Detect the owning framework."""
     raw_fw = (framework_override or "").strip().lower()
     fw = canonical_owner_framework(raw_fw)
     if raw_fw:
@@ -172,14 +113,7 @@ def find_defining_source(
     *,
     source_contents: dict[str, str] | None = None,
 ) -> str:
-    """Return the source text that DEFINES ``op`` (for signature/dtype parsing).
-
-    For a repository task the operation may live in a file OTHER than the anchor
-    (e.g. the anchor is a host wrapper), so scan the whole source set. Prefers the
-    anchor when it defines ``op``. Falls back to the anchor source when nothing
-    matches. Single-file tasks pass no extra ``source_files`` and simply reuse the
-    anchor source.
-    """
+    """Return the source text that DEFINES ``op`` (for signature/dtype parsing)."""
     if not op:
         return anchor_source or ""
     def_re = re.compile(r"\bdef\s+" + re.escape(op) + r"\b")
@@ -201,17 +135,7 @@ def find_defining_path(
     *,
     source_contents: dict[str, str] | None = None,
 ) -> str:
-    """Return the PATH of the file that DEFINES ``op`` (for framework detection).
-
-    The framework identity must follow the file where the compute kernel is
-    actually DEFINED, not the anchor that merely calls it. A common cross-package
-    case: the ``--kernel`` anchor is a vLLM/SGLang entry/dispatch file, but the
-    real ``@triton.jit`` / ``__global__`` kernel lives in aiter, listed in
-    ``source_files``. Keying the framework off the anchor path would then yield
-    ``vllm`` on one side and ``aiter`` on another and split the slug. Mirrors
-    ``find_defining_source`` but returns the path; falls back to the anchor path
-    when the anchor defines ``op`` or nothing matches.
-    """
+    """Return the PATH of the file that DEFINES ``op`` (for framework detection)."""
     if not op:
         return anchor_path
     def_re = re.compile(r"\bdef\s+" + re.escape(op) + r"\b")
@@ -250,9 +174,8 @@ def infer_source_owner_framework(
     )
 
 
-# --------------------------------------------------------------------------- #
-# deterministic signature -> input dtypes
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # deterministic signature -> input
+# dtypes --------------------------------------------------------------------------- #
 def _balanced_parens(source: str, open_idx: int) -> tuple[str, int]:
     """Return (inner, close_idx) for the parens opened at ``open_idx``."""
     depth = 0
@@ -268,11 +191,7 @@ def _balanced_parens(source: str, open_idx: int) -> tuple[str, int]:
 
 
 def _signature_params(source: str, func: str) -> str | None:
-    """Return the raw parameter-list string of ``func``'s definition, or None.
-
-    Handles a Python ``def`` and a C/C++ definition (a ``func(...) {`` whose
-    parens are followed by a body), skipping call sites.
-    """
+    """Return the raw parameter-list string of ``func``'s definition, or None."""
     m = re.search(r"\bdef\s+" + re.escape(func) + r"\s*\(", source)
     if m:
         inner, _ = _balanced_parens(source, m.end() - 1)
@@ -326,12 +245,8 @@ def _parse_param_c(p: str) -> tuple[str, str]:
     p = p.split("=")[0].strip()
     if not p or p == "void":
         return "", ""
-    # Peel trailing array subscripts, then the last identifier is the parameter
-    # name and whatever precedes it is the type. Each subscript is matched
-    # unambiguously as ``[<optional spaces><optional digits><optional spaces>]``
-    # via a single leading ``\s*`` plus a ``(?:\d+\s*)?`` group (the ``\d+`` gates
-    # entry), so there is no two-adjacent-``\s*`` split — this stays linear and
-    # cannot backtrack catastrophically on hostile "a[ ][ ]..." input.
+    # Peel trailing array subscripts, then the last identifier is the parameter name and whatever precedes it is the
+    # type.
     body = p
     arr = ""
     m_arr = re.search(r"((?:\[\s*(?:\d+\s*)?\])+)\s*$", body)
@@ -343,8 +258,8 @@ def _parse_param_c(p: str) -> tuple[str, str]:
         return "", ""
     typ = body[: m_name.start()].strip()
     name = m_name.group(1).strip()
-    # Pointer/reference markers may attach to the name side ("float *a"); fold
-    # them back into the type so the recorded dtype is faithful.
+    # Pointer/reference markers may attach to the name side ("float *a"); fold them back into the type so the recorded
+    # dtype is faithful.
     for mark in ("*", "&"):
         n = p.count(mark)
         if n and mark not in typ:
@@ -353,12 +268,7 @@ def _parse_param_c(p: str) -> tuple[str, str]:
 
 
 def _strip_param_comments(params: str, is_c: bool) -> str:
-    """Remove comments from a raw parameter-list string.
-
-    Signatures commonly carry per-line comments (e.g. AITER annotates each tensor
-    param with a shape comment); their commas/newlines would otherwise corrupt
-    top-level splitting and pollute the parsed parameter names.
-    """
+    """Remove comments from a raw parameter-list string."""
     if is_c:
         params = re.sub(r"/\*.*?\*/", "", params, flags=re.DOTALL)
         return "\n".join(re.sub(r"//.*$", "", ln) for ln in params.splitlines())
@@ -366,13 +276,7 @@ def _strip_param_comments(params: str, is_c: bool) -> str:
 
 
 def extract_input_dtypes(kernel_source: str, func: str, lang: str) -> dict[str, str]:
-    """Parse ``func``'s signature into ``{param_name: declared_type}``.
-
-    Deterministic best-effort: records the types literally declared in the entry
-    signature (C types for HIP/CUDA, annotations for Python DSLs). Parameters
-    with no declared type map to ``unknown``. Returns ``{}`` when the signature
-    can't be located.
-    """
+    """Parse ``func``'s signature into ``{param_name: declared_type}``."""
     if not kernel_source or not func:
         return {}
     params = _signature_params(kernel_source, func)
@@ -388,9 +292,8 @@ def extract_input_dtypes(kernel_source: str, func: str, lang: str) -> dict[str, 
     return out
 
 
-# --------------------------------------------------------------------------- #
-# LLM summarization (strategy / recipe / lessons / category only)
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # LLM summarization (strategy / recipe /
+# lessons / category only) --------------------------------------------------------------------------- #
 _SUMMARY_SYSTEM = (
     "You analyze the trajectory of an autonomous GPU-kernel optimization run and "
     "extract a compact, structured summary. You never write code - you only "
@@ -497,11 +400,7 @@ def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_run(config, workspace: str, op: str, digest: str, kernel_source: str, usage=None) -> dict[str, Any]:
-    """Summarize a run with one LLM call; returns normalized fields (never raises).
-
-    On any backend failure, timeout, or unparsable reply every field degrades to
-    its empty / ``others`` default so the caller can still write a page.
-    """
+    """Summarize a run with one LLM call; returns normalized fields (never raises)."""
     defaults = _normalize_summary({})
     prompt = _summary_prompt(op, digest, kernel_source)
     try:
@@ -519,8 +418,7 @@ def summarize_run(config, workspace: str, op: str, digest: str, kernel_source: s
     return parsed
 
 
-# --------------------------------------------------------------------------- #
-# page rendering
+# --------------------------------------------------------------------------- # page rendering
 # --------------------------------------------------------------------------- #
 def _changed_files_from_diff(diff: str) -> list[str]:
     """Extract the list of changed file paths from a unified/git diff."""
@@ -551,13 +449,7 @@ def _experience_markdown(
     knowledge: dict[str, Any],
     patch_name: str,
 ) -> str:
-    """Render one recorded run for a reader.
-
-    The record's own fields are what a later run compares and ranks; this is
-    what a person or an agent reads when deciding whether a candidate is worth
-    replaying. The diff is not inlined: it sits beside this file under its own
-    name, and copying it here would store the same bytes twice.
-    """
+    """Render one recorded run for a reader."""
     metric = knowledge.get("metric") if isinstance(knowledge.get("metric"), dict) else {}
     kernel = knowledge.get("task_id") or canonical_id
     snr = metric.get("snr_db")
@@ -617,25 +509,7 @@ def write_run_experience(
     reused_speedup: float | None = None,
     usage=None,
 ) -> dict[str, Any]:
-    """Mirror one run's best solution into the experience store. Never raises.
-
-    Logical identity and the implementation signature are derived
-    deterministically from the caller's operator, editable sources, concrete
-    target symbols, framework, and backend. Only experience prose/category
-    may come from an LLM. Returns a small
-    status dict for logging: ``{"written": bool, "reason": str, ...}``.
-
-    The caller persists that reason, and the store client this write opens
-    authenticates with a bearer token, so a failure's text is redacted and
-    bounded before it is returned or logged.
-
-    ``summary_override`` supplies a pre-built ``{category, strategy, recipe,
-    lessons}`` dict INSTEAD of the (expensive, ~150s) LLM summarization. The
-    incremental-publish path (called after every new best, inside the running
-    loop) passes a cheap heuristic summary so it neither stalls the loop nor
-    nests an event loop; the final graceful write passes None to get the precise
-    LLM summary, which overwrites the same solution page in place.
-    """
+    """Mirror one run's best solution into the experience store. Never raises."""
     try:
         return _write_run_experience_impl(
             config=config,
@@ -662,8 +536,8 @@ def write_run_experience(
             usage=usage,
         )
     except Exception as exc:  # noqa: BLE001 - a KB write must never break the loop
-        # Imported here rather than at module scope: the reader imports this
-        # module for detect_framework, so a top-level import would close a cycle.
+        # Imported here rather than at module scope: the reader imports this module for detect_framework, so a
+        # top-level import would close a cycle.
         from kernelforge.knowledge.experience_reader import sanitize_read_error
         from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
 
@@ -697,9 +571,8 @@ def _write_run_experience_impl(
     reused_speedup=None,
     usage=None,
 ) -> dict[str, Any]:
-    # The hardware model addresses the record; without it the run would file its
-    # experience under a GPU-less address that no read ever resolves to, so a
-    # silent write is worse than no write at all.
+    # The hardware model addresses the record; without it the run would file its experience under a GPU-less address
+    # that no read ever resolves to, so a silent write is worse than no write at all.
     gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
@@ -709,17 +582,12 @@ def _write_run_experience_impl(
     this_speedup = float(mean_case_speedup)
     if not math.isfinite(this_speedup) or this_speedup <= 0.0:
         return {"written": False, "reason": "invalid_mean_case_speedup"}
-    # Losing to the source baseline is deliberately not a refusal. An operator
-    # whose best port is still slower than what ships is the one that most needs
-    # its progress carried forward, and refusing it made every later run read the
-    # same losing seed and repeat the same climb: one operator measured here
-    # spent 48h reaching 0.9887x, had it discarded for missing 1.0, and the next
-    # run started again from the 0.0047x record the first one had read.
+    # Losing to the source baseline is deliberately not a refusal: an operator whose best port is still slower than
+    # what ships is the one that most needs its progress carried forward, and withholding it made every later run read
+    # the same losing seed. Only the champion pointer stays gated on speedup.
     #
-    # A warm-started run begins already holding a recorded solution. Recording it
-    # again under this run's id would not be a new solution, just a second copy
-    # of the one it started from, and enough copies crowd the ranking a later
-    # warm start reads. The patch itself stays: it is still this run's result.
+    # A warm-started run begins already holding a recorded solution, so recording it again under this run's id would
+    # file a second copy of the one it started from rather than progress.
     if (
         isinstance(reused_speedup, (int, float))
         and math.isfinite(float(reused_speedup))
@@ -730,8 +598,6 @@ def _write_run_experience_impl(
         return {"written": False, "reason": "empty_diff"}
 
     # Deterministic identity (never LLM-inferred, so the address is stable).
-    # Read and write share one resolver so a warm start cannot look somewhere
-    # a prior write never reached.
     from kernelforge.knowledge.loop_identity import (
         EXPERIENCE_ARTIFACT,
         PATCH_ARTIFACT,
@@ -761,8 +627,7 @@ def _write_run_experience_impl(
     elif implementation_signature_override or implementation_identity_override:
         raise ValueError("implementation signature and identity overrides must be supplied together")
     else:
-        # Compatibility for direct/non-campaign callers. Forge campaigns always
-        # supply the immutable pristine contract captured before warm-start.
+        # Compatibility for direct/non-campaign callers.
         impl_signature, impl_identity = implementation_signature(
             workspace=workspace,
             kernel_path=kernel_path,
@@ -778,13 +643,7 @@ def _write_run_experience_impl(
         impl_signature[:12],
     )
 
-    # The KB Store is addressed by the recipe identity, so the facade is opened
-    # on it rather than on a composed slug. An unconfigured store yields an
-    # inactive facade instead of raising, which is the cold-start outcome the
-    # loop already handles.
-    #
-    # Imported here rather than at module scope: the facade's identity module
-    # imports this one, so a top-level import would close a cycle.
+    # The KB Store is addressed by the recipe identity, so the facade is opened on it rather than on a composed slug.
     from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 
     kb = KernelRecipeKB.open_identity(identity, config)
@@ -792,9 +651,7 @@ def _write_run_experience_impl(
         log.info("experience write skipped: %s", kb.reason or "not_configured")
         return {"written": False, "reason": kb.reason or "not_configured"}
 
-    # Experience prose + category. Use the caller-supplied cheap summary when
-    # given (incremental publish); otherwise pay for the LLM summary (final
-    # graceful write). ``_normalize_summary`` guarantees all fields are present.
+    # Experience prose + category.
     if summary_override is not None:
         summary = _normalize_summary(summary_override)
     else:
@@ -816,9 +673,8 @@ def _write_run_experience_impl(
     }
     changed_files = _changed_files_from_diff(cumulative_diff)
 
-    # Everything a later run needs to judge and reuse this solution, minus the
-    # diff: that travels as an artifact so a reader can rank candidates without
-    # pulling a patch it may not want.
+    # Everything a later run needs to judge and reuse this solution, minus the diff: that travels as an artifact so a
+    # reader can rank candidates without pulling a patch it may not want.
     knowledge = {
         "task_id": experiment_id,
         "category": summary["category"],
@@ -835,8 +691,8 @@ def _write_run_experience_impl(
 
     with tempfile.TemporaryDirectory(prefix="forge-loop-kb-") as staging:
         patch_path = Path(staging) / PATCH_ARTIFACT
-        # Bytes, not text: writing through a text handle would translate the
-        # newlines a patch has to reproduce exactly.
+        # Bytes, not text: writing through a text handle would translate the newlines a patch has to reproduce
+        # exactly.
         patch_path.write_bytes(cumulative_diff.encode("utf-8"))
         experience_path = Path(staging) / EXPERIENCE_ARTIFACT
         experience_path.write_text(
@@ -847,11 +703,8 @@ def _write_run_experience_impl(
             ),
             encoding="utf-8",
         )
-        # The store names a record after its own content, so an LLM-written
-        # summary of a solution this run already recorded is filed as a second
-        # record: same patch, same speedup, richer prose. Suppressing that pair
-        # needs a way to name the record being revised, which the store does not
-        # expose, so the duplicate stands until the write strategy is settled.
+        # The store names a record after its own content, so an LLM-written summary of a solution this run already
+        # recorded is filed as a second record: same patch, same speedup, richer prose.
         outcome = kb.write_candidate(
             knowledge,
             files={

@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reuse of standalone FlyDSL recipes, filed under a producer-owned identity.
-
-A rewrite is only reusable when the contract it was written against still
-holds, so a candidate is admitted on exact hashes of the source, the driver and
-the builder symbol rather than on its score. The score decides ranking and the
-champion pointer, nothing else: a correct port that loses to the source
-baseline is still what saves the next run from repeating PORT.
-
-Candidates that fail the gate are not discarded either. Their code goes back to
-the author as reference material, which is why the reader fetches content for
-rejected candidates too.
-"""
+"""Reuse of standalone FlyDSL recipes, filed under a producer-owned identity."""
 
 from __future__ import annotations
 
@@ -72,12 +61,7 @@ class RewriteKbReadResult:
 
 @dataclass(frozen=True)
 class _ReadPlan:
-    """What the reader resolved before it started trying candidates.
-
-    The store is carried alongside the candidates because a candidate's code
-    is an artifact fetched on demand, not a field of the document that ranked
-    it.
-    """
+    """What the reader resolved before it started trying candidates."""
 
     store: RewriteRecordStore | None
     candidates: list[dict[str, Any]]
@@ -415,34 +399,12 @@ def write_flydsl_kb_solution(
 ) -> dict:
     """Record a validated FlyDSL port as a candidate under its identity.
 
-    Speed is not a condition of recording. Correctness makes an artifact
-    reusable, and an operator whose best port still loses to the source baseline
-    is precisely the one whose progress has to reach the next run: gating the
-    write on beating the baseline meant a warm-started run that fell short
-    banked nothing, so the run after it read the same losing seed and repeated
-    the same climb. Only the champion pointer stays gated on speedup.
-
-    ``session_digest`` replaces the artifact digest that normally makes the
-    candidate's name stable. That name changes with the artifact, so a caller
-    publishing on every KEEP would file one record per KEEP and bury the
-    identity's history under a single run; passing a digest stable for the run
-    makes each publication replace the last. It substitutes for the digest
-    rather than for the whole name so the identity fingerprint survives -- ids
-    partition artifact storage, and one that repeated across identities would
-    let two of them collide.
-
-    ``content_override`` supplies the kernel bytes instead of reading the
-    workspace, for a caller publishing while an agent is still editing there.
-
-    ``snr_db`` is the accuracy measured for *this* artifact. A caller that did
-    not measure it passes ``None``; a reading taken from a different artifact is
-    not a substitute, because the record does not say which kernel it was taken
-    from and a later reader has no way to tell that it does not belong.
-
-    Never raises, and the returned reason is persisted by the rewrite runner, so
-    a store exception is redacted and bounded the way the read side above does
-    it. The exception type leads the message, so the cap can only cut the tail of
-    a long error body.
+    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``session_digest`` substitutes
+    for the artifact digest inside the candidate name -- not for the whole name, so the identity fingerprint still
+    partitions artifact storage -- which lets a caller publishing on every KEEP replace its last record instead of
+    burying the identity's history under one run. ``content_override`` supplies the kernel bytes for a caller
+    publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy measured for *this* artifact;
+    a caller that did not measure it passes ``None``, because a reading taken from another kernel is not a substitute.
     """
     store = create_rewrite_record_store(config)
     if store is None:
@@ -493,10 +455,8 @@ def write_flydsl_kb_solution(
             staged = Path(temporary) / _KERNEL_ARTIFACT
             staged.write_bytes(content)
             store.write(canonical_id, session_id, knowledge, {_KERNEL_ARTIFACT: staged})
-        # The pointer says "the best result for this identity", so a port that
-        # loses to the source baseline never takes it, even when it is the only
-        # one recorded. The reader enumerates candidates rather than following
-        # the pointer, so staying unpromoted costs such a port nothing here.
+        # The pointer says "the best result for this identity", so a port that loses to the source baseline never
+        # takes it, even when it is the only one recorded.
         promoted = False
         if speedup is not None and speedup > 1.0:
             champion = store.champion_speedup(canonical_id)

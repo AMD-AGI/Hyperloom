@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Guards for defects that were shipped once as unreachable code.
-
-Every case here covers a mechanism that existed, was correct, and was never
-called -- or was called with the wrong input. Unit-testing the helper in
-isolation would have passed in each instance, so these assert the wiring: that
-the verdict actually changes.
-"""
+"""Guards for defects that were shipped once as unreachable code."""
 
 from __future__ import annotations
 
@@ -78,12 +72,7 @@ def _install_parallel_state_stub(monkeypatch):
 
 
 def test_empty_shape_measures_the_whole_suite(monkeypatch):
-    """Validation and benchmarking pass no shape, and they decide KEEP.
-
-    Mapping their empty string onto the preflight's single probe case scored
-    the campaign on one 1x7168 all-reduce and dropped the crossover sweep, the
-    production row count and the fused regression guard.
-    """
+    """Validation and benchmarking pass no shape, and they decide KEEP."""
     torch = pytest.importorskip("torch")
     assert torch  # the driver imports it at module scope
     driver = _load_example_driver(monkeypatch)
@@ -98,11 +87,7 @@ def test_empty_shape_measures_the_whole_suite(monkeypatch):
 
 
 def test_unspecified_mode_runs_the_full_correctness_matrix(monkeypatch):
-    """Smoke alone cannot see the known publish-path race.
-
-    Unit-scale inputs still sum plausibly when a rank reads a half-updated
-    buffer; the stability scale is what moves the result far enough to fail.
-    """
+    """Smoke alone cannot see the known publish-path race."""
     torch = pytest.importorskip("torch")
     assert torch
     driver = _load_example_driver(monkeypatch)
@@ -225,11 +210,7 @@ def test_graph_replays_validate_distinct_inputs(monkeypatch):
 
 
 def test_named_suite_reaches_the_scored_run(monkeypatch):
-    """forge passes no --shape, so a named suite arrives by environment.
-
-    Without this the operator's SUITE only affects the launcher's self-check
-    while the campaign scores the derived default.
-    """
+    """forge passes no --shape, so a named suite arrives by environment."""
     torch = pytest.importorskip("torch")
     assert torch
     monkeypatch.setenv("FORGE_COLLECTIVE_SUITE", "tp8_k3")
@@ -254,18 +235,12 @@ def test_unknown_suite_name_is_rejected(monkeypatch):
 
 
 def test_a_self_relaunching_driver_stays_in_the_callers_group():
-    """The AITER driver must not put its torchrun in a second session.
-
-    SIGKILL is neither catchable nor deliverable across a session boundary, so a
-    detached launcher would survive the caller's group kill with its GPUs still
-    allocated -- and no handler in the driver would ever run to release them.
-    """
+    """The AITER driver must not put its torchrun in a second session."""
     driver = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     src = driver.read_text()
     start = src.index("def self_launch(")
     launch = src[start : start + 2000]
-    # Check the CALL, not the prose: the comment above it names the flag it is
-    # deliberately not passing.
+    # Check the CALL, not the prose: the comment above it names the flag it is deliberately not passing.
     popen_line = next(line for line in launch.splitlines() if "subprocess.Popen(" in line)
     assert "start_new_session" not in popen_line
     assert "cmd" in popen_line and "env=env" in popen_line

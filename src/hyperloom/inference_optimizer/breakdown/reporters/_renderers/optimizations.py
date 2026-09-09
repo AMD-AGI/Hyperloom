@@ -18,18 +18,7 @@ def _count(value: Any) -> int:
 
 
 def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
-    """Say what the per-source totals do not add up to, and why.
-
-    The table sums what each source claims. The session moved by a different
-    amount, and a reader with only the table in front of them has no way to
-    see the difference or where it went.
-
-    Args:
-        validation: The ``optimizations.validation`` block.
-
-    Returns:
-        Notes to attach to the section, empty when nothing was left out.
-    """
+    """Say what the per-source totals do not add up to, and why."""
     notes: list[str] = []
     reconciliation = validation.get("reconciliation_gap_pct")
     if isinstance(reconciliation, (int, float)) and abs(float(reconciliation)) > 0.01:
@@ -83,8 +72,8 @@ def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
         )
     unclaimed = _count(validation.get("unclaimed_integration_count"))
     if unclaimed:
-        # Placed after the unattributed note on purpose: this is the reason to
-        # doubt that figure rather than another item beside it.
+        # Placed after the unattributed note on purpose: this is the reason to doubt that figure rather than another
+        # item beside it.
         notes.append(
             f"{unclaimed} change(s) are recorded as integrated with nothing "
             "crediting them. Whatever they earned is inside the unattributed "
@@ -103,8 +92,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     validation = optimizations.get("validation") or {}
 
     if optimizations.get("available") is False:
-        # Rendering nothing here is what let a session with no records pass for
-        # a session with no optimizations.
+        # Rendering nothing here is what let a session with no records pass for a session with no optimizations.
         reason = str(optimizations.get("unavailable_reason") or "no reason recorded")
         return RenderedSection(
             section_id="optimizations",

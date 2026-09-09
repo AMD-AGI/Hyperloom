@@ -1,29 +1,4 @@
-"""Measurement driver for the Mixtral dynamic FP8 quantization task.
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the two
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public name ``dynamic_quant_fp8`` from ``quant_kernel.py``.
-
-Correctness is scored on the DEQUANTIZED output (``fp8 * scale``) against a pure
-Torch per-tensor quantization oracle, so the metric measures how faithfully the
-kernel reproduces the reference rather than the ~28 dB physical noise floor of
-fp8-e4m3 itself.
-"""
+"""Measurement driver for the Mixtral dynamic FP8 quantization task."""
 
 from __future__ import annotations
 
@@ -54,8 +29,8 @@ def _make_input(rows: int, cols: int, mode: str, device: str) -> torch.Tensor:
     torch.manual_seed(_SEED)
     x = torch.randn(rows, cols, device=device, dtype=torch.bfloat16)
     if mode == "stability":
-        # A wide dynamic range stresses the amax reduction: a kernel that reduces
-        # per-block without a final global pass picks the wrong scale here.
+        # A wide dynamic range stresses the amax reduction: a kernel that reduces per-block without a final global
+        # pass picks the wrong scale here.
         x = x * 200.0
         x[0, 0] = 60000.0
     return x
@@ -110,8 +85,8 @@ def _run_correctness(rows: int, cols: int, mode: str, device: str) -> int:
 
 
 def _run_bench(rows: int, cols: int, warmup: int, iters: int, device: str) -> int:
-    # Static tensors allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead.
+    # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
+    # not host launch overhead.
     x = _make_input(rows, cols, "full", device)
     out, scale = _allocate_outputs(x)
     ref_y, ref_scale = _reference(x)
@@ -120,8 +95,8 @@ def _run_bench(rows: int, cols: int, warmup: int, iters: int, device: str) -> in
     def step() -> None:
         dynamic_quant_fp8(x, out, scale)
 
-    # dirty + verify prove the graph actually captured the kernel (an uncaptured
-    # launch would leave the outputs at their dirtied values and fail verify).
+    # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave the outputs at
+    # their dirtied values and fail verify).
     def dirty() -> None:
         out.zero_()
         scale.zero_()

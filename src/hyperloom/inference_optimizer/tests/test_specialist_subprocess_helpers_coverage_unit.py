@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for specialist_subprocess helpers: worktree pick/setup/teardown,
-claude argv assembly, patch discovery, and done-file parse/unwrap."""
+"""Coverage for specialist_subprocess helpers: worktree pick/setup/teardown, claude argv assembly, patch discovery, and
+done-file parse/unwrap.
+"""
 
 from __future__ import annotations
 
@@ -42,15 +43,7 @@ def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
 
 
 def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: Path) -> None:
-    """The session's own framework wins over whatever trusted root sorts first.
-
-    ``roots`` is the source-file allowlist — a *permission* list whose order
-    carries no information about which framework the session is optimising.
-    Choosing the base from it by position is how a WorldPlay session ended up
-    with an aiter worktree: the pod shipped aiter as a git checkout, so it
-    sorted first, and every patch the specialist wrote against ``hyvideo/``
-    paths was dropped by patch-safety as ``missing_target``.
-    """
+    """The session's own framework wins over whatever trusted root sorts first."""
     other = tmp_path / "aiter"
     other.mkdir()
     (other / ".git").mkdir()
@@ -66,8 +59,7 @@ def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: P
 def test_pick_worktree_base_ignores_a_preferred_root_that_is_not_a_checkout(
     tmp_path: Path,
 ) -> None:
-    """A framework that is pip-installed rather than checked out must not
-    disable isolation; the allowlist order still supplies a usable base."""
+    """A framework that is pip-installed rather than checked out must not disable isolation; the allowlist order still supplies a usable base."""
     other = tmp_path / "aiter"
     other.mkdir()
     (other / ".git").mkdir()
@@ -151,7 +143,9 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied and "SlashCommand" in denied
-    assert str(wt) in cmd and str(ws) in cmd and str(fw) in cmd
+    # --add-dir grants writes; integrate_patch is the only writer of source.
+    assert str(wt) in cmd and str(ws) in cmd
+    assert str(fw) not in cmd
     assert cmd[-2:] == ["--foo", "bar"]
 
 

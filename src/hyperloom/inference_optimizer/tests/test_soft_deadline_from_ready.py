@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the two things measured from the server-ready marker.
-
-When a ``server.log`` is available the explore overtime soft deadline measures
-only the post-ready phase: the clock starts at the server-ready marker,
-excluding pre-ready boot / weight load / first-request recompile. Opt out via
-``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0``.
-
-The same marker is recorded so a round can be *priced* by its two parts rather
-than its total, which is what lets later work be charged for what it will
-actually spend: a variant boots its own server and pays both parts, a pass that
-re-attaches pays only the second.
-"""
+"""Tests for the two things measured from the server-ready marker."""
 
 from __future__ import annotations
 
@@ -34,8 +23,7 @@ _LONG_STALL_GRACE = 3600.0
 
 
 def test_from_ready_excludes_pre_ready_phase(tmp_path):
-    """Pre-ready time is NOT counted: a child that spends > deadline BEFORE the
-    ready marker but only a little AFTER it finishes normally."""
+    """Pre-ready time is NOT counted: a child that spends > deadline BEFORE the ready marker but only a little AFTER it finishes normally."""
     log_path = tmp_path / "server.log"
     # 3s pre-ready boot, then ready, then ~1s post-ready client.
     script = (
@@ -62,8 +50,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
 
 
 def test_from_ready_fires_after_ready(tmp_path):
-    """Post-ready overrun IS killed: once ready, exceeding the deadline in the
-    client phase reaps the tree with the overtime sentinel."""
+    """Post-ready overrun IS killed: once ready, exceeding the deadline in the client phase reaps the tree with the overtime sentinel."""
     log_path = tmp_path / "server.log"
     # Ready immediately, then a post-ready run that overruns the deadline.
     script = (
@@ -88,8 +75,7 @@ def test_from_ready_fires_after_ready(tmp_path):
 
 
 def test_opt_out_reverts_to_from_spawn(tmp_path, monkeypatch):
-    """With INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0 the legacy from-spawn
-    clock applies even with a server.log: pre-ready time counts and trips."""
+    """With INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0 the legacy from-spawn clock applies even with a server.log: pre-ready time counts and trips."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "0")
     log_path = tmp_path / "server.log"
     # Long pre-ready phase; from-spawn overruns the 1s deadline.
@@ -128,12 +114,7 @@ def test_no_server_log_uses_from_spawn(tmp_path):
 
 
 class TestARoundIsPricedByItsTwoParts:
-    """What a round spent booting and what it spent benchmarking, told apart.
-
-    The whole point of separating them is that they are spent by different
-    things. Charging a re-attaching pass for a boot it never pays is what makes
-    a budget gate refuse work that fits.
-    """
+    """What a round spent booting and what it spent benchmarking, told apart."""
 
     def test_the_boot_is_not_charged_to_the_benchmark(self, tmp_path):
         """A round that boots for 3s and benchmarks for 1s reports 1s, not 4s."""
@@ -163,22 +144,13 @@ class TestARoundIsPricedByItsTwoParts:
             runtime_sec=runtime_sec,
         )
         assert post_ready is not None, "the round reported ready but nothing recorded when"
-        # The benchmark's own second, found without the three the boot took. The
-        # windows are wide because the poll interval and process spawn are inside
-        # them; what is being pinned is that the two parts are told apart at all.
+        # The benchmark's own second, found without the three the boot took.
         assert 0.5 <= post_ready <= 2.5, f"benchmark share read as {post_ready:.2f}s, expected ~1s"
         boot_sec = runtime_sec - post_ready
         assert 2.5 <= boot_sec <= 4.5, f"boot share read as {boot_sec:.2f}s, expected ~3s"
 
     def test_a_previous_attempts_log_does_not_time_this_rounds_boot(self, tmp_path):
-        """Only bytes this round writes may say when its server came up.
-
-        Magpie writes into a ``benchmark_*/`` workspace under the round's output
-        dir, and a reused dir can still hold one from an earlier attempt. Scanned
-        from byte zero, its ready line latches on the first poll -- seconds after
-        spawn -- and the round reports a boot that took minutes as one that took
-        none. Every variant is then admitted at a benchmark's price and reaped.
-        """
+        """Only bytes this round writes may say when its server came up."""
         stale = tmp_path / "benchmark_vllm_20200101" / "server.log"
         stale.parent.mkdir(parents=True)
         stale.write_text("Application startup complete\n", encoding="utf-8")
@@ -215,12 +187,7 @@ class TestARoundIsPricedByItsTwoParts:
         )
 
     def test_the_split_does_not_depend_on_an_unrelated_watchdog(self, tmp_path):
-        """The stall grace is a hang backstop, not a switch for the cost model.
-
-        Turning it off used to withdraw the ready timestamp with it, and a session
-        run that way prices every round at its whole cold wall-clock without
-        anything saying so.
-        """
+        """The stall grace is a hang backstop, not a switch for the cost model."""
         log_path = tmp_path / "server.log"
         script = (
             "import sys, time\n"
@@ -244,14 +211,7 @@ class TestARoundIsPricedByItsTwoParts:
         )
 
     def test_a_reader_on_another_clock_gets_the_same_boot(self, tmp_path):
-        """The split survives being read where it was not written.
-
-        On the Ray path the round runs inside an actor, possibly on another host,
-        and the caller subtracting its own clock from the actor's would charge the
-        boot for whatever the two disagree by -- inflating it, and making the
-        budget gates refuse rounds that fit. The boot is a duration taken on one
-        clock, so a reader whose clock is five seconds off reads the same figure.
-        """
+        """The split survives being read where it was not written."""
         log_path = tmp_path / "server.log"
         script = (
             "import sys, time\n"
@@ -277,9 +237,7 @@ class TestARoundIsPricedByItsTwoParts:
             started_unix=started_unix,
             runtime_sec=runtime_sec,
         )
-        # A caller whose clock runs five seconds behind the writer's. The instant
-        # is still this round's, so the stamp is accepted, and the boot it
-        # reports does not move.
+        # A caller whose clock runs five seconds behind the writer's.
         skewed = post_ready_runtime_sec(
             str(log_path),
             started_unix=started_unix - 5.0,
@@ -316,11 +274,7 @@ class TestARoundIsPricedByItsTwoParts:
         )
 
     def test_an_earlier_rounds_stamp_is_not_read_as_this_ones(self, tmp_path):
-        """A stamp predating the round is unknown, not "it never booted".
-
-        The clamp alone would report such a stamp as a whole-round benchmark,
-        which is the reading that would price a cold round as a warm one.
-        """
+        """A stamp predating the round is unknown, not \"it never booted\"."""
         log_path = tmp_path / "server.log"
         log_path.write_text("INFO loading weights\n", encoding="utf-8")
         # A complete stamp, so what rejects it can only be its instant.
@@ -350,13 +304,7 @@ class TestARoundIsPricedByItsTwoParts:
         clear_server_ready_stamp(str(log_path))
 
     def test_a_boot_longer_than_the_round_cannot_produce_a_negative_price(self, tmp_path):
-        """A corrupt stamp must cost a measurement, never produce a nonsense one.
-
-        The two figures come from two places -- the boot from inside the round,
-        the total from the caller around it -- so nothing structurally forbids a
-        boot larger than the total. It is floored, and the total caps the other
-        end.
-        """
+        """A corrupt stamp must cost a measurement, never produce a nonsense one."""
         log_path = tmp_path / "server.log"
         started_unix = time.time()
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f} 500.000\n", encoding="utf-8")
@@ -370,14 +318,7 @@ class TestARoundIsPricedByItsTwoParts:
         assert priced == 0.0
 
     def test_a_stamp_with_no_boot_recorded_is_no_stamp_at_all(self, tmp_path):
-        """A missing boot must not read as a round that never booted.
-
-        Zero is a legitimate boot, so it cannot also mean "not recorded" --
-        reading it that way hands the whole round to the benchmark, which is the
-        figure every later variant is then admitted on, and every one of them is
-        reaped. Unmeasured is reported as unmeasured; the gates know what to do
-        with that.
-        """
+        """A missing boot must not read as a round that never booted."""
         log_path = tmp_path / "server.log"
         started_unix = time.time()
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f}\n", encoding="utf-8")

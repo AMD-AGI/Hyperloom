@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Edge-path coverage for the trace parsers and Langfuse mapping helpers.
-
-Exercises the tolerant/degenerate branches (blank lines, malformed JSON,
-non-dict rows, unreadable paths, and non-numeric fields) so a parse miss
-degrades to an empty/``None`` result instead of raising.
-"""
+"""Edge-path coverage for the trace parsers and Langfuse mapping helpers."""
 
 from __future__ import annotations
 

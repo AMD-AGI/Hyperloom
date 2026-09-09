@@ -88,11 +88,7 @@ def test_work_still_reporting_units_withholds_the_accusation() -> None:
 
 
 def test_a_withheld_accusation_still_leaves_a_trace() -> None:
-    """``return []`` made the near-miss unobservable; the operator needs to see it.
-
-    Under its own name: RCA reading ``agent_stall`` off a healthy long phase
-    cannot tell it apart from an agent that really did go quiet.
-    """
+    """``return []`` made the near-miss unobservable; the operator needs to see it."""
     ctx = ReactorContext(inbox=[_item("orchestration", ts=9_800.0)], now_unix=10_000.0)
     data = SourceData(local_task_progress=_progress("orchestration", unix=9_950.0, task="explore"))
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=100.0))
@@ -102,12 +98,7 @@ def test_a_withheld_accusation_still_leaves_a_trace() -> None:
 
 
 def test_a_quiet_sibling_unit_is_named_even_though_a_busy_one_holds_the_accusation() -> None:
-    """Two units of one agent: one reporting, one quiet for hours.
-
-    One unit reporting still answers the question the signal asks, so the
-    accusation stays withheld — a Ray-backed round has no liveness callback and
-    is quiet by design. What the snapshot must not do is lose the quiet one.
-    """
+    """Two units of one agent: one reporting, one quiet for hours."""
     ctx = ReactorContext(inbox=[_item("orchestration", ts=9_600.0)], now_unix=10_000.0)
     progress = _progress("orchestration", unix=9_950.0, task="explore")
     progress["by_agent"]["orchestration"].update(oldest_progress_unix=2_800.0, oldest_task="baseline")
@@ -148,12 +139,7 @@ def test_busy_work_of_one_agent_does_not_silence_another() -> None:
 
 
 def test_an_hour_long_warmup_that_keeps_reporting_is_never_accused() -> None:
-    """A measured warmup runs 3941s and reports throughout; it is not a stall.
-
-    Any tier above the observation one alerts — MEDIUM routes to
-    ``alert(medium)`` — so grading this by elapsed silence is the ceiling the
-    signal was written to drop, one rung lower.
-    """
+    """A measured warmup runs 3941s and reports throughout; it is not a stall."""
     ctx = ReactorContext(inbox=[_item("orchestration", ts=10_000.0)], now_unix=13_941.0)
     data = SourceData(local_task_progress=_progress("orchestration", unix=13_900.0, task="warmup"))
     out = evaluate_stall_signals(
@@ -215,21 +201,13 @@ def test_running_work_that_never_reported_is_no_evidence_either_way() -> None:
 
 
 def test_kernel_agent_is_not_a_tracked_agent() -> None:
-    """It has no backend, no turn and no heartbeat, so silence means nothing.
-
-    Its only bus footprint is the completion receipt the Coordinator signs on
-    its behalf, which measures demand for kernel work rather than health.
-    """
+    """It has no backend, no turn and no heartbeat, so silence means nothing."""
     inbox = [_item("kernel_agent", ts=1.0)]
     assert _collect_last_seen(build_event_view(inbox, [])) == {}
 
 
 def test_a_long_inline_kernel_step_does_not_accuse_orchestration() -> None:
-    """Kernel handlers are awaited inline, so the tick's own agent goes quiet.
-
-    A heartbeat raised around the handler is the only thing keeping that agent
-    visible; without it a two-hour forge run reads as a stalled orchestrator.
-    """
+    """Kernel handlers are awaited inline, so the tick's own agent goes quiet."""
     now = 10_000.0
     cfg = StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0)
     ctx = ReactorContext(inbox=[], now_unix=now)

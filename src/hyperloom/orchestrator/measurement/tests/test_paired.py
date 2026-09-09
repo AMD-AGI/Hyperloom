@@ -37,9 +37,7 @@ class TestVerdicts:
         assert not v.candidate_wins
 
     def test_sign_disagreement_is_inconclusive(self):
-        # One pair says the candidate is faster, another says slower. The
-        # machine moved more than the change did; averaging would invent a
-        # winner out of that.
+        # One pair says the candidate is faster, another says slower.
         v = assess_paired([(100.0, 115.0), (100.0, 88.0)])
         assert not v.decisive and v.reason == "sign_disagreement"
         assert not v.candidate_wins
@@ -54,8 +52,7 @@ class TestVerdicts:
 
 class TestMedianNotMean:
     def test_one_disturbed_pair_does_not_carry_the_result(self):
-        # Three pairs agree on ~+4%; a fourth is wrecked by a neighbour landing
-        # on the box. The mean would be dragged far off; the median holds.
+        # Three pairs agree on ~+4%; a fourth is wrecked by a neighbour landing on the box.
         pairs = [(100.0, 104.0), (100.0, 104.5), (100.0, 103.5), (100.0, 160.0)]
         v = assess_paired(pairs)
         assert v.decisive and v.candidate_wins

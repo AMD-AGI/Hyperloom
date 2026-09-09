@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for tune_robustness (fault classification, blocklist, helpers).
-
-Hermetic: no GPU / no subprocess. run_isolated / gpu_healthy are integration
-paths exercised on the pod, not here.
-"""
+"""Unit tests for tune_robustness (fault classification, blocklist, helpers)."""
 
 from __future__ import annotations
 
@@ -35,9 +31,8 @@ class TestClassifyFault:
         assert tr.classify_fault(1, "", "GPU coredump failed") == "hard_fault"
 
     def test_recovered_memory_fault_rc0_not_hard(self):
-        # rc==0 with a memory-fault string = a per-candidate fault aiter --timeout
-        # recovered (merely printed under -v); must NOT be a hard fault, else a
-        # shape that tuned fine gets permanently blocklisted.
+        # rc==0 with a memory-fault string = a per-candidate fault aiter --timeout recovered (merely printed under
+        # -v); must NOT be a hard fault, else a shape that tuned fine gets permanently blocklisted.
         assert tr.classify_fault(0, "Memory access fault by GPU node-2", "") is None
 
     def test_clean_run_is_none(self):
@@ -50,8 +45,8 @@ class TestClassifyFault:
         assert tr.count_soft_faults(out, "") >= 1
 
     def test_count_soft_faults_mapping_error(self):
-        # The line carries two markers ("Mapping Error" + "Process PID not in GPU
-        # map"); count is a coarse diagnostic, so >=1 is what matters.
+        # The line carries two markers ("Mapping Error" + "Process PID not in GPU map"); count is a coarse diagnostic,
+        # so >=1 is what matters.
         assert tr.count_soft_faults("[aiter] [Mapping Error] Task 3 - Process PID not in GPU map", "") >= 1
 
 
@@ -97,15 +92,15 @@ class TestFaultBlocklist:
         p = tmp_path / "bl.json"
         row = "64,4096,1536"
         sig = tr.shape_signature(row)
-        # record + SAVE under one regime key (record on the saved object, else
-        # the file persists an empty table and the assertion below is vacuous).
+        # record + SAVE under one regime key (record on the saved object, else the file persists an empty table and
+        # the assertion below is vacuous).
         bl_a = tr.FaultBlocklist(p, self._key())
         bl_a.record(sig, "hard_fault", row)
         bl_a.save()
         # the SAME regime must see it (proves the record actually persisted) ...
         assert tr.FaultBlocklist(p, self._key()).is_blocked(sig)
-        # ... but a DIFFERENT regime (different tuner) must NOT -> real isolation,
-        # not a degenerate always-empty table.
+        # ... but a DIFFERENT regime (different tuner) must NOT -> real isolation, not a degenerate always-empty
+        # table.
         assert not tr.FaultBlocklist(p, self._key(tuner="a8w8_blockscale")).is_blocked(sig)
 
     def test_corrupt_file_degrades(self, tmp_path):
@@ -127,9 +122,8 @@ class TestIsolationSwitch:
 
 class TestRunIsolatedProfileMerge:
     def test_per_shape_profiles_merged_into_shared(self, tmp_path, monkeypatch):
-        # Each isolated shape writes its OWN -o2 profile; run_isolated must merge
-        # them all into the shared -o2 path (else only the last shape survives and
-        # the serve-safe split-K cap loses every other shape's candidates).
+        # Each isolated shape writes its OWN -o2 profile; run_isolated must merge them all into the shared -o2 path
+        # (else only the last shape survives and the serve-safe split-K cap loses every other shape's candidates).
         from pathlib import Path as _P
 
         untuned = tmp_path / "untuned.csv"
@@ -168,10 +162,10 @@ class TestRunIsolatedProfileMerge:
 
 
 class TestLatestCandidateStemBoundary:
-    """`_latest_candidate` must match the stem as a whole token, not a substring:
-    the dense tuners nest by prefix (tuned_a8w8_blockscale is a prefix of
-    tuned_a8w8_blockscale_bpreshuffle), so a plain `in` test would let a shorter
-    tuner steal a longer sibling's candidate CSV."""
+    """`_latest_candidate` must match the stem as a whole token, not a substring: the dense tuners nest by prefix
+    (tuned_a8w8_blockscale is a prefix of tuned_a8w8_blockscale_bpreshuffle), so a plain `in` test would let a
+    shorter tuner steal a longer sibling's candidate CSV.
+    """
 
     def _touch(self, path, mtime):
         import os

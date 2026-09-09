@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the xDiT (scriptable diffusion) framework integration.
-
-Covers the cross-cutting contracts for xDiT: the framework registry, the
-server-args env resolver, the do-not-set blacklist + compatibility filter, the
-scriptable quality gate, scriptable measurement validity, the per-framework
-YAML resolvers, the explore cold-start grid, the roofline snapshot units and
-their latency sidecar, the TraceLens arch spec, and scriptable trace health.
-"""
+"""Unit coverage for the xDiT (scriptable diffusion) framework integration."""
 
 from __future__ import annotations
 
@@ -138,24 +131,23 @@ class TestQualityGate:
         assert ag.quality_gate_passed({"lpips": 0.01, "lpips_max": 0.05}, require=True) is True
 
     def test_quality_gate_passed_skipped_reference_established(self, monkeypatch):
-        # The baseline establishing the reference (skipped) must pass even when
-        # required and a reference is configured.
+        # The baseline establishing the reference (skipped) must pass even when required and a reference is
+        # configured.
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         gate = {"passed": True, "skipped": True, "reason": "reference_established"}
         assert ag.quality_gate_passed(gate, require=True) is True
 
     def test_quality_gate_passed_skipped_fails_closed_when_ref_configured(self, monkeypatch):
-        # A variant that SKIPPED the gate while a reference was configured did
-        # not actually compare -> fail closed (scriptable require=True).
+        # A variant that SKIPPED the gate while a reference was configured did not actually compare -> fail closed
+        # (scriptable require=True).
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         for reason in ("no_reference_or_image", "reference_missing", "image_libs_unavailable"):
             gate = {"passed": True, "skipped": True, "reason": reason}
             assert ag.quality_gate_passed(gate, require=True) is False, reason
 
     def test_quality_gate_passed_skipped_fails_closed_regardless_of_env(self, monkeypatch):
-        # A comparison is always expected, so a non-established skip is
-        # unverifiable and fails closed even when the process env carries no
-        # XDIT_QUALITY_REF.
+        # A comparison is always expected, so a non-established skip is unverifiable and fails closed even when the
+        # process env carries no XDIT_QUALITY_REF.
         monkeypatch.delenv("XDIT_QUALITY_REF", raising=False)
         gate = {"passed": True, "skipped": True, "reason": "no_reference_or_image"}
         assert ag.quality_gate_passed(gate, require=True) is False
@@ -236,8 +228,8 @@ class TestScriptableMeasurement:
         assert br.is_valid_measurement(m) is False
 
     def test_quality_missing_gate_still_valid(self):
-        # A missing/empty gate stays non-blocking for selection (require=False);
-        # required-gate enforcement happens upstream.
+        # A missing/empty gate stays non-blocking for selection (require=False); required-gate enforcement happens
+        # upstream.
         m = {"workload_kind": "scriptable", "output_throughput": 0.29}
         assert br.is_valid_measurement(m) is True
 
@@ -342,8 +334,7 @@ class TestLifecycleScriptableSkip:
 
 
 class TestRooflineSnapshotUnits:
-    """The roofline snapshot table renders the achieved primary metric in the
-    framework-correct unit (serving tok/s vs scriptable per-image ms)."""
+    """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
         from hyperloom.orchestrator.kernel import roofline_snapshot as rs
@@ -378,8 +369,7 @@ class TestRooflineSnapshotUnits:
         assert "decode memory-roofline ceiling" not in table
 
     def test_snapshot_carries_latency_siblings_and_within(self):
-        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and
-        drive a unit-agnostic within/gap when no decode ceiling applies."""
+        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
         from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
@@ -436,9 +426,7 @@ class TestRooflineSnapshotUnits:
 
 
 class TestScriptableLatencyRooflineSidecar:
-    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when
-    ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only
-    ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
+    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
 
     def _make_state(self, tmp_path):
         from hyperloom.orchestrator.state.shared_state import SharedState
@@ -537,8 +525,7 @@ class TestHyperloomArchSpec:
 
 
 class TestValidateTraceStructureScriptable:
-    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are
-    skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
+    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 
     def _write_trace(self, trace_dir, *, with_kernels: bool, with_annotations: bool = False) -> None:
         import gzip
@@ -580,18 +567,11 @@ class TestValidateTraceStructureScriptable:
 
         self._write_trace(tmp_path, with_kernels=True)
         health = pf._validate_trace_structure(tmp_path, "vllm")
-        # Same trace, serving framework: the LLM checks run and flag the missing
-        # execute_*/user_annotation events.
+        # Same trace, serving framework: the LLM checks run and flag the missing execute_*/user_annotation events.
         assert health["per_kernel_attribution_degraded"] is True
 
     def test_serving_sees_annotations_recorded_under_cat(self, tmp_path):
-        """The annotation category lives in ``cat``; ``name`` holds the label.
-
-        A marker keyed on ``"name": "user_annotation"`` therefore matches a label
-        no producer writes: 53 of the 62 reference captures were reported as
-        carrying no annotations while each held several hundred, and the zero-hot-
-        kernel path then blamed CUDA-graph folding for an unrelated result.
-        """
+        """The annotation category lives in ``cat``; ``name`` holds the label."""
         from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True, with_annotations=True)
@@ -602,14 +582,7 @@ class TestValidateTraceStructureScriptable:
         assert not any("[3]" in i for i in health["issues"])
 
     def test_empty_framework_falls_back_to_session_framework(self, monkeypatch, tmp_path):
-        """An unset framework must not be treated as serving.
-
-        Session 20260803T134328Z: the roofline-composite ctx carries no
-        framework, so the scriptable profile leg was validated as serving and
-        reported the two serving-only issues ([1] capture_traces/ missing and
-        [3] no execute_*), each pointing at EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS
-        that a scriptable framework never sets.
-        """
+        """An unset framework must not be treated as serving."""
         from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True)

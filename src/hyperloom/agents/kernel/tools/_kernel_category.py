@@ -1,18 +1,4 @@
-"""Canonical kernel-category display vocabulary for rendered reports.
-
-Category values reach a report with inconsistent casing and near-synonyms
-("Others" / "other", "LayerNorm" / "rmsnorm"), because the taxonomy is written
-by whichever backend produced the candidates. This module maps those spellings
-onto ONE canonical display label so ``analysis.md`` reads consistently. The
-bypass report renderer is the only caller today, but the vocabulary stays wide
-enough for TraceLens-authored candidate files.
-
-Display-only: this does NOT rewrite the ``kernel_category`` /
-``tracelens_category`` fields in ``kernel_candidates.json`` / ``kernel_roofline.json``,
-which downstream GEAK skill-routing consumes with its own taxonomy.
-
-Kept dependency-free (stdlib only) so any renderer can import it freely.
-"""
+"""Canonical kernel-category display vocabulary for rendered reports."""
 
 from __future__ import annotations
 
@@ -75,16 +61,7 @@ _CANONICAL: dict[str, str] = {
 
 
 def canonical_category(raw: str | None) -> str | None:
-    """Map a route-native category string to the canonical display label.
-
-    Args:
-        raw: A route-native category (e.g. ``"gemm"``, ``"Others"``, ``"norm"``).
-
-    Returns:
-        The canonical display label, or ``None`` when ``raw`` is empty/None, or
-        the original (stripped) value when it maps to nothing known (so a novel
-        category is surfaced verbatim rather than silently dropped).
-    """
+    """Map a route-native category string to the canonical display label."""
     if raw is None:
         return None
     s = str(raw).strip()

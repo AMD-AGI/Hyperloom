@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Acceptance tests for the long-run optimization refinements.
-
-Covers the decaying acceptance curve, decaying-gain convergence, the absolute
-per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK
-reloop target, and the trailing-window crash-rate emergency stop.
-
-All deterministic + offline.
-"""
+"""Acceptance tests for the long-run optimization refinements."""
 
 from __future__ import annotations
 

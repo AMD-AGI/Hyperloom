@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent
-choices, kernel selection, validation errors), advisory proposal-scorer
-wiring and robustness option overrides."""
+"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring and robustness option overrides."""
 
 from __future__ import annotations
 
@@ -62,9 +60,7 @@ def _build(**over):
 
 @pytest.fixture(autouse=True)
 def _isolated_provider_env(monkeypatch):
-    """Every case in this module resolves backends from the environment, so the
-    machine running the suite must not be able to change the answer. Applied to
-    all of them, including the ones that assert a default."""
+    """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
 
 
@@ -108,8 +104,7 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
 
 
 def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
-    """Silently swapping the critic for bare tool-use would drop KB priors and
-    session memory with no signal, so a missing root is now an error."""
+    """Silently swapping the critic for bare tool-use would drop KB priors and session memory with no signal, so a missing root is now an error."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -153,8 +148,7 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
 
 
 def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) -> None:
-    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a
-    gateway-only host instead of rejecting a config that would have run."""
+    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a gateway-only host instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
@@ -167,9 +161,7 @@ def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) 
 
 
 def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
-    """resolve_openai_client_config derives an OpenAI side from an Anthropic
-    gateway -- one host, two protocols, one token. The gate must ask it rather
-    than re-deriving a shorter key chain, which rejected this working config."""
+    """resolve_openai_client_config derives an OpenAI side from an Anthropic gateway -- one host, two protocols, one token."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
     b = _build(
@@ -192,8 +184,7 @@ def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch
 
 
 def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(monkeypatch) -> None:
-    """The Claude CLI authenticates from the token alone, so the flag must
-    accept it instead of rejecting a config that would have run."""
+    """The Claude CLI authenticates from the token alone, so the flag must accept it instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     b = _build(
@@ -228,11 +219,7 @@ def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
 
 
 def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
-    """A dual-protocol gateway (e.g. DeepSeek) is just "both sides configured".
-
-    Once normalized it carries an Anthropic AND an OpenAI endpoint, so it takes
-    the ordinary two-sided path rather than a provider-specific branch.
-    """
+    """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
@@ -243,19 +230,15 @@ def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeyp
         critic_agent_root=Path("/tmp/critic"),
     )
     assert b["critic"][0] == "critic_agent"
-    # Both sides configured means auto lands on openai; the point of the test is
-    # that the gateway takes that ordinary path, so the protocol is the assertion.
+    # Both sides configured means auto lands on openai; the point of the test is that the gateway takes that ordinary
+    # path, so the protocol is the assertion.
     assert b["critic"][1]["protocol"] == "openai"
     assert b["critic"][1]["codex_model"] == "codex-y"
     assert "codex_client_factory" not in b["critic"][1]
 
 
 def test_backends_have_no_provider_specific_branch() -> None:
-    """The retired DeepSeek branch and its hardcoded client factory are gone.
-
-    Names are read off the module rather than asserted absent blindly: a typo
-    in either string would make the old form of this test pass forever.
-    """
+    """The retired DeepSeek branch and its hardcoded client factory are gone."""
     exported = set(vars(clib))
     assert "_deepseek_only" not in exported
     assert "_deepseek_openai_client_factory" not in exported

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""High-level builders that turn a :class:`Config` into a running reactor.
-
-:func:`build_reactor_components` returns a :class:`ReactorBundle` (reactor +
-ReactorComponents + FindingSink) so callers can manage lifecycles via
-``await bundle.aclose()``. All hosts drive ``bundle.reactor.tick(ctx)`` per
-tick; the blessed transport is the subprocess CLI (mirrors critic-agent), no
-in-process Backend adapter.
-"""
+"""High-level builders that turn a :class:`Config` into a running reactor."""
 
 from __future__ import annotations
 
@@ -73,29 +66,12 @@ class ReactorBundle:
     sink: FindingSink
 
     async def aclose(self) -> None:
-        """Close the RCA engine's provider client.
-
-        The engine only acts on a client it created, so an injected one is
-        left to its owner.
-        """
+        """Close the RCA engine's provider client."""
         await self.components.rca.aclose()
 
 
 def _build_local_probe_config(config: Config) -> LocalProbeConfig:
-    """Project the agent config onto the local probe's own configuration.
-
-    ``server_process_patterns`` is passed through as both the server subset and
-    part of the match list, so a framework an operator adds to that knob is
-    matched *and* recognised as a server. Splitting those two decisions across
-    separately-maintained lists is what let a configured framework show up as
-    ``is_server=False`` and silently disable ``local_server_unreachable``.
-
-    Args:
-        config (Config): The discovered agent configuration.
-
-    Returns:
-        LocalProbeConfig: Configuration for :class:`LocalProbeSource`.
-    """
+    """Project the agent config onto the local probe's own configuration."""
     # Auto-include the local inference server health endpoint.
     probe_targets = list(config.health_probe_targets)
     if (
@@ -148,24 +124,7 @@ def build_reactor_components(
     rca: RcaEngine | None = None,
     session_id: str | None = None,
 ) -> ReactorBundle:
-    """Construct everything the reactor needs.
-
-    Wires the source, degrade router, detectors, state store, finding sink,
-    and RCA engine into a single bundle.
-
-    Args:
-        config (Config): Discovered configuration — typically the result
-            of ``Config.discover()``.
-        rca (RcaEngine | None): Optional RCA engine override. Defaults to
-            an auto-selected engine (Noop unless LLM RCA is enabled).
-        session_id (str | None): Override for the FindingSink filename.
-            Defaults to ``config.session_dir.name`` so each per-session
-            sandbox writes to a stable file.
-
-    Returns:
-        ReactorBundle: The assembled reactor plus the components and sink
-        the caller must manage.
-    """
+    """Construct everything the reactor needs."""
     # Multi-node guard: the probe only sees its own pod, so it is disabled there.
     source: Source = (
         _BlindSource() if config.disable_local_probe else LocalProbeSource(_build_local_probe_config(config))
@@ -181,8 +140,8 @@ def build_reactor_components(
         DetectorStateStore(session_dir=config.session_dir) if config.state_store_enabled else None
     )
 
-    # Config->SignalConfig map keyed by ``SignalSpec.config_attr``; omitted
-    # slots are filled by the classifier from the registry ``config_factory``.
+    # Config->SignalConfig map keyed by ``SignalSpec.config_attr``; omitted slots are filled by the classifier from
+    # the registry ``config_factory``.
     signal_configs: dict[str, Any] = {
         "stall": StallConfig(
             stall_timeout_s=config.agent_stall_timeout_s,
@@ -313,20 +272,7 @@ def build_reactor_components(
 
 
 def _llm_credentials_ready(config: Config) -> bool:
-    """Whether the discovered provider can authenticate an RCA call.
-
-    The Anthropic side may hold no in-process key at all — a subscription token
-    is spent by the Claude CLI, never by this process — so the key pair is the
-    wrong question there. Ask the transport instead, which also covers the case
-    where the token is present but the CLI that would spend it is not.
-
-    Args:
-        config (Config): The configuration carrying the discovered provider
-            and credentials.
-
-    Returns:
-        bool: True when an RCA call can authenticate.
-    """
+    """Whether the discovered provider can authenticate an RCA call."""
     if config.llm_provider == "anthropic":
         return llm_config.anthropic_transport_ready()
     return bool(config.llm_base_url and config.llm_api_key)
@@ -337,18 +283,7 @@ def _build_rca_engine(
     *,
     state_store: DetectorStateStore | None = None,
 ) -> RcaEngine:
-    """Choose between Noop and Llm based on config + env override.
-
-    Args:
-        config (Config): Configuration carrying LLM RCA enablement,
-            credentials, and throttle settings.
-        state_store (DetectorStateStore | None): Optional store backing
-            the RCA throttle's cross-tick cooldown state.
-
-    Returns:
-        RcaEngine: A :class:`LlmRcaEngine` when LLM RCA is enabled and
-        credentials are present, otherwise a :class:`NoopRcaEngine`.
-    """
+    """Choose between Noop and Llm based on config + env override."""
     if os.environ.get("ROBUSTNESS_LLM_RCA_DISABLED", "").lower() in {"1", "true", "yes"}:
         log.info("LLM RCA disabled via ROBUSTNESS_LLM_RCA_DISABLED env override")
         return NoopRcaEngine()
@@ -387,16 +322,7 @@ def _build_rca_engine(
 
 
 def _parse_severity(value: str) -> SymptomSeverity:
-    """Map a severity string to a :class:`SymptomSeverity`.
-
-    Args:
-        value (str): A severity label such as ``"low"``, ``"medium"``,
-            or ``"high"`` (case-insensitive; synonyms accepted).
-
-    Returns:
-        SymptomSeverity: The matching severity, defaulting to ``HIGH``
-        for unrecognised values.
-    """
+    """Map a severity string to a :class:`SymptomSeverity`."""
     normalized = (value or "").strip().lower()
     if normalized in {"low", "info", "observe"}:
         return SymptomSeverity.LOW
@@ -407,24 +333,12 @@ def _parse_severity(value: str) -> SymptomSeverity:
 
 @dataclass
 class _BlindSource:
-    """Stands in for the local probe when it is disabled.
-
-    Never raises, so the router stays HEALTHY rather than reporting a degrade
-    that a deliberately disabled probe did not suffer.
-    """
+    """Stands in for the local probe when it is disabled."""
 
     name: str = "local-probe-disabled"
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
-        """Return empty data with process visibility marked unknown.
-
-        Args:
-            ctx: Fetch context; unused because this source never collects data.
-
-        Returns:
-            A :class:`SourceData` with no signals and
-            ``local_processes_known=False``.
-        """
+        """Return empty data with process visibility marked unknown."""
         return SourceData(local_processes_known=False)
 
 

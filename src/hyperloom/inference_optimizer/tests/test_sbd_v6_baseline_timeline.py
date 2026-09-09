@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for the SBD V6 ``baseline`` event.
-
-The event this replaces was projected from V5, and the projection's defect is
-what most of these tests pin: V5 stamps the measurement's rows when it
-completes, so the projected event's window collapsed onto its own end and it
-sorted onto the timeline at the moment it finished rather than the moment it
-began.
-"""
+"""Coverage for the SBD V6 ``baseline`` event."""
 
 from __future__ import annotations
 
@@ -119,12 +112,7 @@ def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: 
 
 
 def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: Path) -> None:
-    """The whole point of recording baseline rather than projecting it.
-
-    The projected event took both ends of its window from completion stamps, so
-    a measurement that ran for minutes was published as an instant at its own
-    end, and it sorted onto the timeline behind actions that began after it.
-    """
+    """The whole point of recording baseline rather than projecting it."""
     recorder = _recorder()
     opened = _events(tmp_path)[0]["start_time"]
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
@@ -139,15 +127,14 @@ def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: P
     recorder.end_run(run_index=index, result=_measured())
     recorder.finish(_measured())
 
-    # The closing write reuses the opening write's start, so the window the
-    # timeline publishes begins where the action began.
+    # The closing write reuses the opening write's start, so the window the timeline publishes begins where the action
+    # began.
     event = _events(tmp_path)[0]
     assert event["start_time"] == opened
     assert event["end_time"] >= event["start_time"]
     action = _actions(tmp_path)[0]
     assert action["start_time"] == opened
-    # Each round carries the window it ran in, taken when it started rather
-    # than read back off a completion stamp.
+    # Each round carries the window it ran in, taken when it started rather than read back off a completion stamp.
     round_row = action["runs"][0]["rounds"][0]
     assert round_row["start_time"] == "2026-09-02T15:07:09+00:00"
     assert round_row["duration_sec"] == pytest.approx(242.0)
@@ -209,13 +196,7 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
 
 
 def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_path: Path) -> None:
-    """Start stamps are ISO seconds, so they cannot be the only ordering key.
-
-    A round that fails fast can start and finish inside the same second as the
-    next one. Ordering on the stamp alone leaves that tie to the next declared
-    key, and on the label it resolves alphabetically -- ``measure`` ahead of
-    the ``warmup`` that booted the server it re-attached to.
-    """
+    """Start stamps are ISO seconds, so they cannot be the only ordering key."""
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
     same_second = "2026-09-02T15:07:09+00:00"
@@ -232,8 +213,8 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
 
     rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
     assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY]
-    # The ordinal that fixed the order is recording-side bookkeeping and does
-    # not reach the wire; the array's own order carries it.
+    # The ordinal that fixed the order is recording-side bookkeeping and does not reach the wire; the array's own
+    # order carries it.
     assert all("ordinal" not in row for row in rounds)
 
 
@@ -361,8 +342,8 @@ def test_two_baselines_in_one_cycle_are_one_event_with_two_actions(tmp_path: Pat
     assert len(events) == 1
     actions = events[0]["ext"]["actions"]
     assert [action["task_id"] for action in actions] == ["t-1", "t-2"]
-    # The event takes the worst of them, so the failure the retry recovered
-    # from cannot be read off the event as though it had not happened.
+    # The event takes the worst of them, so the failure the retry recovered from cannot be read off the event as
+    # though it had not happened.
     assert events[0]["status"] == "failed"
 
 
@@ -413,8 +394,7 @@ def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Pa
     event = _events(tmp_path)[0]
     assert event["status"] == EVENT_STATUS_INTERRUPTED
     action = event["ext"]["actions"][0]
-    # The action was never closed, so it is still running inside an event that
-    # says nothing judged it.
+    # The action was never closed, so it is still running inside an event that says nothing judged it.
     assert action["status"] == "running"
     assert action["in_flight_run_index"] == 1
     assert action["runs"][0]["rounds"][0]["label"] == ROUND_WARMUP
@@ -445,9 +425,7 @@ def test_no_sink_declines_rather_than_guessing_an_event(tmp_path: Path) -> None:
     assert _events(tmp_path) == []
 
 
-# ---------------------------------------------------------------------------
 # the executor wiring
-# ---------------------------------------------------------------------------
 def _executor_ctx(tmp_path: Path, **params: Any):
     """Build the context a dispatched baseline arrives with."""
     return SimpleNamespace(
@@ -541,14 +519,7 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 
 
 def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
-    """A profile borrows this executor's body but is not a measurement.
-
-    ``ProfileExecutor`` subclasses ``BaselineExecutor`` and runs its body via
-    ``super().__call__``, so without this the roofline's profile sub-step would
-    mint a BASELINE event per roofline -- and because ``open_event`` is
-    idempotent, in a cycle that also measured for real the profile pass would
-    land inside that event's actions and read as one of its measurements.
-    """
+    """A profile borrows this executor's body but is not a measurement."""
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     executor = object.__new__(ProfileExecutor)

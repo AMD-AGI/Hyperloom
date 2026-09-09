@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing,
-ranker-client plumbing, config-lever extraction, and the cyclic phase-budget
-dispatch guard.
-
-These exercise the pure/sync helpers and the small async helpers directly
-(stubbing the LLM client / fa phase-audit / KB writeback) so no event-loop GPU
-work or network is needed."""
+"""Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing, ranker-client plumbing, config-lever
+extraction, and the cyclic phase-budget dispatch guard.
+"""
 
 from __future__ import annotations
 
@@ -39,9 +35,7 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
-# --------------------------------------------------------------------------
 # _framework_config_levers_from_done
-# --------------------------------------------------------------------------
 def test_config_levers_non_dict_and_patch_precedence() -> None:
     f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
@@ -114,9 +108,7 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
     }
 
 
-# --------------------------------------------------------------------------
 # _framework_agent_audit_skip_confident
-# --------------------------------------------------------------------------
 
 
 def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
@@ -129,26 +121,16 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
     priors = coord._collect_framework_agent_candidate_priors()
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
-    # The denial reason has to reach the Critic, or the priors carry the
-    # verdict without the argument behind it.
+    # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
     denied = next(o for o in priors["recent_outcomes"] if o["status"] == "critic_denied")
     assert denied["rationale"] == "off the bottleneck"
 
 
-# --------------------------------------------------------------------------
 # _match_framework_agent_candidate
-# --------------------------------------------------------------------------
 
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
-    """Patch ``llm_config``'s async-client contract with a resolving stub.
-
-    The stub still runs ``llm_config.resolve_openai_client_config`` so the
-    returned credentials remain the ones the call site actually asked for, then
-    exposes them on a plain object. ``raising=False``: the contract is owned by
-    ``llm_config``, and patching it keeps these tests independent of whether the
-    ``openai`` SDK is installed.
-    """
+    """Patch ``llm_config``'s async-client contract with a resolving stub."""
     from hyperloom.common import llm_config
 
     def _fake(**kwargs):
@@ -263,11 +245,7 @@ def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
 
 
 def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
-    """Both ends of the diff range are shas, so no tree has to be materialized.
-
-    The mode checked the head out into a worktree and diffed the bare repo
-    anyway, paying a full checkout of a multi-gigabyte tree nothing read.
-    """
+    """Both ends of the diff range are shas, so no tree has to be materialized."""
     seen: list[str] = []
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(seen=seen))
     ok, _err = fpr_mod._materialize_pr_diff_from_head(
@@ -278,11 +256,7 @@ def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
 
 
 def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path) -> None:
-    """The row reaches us from the KB and from LLM-authored proposals alike.
-
-    A non-numeric number used to reach ``int()`` and raise out of the
-    executor; it now reads as "no PR number".
-    """
+    """The row reaches us from the KB and from LLM-authored proposals alike."""
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"pr_number": "not-a-number"}, tmp_path / "c.patch", timeout_sec=30.0
@@ -290,18 +264,16 @@ def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path
     assert ok is False and "cannot resolve PR head" in err
 
 
-# --------------------------------------------------------------------------
 # Dispatch pause on a spent phase budget
-# --------------------------------------------------------------------------
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
     assert coord._dispatch_paused_for_phase_budget() is False
 
 
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
-    # The pause is length-agnostic: it fires whenever the phase budget is spent,
-    # regardless of is_long_run (the dispatcher no longer reads it), so short and
-    # long runs both pause new dispatch — consistent with the phase-advance gates.
+    # The pause is length-agnostic: it fires whenever the phase budget is spent, regardless of is_long_run (the
+    # dispatcher no longer reads it), so short and long runs both pause new dispatch — consistent with the
+    # phase-advance gates.
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
@@ -321,9 +293,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     assert coord._dispatch_paused_for_phase_budget() is False
 
 
-# --------------------------------------------------------------------------
 # _maybe_autosubmit_framework_config
-# --------------------------------------------------------------------------
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -400,11 +370,7 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
-    """Regression: a config-lever ENABLEMENT deliverable must carry the
-    ``enablement`` marker + setup commands into integrate_patch, otherwise the
-    integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement``
-    no-ops, the stall streak never advances, and the run spins until wall-clock.
-    """
+    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
         # NEW setup command proposed by the specialist in this deliverable.
@@ -423,8 +389,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
-    """An enablement deliverable with NO config levers (setup-only stack upgrade)
-    must still reach integrate_patch so the stall accounting can advance."""
+    """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
@@ -456,9 +421,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
     assert not coord.state.pending_proposals
 
 
-# --------------------------------------------------------------------------
 # _record_framework_agent_authored_outcome
-# --------------------------------------------------------------------------
 def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -> None:
     # result.result not a dict -> no-op.
     coord._record_framework_agent_authored_outcome(
@@ -518,9 +481,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
     assert row["status"] == "reverted"
 
 
-# --------------------------------------------------------------------------
 # _record_framework_agent_authoring_empty_outcome
-# --------------------------------------------------------------------------
 def _enter_fpr(coord: Coordinator) -> None:
     coord.shared_state.phase = ps_mod.PHASE_FRAMEWORK_AGENT
 
@@ -596,6 +557,4 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     assert statuses["ae-1"] == "author_empty"
 
 
-# ---------------------------------------------------------------------------
 # Lenient ranker: an "applicable: false" reply never vetoes the phase
-# ---------------------------------------------------------------------------

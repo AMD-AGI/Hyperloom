@@ -5,24 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Kernel-fusion opportunity analysis for the bypass analysis backend.
-
-The candidate/roofline artifacts answer *what* kernels exist (name-aggregated).
-Fusion needs *relationships*: which small kernels run back-to-back and could be
-fused into one launch. This module derives that from the time-ordered per-launch
-device sequence (which the reader otherwise aggregates away):
-
-* ``fusable_clusters``: maximal runs of CONSECUTIVE launches in point-wise /
-  memory-bound categories (Elementwise / Normalization / Quantization /
-  KVCacheStore) — the classic fusion targets (elementwise chains, norm+quant).
-  Each cluster reports its members, launch count, aggregate device time, and the
-  inter-kernel gap it would remove.
-* ``adjacent_pairs``: recurring (categoryA -> categoryB) transitions, surfacing
-  systematic fusion patterns across the whole run.
-
-Independent + GPU-free; consumes only the trace's per-launch (name, op_name,
-category, ts, dur) tuples.
-"""
+"""Kernel-fusion opportunity analysis for the bypass analysis backend."""
 
 from __future__ import annotations
 
@@ -59,17 +42,7 @@ def _summarize_cluster(run: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def fusable_clusters(launches: list[dict[str, Any]], *, min_len: int = 2, top_k: int = 0) -> list[dict[str, Any]]:
-    """Find maximal runs of consecutive fusable-category launches.
-
-    Args:
-        launches: Time-ordered per-launch dicts (``name``/``op_name``/``category``
-            /``ts``/``dur``). MUST already be sorted by ``ts``.
-        min_len: Minimum consecutive launches to count as a cluster (>=2).
-        top_k: Cap on returned clusters (0 = all), ranked by aggregate time.
-
-    Returns:
-        Cluster records ranked by ``aggregate_dur_us`` descending.
-    """
+    """Find maximal runs of consecutive fusable-category launches."""
     clusters: list[dict[str, Any]] = []
     run: list[dict[str, Any]] = []
     for lc in launches:
@@ -86,15 +59,7 @@ def fusable_clusters(launches: list[dict[str, Any]], *, min_len: int = 2, top_k:
 
 
 def adjacent_pairs(launches: list[dict[str, Any]], *, top_n: int = 20) -> list[dict[str, Any]]:
-    """Count recurring (categoryA -> categoryB) consecutive transitions.
-
-    Args:
-        launches: Time-ordered per-launch dicts (see :func:`fusable_clusters`).
-        top_n: Max transitions to return, most frequent first.
-
-    Returns:
-        ``[{from, to, count}]`` ranked by count descending.
-    """
+    """Count recurring (categoryA -> categoryB) consecutive transitions."""
     pairs: Counter[tuple[str, str]] = Counter()
     for a, b in zip(launches, launches[1:]):
         ca = str(a.get("category") or "")
@@ -106,19 +71,7 @@ def adjacent_pairs(launches: list[dict[str, Any]], *, top_n: int = 20) -> list[d
 
 
 def analyze_fusion(launches: list[dict[str, Any]], *, top_k_clusters: int = 20) -> dict[str, Any]:
-    """Build the fusion analysis payload from a time-ordered launch sequence.
-
-    Args:
-        launches: Time-ordered per-launch dicts (``name``/``op_name``/``category``
-            /``ts``/``dur``).
-        top_k_clusters: Cap on returned fusable clusters.
-
-    Returns:
-        ``{launch_count, fusable_clusters, fusable_cluster_count,
-        fusable_time_us, adjacent_pairs}``. ``fusable_cluster_count`` /
-        ``fusable_time_us`` are totals over ALL clusters; ``fusable_clusters`` is
-        capped to the ``top_k_clusters`` largest (list-size bound only).
-    """
+    """Build the fusion analysis payload from a time-ordered launch sequence."""
     # Totals over ALL clusters; the returned LIST is capped to top_k.
     all_clusters = fusable_clusters(launches)
     fusable_time = sum(c["aggregate_dur_us"] for c in all_clusters)
