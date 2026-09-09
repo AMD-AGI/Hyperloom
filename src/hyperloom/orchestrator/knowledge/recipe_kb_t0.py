@@ -25,7 +25,6 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_frame
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
     recipe_kb_pitfalls_json,
-    recipe_kb_warm_json,
 )
 
 
@@ -915,6 +914,14 @@ def run_t0_anchor(
     emit = on_status or _default_status_emitter
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
+
+    # The warm-start read is the fourth Recipe sink; see agentx_kb_blocked.
+    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_kb_blocked
+
+    if agentx_kb_blocked(shared_state):
+        log.info("run_t0_anchor: skipping (AgentX); the recipe identity has no mode dimension")
+        return
+
     sd = Path(session_dir)
 
     sid = (getattr(shared_state, "recipe_kb_session_id", "") or "").strip()
@@ -1062,14 +1069,14 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
-        # Third Recipe sink; see agentx_kb_write_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
+        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
         # row, which under AgentX are the inert 1024/1024 placeholders -- so anchoring here mis-tags the cross-session
         # row exactly as the CLOSE-time write would.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(shared_state):
+        if agentx_kb_blocked(shared_state):
             log.info(
                 "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
                 "mode or workload dimension and isl/osl are placeholders here."
@@ -1192,37 +1199,13 @@ def run_t0_anchor(
             config_donor_tier = dtier
             config_donor_conf = dconf
 
-    # Keep warm.json envelope shape stable; new readers prefer shared_state.warm_start_recipe.
-    warm_text = json.dumps(
-        {"points": [warm_point] if warm_point else []},
-        sort_keys=True,
-    )
-    try:
-        warm_path = recipe_kb_warm_json(sd)
-        warm_path.parent.mkdir(parents=True, exist_ok=True)
-        warm_path.write_text(
-            json.dumps(
-                {
-                    "workload": workload,
-                    "hw": hw,
-                    "tier": warm_tier,
-                    "confidence": warm_conf,
-                    "recipe": warm_point,
-                    "raw": warm_text,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        shared_state.warm_start_recipe = {
-            "workload": workload,
-            "hw": hw,
-            "tier": warm_tier,
-            "confidence": warm_conf,
-            "recipe": warm_point,
-        }
-    except OSError as exc:
-        log.warning("warm_start snapshot write failed: %s", exc)
+    shared_state.warm_start_recipe = {
+        "workload": workload,
+        "hw": hw,
+        "tier": warm_tier,
+        "confidence": warm_conf,
+        "recipe": warm_point,
+    }
 
     # WarmStartContext: model-facing projection of the KB result, with an explicit hit/seed_only/miss status.
     if not warm_point:

@@ -52,7 +52,7 @@ from ..model_config_utils import (
 )
 from .bootstrap import (
     _begin_resume_leg,
-    _clean_stop_resume_budget_lines,
+    _resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
@@ -101,6 +101,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
+from hyperloom.orchestrator.supervisor import spawn_supervisor, stop_supervisor
+
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
     ENV_USER_DATA_PATH,
@@ -311,6 +313,8 @@ def _build_orchestration_prompt(
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
+    benchmark_mode: str = "",
+    agentx_corpus_shape: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -329,6 +333,8 @@ def _build_orchestration_prompt(
         cycle_directive=cycle_directive,
         phase=phase,
         transport=transport,
+        benchmark_mode=benchmark_mode,
+        agentx_corpus_shape=agentx_corpus_shape,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -1284,28 +1290,16 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
         args.streams_per_partition = int(streams) if streams else None
 
 
-# Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
-_SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
-    {
-        "target_reached",
-        "global_converged",
-        "time_exhausted",
-        "max_ticks",
-        # SWEEP finished cleanly: exit_normal_sweep returns sweep_done once the concurrency ladder settles, which
-        # means the run optimized and closed normally (e.g. the no-kernel path), so neither is a CI failure.
-        "sweep_done",
-        # Written for exactly one thing: the model asking to close early. A run
-        # whose infrastructure actually failed carries baseline_failed,
-        # crash_threshold_exceeded, policy_loop or signal instead, so this value
-        # marks a normal closeout and the breakdown keeps the escalation flag.
-        "robustness_escalated",
-    }
-)
-
-
 def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
-    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure)."""
-    return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
+    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
+
+    Reads the same set the breakdown grades outcomes against. A second copy here
+    would decide CI's verdict on a vocabulary that had drifted from the one the
+    report was written from.
+    """
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+
+    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
 
 
 def _new_preflight_failure_session_dir(
@@ -1771,8 +1765,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
 
-        reanchor_budget = bool(prior_stop or prior_crash >= 3)
-        _begin_resume_leg(state, reanchor_budget=reanchor_budget)
+        _begin_resume_leg(state)
+        extend_hours = float(args.extend_hours)
+        if extend_hours > 0.0:
+            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -1784,16 +1780,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 "gpu_type": str(state.gpu_type or manifest.get("gpu_type") or ""),
             },
         )
-        if reanchor_budget:
-            override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
-            print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
-            print(f"  → reset start_ts to {state.start_ts} (resume budget)")
-        else:
-            for line in _clean_stop_resume_budget_lines(
-                state,
-                max_hours=float(getattr(args, "max_hours", 0) or 0),
-            ):
-                print(line)
+        override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
+        print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
+        for line in _resume_budget_lines(state, extend_hours=extend_hours):
+            print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -1925,12 +1915,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 _fw_version_for_env = _detected
         if _fw_version_for_env:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
-        print(
-            f"Workload        : ISL={args.isl} OSL={args.osl} "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
+        if _agentx_enabled():
+            from hyperloom.inference_optimizer.agentx.mapping import (
+                CANONICAL_ISL,
+                CANONICAL_OSL,
+                CANONICAL_PREFIX_CACHE_HIT,
+            )
+
+            print(
+                f"Workload        : AgentX corpus replay "
+                f"(ISL avg={CANONICAL_ISL['avg']} p50={CANONICAL_ISL['p50']} p90={CANONICAL_ISL['p90']}, "
+                f"OSL avg={CANONICAL_OSL['avg']} p50={CANONICAL_OSL['p50']}, "
+                f"prefix_cache~{CANONICAL_PREFIX_CACHE_HIT:.0%}) "
+                f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+                f"PRECISION={args.precision} "
+                f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+            )
+        else:
+            print(
+                f"Workload        : ISL={args.isl} OSL={args.osl} "
+                f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+                f"PRECISION={args.precision} "
+                f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+            )
 
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         session_dir = make_session_dir(model_name=resolve_model_display_name(args))
@@ -2190,6 +2197,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cycle_directive=_initial_directive,
             phase=_initial_phase,
             transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2207,6 +2216,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         objective=objective,
         max_minutes=max_minutes_for_prompt,
         transport=_orch_transport,
+        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2281,6 +2292,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # The out-of-band supervisor watches for the two failures this process
+    # cannot report on itself: dying, and ceasing to tick. It is given the
+    # session's budget so its stall window fits inside the run it watches.
+    try:
+        supervisor_proc = spawn_supervisor(session_dir, session_sec=args.max_hours * 3600.0)
+    except OSError as exc:
+        # Auxiliary: a run without a watchdog still runs, and the operator is
+        # told on both channels that it is unwatched.
+        supervisor_proc = None
+        log.warning("supervisor: could not start (%s); the run proceeds unwatched", exc)
+        print(f"[supervisor] could not start ({exc}); the run proceeds unwatched", file=sys.stderr)
+
     try:
         stop_reason = await coordinator.run(
             objective=objective,
@@ -2292,9 +2315,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
+        # Stopping the leases and the agent subprocesses is itself a step that
+        # can hang, so it happens while the supervisor is still watching; the
+        # supervisor is stood down only once it has returned.
         with timed_teardown_step(state, "coordinator_stop"):
             await coordinator.stop()
-        # Drop the single-optimizer session lock once the coordinator has released its leases.
+        with timed_teardown_step(state, "supervisor_stop"):
+            stop_supervisor(supervisor_proc)
+        # Drop the single-optimizer session lock once the
+        # coordinator has released its leases. The OS would drop it on process
+        # exit anyway; this just frees it promptly for an intentional resume.
         with timed_teardown_step(state, "session_lock"):
             session_lock.release()
         # Crash-safe reports/final.json.

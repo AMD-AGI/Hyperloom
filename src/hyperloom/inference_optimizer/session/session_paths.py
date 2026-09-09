@@ -27,6 +27,65 @@ def optimizer_lock_path(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "optimizer.lock"
 
 
+def supervisor_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/supervisor`` — the out-of-band supervisor's own store.
+
+    Everything the supervisor writes lives here: it must not be a second
+    writer to ``coordinator.db``, which may sit on a network filesystem.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/supervisor``.
+    """
+    return Path(session_dir) / "runtime" / "supervisor"
+
+
+def coordinator_tick_path(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/supervisor/coordinator_tick.json``.
+
+    Stamped by the coordinator at the top of every tick and read by the
+    supervisor, which uses it to tell a wedged loop from a busy one.
+
+    Schema: ``{pid, hostname, tick, stamped_unix}``.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to the tick stamp.
+    """
+    return supervisor_dir(session_dir) / "coordinator_tick.json"
+
+
+def supervisor_status_path(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/supervisor/status.json``.
+
+    The supervisor's own view of the session, rewritten every poll: what it
+    observed, what it would do, and what it actually did.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to the status snapshot.
+    """
+    return supervisor_dir(session_dir) / "status.json"
+
+
+def supervisor_log_path(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/supervisor/supervisor.log``.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: Where the supervisor process's own output is redirected.
+    """
+    return supervisor_dir(session_dir) / "supervisor.log"
+
+
 def pod_history_path(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/pod_history.jsonl`` — the optimizer-owner ledger."""
     return Path(session_dir) / "runtime" / "pod_history.jsonl"
@@ -292,13 +351,22 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 
 
 def recipe_kb_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root."""
+    """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
+
+    This directory holds only *derived* bookkeeping — the authoritative recipe
+    store is the local KB root (``$HYPERLOOM_LOCAL_KB_ROOT`` / ``workspace_root()/kb``,
+    mirrored to gbrain), which lives outside the session tree. The snapshots
+    here (``.kb_pitfalls.json`` / ``.kb_lessons.json``) are rewritten by every
+    T0 anchor, so a session that predates the ``runtime/cortex`` ->
+    ``runtime/recipe_kb`` rename simply regenerates them; no migration is needed.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/recipe_kb``.
+    """
     return Path(session_dir) / "runtime" / "recipe_kb"
-
-
-def recipe_kb_warm_json(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_warm.json``, the T0 warm-start recipe snapshot."""
-    return recipe_kb_dir(session_dir) / ".kb_warm.json"
 
 
 def recipe_kb_pitfalls_json(session_dir: Path) -> Path:
@@ -419,7 +487,6 @@ __all__ = [
     "recipe_kb_lessons_json",
     "recipe_kb_pending_ndjson",
     "recipe_kb_pitfalls_json",
-    "recipe_kb_warm_json",
     "decision_trace_path",
     "proposal_task_map_path",
     "forge_steps_path",

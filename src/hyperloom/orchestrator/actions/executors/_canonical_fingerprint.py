@@ -128,9 +128,14 @@ def workload_signature(
     osl: int | str | None = None,
     precision: str | None = None,
     tp: int | str | None = None,
+    benchmark_mode: str | None = None,
 ) -> str:
     """Return a stable 12-char digest of the workload contract."""
+    # ``benchmark_mode`` is in the digest so an AgentX and a synthetic session with the same CONC/TP never collide.
+    if benchmark_mode is None:
+        benchmark_mode = "agentx" if os.environ.get("HYPERLOOM_AGENTX", "").strip() else "synthetic"
     fields = {
+        "benchmark_mode": benchmark_mode.strip().lower(),
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),
         "isl": str(isl if isl is not None else os.environ.get("ISL", "")).strip(),
         "osl": str(osl if osl is not None else os.environ.get("OSL", "")).strip(),

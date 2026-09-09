@@ -247,6 +247,17 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "user_stop_requested": "Stopped on an explicit operator request.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
+    "server_argv_invalid": (
+        "The installed framework's own argument parser refused the composed server argv before any "
+        "server was launched. Nothing in the framework source is at fault: correct the offending flag "
+        "in --server-args / the recipe for the installed version, then re-run."
+    ),
+    "environment_fault": (
+        "This host cannot run the combination as installed - the framework is missing from the serving "
+        "interpreter, a compiled extension has no build for this platform, the checkpoint path resolves "
+        "to nothing, or the port is already held. No patch to the model or the framework source repairs "
+        "any of those, so the run stopped instead of spending rounds authoring against the machine."
+    ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
@@ -297,7 +308,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "which would crash engine init."
     ),
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
-    "enablement_stalled": "The enablement loop made no forward progress for several consecutive rounds and stopped instead of re-deriving the same fix.",
+    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
+    "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
         "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
@@ -307,6 +319,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
         "the real cause), or point AIPERF_BIN at an existing pinned build."
     ),
+    # Host-level terminals: something outside the model ended the run.
+    "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
+    "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
 }
 
 
@@ -352,9 +367,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     """Render the AgentX graded axes when baseline perf data is available."""
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
+        INTVTY_V1,
+        intvty_grading_enabled,
+        intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
-        total_tput_grading_enabled,
         total_tput_of,
     )
 
@@ -363,18 +380,21 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         return
     cb = summary.get("current_best") or {}
     cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.append("## AgentX perf (total tok/s objective, intvty p90 gate)")
+    lines.append("## AgentX perf (interactivity objective, per-chip tput guard)")
     lines.append("")
+    lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
     lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
-    lines.append(f"- baseline intvty p90 : `{baseline['intvty_p90']:.1f}` tok/s/user")
     if cb_snap:
+        lines.append(f"- current_best intvty : `{intvty_of(cb_snap):.1f}` tok/s/user")
         lines.append(f"- current_best total  : `{total_tput_of(cb_snap):.1f}` tok/s")
-        lines.append(f"- current_best intvty : `{cb_snap['intvty_p90']:.1f}` tok/s/user")
-        gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
+        gain = gain_pct(intvty_of(cb_snap), intvty_of(baseline))
         if gain is not None:
-            lines.append(f"- total tput gain     : `{gain:+.2f}%`")
-    if total_tput_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-        lines.append(f"- grading mode        : `composite_v1` (intvty band `{parse_intvty_noise_pct():.1f}%`)")
+            lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
+        tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
+        if tput_gain is not None:
+            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
+    if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
+        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
     else:
         lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 

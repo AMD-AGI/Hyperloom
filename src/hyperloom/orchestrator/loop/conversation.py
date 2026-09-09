@@ -289,10 +289,7 @@ class ConversationCollaborator:
             if cycle_strategy_block:
                 sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
-                remaining_min = max(
-                    0.0,
-                    (self._run_deadline - time.monotonic()) / 60.0,
-                )
+                remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
                 elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
                 budget_min = self.shared_state.max_minutes or 0
                 sections.append("=== Time budget ===")
@@ -310,10 +307,7 @@ class ConversationCollaborator:
 
         # Time budget for Robustness — drives the deadline_imminent alert.
         if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
-            remaining_min = max(
-                0.0,
-                (self._run_deadline - time.monotonic()) / 60.0,
-            )
+            remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
             elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
             budget_min = self.shared_state.max_minutes or 0
             sections.append("=== Time budget ===")

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -286,7 +287,20 @@ def test_scan_reaches_the_source_tree() -> None:
     """A scan that parses nothing reports the same green as a clean one."""
     assert _REPO_ROOT is not None
     roots = [_REPO_ROOT / name for name in _SCAN_ROOTS]
-    count = sum(1 for root in roots if root.is_dir() for _ in root.rglob("*.py"))
+    # ``os.walk``, not ``rglob``: a parallel test tears a fixture directory down
+    # inside the tree while this walk is in flight, and pathlib's recursive glob
+    # catches only PermissionError before 3.12, so the FileNotFoundError escapes.
+    # os.walk ignores a directory that vanished, on every version, and reaches
+    # the same files. :func:`_scan_tree` guards the same race by skipping the
+    # root, which is not available here: this test counts what it reached.
+    count = sum(
+        1
+        for root in roots
+        if root.is_dir()
+        for _dirpath, _dirnames, filenames in os.walk(root)
+        for name in filenames
+        if name.endswith(".py")
+    )
     assert count >= 900, f"_SCAN_ROOTS reached only {count} files; an entry is missing or misspelled"
 
 

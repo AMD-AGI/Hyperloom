@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +15,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
+from ..state.task_registry import TerminalTaskReuse, create_in_cursor
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -20,6 +24,10 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+
+class _RowAlreadyLive(Exception):
+    """The generation's key already names a live row, so no round is taken."""
 
 
 class EnablementRevalidation(CoordinatorCollaborator):
@@ -69,10 +77,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             rt_override = rt_obj.to_runtime_override()
             if rt_override:
                 params["runtime_override"] = rt_override
-        task = await self._open_revalidation_row(params)
-        if task is None:
+        task_id = await self._open_revalidation_row(params)
+        if not task_id:
             return ""
-        task_id = str(getattr(task, "task_id", "") or "")
         enablement_event.record_revalidation(
             generation=int(state.enablement.revalidation_generation or 0),
             task_id=task_id,
@@ -87,23 +94,30 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
 
-    async def _open_revalidation_row(self, params: dict[str, Any]) -> "Task | None":
-        """Resolve this revalidation window's task row, on a generation it can use."""
+    async def _open_revalidation_row(self, params: dict[str, Any]) -> str:
+        """Open this revalidation window's round, on a generation it can use.
+
+        Args:
+            params: The baseline params for the revalidation row.
+
+        Returns:
+            str: The holder task id, or ``""`` when this tick found only spent
+            generations or a machine something else still holds -- the window
+            stays open and the next tick tries again.
+        """
         state = self.shared_state
-        _baseline_lanes, _baseline_ttl = self._registry_lanes_ttl("baseline")
-        task, generation = await self._open_row_past_spent_generations(
-            kind="baseline",
+        baseline_lanes, baseline_ttl = self._registry_lanes_ttl("baseline")
+        task_id, generation = await self._open_round_past_spent_generations(
             params=params,
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
-            label="revalidation",
-            # Both halves of the catalogue contract: a baseline re-launches the server, so it must hold the same lanes
-            # any other baseline does.
-            requires_lanes=_baseline_lanes,
-            lease_ttl_sec=_baseline_ttl,
+            # Both halves of the catalogue contract: a baseline re-launches the
+            # server, so it must hold the same lanes any other baseline does.
+            requires_lanes=baseline_lanes,
+            lease_ttl_sec=int(baseline_ttl),
         )
         state.enablement.revalidation_generation = generation
-        return task
+        return task_id
 
     async def _open_row_past_spent_generations(
         self,
@@ -139,3 +153,83 @@ class EnablementRevalidation(CoordinatorCollaborator):
             )
             generation += 1
         return None, generation
+
+    async def _open_round_past_spent_generations(
+        self,
+        *,
+        params: dict[str, Any],
+        key_for: Callable[[int], str],
+        generation: int,
+        requires_lanes: list[str],
+        lease_ttl_sec: int,
+        attempts: int = 2,
+    ) -> tuple[str, int]:
+        """Acquire a bring-up round for a baseline row, skipping spent generations.
+
+        A revalidation launches the server again, so it takes the machine the
+        same way an authoring round does. The row and the acquire commit
+        together, so the store names this task the round's holder and the round
+        it opened is not read as one standing in its way.
+
+        A generation in the idempotency key is what lets one piece of work get a
+        fresh row after an earlier attempt went terminal, so a key resolving to a
+        terminal row is recognised as a spent generation rather than an enqueue.
+
+        Args:
+            params: The baseline task params.
+            key_for: Builds the idempotency key for a generation number.
+            generation: The generation to try first.
+            requires_lanes: Lanes the baseline must hold while running.
+            lease_ttl_sec: The baseline's lease, and the round's first one.
+            attempts: How many generations to try before giving up this pass.
+
+        Returns:
+            tuple[str, int]: The holder task id and the generation it sits on,
+            or ``""`` with the generation to try next. The caller persists the
+            generation.
+        """
+        for _attempt in range(max(1, attempts)):
+            key = key_for(generation)
+            holder = uuid.uuid4().hex
+
+            def _join(cur: sqlite3.Cursor, _key: str = key, _holder: str = holder) -> None:
+                _task, existing = create_in_cursor(
+                    cur,
+                    kind="baseline",
+                    params=params,
+                    idempotency_key=_key,
+                    requires_lanes=requires_lanes,
+                    lease_ttl_sec=lease_ttl_sec,
+                    task_id=_holder,
+                )
+                if existing:
+                    # A live row already runs this generation, under the round
+                    # it opened.
+                    raise _RowAlreadyLive(_key)
+
+            try:
+                acquired = await self.rounds.open(
+                    f"revalidation-{holder}",
+                    holder_task_id=holder,
+                    lease_sec=float(lease_ttl_sec),
+                    now_unix=time.time(),
+                    request_id=key,
+                    evidence={"idempotency_key": key},
+                    join=_join,
+                )
+            except _RowAlreadyLive:
+                return "", generation
+            except TerminalTaskReuse as exc:
+                log.warning(
+                    "ENABLEMENT revalidation: gen%d is spent (%s); opening generation %d",
+                    generation,
+                    exc,
+                    generation + 1,
+                )
+                generation += 1
+                continue
+            if not acquired.ok:
+                log.info("ENABLEMENT revalidation: round not opened (%s)", acquired.reason)
+                return "", generation
+            return holder, generation
+        return "", generation

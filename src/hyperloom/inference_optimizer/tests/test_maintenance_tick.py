@@ -29,14 +29,16 @@ from hyperloom.orchestrator.loop.maintenance import (
 )
 
 
-class _Locks:
-    def __init__(self, reaped=(), raises=False):
-        self._reaped, self._raises = reaped, raises
+class _Reconciler:
+    """The pass that owns the serving-lease sweep; maintenance only reports it.
 
-    async def reap_expired(self):
-        if self._raises:
-            raise RuntimeError("lease table locked")
-        return list(self._reaped)
+    An open bring-up round holds one of those leases and can only be settled in
+    the reconciler, so a second sweep here would reap a lease a live round still
+    holds. ``raises`` stands in for a report this pass could not produce.
+    """
+
+    def __init__(self, reaped=0, raises=False):
+        self.last_report = None if raises else SimpleNamespace(leases_reaped=reaped)
 
 
 class _Pool:
@@ -63,7 +65,7 @@ class _Tasks:
 
 def _host(**kw):
     return SimpleNamespace(
-        locks=kw.get("locks", _Locks(reaped=["l1", "l2"])),
+        reconciler=kw.get("reconciler", _Reconciler(reaped=2)),
         gpu_specialist_pool=kw.get("pool", _Pool(count=3)),
         tasks=kw.get("tasks", _Tasks(reclaimed=["t1"])),
         db=kw.get("db", object()),
@@ -110,11 +112,11 @@ class TestReclaimReportsWhatEachStepDid:
 
 class TestNoSingleStepCanEndTheRun:
     @pytest.mark.asyncio
-    async def test_a_failed_lease_reap_leaves_the_other_steps_intact(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_an_unreadable_lease_sweep_leaves_the_other_steps_intact(self, monkeypatch: pytest.MonkeyPatch):
         _patch_retention(monkeypatch)
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(locks=_Locks(raises=True)), summary, reason="r")
+        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
 
         assert "leases_reaped" not in summary
         assert summary["gpu_leases_reaped"] == 3
@@ -151,15 +153,12 @@ class TestNoSingleStepCanEndTheRun:
         assert summary["running_tasks_reclaimed"] == 1
 
     @pytest.mark.asyncio
-    async def test_a_reaped_lease_list_of_none_counts_as_zero(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_a_pass_that_swept_nothing_counts_as_zero(self, monkeypatch: pytest.MonkeyPatch):
+        """A reconciler that ran and found nothing reports 0, not an absent key."""
         _patch_retention(monkeypatch)
-
-        class _NoneLocks:
-            async def reap_expired(self):
-                return None
-
         summary: dict = {}
-        await run_lease_and_db_reclaim(_host(locks=_NoneLocks()), summary, reason="r")
+
+        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(reaped=0)), summary, reason="r")
 
         assert summary["leases_reaped"] == 0
 
@@ -168,7 +167,7 @@ def _coordinator(session_dir: Path, **kw):
     """A stand-in exposing exactly what the collaborator reads off its host."""
     return SimpleNamespace(
         session_dir=session_dir,
-        locks=_Locks(),
+        reconciler=_Reconciler(),
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
         db=object(),

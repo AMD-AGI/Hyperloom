@@ -220,6 +220,7 @@ def wait_for_server_ready(
     base_url: str,
     *,
     timeout_s: float,
+    server_exited: Callable[[], bool],
     poll_s: float = 2.0,
     probe: Callable[[str], int] | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -240,6 +241,10 @@ def wait_for_server_ready(
                 return True
         except Exception:  # noqa: BLE001 - not-ready yet; keep polling
             pass
+        # Checked after the probe, so a server that answered and exited in the
+        # same breath is still credited with having come up.
+        if server_exited():
+            return False
         sleep(poll_s)
     return False
 
@@ -308,3 +313,25 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
         return do_probe(health_url) == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+def _json_post(url: str, payload: dict[str, Any], timeout_s: float) -> Any:
+    """POST ``payload`` as JSON and return the decoded body."""
+    import json as _json
+
+    request = urllib.request.Request(  # noqa: S310  # nosec B310 - fixed local serving endpoint
+        url,
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _json_get(url: str, timeout_s: float) -> Any:
+    """GET ``url`` and return the decoded JSON body."""
+    import json as _json
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))

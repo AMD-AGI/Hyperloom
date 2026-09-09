@@ -295,9 +295,11 @@ def _elapsed_seconds(state: Any) -> tuple[float, float]:
     previous leg -- and any stamp that does not postdate the leg's start is
     that stale one rather than this leg's end.
 
-    The total adds the legs already banked at each resume boundary, so it
-    measures time the session spent running instead of the span it existed
-    over.
+    The total is the session's own charged budget (``elapsed_charged_sec`` plus
+    whatever the live leg has run since the last charge), so it measures time
+    the session spent running instead of the span it existed over. It is read
+    rather than recomputed here because the budget that stops the run is the
+    one a report has to agree with.
 
     Args:
         state: The live ``SharedState`` to measure.
@@ -312,8 +314,11 @@ def _elapsed_seconds(state: Any) -> tuple[float, float]:
     if ended <= started:
         ended = time.time()
     leg = max(0.0, ended - started) if started > 0.0 else 0.0
-    banked = max(0.0, float(getattr(state, "prior_legs_elapsed_s", 0.0) or 0.0))
-    return leg, banked + leg
+    charged = max(0.0, float(getattr(state, "elapsed_charged_sec", 0.0) or 0.0))
+    anchor = float(getattr(state, "leg_anchor_unix", 0.0) or 0.0)
+    live = max(0.0, time.time() - anchor) if anchor > 0.0 else 0.0
+    total = charged + live
+    return leg, total or leg
 
 
 def _recovery(state: Any) -> dict[str, Any]:

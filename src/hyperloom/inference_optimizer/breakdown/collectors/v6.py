@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...session.sbd_v6 import read_timeline_events
+from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ._common import (
     _dict_rows,
     _first,
@@ -24,23 +25,6 @@ from ._common import (
 )
 
 
-_SUCCESS_STOP_REASONS = frozenset(
-    {
-        "target_reached",
-        "global_converged",
-        "time_exhausted",
-        "max_ticks",
-        "sweep_done",
-    }
-)
-_ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
-_MODEL_GATE_STOP_REASONS = frozenset(
-    {
-        "model_context_window_too_small",
-        "model_config_incompatible",
-        "unsupported_model_arch",
-    }
-)
 # Structural model fields carried verbatim out of ``state.model_info``. Kept in
 # lockstep with the recorder's own list (``recorder/session_metadata.py``) so a
 # fragment-backed session and a collector fallback expose the same block.
@@ -291,20 +275,12 @@ def collect_v6_timeline(
     return [event for _, event in indexed]
 
 
-def _outcome_status(stop_reason: str) -> str:
-    if stop_reason in _SUCCESS_STOP_REASONS:
-        return "completed"
-    if stop_reason in _ABORTED_STOP_REASONS or not stop_reason:
-        return "aborted"
-    return "failed"
-
-
 def _stage_reached(
     state: dict[str, Any],
     stop_reason: str,
     timeline: list[dict[str, Any]],
 ) -> str:
-    if stop_reason in _MODEL_GATE_STOP_REASONS:
+    if stop_reason in MODEL_GATE_STOP_REASONS:
         return "model_gate"
     phase = str(state.get("phase") or "").strip().upper()
     history = state.get("phase_history")

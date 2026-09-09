@@ -14,6 +14,7 @@ FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
 
 # Variant outcomes that produced no usable measurement, so they need evidence.
+# ``RECORDED`` is deliberately absent: it was measured, just not promoted.
 UNMEASURED_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
 
 # Matches every character replaced by ``_`` in a variant-name slug.

@@ -425,8 +425,16 @@ def test_a_round_that_ran_clears_the_failure_streak(tmp_path: Path):
     assert stub.shared_state.framework_agent_empty_discoveries == 1
 
 
-def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path):
-    """The patch applied, benched and was rolled back; only the commit failed."""
+@pytest.mark.asyncio
+async def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path):
+    """The patch applied, benched and was rolled back; only the commit failed.
+
+    Reported as ``apply_failed`` it sent a specialist to rewrite a diff that
+    had already passed the bench and the accuracy gate. Reported as the
+    rollback it is, the rearm skips it on the status alone -- and the ledger,
+    which skips ``apply_failed`` on a perf lane for the retry loop's sake,
+    still records the candidate's outcome.
+    """
     stub = _Stub(tmp_path, authoring=True, local_explore=False)
     res = {
         "status": "reverted",
@@ -436,11 +444,11 @@ def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path)
         "specialist_task_id": "t1",
     }
 
-    stub._maybe_rearm_authored_lane(res)
+    await stub._maybe_rearm_authored_lane(res)
     assert stub.shared_state.apply_fail_retry_pending == []
 
     # A genuine apply failure on the same lane still queues a retry.
-    stub._maybe_rearm_authored_lane({**res, "status": "apply_failed", "error_class": "patch_did_not_apply"})
+    await stub._maybe_rearm_authored_lane({**res, "status": "apply_failed", "error_class": "patch_did_not_apply"})
     assert len(stub.shared_state.apply_fail_retry_pending) == 1
 
 

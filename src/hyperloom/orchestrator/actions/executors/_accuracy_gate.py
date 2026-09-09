@@ -18,10 +18,16 @@ from typing import Any
 import yaml
 
 from hyperloom.common.io import safe_mtime
+from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
+
+# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
+# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
+# PERCENT and derives ``100.0 * errors / total``.
+AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
 
 # Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
 # diverge.
@@ -338,6 +344,23 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
+def parse_agentx_error_rate(workspace: Path | str) -> float | None:
+    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
+    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
+    workspace = Path(workspace)
+    results = [Path(f) for f in glob.glob(str(workspace / "**" / "inferencex_result.json"), recursive=True)]
+    if not results:
+        return None
+    latest = max(results, key=lambda p: p.stat().st_mtime)
+    try:
+        data = json.loads(latest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
+        return None
+    rate = data.get("request_error_rate")
+    return float(rate) if isinstance(rate, (int, float)) else None
+
+
 def quality_gate_passed(
     quality_gate: dict[str, Any] | None,
     require: bool = False,
@@ -378,13 +401,29 @@ def quality_gate_passed(
 def parse_eval_results(
     workspace: Path | str,
     framework: str | None = None,
+    benchmark_mode: str = "",
 ) -> dict[str, Any]:
-    """Extract accuracy score from Magpie workspace's eval output."""
+    """Extract accuracy score from Magpie workspace's eval output; AgentX grades on its error rate instead."""
     workspace = Path(workspace)
 
     from hyperloom.inference_optimizer import framework_registry
 
     scriptable = framework_registry.is_scriptable(framework)
+
+    # AgentX has no lm-eval; its correctness signal is the error rate upstream
+    # gates a submission on. Fails closed like the scriptable gate below: a run
+    # that reported no rate is not comparable, and treating that as a pass is
+    # how an incomparable measurement reaches the leaderboard set.
+    if is_agentx_mode(benchmark_mode):
+        rate = parse_agentx_error_rate(workspace)
+        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+        log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+        return {
+            "accuracy": 1.0 if passed else 0.0,
+            "task": "agentx_error_rate",
+            "metric": "request_error_rate",
+            "error_rate": rate,
+        }
 
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.
     qg_out = parse_quality_gate(workspace)

@@ -29,6 +29,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablemen
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -37,9 +39,10 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
 )
 from hyperloom.orchestrator.enablement.lane import EnablementLane
-from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_STALL, Coordinator
+from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS, Coordinator
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
 
 _MISSING_ARCH_LOG = (
     "Traceback (most recent call last):\n"
@@ -106,6 +109,29 @@ class _FakeTasks:
         return []
 
 
+def _rounds(session_dir: Path) -> RoundStore:
+    """A real round ledger, which is what the lane now counts stalls from."""
+    db = SqliteConnection(Path(session_dir) / "coordinator.db")
+    ensure_schema(db.raw)
+    return RoundStore(db)
+
+
+async def _seed_stalled(rounds: RoundStore, n: int) -> None:
+    """Settle N FAILED rounds, the ledger's way of saying the streak is N."""
+    for i in range(n):
+        rid = f"seed-stalled-{i:03d}"
+        holder = f"holder-{i:03d}"
+        await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=float(i), request_id=rid)
+        await rounds.settle(
+            rid,
+            holder_task_id=holder,
+            fence=1,
+            outcome=FAILED,
+            now_unix=float(i) + 1.0,
+            request_id=f"settle-{rid}",
+        )
+
+
 def _lane(session_dir: Path, **overrides: Any):
     """A lane bound to the real dispatch, rearm and revalidation methods."""
     state = types.SimpleNamespace(
@@ -120,9 +146,7 @@ def _lane(session_dir: Path, **overrides: Any):
         enablement=EnablementRound(
             origin=overrides.get("origin", ""),
             launch_log=overrides.get("launch_log", _MISSING_ARCH_LOG),
-            attempts=overrides.get("attempts", 0),
-            inflight_task_id=overrides.get("inflight_task_id", ""),
-            stall_streak=overrides.get("stall_streak", 0),
+            last_specialist_task_id=overrides.get("last_specialist_task_id", ""),
             validation_pending=overrides.get("validation_pending", False),
             revalidation_generation=overrides.get("revalidation_generation", 0),
             accepted_config_path=overrides.get("accepted_config_path", ""),
@@ -147,6 +171,7 @@ def _lane(session_dir: Path, **overrides: Any):
         shared_state=state,
         state=types.SimpleNamespace(pending_proposals={}),
         tasks=_FakeTasks(),
+        rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
         _run_deadline=None,
         _warm_specialist_params=_noop,
@@ -170,20 +195,33 @@ def _lane(session_dir: Path, **overrides: Any):
         "_maybe_enqueue_enablement_baseline_revalidation",
         "_open_revalidation_row",
         "_open_row_past_spent_generations",
+        "_open_round_past_spent_generations",
     ):
         setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
-    fake._enablement_in_flight = types.MethodType(EnablementLane._enablement_in_flight, fake)
+    # The round ledger's own surface, which the dispatch and the rearm both
+    # reach through: the cap, the lease and the settle all live on it.
+    for name in (
+        "_refused_argv_is_terminal",
+        "_environment_fault_is_terminal",
+        "_environment_verdict",
+        "_enablement_in_flight",
+        "_round_has_live_work",
+        "_open_authoring_round",
+        "_renew_enablement_round",
+        "_settle_enablement_round",
+    ):
+        setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
+    fake._close_enablement_lane = types.MethodType(WritebackCollaborator._close_enablement_lane, fake)
     return fake
 
 
-def _writeback(**overrides: Any):
+def _writeback(session_dir: Path, **overrides: Any):
     """A writeback bound to the real eval-failure persistence."""
     state = types.SimpleNamespace(
         enablement_mode=overrides.get("mode", "all"),
         enablement=EnablementRound(
             validation_pending=overrides.get("validation_pending", False),
             revalidation_generation=overrides.get("revalidation_generation", 0),
-            stall_streak=overrides.get("stall_streak", 0),
             baseline_eval_kind=overrides.get("baseline_eval_kind", ""),
             observed_accuracy=overrides.get("observed_accuracy", 0.0),
             observed_task=overrides.get("observed_task", ""),
@@ -191,7 +229,10 @@ def _writeback(**overrides: Any):
         stop_reason="",
     )
     state.set_stop_reason = lambda value, **k: setattr(state, "stop_reason", str(value or ""))
-    fake = types.SimpleNamespace(shared_state=state)
+    fake = types.SimpleNamespace(
+        shared_state=state,
+        rounds=overrides.get("rounds") or _rounds(session_dir),
+    )
     for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
     return fake
@@ -212,10 +253,10 @@ async def test_the_real_dispatch_records_the_kind_it_classified(_bound_session):
 
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    assert task_id == "spec-1"
+    assert task_id
     rows = _ext()["attempts"]["rows"]
     assert len(rows) == 1
-    assert rows[0]["task_id"] == "spec-1"
+    assert rows[0]["task_id"] == task_id
     assert rows[0]["attempt"] == 1
     assert rows[0]["failure_kind"] == "missing_model_arch"
     assert "Glm5ForCausalLM" in rows[0]["launch_log_excerpt"]
@@ -244,13 +285,13 @@ async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
 async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
     """Rotation through attempts is a sequence of rows, not a counter."""
     lane = _lane(_bound_session)
-    await lane._maybe_enqueue_enablement_specialist()
-    lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
-    await lane._maybe_enqueue_enablement_specialist()
+    first = await lane._maybe_enqueue_enablement_specialist()
+    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
+    second = await lane._maybe_enqueue_enablement_specialist()
 
     assert len(_events(_bound_session)) == 1
     rows = _ext()["attempts"]["rows"]
-    assert [row["task_id"] for row in rows] == ["spec-1", "spec-2"]
+    assert [row["task_id"] for row in rows] == [first, second]
     assert [row["attempt"] for row in rows] == [1, 2]
 
 
@@ -261,13 +302,13 @@ async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
 async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
     """A boot-origin KEEP is the terminal, and the event says which round it was."""
     lane = _lane(_bound_session)
-    await lane._maybe_enqueue_enablement_specialist()
+    task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    lane._maybe_rearm_enablement(
+    await lane._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
-            "specialist_task_id": "spec-1",
+            "specialist_task_id": task_id,
             "patches_applied": ["/s/patches/arch.diff"],
             "setup_commands_applied": ["pip install -e ."],
             "framework_root": "/fw/sglang",
@@ -289,14 +330,14 @@ async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
 async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
     """Serial enablement: the round's own gap and the next one are both kept."""
     lane = _lane(_bound_session)
-    await lane._maybe_enqueue_enablement_specialist()
+    task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    lane._maybe_rearm_enablement(
+    await lane._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
             "advanced": True,
-            "specialist_task_id": "spec-1",
+            "specialist_task_id": task_id,
             "patches_applied": ["/s/patches/arch.diff"],
             "enablement_launch_log": "ValueError: Following weights were not initialized from checkpoint",
         }
@@ -312,19 +353,26 @@ async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
 
 @pytest.mark.asyncio
 async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
-    """``enablement_stalled`` stops the run, so the lane failed."""
-    lane = _lane(_bound_session)
-    for attempt in range(_ENABLEMENT_MAX_STALL):
-        lane.shared_state.enablement.inflight_task_id = f"spec-{attempt}"
-        lane._maybe_rearm_enablement(
-            {"enablement": True, "status": "reverted", "specialist_task_id": f"spec-{attempt}"}
-        )
+    """The cap stops the run, so the lane failed.
 
-    assert lane.shared_state.stop_reason == "enablement_stalled"
+    The cap is read where the next round would be dispatched, not where the
+    last one was scored, so the lane only closes on the dispatch that finds
+    the ledger already exhausted.
+    """
+    lane = _lane(_bound_session)
+    for _ in range(_ENABLEMENT_MAX_ATTEMPTS):
+        task_id = await lane._maybe_enqueue_enablement_specialist()
+        lane.shared_state.enablement.last_specialist_task_id = task_id
+        await lane._maybe_rearm_enablement(
+            {"enablement": True, "status": "reverted", "specialist_task_id": task_id}
+        )
+    await lane._maybe_enqueue_enablement_specialist()
+
+    assert lane.shared_state.stop_reason == "enablement_attempts_exhausted"
     events = _events(_bound_session)
     assert events[0]["status"] == "failed"
-    assert events[0]["ext"]["result"]["reason"] == "enablement_stalled"
-    assert events[0]["ext"]["attempts"]["count"] == _ENABLEMENT_MAX_STALL
+    assert events[0]["ext"]["result"]["reason"] == "enablement_attempts_exhausted"
+    assert events[0]["ext"]["attempts"]["count"] == _ENABLEMENT_MAX_ATTEMPTS
     assert events[0]["ext"]["attempts"]["landed"] == 0
 
 
@@ -332,9 +380,9 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
 async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
     """The patch is provisional until a genuine baseline re-measures accuracy."""
     lane = _lane(_bound_session, origin="eval")
-    lane.shared_state.enablement.inflight_task_id = "spec-1"
+    lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
-    lane._maybe_rearm_enablement(
+    await lane._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -354,28 +402,25 @@ async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
 
 
 @pytest.mark.asyncio
-async def test_a_round_that_finished_without_a_rearm_settles_its_own_row(_bound_session):
-    """The pump's watchdog rearm carries no specialist id of its own.
+async def test_a_round_still_open_leaves_one_unruled_row(_bound_session):
+    """A round nobody rearmed keeps its row, and the pump opens no second one.
 
-    It closes out the round the in-flight guard names, so it settles that
-    round's row rather than opening an anonymous second one -- which is what
-    keeps the kind and the log the round was pointed at attached to the verdict
-    it eventually got.
+    Ending such a round is the reconciler's, not the pump's: the pump sees the
+    ledger still holding one and declines. What the timeline must not do is
+    invent a verdict for it -- the row stays as the dispatch left it, carrying
+    the kind and the log the round was pointed at and no status, which is the
+    honest account of a round the lane never learned the outcome of.
     """
     lane = _lane(_bound_session)
-    await lane._maybe_enqueue_enablement_specialist()
-    # The specialist row is gone from the registry, so the next pump treats the
-    # round as finished without a rearm, charges it as a stall, and dispatches
-    # the next one.
-    await lane._maybe_enqueue_enablement_specialist()
+    first = await lane._maybe_enqueue_enablement_specialist()
+    # The specialist row is gone from the registry, but the round it holds is
+    # still open, so this pump declines rather than dispatching over it.
+    assert await lane._maybe_enqueue_enablement_specialist() == ""
 
     rows = _ext()["attempts"]["rows"]
-    assert [row["task_id"] for row in rows] == ["spec-1", "spec-2"]
+    assert [row["task_id"] for row in rows] == [first]
     assert rows[0]["failure_kind"] == "missing_model_arch"
-    assert rows[0]["reason"] == "round_finished_without_rearm"
-    assert rows[0]["stall_streak_after"] == 1
-    # The round the watchdog dispatched has not been ruled.
-    assert rows[1].get("status") in (None, "")
+    assert rows[0].get("status") in (None, "")
 
 
 # --- rounds that never happened -------------------------------------------
@@ -418,7 +463,7 @@ async def test_the_same_unclassifiable_failure_is_filed_once(_bound_session):
 
 def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session):
     """The real writeback records the trigger it just persisted to state."""
-    writeback = _writeback()
+    writeback = _writeback(_bound_session)
 
     writeback._persist_eval_failure(
         {
@@ -451,7 +496,7 @@ def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
     the eval-less run's fingerprint never matches the measured one. The
     recorder keeps the opening trigger for the same reason the state does.
     """
-    writeback = _writeback()
+    writeback = _writeback(_bound_session)
     writeback._persist_eval_failure(
         {
             BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
@@ -467,10 +512,13 @@ def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
     assert trigger["observed_accuracy"] == 0.21
 
 
-def test_a_failed_revalidation_closes_its_window_and_charges_the_stall(_bound_session):
+def test_a_failed_revalidation_closes_the_window_it_was_opened_for(_bound_session):
     """A revalidation that comes back sub-floor reopens the authoring loop."""
     writeback = _writeback(
-        validation_pending=True, revalidation_generation=2, baseline_eval_kind="accuracy_below_floor"
+        _bound_session,
+        validation_pending=True,
+        revalidation_generation=2,
+        baseline_eval_kind="accuracy_below_floor",
     )
 
     writeback._persist_eval_failure(
@@ -489,12 +537,18 @@ def test_a_failed_revalidation_closes_its_window_and_charges_the_stall(_bound_se
     assert revalidations[0]["accuracy"] == 0.33
 
 
-def test_a_revalidation_that_trips_the_cap_closes_the_lane(_bound_session):
-    """The last window's failure is also the lane's terminal."""
+def test_a_failed_revalidation_is_not_itself_the_lanes_terminal(_bound_session):
+    """The cap belongs to the round ledger, so a window's failure cannot call it.
+
+    A sub-floor revalidation reopens the authoring loop; whether that loop has
+    any ground left is a question only the ledger can answer, and it is asked
+    at the next dispatch. Closing the lane here would end it on a round the
+    ledger had not yet charged.
+    """
     writeback = _writeback(
+        _bound_session,
         validation_pending=True,
         revalidation_generation=3,
-        stall_streak=_ENABLEMENT_MAX_STALL - 1,
         baseline_eval_kind="accuracy_below_floor",
     )
 
@@ -506,10 +560,8 @@ def test_a_revalidation_that_trips_the_cap_closes_the_lane(_bound_session):
         }
     )
 
-    assert writeback.shared_state.stop_reason == "enablement_stalled"
-    events = _events(_bound_session)
-    assert events[0]["status"] == "failed"
-    assert events[0]["ext"]["result"]["stall_streak"] == _ENABLEMENT_MAX_STALL
+    assert writeback.shared_state.stop_reason == ""
+    assert _events(_bound_session)[0]["status"] == "running"
 
 
 # --- the revalidation enqueue --------------------------------------------
@@ -584,7 +636,7 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     lane = _lane(tmp_path)
 
     task_id = await lane._maybe_enqueue_enablement_specialist()
-    lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
+    await lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
 
-    assert task_id == "spec-1"
+    assert task_id
     assert lane.shared_state.enablement.succeeded is True

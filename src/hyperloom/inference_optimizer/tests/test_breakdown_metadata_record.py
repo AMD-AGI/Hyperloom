@@ -213,11 +213,12 @@ def test_a_resumed_leg_is_measured_from_its_own_start(tmp_path):
     assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] == 60.0
 
 
-def test_the_total_adds_the_legs_already_banked(tmp_path):
+def test_the_total_reports_the_budget_the_session_was_charged(tmp_path):
+    """The live leg is one leg; the total is what every leg together has spent."""
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(
         rec,
-        _state(resumed_ts="2026-09-01T01:00:00+00:00", prior_legs_elapsed_s=1800.0),
+        _state(resumed_ts="2026-09-01T01:00:00+00:00", elapsed_charged_sec=5400.0),
     )
     session = assemble_parts(tmp_path)[SECTION]["session"]
     assert session["elapsed_minutes"] == 60.0

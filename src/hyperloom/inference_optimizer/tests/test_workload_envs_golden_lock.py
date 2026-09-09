@@ -177,7 +177,7 @@ def test_run_eval_disabled_no_warn_when_already_emitted(monkeypatch, tmp_path, c
 # ── unset_envs then restore-from-extra_envs semantics ───────────────────────
 
 
-def test_unset_env_restored_from_extra_envs(monkeypatch, tmp_path):
+def test_unset_env_wins_over_extra_envs_for_the_same_key(monkeypatch, tmp_path):
     _isolate(monkeypatch)
     # KEEP exists in the YAML base, is overridden by extra_envs, then named in unset_envs. The final restore loop
     # re-injects the extra_envs value.
@@ -189,7 +189,7 @@ def test_unset_env_restored_from_extra_envs(monkeypatch, tmp_path):
         unset_envs="KEEP",
     )
     envs = yaml.safe_load(res.read_text())["benchmark"]["envs"]
-    assert envs["KEEP"] == "from_extra"
+    assert "KEEP" not in envs
 
 
 def test_unset_env_dropped_when_not_in_extra_envs(monkeypatch, tmp_path):
