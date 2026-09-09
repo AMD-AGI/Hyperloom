@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the structured apply-failure feedback helpers.
-
-Covers ApplyFeedback (de)serialisation and mandate rendering, the patch
-source-context extractor (modification + deletion targets, prefix stripping,
-missing-file fallbacks), the generic source_context_for_file primitive, and
-the build_apply_feedback factory.
-"""
+"""Unit tests for the structured apply-failure feedback helpers."""
 
 from __future__ import annotations
 
@@ -20,9 +14,7 @@ from hyperloom.orchestrator.actions.executors._apply_feedback import (
 )
 
 
-# ---------------------------------------------------------------------------
 # ApplyFeedback dataclass
-# ---------------------------------------------------------------------------
 
 
 def test_from_dict_defaults_for_missing_keys():
@@ -74,9 +66,7 @@ def test_format_for_mandate_all_sections():
     assert "Source context" in block
 
 
-# ---------------------------------------------------------------------------
 # read_patch_source_context
-# ---------------------------------------------------------------------------
 
 
 def test_read_context_modification_with_ab_prefix(tmp_path):
@@ -116,9 +106,7 @@ def test_read_context_absolute_target(tmp_path):
     assert str(target) in ctx
 
 
-# ---------------------------------------------------------------------------
 # source_context_for_file
-# ---------------------------------------------------------------------------
 
 
 def test_source_context_for_file_empty_path_returns_empty():
@@ -157,9 +145,7 @@ def test_source_context_for_file_symbol_not_found_centres_top(tmp_path):
     assert "nosym.py" in ctx
 
 
-# ---------------------------------------------------------------------------
 # build_apply_feedback
-# ---------------------------------------------------------------------------
 
 
 def test_build_apply_feedback_without_root():
@@ -190,9 +176,7 @@ def test_build_apply_feedback_with_root_unreadable_patch(tmp_path):
     assert fb.source_context == ""
 
 
-# ---------------------------------------------------------------------------
 # Exception-guard branches (helpers must swallow and return "")
-# ---------------------------------------------------------------------------
 
 
 def test_read_patch_source_context_swallows_exceptions(tmp_path, monkeypatch):

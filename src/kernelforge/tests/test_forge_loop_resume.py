@@ -33,12 +33,8 @@ from kernelforge.loop.run_state import (
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
-# The forge-loop CLI activates per-workspace aiter cache isolation, which writes
-# AITER_ROOT_DIR / AITER_JIT_DIR (and friends) directly into os.environ so child
-# tuner processes inherit the redirected build dirs. That is deliberate runtime
-# behavior, but it is a process-global mutation monkeypatch does not undo, so it
-# leaks into later tests (e.g. resolve_aiter_root picks up a dangling workspace
-# path). Snapshot and restore those keys around every test in this module.
+# The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
+# friends) directly into os.environ so child tuner processes inherit the redirected build dirs.
 _AITER_CACHE_ENV_KEYS = (
     "AITER_ROOT_DIR",
     "AITER_JIT_DIR",
@@ -64,9 +60,8 @@ def _isolate_aiter_cache_env():
 
 
 def test_forge_loop_exposes_the_superset_of_resume_and_orchestration_options():
-    # The resume CLI is a SUPERSET: it keeps our resume/campaign options and
-    # also exposes main's orchestration options (Hyperloom shells out to this
-    # command and passes them). Both families must be present.
+    # The resume CLI is a SUPERSET: it keeps our resume/campaign options and also exposes main's orchestration options
+    # (Hyperloom shells out to this command and passes them).
     runner = CliRunner()
 
     help_result = runner.invoke(main, ["forge-loop", "--help"])
@@ -126,9 +121,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         def set_kb_experience(self, experiment_id, payload):
             captured["kb_experience"] = (experiment_id, payload)
 
-        # The real tracker raises FileNotFoundError for an unknown ID, which is
-        # what forces the CLI to materialize the caller-owned recovery record
-        # before the first KEEP can checkpoint onto it.
+        # The real tracker raises FileNotFoundError for an unknown ID, which is what forces the CLI to materialize the
+        # caller-owned recovery record before the first KEEP can checkpoint onto it.
         def get(self, experiment_id):
             try:
                 return captured["experiments"][experiment_id]
@@ -307,8 +301,8 @@ def _invoke_forge_loop(
         "--max-hours",
         "1",
         "--no-profiling",
-        # These tests fake the loop and exercise campaign/resume orchestration,
-        # not the real measurement-driver task preparer (covered separately).
+        # These tests fake the loop and exercise campaign/resume orchestration, not the real measurement-driver task
+        # preparer (covered separately).
         "--no-prepare-task",
     ]
     if include_campaign_inputs:
@@ -497,13 +491,7 @@ def test_a_warm_start_rejected_by_the_task_suite_is_not_returned(
     tmp_path,
     monkeypatch,
 ):
-    """A candidate the task's own suite failed cannot be the campaign's answer.
-
-    ``kb_warmstart`` runs that suite before it adopts anything, so a candidate
-    that clears SNR and breaks the task's tolerance comes back unapplied; the
-    run must then search rather than publish it. The suite's own verdict is
-    covered end to end in tests/test_kb_warmstart_end_to_end.py.
-    """
+    """A candidate the task's own suite failed cannot be the campaign's answer."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
     def rejected_warmstart(**_kwargs):
@@ -710,8 +698,7 @@ def _fresh_command(workspace, kernel, driver):
         "--max-hours",
         "1",
         "--no-profiling",
-        # See _invoke_forge_loop: these tests fake the loop and do not exercise
-        # the real task preparer.
+        # See _invoke_forge_loop: these tests fake the loop and do not exercise the real task preparer.
         "--no-prepare-task",
     ]
 
@@ -859,12 +846,7 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
     tmp_path,
     monkeypatch,
 ):
-    """What the banner claims has to be what the round buys.
-
-    A wide round is reviewed like any other, so a banner that still called the
-    critic off for multi-lane rounds described a version of the service that no
-    longer exists -- and it is the default width that reads it.
-    """
+    """What the banner claims has to be what the round buys."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
     result, _workspace = _invoke_forge_loop(
@@ -1152,8 +1134,8 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     assert result.exit_code == 0, result.output
     assert "on_iteration" not in captured["run_kwargs"]
 
-    # Discard finalization effects and invoke the exact callback that runner calls
-    # synchronously after a durable KEEP, before post-KEEP profiling.
+    # Discard finalization effects and invoke the exact callback that runner calls synchronously after a durable KEEP,
+    # before post-KEEP profiling.
     result_json.unlink()
     captured["kb_writes"].clear()
     captured["loops"][0].experiment = None
@@ -1189,16 +1171,7 @@ def test_forge_loop_materializes_the_caller_owned_recovery_record(
     tmp_path,
     monkeypatch,
 ):
-    """--experiment-id must exist as a record before the first KEEP.
-
-    An external orchestrator that enforces its own wall clock hard-kills this
-    process and then salvages the last validated best from
-    <experiments-dir>/<experiment-id>.json. Campaign segments deliberately get
-    fresh internal IDs (so the resume parent/child chain stays intact), so the
-    caller-owned record is a separate channel the CLI must create up front --
-    otherwise set_checkpoint raises FileNotFoundError and the salvage silently
-    finds nothing.
-    """
+    """--experiment-id must exist as a record before the first KEEP."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
     result, _workspace = _invoke_forge_loop(
@@ -1475,20 +1448,7 @@ def test_resume_rejects_repeated_campaign_inputs(tmp_path, monkeypatch):
 
 
 def test_forge_loop_rejects_an_unknown_option(tmp_path, monkeypatch):
-    """An option this version does not declare is fatal, not silently dropped.
-
-    forge-loop used to tolerate unknown options: it dropped them, warned on
-    stderr and recorded them on the result, so that a consumer shipping from a
-    separate repository could stay ahead of the installed producer. Vendoring
-    put producer and consumer in one tree and one wheel, so that skew can no
-    longer happen -- and the tolerance only ever silently absorbed typos, which
-    is how seven shipped examples ran an inferred kernel backend for a while.
-
-    ``--max-hour`` is used deliberately: it is a typo of ``--max-hours``, which
-    tolerance could not distinguish from an option that did not exist yet. It
-    must now cost an exit code before any work starts, not an hour of GPU time
-    spent on the ``--max-hours`` default.
-    """
+    """An option this version does not declare is fatal, not silently dropped."""
     _install_cli_fakes(monkeypatch, tmp_path)
 
     result, _workspace = _invoke_forge_loop(
@@ -1551,14 +1511,7 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
 
 
 def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
-    """A retired option now costs an exit code instead of being absorbed.
-
-    It used to be accepted and ignored so that a caller still passing it would
-    not lose the run. Nothing passes it: this repo is the only consumer, and no
-    caller builds a forge-loop argv carrying ``--max-iters``. What the
-    tolerance actually bought was a run that silently ignored what the caller
-    asked for, so it is refused at parse time instead.
-    """
+    """A retired option now costs an exit code instead of being absorbed."""
     _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
 
@@ -1676,15 +1629,7 @@ def test_experience_ledger_skips_bad_rows_without_losing_valid_suffix(
 
 
 def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monkeypatch):
-    """Review #1: a fresh campaign with task preparation enabled must persist the
-    driver digest and pristine base_commit captured AFTER prep runs.
-
-    Prep may repair the driver (new content -> new sha256) and commit its
-    scaffolding (new HEAD). If the campaign froze the pre-prep snapshot, the
-    driver-integrity gate would reject the repaired driver and the prep commit
-    would leak into the solution diff. The deferred save must instead anchor the
-    repaired driver's digest and the post-prep HEAD.
-    """
+    """Review #1: a fresh campaign with task preparation enabled must persist the driver digest and pristine base_commit captured AFTER prep runs."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
 
@@ -1703,8 +1648,8 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
         return SimpleNamespace(ok=False, profile_ok=False, summary=lambda: "needs prep")
 
     def fake_prepare(**kwargs):
-        # Simulate the prep agent: repair the driver and commit scaffolding into
-        # pristine, advancing HEAD and changing the driver digest.
+        # Simulate the prep agent: repair the driver and commit scaffolding into pristine, advancing HEAD and changing
+        # the driver digest.
         Path(kwargs["driver"]).write_text(repaired_body)
         (workspace / "task_helper.py").write_text("# scaffolding\n")
         subprocess.run(
@@ -1765,8 +1710,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
     assert post_prep_digest != pre_prep_digest
 
     campaign = CampaignConfigStore(str(workspace)).load()
-    # The persisted campaign must reflect the POST-prep state, not the stale
-    # pre-prep snapshot.
+    # The persisted campaign must reflect the POST-prep state, not the stale pre-prep snapshot.
     assert campaign.driver_sha256 == post_prep_digest
     assert campaign.base_commit == post_prep_head
 

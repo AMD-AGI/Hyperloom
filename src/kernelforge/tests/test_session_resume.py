@@ -1,11 +1,4 @@
-"""An API failure must resume the session; a limit the caller set must not.
-
-A candidate Session is expensive — by the time the gateway drops it, the agent
-has usually read the kernel, edited it, and paid for a build and a benchmark.
-These pin that such a session is continued rather than abandoned, that a turn
-cap or a deadline is left alone, and that a session the API killed is never
-reported as an agent that decided to change nothing.
-"""
+"""An API failure must resume the session; a limit the caller set must not."""
 
 from __future__ import annotations
 
@@ -121,8 +114,7 @@ class _FakeSafetyError(RuntimeError):
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        # Transport and gateway weather: the request never got an answer, and the
-        # next one might.
+        # Transport and gateway weather: the request never got an answer, and the next one might.
         (ConnectionError("connection reset"), True),
         (RuntimeError("429 Too Many Requests"), True),
         (RuntimeError("503 Service Unavailable"), True),
@@ -133,25 +125,19 @@ class _FakeSafetyError(RuntimeError):
         (RuntimeError("missing subscription key"), False),
         (_FakeSafetyError("Codex changed HEAD or the active branch"), False),
         (AgentProviderUnavailableError("claude-agent-sdk is not installed"), False),
-        # A bare timeout type is the transport's; the local turn deadline is a
-        # plain backend error saying the model was answering and ran out of clock.
+        # A bare timeout type is the transport's; the local turn deadline is a plain backend error saying the model
+        # was answering and ran out of clock.
         (asyncio.TimeoutError(), False),
         (RuntimeError("Codex timed out after 1800s"), False),
     ],
 )
 def test_only_transient_transport_failures_are_retried(error, expected):
-    """The policy is an allowlist: retrying is the exception, not the default.
-
-    It used to be a denylist of credentials plus ``TimeoutError``, which made a
-    safety stop and a 1800s turn timeout retryable -- one wedged session could
-    burn two hours re-running the same timeout four times.
-    """
+    """The policy is an allowlist: retrying is the exception, not the default."""
     assert is_retryable_api_error(error) is expected
 
 
 def test_a_wrapped_transport_error_is_read_through_the_cause_chain():
-    """Backends flatten the transport error into a message of their own, so the
-    type that decides retryability is the ``__cause__``."""
+    """Backends flatten the transport error into a message of their own, so the type that decides retryability is the ``__cause__``."""
     cause = ConnectionResetError("connection reset by peer")
     wrapped = RuntimeError("Codex SDK execution failed: [Errno 104]")
     wrapped.__cause__ = cause
@@ -160,8 +146,7 @@ def test_a_wrapped_transport_error_is_read_through_the_cause_chain():
 
 
 def test_a_safety_stop_stays_terminal_even_when_wrapped():
-    """A rollback-triggering safety stop must never be retried, however it is
-    reported: retrying it re-runs the session that violated the workspace."""
+    """A rollback-triggering safety stop must never be retried, however it is reported: retrying it re-runs the session that violated the workspace."""
     wrapped = RuntimeError("connection reset")  # would otherwise look transient
     wrapped.__cause__ = _FakeSafetyError("Codex read-only resume changed the workspace")
 
@@ -180,12 +165,7 @@ class _ErrorWithSession(RuntimeError):
 
 
 def test_a_raise_after_the_thread_exists_resumes_it_instead_of_restarting():
-    """The expensive case: the transport dropped, but the thread holds the turns.
-
-    Codex raises ``CodexExecutionError`` for a transport failure, so a session
-    that had already read, built and benchmarked came back as a bare exception and
-    the retry opened a BRAND NEW thread -- the exact opposite of resuming.
-    """
+    """The expensive case: the transport dropped, but the thread holds the turns."""
     finished = AgentRunResult(text="PLAN: fused the rmsnorm", end_reason="agent_stopped")
     backend = _Backend(
         [_ErrorWithSession("Codex SDK execution failed: connection reset", "thread-9")],
@@ -222,8 +202,7 @@ def test_the_handle_is_read_through_the_cause_chain():
 
 
 def test_the_resume_chain_stops_at_its_deadline():
-    """The resume budget does not bound wall clock: each attempt may spend a full
-    turn timeout, so an outage outliving the budget would hold the campaign."""
+    """The resume budget does not bound wall clock: each attempt may spend a full turn timeout, so an outage outliving the budget would hold the campaign."""
     # First read anchors the start; every later read is past the deadline.
     reads = iter([0.0])
     clock = lambda: next(reads, 5000.0)  # noqa: E731 - one-line fake clock

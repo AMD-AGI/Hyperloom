@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` / ``state`` /
-``manifest`` returning its schema section (see :mod:`..schema`). Collectors never
-mutate state, fabricate values, or raise — failures are recorded in ``warnings``
-and the section returns a best-effort partial.
-
-Split into cohesive submodules (shared foundation helpers in :mod:`._common`);
-this package re-exports the full namespace so every importer and monkeypatch
-site keeps working.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 

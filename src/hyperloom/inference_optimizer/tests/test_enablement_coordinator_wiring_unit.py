@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the Coordinator enablement wiring.
-
-Covers the pure launch-log extractor, the ``build_mandate``-backed specialist
-param builder, and the one-shot ``_maybe_enqueue_enablement_specialist`` gate.
-"""
+"""Unit tests for the Coordinator enablement wiring."""
 
 from __future__ import annotations
 
@@ -149,8 +145,7 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch):
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
     assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    # The eval-contract fingerprint is no longer carried: nothing downstream
-    # reads it. Correctness is judged from the candidate's own measurement.
+    # The eval-contract fingerprint is no longer carried: nothing downstream reads it.
     assert "enablement_eval_contract_fingerprint" not in params
 
 
@@ -162,15 +157,7 @@ _TRANSFORMERS_UNRECOGNIZED_LOG = (
 
 
 def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch):
-    """An arch-miss round must NOT auto-seed ANY shared-venv mutation.
-
-    Both ``pip install -U vllm`` and ``pip install -U transformers`` were removed
-    from the deterministic seed: an unpinned upgrade of the shared serving venv
-    bypasses the LLM/Critic/ROCm guard and can brick serving (CUDA-wheel clobber
-    of the ROCm vLLM/torch; transformers-major skew breaking vLLM's pin + the
-    compiled tokenizers/hf-hub/numpy ABI). Environment/build acquisition is owned
-    by the isolated, ROCm-safe targeted-build path and the specialist's own
-    recorded setup_commands — never a blind Coordinator seed."""
+    """An arch-miss round must NOT auto-seed ANY shared-venv mutation."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self(model_name="deepseek-ai/DeepSeek-V4-Flash")
     params = Coordinator._build_enablement_specialist_params(fake, _TRANSFORMERS_UNRECOGNIZED_LOG)
@@ -336,8 +323,8 @@ def _enqueue_self(**state_kw):
     )
     fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
     fake._open_row_past_spent_generations = types.MethodType(Coordinator._open_row_past_spent_generations, fake)
-    # Admission on the session wall-clock is exercised in test_coordinator_runtime
-    # against a real coordinator; here nothing is ever denied for want of budget.
+    # Admission on the session wall-clock is exercised in test_coordinator_runtime against a real coordinator; here
+    # nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
     from hyperloom.orchestrator.enablement.lane import EnablementLane
 
@@ -449,8 +436,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_rearms_silently_finished_round(monkeypatch):
-    """A round whose inflight_task_id maps to a terminal task counts as a stall
-    and clears the guard so a fresh round can dispatch."""
+    """A round whose inflight_task_id maps to a terminal task counts as a stall and clears the guard so a fresh round can dispatch."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -471,8 +457,7 @@ async def test_watchdog_rearms_silently_finished_round(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
-    """When the inflight_task_id maps to a running task, the round is not
-    counted as a stall — the specialist is still working."""
+    """When the inflight_task_id maps to a running task, the round is not counted as a stall — the specialist is still working."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -504,8 +489,7 @@ def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
 
 @pytest.mark.asyncio
 async def test_in_flight_defers_on_undecided_integrate_proposal():
-    """The specialist goes terminal a tick before the Critic sees the integrate
-    proposal; the round must still count as in flight."""
+    """The specialist goes terminal a tick before the Critic sees the integrate proposal; the round must still count as in flight."""
     # No task rows, so the specialist lookup raises TaskNotFound (terminal).
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
@@ -514,8 +498,7 @@ async def test_in_flight_defers_on_undecided_integrate_proposal():
 
 @pytest.mark.asyncio
 async def test_in_flight_ignores_decided_integrate_proposal():
-    """Once the Critic has ruled, the proposal stops deferring so a dropped
-    proposal cannot hold the round open forever."""
+    """Once the Critic has ruled, the proposal stops deferring so a dropped proposal cannot hold the round open forever."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done", decided=True)
     assert await fake._enablement_in_flight() is False
@@ -554,8 +537,7 @@ async def test_in_flight_ignores_integrate_task_for_other_specialist():
 
 @pytest.mark.asyncio
 async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
-    """Regression: a terminal specialist with an unreviewed integrate proposal
-    must not bump the stall streak nor dispatch a second concurrent round."""
+    """Regression: a terminal specialist with an unreviewed integrate proposal must not bump the stall streak nor dispatch a second concurrent round."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -949,8 +931,7 @@ def test_enablement_close_guard_blocks_premature_skip_to_close():
 
 
 def test_enablement_close_guard_active_during_validation_pending():
-    """An eval-origin KEEP awaiting revalidation must keep the guard active even
-    if a stale positive tput is present."""
+    """An eval-origin KEEP awaiting revalidation must keep the guard active even if a stale positive tput is present."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState()
@@ -1097,8 +1078,8 @@ def test_derive_weight_facts_missing_index_returns_empty(tmp_path):
 
 
 def test_derive_weight_facts_reports_present_and_missing_layers(tmp_path):
-    # The checkpoint carries the k_norm weight only for layers 0 and 3, so the
-    # offending layer 5 is reported MISSING while 3 is PRESENT.
+    # The checkpoint carries the k_norm weight only for layers 0 and 3, so the offending layer 5 is reported MISSING
+    # while 3 is PRESENT.
     _write_index(
         tmp_path,
         {
@@ -1116,8 +1097,8 @@ def test_derive_weight_facts_reports_present_and_missing_layers(tmp_path):
 
 
 def test_derive_weight_facts_family_absent_from_checkpoint(tmp_path):
-    # The checkpoint has NO k_norm weight for any layer → the "NOT present for
-    # ANY layer" branch fires (model should guard/skip instantiation).
+    # The checkpoint has NO k_norm weight for any layer → the "NOT present for ANY layer" branch fires (model should
+    # guard/skip instantiation).
     _write_index(
         tmp_path,
         {"model.layers.0.self_attn.q_proj.weight": "a.safetensors"},
@@ -1196,9 +1177,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
     assert Coordinator._read_enablement_source_context(fake, _sig(str(src))) == ""
 
 
-# ---------------------------------------------------------------------------
 # _maybe_rearm_authored_lane
-# ---------------------------------------------------------------------------
 
 
 def _make_coord_with_phase(session_dir) -> "Coordinator":
@@ -1381,10 +1360,7 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring():
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_artifacts(monkeypatch):
-    """Artifacts applied in an advanced round must be recorded in kept_artifacts
-    so that _replay_base_artifacts re-installs them at the start of the next round.
-    Before the fix, the advanced result had no 'artifacts_applied' key, so
-    _stack_kept_artifacts() always saw an empty list."""
+    """Artifacts applied in an advanced round must be recorded in kept_artifacts so that _replay_base_artifacts re-installs them at the start of the next round."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=0)
     art = {
         "target": "/sgl-workspace/sglang/srt/server_args.py",

@@ -38,9 +38,7 @@ from kernelforge.orchestrator.structured_output import (
 
 PLAN_CRITIC_MAX_TURNS = 100
 PLAN_CRITIC_TIMEOUT_SEC = 600
-# One repair pass for a width block the review did not deliver. Given no tools
-# and two turns because nothing is being judged: the review already happened,
-# and this call only restates its width decision in the shape the round reads.
+# One repair pass for a width block the review did not deliver.
 WIDTH_REPAIR_MAX_TURNS = 2
 WIDTH_REPAIR_TIMEOUT_SEC = 120
 WIDTH_REPAIR_EFFORT = "low"
@@ -49,18 +47,15 @@ _NARROWING_NOTE_MAX_CHARS = 240
 
 log = logging.getLogger(__name__)
 
-# The verdict stays a regex. It is one token from a closed three-word
-# vocabulary, so the pattern is the whole grammar and there is nothing a
-# structured block would add. The width ruling is a set of (lane, reason) pairs,
-# which is why it is read as JSON below rather than out of the prose.
+# The verdict stays a regex.
 _VERDICT_PATTERN = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?"
     r"VERDICT(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?"
     r"(ACCEPT|REVISE|REPLACE)\b"
 )
 
-# The one key the review's trailing width block is required to carry, and the
-# schema shown to the review and to the repair pass.
+# The one key the review's trailing width block is required to carry, and the schema shown to the review and to the
+# repair pass.
 _WIDTH_BLOCK_KEY = "lane_narrowing"
 _WIDTH_BLOCK_SCHEMA: dict[str, Any] = {
     _WIDTH_BLOCK_KEY: [
@@ -72,19 +67,10 @@ _WIDTH_BLOCK_SCHEMA: dict[str, Any] = {
 }
 _WIDTH_BLOCK_LABEL = "plan critic width block"
 _WIDTH_BLOCK_ABSENT = f"the review ended with no {_WIDTH_BLOCK_KEY} block"
-# The two ways a round ends up not knowing what width the review wanted. Both
-# survive the repair pass only when it, too, came back with nothing readable.
+# The two ways a round ends up not knowing what width the review wanted.
 _UNREAD_WIDTH_STATUSES = frozenset({"absent", "malformed"})
 
-# There is deliberately no prose fallback beside this parser. A `DROP LANE <n>`
-# regex kept alongside a required block would give a review two ways to answer
-# one question and the round no rule for ranking them when they disagree, and
-# its own reach ended at whatever literal it was written around -- which is the
-# defect this replaces. The failure mode that is therefore NOT protected
-# against: a review that states a drop only in prose and whose one repair pass
-# also fails to restate it as a block. That round runs every lane it planned,
-# and says so under `lane_narrowing` with the note naming what was unread. It is
-# never silent, and it is never narrowed on a reading nobody validated.
+# There is deliberately no prose fallback beside this parser.
 
 
 def _bounded_error_detail(error: Exception) -> str:
@@ -105,13 +91,7 @@ def _bounded_note(note: str) -> str:
 
 
 def _entry_note(problem: str, entry: object) -> str:
-    """Name one entry of a readable width block that could not be used.
-
-    The note stops at what was found in the entry. What the round then does
-    about it is ``status`` and the drops, and a note that also stated an
-    outcome could contradict them: the repeated entry below names a lane the
-    entry before it has already dropped.
-    """
+    """Name one entry of a readable width block that could not be used."""
     try:
         rendered = json.dumps(entry, sort_keys=True)
     except (TypeError, ValueError):  # pragma: no cover - json.loads output only
@@ -121,30 +101,7 @@ def _entry_note(problem: str, entry: object) -> str:
 
 @dataclass(frozen=True)
 class LaneNarrowingRuling:
-    """What one review's trailing width block asked for, and how it was read.
-
-    Four answers reach the round, and ``drops`` alone tells three of them apart
-    from none. ``status`` is what separates them:
-
-    - ``answered`` with no drops and no notes -- the block was read and it named
-      no lane. This is the only one of the four that means "run every lane".
-    - ``answered`` with notes -- the block was read and something it asked for
-      was not a usable decision: a lane it did not number, a drop it gave no
-      reason for, one lane named twice.
-    - ``absent`` -- the review ended without a block at all.
-    - ``malformed`` -- a block was there and could not be decoded, or its
-      ``lane_narrowing`` was not a list, so what it wanted is unknown.
-
-    The last two are what the review still owes an answer for, and the two a
-    repair pass can settle. A block that was read and got a lane or a reason
-    wrong is not repaired: correcting it would mean inventing the decision.
-
-    ``notes`` says what was seen while reading the block and nothing more.
-    ``unread`` is the separate question of whether the reading lost a width
-    decision the review asked for, which is what a log line's severity has to
-    follow: a note by itself is not a failure, and a lane named twice is a note
-    with nothing lost, because the first entry dropped that lane.
-    """
+    """What one review's trailing width block asked for, and how it was read."""
 
     drops: tuple[LaneDrop, ...] = ()
     notes: tuple[str, ...] = ()
@@ -287,12 +244,7 @@ def parse_plan_critic_verdict(text: str) -> str:
 
 
 def _lane_id_of(raw: object) -> int | None:
-    """Return the positive lane a width-block entry names, or None.
-
-    A quoted integer is read as the integer it spells. Nothing is invented by
-    doing so -- "2" names lane 2 and no other -- and no schema shown to a model
-    can stop one quoting its numbers.
-    """
+    """Return the positive lane a width-block entry names, or None."""
     if isinstance(raw, bool):
         return None
     if isinstance(raw, int):
@@ -305,21 +257,7 @@ def _lane_id_of(raw: object) -> int | None:
 
 
 def parse_plan_critic_width_block(text: str) -> LaneNarrowingRuling:
-    """Read the width ruling the review was required to end with.
-
-    The review's product is prose -- a person reads it and the revision is fed
-    it -- so only its width decision is structured, in one trailing JSON object.
-    Whether the drops are obeyed is not decided here: the round's width belongs
-    to whoever holds the lanes. What is decided here is that no answer leaves as
-    nothing, because a round that quietly kept every lane would look exactly
-    like a round the review wanted whole.
-
-    The search runs from the end, anchored on the block's own key, because the
-    block is asked for last and the prose before it is free to quote JSON --
-    autotune configs and `structured_output.json` fragments are ordinary things
-    for a kernel review to cite. Taking the first object in the response would
-    hand the round a tuning dict and call the real ruling missing.
-    """
+    """Read the width ruling the review was required to end with."""
     review = str(text or "")
     marker = review.rfind(f'"{_WIDTH_BLOCK_KEY}"')
     if marker < 0:
@@ -362,12 +300,7 @@ def parse_plan_critic_width_block(text: str) -> LaneNarrowingRuling:
 def _read_lane_drops(
     entries: Sequence[object],
 ) -> tuple[tuple[LaneDrop, ...], tuple[str, ...], bool]:
-    """Turn one readable width block's entries into drops, naming the rest.
-
-    The third return value is whether any of those entries cost the round a
-    decision. A lane named twice does not: the entry before it dropped that
-    lane, so the second is worth recording and is nothing to raise.
-    """
+    """Turn one readable width block's entries into drops, naming the rest."""
     drops: list[LaneDrop] = []
     notes: list[str] = []
     seen: set[int] = set()
@@ -403,15 +336,7 @@ def build_plan_critic_prompts(
     specialist_outcomes: Sequence[SpecialistOutcome],
     coverage: Mapping[str, object],
 ) -> tuple[str, str]:
-    """Build one bounded critic request from persisted planning evidence.
-
-    A round of several lanes is reviewed once, together: the lanes are one
-    division of one round, so what is worth asking about them -- whether the
-    division is right, whether two lanes are the same change twice, whether the
-    round as a whole has stopped moving -- cannot be asked of any lane alone.
-    One plan is reviewed exactly as it always was; there is no division to
-    review and no sibling to compare against.
-    """
+    """Build one bounded critic request from persisted planning evidence."""
     if not drafts:
         raise ValueError("plan critic needs at least one draft to review")
     payload = {
@@ -467,22 +392,13 @@ class PlanCriticAgent:
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
         self.backend = backend
-        # Budget for one plan. A round of several is several times the reading,
-        # so the budget is spent per plan and capped by what the provider allows
-        # a single call. Left equal to ``timeout_sec`` when no ceiling is given,
-        # which keeps a one-plan review exactly as it was.
+        # Budget for one plan.
         self.timeout_sec = timeout_sec
         self.ceiling_sec = max(timeout_sec, int(ceiling_sec or timeout_sec))
         self.max_turns = max_turns
 
     def _budget_for(self, drafts: int) -> int:
-        """The wall-clock a review of this many plans is allowed.
-
-        Measured on one real two-lane round: the review took about eleven
-        minutes against a ten-minute budget sized for one plan, so it failed
-        open to ACCEPT and the round lost a verdict that had found a lane not
-        worth its session.
-        """
+        """The wall-clock a review of this many plans is allowed."""
         return min(self.timeout_sec * max(1, drafts), self.ceiling_sec)
 
     async def review(
@@ -495,12 +411,7 @@ class PlanCriticAgent:
         coverage: Mapping[str, object],
         usage=None,
     ) -> PlanCriticOutcome:
-        """Review one round; every backend/output failure accepts fail-open.
-
-        One call whatever the round's width. Reviewing each lane on its own
-        would multiply the cost by the width and still leave the one question a
-        round raises -- whether the division is right -- asked of nobody.
-        """
+        """Review one round; every backend/output failure accepts fail-open."""
         system_prompt, user_prompt = build_plan_critic_prompts(
             context=context,
             drafts=drafts,
@@ -584,15 +495,7 @@ class PlanCriticAgent:
         drafts: int,
         usage=None,
     ) -> LaneNarrowingRuling:
-        """Read the review's width block, repairing it once if it cannot be.
-
-        A one-plan round is never asked for a block -- there is no division to
-        rule on and no second lane to drop -- so it is not held to one, is not
-        reported for omitting one, and never pays for a repair. A block it
-        volunteers anyway is still read, because the floor that refuses it lives
-        downstream in the round and is worth reaching rather than leaving as
-        dead code.
-        """
+        """Read the review's width block, repairing it once if it cannot be."""
         if drafts <= 1:
             volunteered = parse_plan_critic_width_block(review)
             return volunteered if volunteered.answered else LaneNarrowingRuling(status="not_asked")
@@ -614,22 +517,7 @@ class PlanCriticAgent:
         ruling: LaneNarrowingRuling,
         usage=None,
     ) -> LaneNarrowingRuling:
-        """Spend one call to recover a width ruling the review did not format.
-
-        This is the round's only conditional call, and what it buys is an
-        Implementer session: a drop the round cannot read is a lane it runs, and
-        a lane costs a full session against a planning window already measured
-        at 21.6 minutes a round. The repair is given no tools, two turns and two
-        minutes, so at worst it costs a small fraction of the review that
-        preceded it, and it is reached only when the block was absent or
-        unreadable -- a review that answered and named a lane the round does not
-        have has been read, and repairing a decision is how a parser starts
-        inventing one.
-
-        It cannot fail the round. A repair that errors, times out or comes back
-        without a block leaves the original ruling standing, plus one note
-        saying the pass was spent and what it did not recover.
-        """
+        """Spend one call to recover a width ruling the review did not format."""
         detail = ruling.notes[0] if ruling.notes else _WIDTH_BLOCK_ABSENT
         try:
             result = await asyncio.wait_for(
@@ -688,8 +576,7 @@ class PlanCriticAgent:
                 _bounded_note("the review did not end with a readable width block; one repair pass restated it"),
             ),
             status="repaired",
-            # What the first reading could not find has been found. Only what
-            # the restated block itself asked for and did not say is still lost.
+            # What the first reading could not find has been found.
             unread=recovered.unread,
         )
 
@@ -702,12 +589,7 @@ class PlanCriticAgent:
         ruling: LaneNarrowingRuling,
         note: str,
     ) -> LaneNarrowingRuling:
-        """Keep the unreadable ruling, naming the repair pass that was spent.
-
-        Nothing is logged here. The ruling is reported once, by the review that
-        owns it, at the severity its outcome earns -- and this one earns the
-        warning, because the width decision is now known to be unrecoverable.
-        """
+        """Keep the unreadable ruling, naming the repair pass that was spent."""
         return LaneNarrowingRuling(
             drops=ruling.drops,
             notes=(*ruling.notes, _bounded_note(note)),
@@ -717,17 +599,7 @@ class PlanCriticAgent:
 
     @staticmethod
     def _log_width_ruling(ruling: LaneNarrowingRuling) -> None:
-        """Report how the width block read, at the severity that reading earns.
-
-        A note says what was seen; ``status`` and the drops say what the ruling
-        came to, and what the round then does with it is the round's own line.
-        Logging every note as "narrowing was not applied" made the recovered
-        path -- block absent, one repair pass restated it, a lane dropped --
-        warn twice that nothing had been narrowed, immediately above the line
-        saying the round had narrowed. An operator who sees a warning
-        contradicted a few times stops reading it, which costs more than the
-        wrong line does.
-        """
+        """Report how the width block read, at the severity that reading earns."""
         if not ruling.notes:
             return
         detail = "; ".join(ruling.notes)

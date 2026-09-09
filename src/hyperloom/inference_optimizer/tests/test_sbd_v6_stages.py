@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SBD V6 measurement stage projections and the ``close`` key.
-
-Companion to ``test_sbd_v6_initial.py``, which covers the durable ``install``
-/ ``model_gate`` events and the Framework Agent projection. Everything here is
-projected at export time from V5 sections, so most tests call
-``collect_v6_timeline`` / ``collect_v6_close`` directly with the sections a
-real exporter run would hand them; the additivity and ordering tests go
-through ``exporter.build`` because that is where the isolation actually has to
-hold.
-"""
+"""SBD V6 measurement stage projections and the ``close`` key."""
 
 from __future__ import annotations
 
@@ -40,9 +31,7 @@ def _events(timeline: list[dict], event_type: str) -> list[dict]:
     return [event for event in timeline if event["type"] == event_type]
 
 
-# ---------------------------------------------------------------------------
 # conc_sweep
-# ---------------------------------------------------------------------------
 def _conc_sweep_section() -> dict:
     return {
         "status": "ok",
@@ -63,8 +52,8 @@ def _conc_sweep_section() -> dict:
                 {"conc": 16, "status": "failed", "output_throughput": None, "error": "server OOM at conc=16"},
             ],
         },
-        # ``conc_pair_comparison`` stamps both arm statuses on every row, and
-        # ``None`` where an arm has no point at that concurrency at all.
+        # ``conc_pair_comparison`` stamps both arm statuses on every row, and ``None`` where an arm has no point at
+        # that concurrency at all.
         "comparison": [
             {
                 "conc": 8,
@@ -99,8 +88,7 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
 
     event = _event(timeline, "conc_sweep")
     assert event["status"] == "succeeded"
-    # Only the completion time is recorded; the window closes rather than
-    # collapsing onto a single instant.
+    # Only the completion time is recorded; the window closes rather than collapsing onto a single instant.
     assert event["start_time"] == ""
     assert event["end_time"] == "2026-08-27T04:00:00+00:00"
     assert event["ext"]["comparison"][0] == {
@@ -110,9 +98,7 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
         "speedup": 1.1,
         "error": None,
     }
-    # An unpaired point names the arm that broke and quotes that arm's own
-    # error. Reporting the first of the two statuses would have said
-    # "succeeded" here, since it is the baseline arm that came through.
+    # An unpaired point names the arm that broke and quotes that arm's own error.
     assert event["ext"]["comparison"][1]["speedup"] is None
     assert event["ext"]["comparison"][1]["error"] == "optimized: server OOM at conc=16"
     # "" is the baseline arm's defining value, not a missing one.
@@ -137,9 +123,7 @@ def test_conc_sweep_without_any_evidence_produces_no_event(tmp_path):
     assert _event(collect_v6_timeline(tmp_path, [], state={}), "conc_sweep") is None
 
 
-# ---------------------------------------------------------------------------
 # close
-# ---------------------------------------------------------------------------
 def _close_state(steps: list[dict], **overrides) -> dict:
     return {
         "phase": "CLOSE",
@@ -155,14 +139,7 @@ def _close_state(steps: list[dict], **overrides) -> dict:
 
 
 def test_close_is_degraded_while_the_breakdown_predates_the_rest_of_the_sequence(tmp_path):
-    """The step-2 snapshot describes the close-out only as far as itself.
-
-    ``session_breakdown`` is step 2, so at the moment it runs the four steps
-    after it do not exist yet and ``close_sequence_done`` is false. Reporting
-    ``degraded`` for that is correct — the record really is incomplete. The
-    sequencer's final ``patch_breakdown_close`` is what supersedes it; see
-    ``test_close_patch_*``.
-    """
+    """The step-2 snapshot describes the close-out only as far as itself."""
     state = _close_state(
         [
             {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
@@ -201,12 +178,7 @@ def test_close_is_succeeded_only_when_every_step_settled_and_the_sequence_finish
 
 
 def test_close_succeeds_even_though_sequencer_started_never_leaves_running(tmp_path):
-    """``sequencer_started`` is a marker, not a unit of work.
-
-    The sequencer records it once on entry and never revisits it, so treating
-    ``running`` as unsettled made ``succeeded`` unreachable no matter how
-    cleanly the session closed.
-    """
+    """``sequencer_started`` is a marker, not a unit of work."""
     state = _close_state(
         [
             {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
@@ -224,8 +196,7 @@ def test_close_succeeds_even_though_sequencer_started_never_leaves_running(tmp_p
     close = collect_v6_close(tmp_path, state, {}, warnings)
 
     assert close["status"] == "succeeded"
-    # ``fact_finalize`` is emitted by the sequencer but was missing from the V6
-    # field design's enum. It is a known step, not drift.
+    # ``fact_finalize`` is emitted by the sequencer but was missing from the V6 field design's enum.
     assert "fact_finalize" in [step["step"] for step in close["steps"]]
     assert warnings == []
 
@@ -361,9 +332,7 @@ def test_close_ignores_a_skipped_artifact_package_detail(tmp_path):
     assert collect_v6_close(tmp_path, state, {}, [])["artifacts"]["artifact_package_path"] is None
 
 
-# ---------------------------------------------------------------------------
 # close: the end-of-sequence refresh
-# ---------------------------------------------------------------------------
 _FULL_CLOSE_STEPS = [
     {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
     {"step": "fact_finalize", "status": "done", "ts": "2026-08-27T05:00:05+00:00"},
@@ -451,15 +420,9 @@ def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
     assert target.read_text(encoding="utf-8") == "{not json"
 
 
-# ---------------------------------------------------------------------------
 # what the consumer actually receives
-# ---------------------------------------------------------------------------
 def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
-    """Return the ``close`` key as delivered, from inside the zip and loose.
-
-    External sync ships the package, not the session directory, so these two
-    copies — not the one under ``session_dir`` — are what a consumer reads.
-    """
+    """Return the ``close`` key as delivered, from inside the zip and loose."""
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
     with zipfile.ZipFile(zip_path) as bundle:
         zipped = json.loads(bundle.read(exporter.BREAKDOWN_FILENAME))
@@ -468,11 +431,7 @@ def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
 
 
 def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
-    """Patching the session copy is not delivery; the package has to be rebuilt.
-
-    Mirrors the sequencer's order: package (CLOSE step 5), then patch the close
-    section, then rebuild the bundle so the copies that ship agree with it.
-    """
+    """Patching the session copy is not delivery; the package has to be rebuilt."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -489,12 +448,7 @@ def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
 
 
 def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
-    """The regression this guards: the fix reaching the session dir only.
-
-    Without the rebuild the session copy reads ``succeeded`` while both
-    delivered copies still say ``degraded`` and stop four steps in — the state
-    that made the previous round's fix invisible to its consumers.
-    """
+    """The regression this guards: the fix reaching the session dir only."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     target = _session_with_step_two_breakdown(session_dir)
@@ -510,12 +464,7 @@ def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
 
 
 def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
-    """A surgical member swap would leave the manifest describing the old file.
-
-    Hence a full repackage: the manifest is rebuilt from the members that were
-    actually written, so its digest of ``session_breakdown.json`` matches what
-    the consumer unzips.
-    """
+    """A surgical member swap would leave the manifest describing the old file."""
     session_dir = tmp_path / "session"
     dest_root = tmp_path / "dest"
     _session_with_step_two_breakdown(session_dir)
@@ -532,9 +481,7 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
     assert entry["bytes"] == member.file_size
 
 
-# ---------------------------------------------------------------------------
 # outcome
-# ---------------------------------------------------------------------------
 def _v6_outcome(optimizations: dict) -> dict:
     return v6_collectors.collect_v6_outcome(
         session={"stop_reason": "target_reached"},
@@ -608,9 +555,7 @@ def test_outcome_marks_gain_totals_unknown_when_the_canonical_ledger_is_unavaila
     assert attribution["by_source"]["kernel"]["by_backend"]["forge"]["total_gain_pct"] is None
 
 
-# ---------------------------------------------------------------------------
 # cross-cutting: ordering and additivity
-# ---------------------------------------------------------------------------
 def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
     write_timeline_event_at(
         tmp_path,
@@ -632,21 +577,14 @@ def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
         conc_sweep_summary=_conc_sweep_section(),
     )
 
-    # The durable event is read first and the stage is projected after it, so
-    # ordering by the projection order rather than by the recorded time would
-    # put ``install`` in front.
+    # The durable event is read first and the stage is projected after it, so ordering by the projection order rather
+    # than by the recorded time would put ``install`` in front.
     assert [event["type"] for event in timeline] == ["conc_sweep", "install"]
 
 
 @pytest.mark.parametrize("projector", ["project_conc_sweep_event"])
 def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatch, projector):
-    """One stage blowing up must not take the durable events or its peers down.
-
-    The exporter wraps the whole timeline collector, so without per-projector
-    isolation a sweep-stage bug discards the ``install`` event a session read
-    off disk before the Coordinator existed -- the one record a run that never
-    reached a measurement stage actually has.
-    """
+    """One stage blowing up must not take the durable events or its peers down."""
     _write_json(
         tmp_path / "state.json",
         {"session_id": "s1", "model_name": "M", "framework": "sglang", "baseline_tput": 100.0, "phase": "CLOSE"},
@@ -696,9 +634,7 @@ def test_a_raising_close_collector_cannot_disturb_the_v5_payload(tmp_path, monke
     assert any("close" in warning for warning in after["metadata"]["warnings"])
 
 
-# ---------------------------------------------------------------------------
 # fabrication, settlement, identity and vocabulary
-# ---------------------------------------------------------------------------
 def _events(timeline: list[dict], event_type: str) -> list[dict]:
     return [event for event in timeline if event["type"] == event_type]
 
@@ -730,7 +666,7 @@ def test_an_unknown_close_step_status_is_reported(tmp_path):
     }
     section = collect_v6_close(tmp_path, state, {}, warnings)
 
-    # Passed through unchanged -- inventing ``done`` is the one thing this key
-    # cannot afford -- but no longer silent about it.
+    # Passed through unchanged -- inventing ``done`` is the one thing this key cannot afford -- but no longer silent
+    # about it.
     assert section["steps"][0]["status"] == "completed"
     assert any("unrecognized close step status" in warning for warning in warnings)

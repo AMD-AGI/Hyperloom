@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``report`` ActionRunner.
-
-Reads SharedState + the bus event log and writes
-``$SESSION_DIR/reports/final.json`` (machine-readable, dashboard shape) and
-``final.md`` (human-readable). The returned dict surfaces both paths.
-``final.json`` carries the run identity, stop reason, baseline/best, the
-validated cumulative gain, completeness annotations, event counts and
-highlights, plus optional blocks (failure summary, roofline comparison,
-external baseline, concurrency-sweep and kernel-optimization pointers) when the
-corresponding data exists; ``final.md`` renders the same content as sections.
-Side artifacts land in the same reports directory:
-``kernel_optimization_summary.json`` and ``conc_sweep_curve.png``. See
-:func:`_build_summary_dict` for the authoritative key set.
-"""
+"""Real ``report`` ActionRunner."""
 
 from __future__ import annotations
 
@@ -41,12 +28,7 @@ log = logging.getLogger(__name__)
 
 
 def _count_server_boot_failures(session_dir: Path | None) -> int:
-    """Count ``warmup_failed`` variants (server boot failures) from the journal.
-
-    ``crash_count`` only counts Coordinator tick/agent exceptions, so a run whose server
-    repeatedly fails to boot still reports ``crash_count: 0``. Surfacing this
-    keeps the report honest. Fail-soft: returns 0 on any read error.
-    """
+    """Count ``warmup_failed`` variants (server boot failures) from the journal."""
     if session_dir is None:
         return 0
     path = Path(session_dir) / "reports" / "optimization_journal.json"
@@ -61,17 +43,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when absent
-    or raising.
-
-    Args:
-        state: The object the helper is looked up on.
-        method: Name of the zero-arg method to call.
-        default: Value returned when the method is missing or raises.
-
-    Returns:
-        The method's result, or ``default`` when it is absent or raises.
-    """
+    """Call a zero-arg SharedState helper, returning ``default`` when absent or raising."""
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
@@ -81,54 +53,24 @@ def _safe_call(state: Any, method: str, default: Any) -> Any:
         return default
 
 
-# Benign upstream WARN fragments that must never be promoted as the
-# ``baseline_failed`` headline; the full text still appears in the per-attempt logs.
+# Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
+# appears in the per-attempt logs.
 _BENIGN_FAILURE_PATTERNS: tuple[str, ...] = ("modeling_cohere2.py",)
 
 
 def _is_benign_failure_text(text: str) -> bool:
-    """Return True when ``text`` matches a known-benign upstream WARN pattern.
-
-    Args:
-        text: The candidate error/warning text to test.
-
-    Returns:
-        ``True`` when ``text`` contains any known-benign upstream WARN pattern.
-    """
+    """Return True when ``text`` matches a known-benign upstream WARN pattern."""
     blob = str(text or "")
     return any(pat in blob for pat in _BENIGN_FAILURE_PATTERNS)
 
 
 def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
-    """Return True when a highlight's *headline* is only a benign upstream WARN.
-
-    Judges the one-line ``summary`` exclusively; payload-buried mentions are
-    ignored so a highlight whose summary describes a real fault is never
-    suppressed.
-
-    Args:
-        highlight: A highlight record whose one-line ``summary`` is judged.
-
-    Returns:
-        ``True`` when the highlight's ``summary`` is only a benign upstream
-        WARN.
-    """
+    """Return True when a highlight's *headline* is only a benign upstream WARN."""
     return _is_benign_failure_text(str(highlight.get("summary", "")))
 
 
 def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
-    """Split an error blob into ``(kept_lines, suppressed_benign_lines)``.
-
-    Drops only the lines matching a benign upstream WARN pattern and preserves
-    every other line, so a mixed blob keeps its real root cause.
-
-    Args:
-        text: The raw error blob to partition line-by-line.
-
-    Returns:
-        A ``(kept_lines, suppressed_benign_lines)`` tuple; suppressed lines are
-        stripped and truncated to 200 characters.
-    """
+    """Split an error blob into ``(kept_lines, suppressed_benign_lines)``."""
     kept: list[str] = []
     suppressed: list[str] = []
     for line in str(text or "").splitlines():
@@ -142,19 +84,7 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
 
 
 def _classify_root_cause_type(error_class: str, error_text: str) -> str:
-    """Map a baseline attempt's ``error_class`` + message to a coarse enum.
-
-    Returns one of ``kv_cache_oom`` / ``oom`` / ``benchmark_timeout`` /
-    ``engine_core_init`` / ``worker_crash`` / ``unknown`` for the dashboard /
-    ops contract.
-
-    Args:
-        error_class: The attempt's recorded error class.
-        error_text: The attempt's error message / excerpt.
-
-    Returns:
-        The coarse root-cause enum string for the dashboard / ops contract.
-    """
+    """Map a baseline attempt's ``error_class`` + message to a coarse enum."""
     from .baseline import _KV_CACHE_OOM_MARKERS
 
     blob = f"{error_class} {error_text}".lower()
@@ -178,17 +108,7 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
 
 
 def _pick_failure_headline(text: str) -> str:
-    """Pick the most informative single line out of a server.log excerpt.
-
-    Prefers terminal fault lines (OOM / FATAL / engine-core markers) over the
-    last line, so the headline points at the real root cause.
-
-    Args:
-        text: The server.log excerpt to scan.
-
-    Returns:
-        The most informative single line, or ``""`` when ``text`` is empty.
-    """
+    """Pick the most informative single line out of a server.log excerpt."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
         return ""
@@ -210,20 +130,7 @@ def _pick_failure_headline(text: str) -> str:
 
 
 def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
-    """Return the most recent *failed* baseline attempt record, or ``None``.
-
-    Prefers ``SharedState.baseline_attempts`` (the per-action audit log written
-    by ``record_action_attempt``) and falls back to the matching
-    ``last_action_failures`` row. Both are persisted in ``state.json`` — there
-    is no on-disk ``runs/baseline/<task_id>/result.json`` to scan.
-
-    Args:
-        state: The session's shared state to read attempt records from.
-
-    Returns:
-        The most recent failed baseline attempt record, or ``None`` when none
-        is found.
-    """
+    """Return the most recent *failed* baseline attempt record, or ``None``."""
     attempts = getattr(state, "baseline_attempts", None) or []
     failed = [a for a in attempts if isinstance(a, dict) and str(a.get("status")) == "failed"]
     if failed:
@@ -234,19 +141,7 @@ def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
 
 
 def _resolve_attempt_server_log(attempt: dict[str, Any]) -> Path | None:
-    """Best-effort path to a baseline attempt's ``server.log``.
-
-    The audit row stores the ``benchmark_*`` workspace; ``server.log`` is
-    written one level up (``output_dir/server.log``). Also honours an explicit
-    ``stderr_log_path`` when present.
-
-    Args:
-        attempt: A baseline attempt audit record.
-
-    Returns:
-        The path to an existing ``server.log``, or ``None`` when none of the
-        candidates exist.
-    """
+    """Best-effort path to a baseline attempt's ``server.log``."""
     candidates: list[Path] = []
     workspace = attempt.get("workspace")
     if workspace:
@@ -269,28 +164,7 @@ def _build_failure_summary(
     state: SharedState,
     session_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Surface the real terminal error on ``baseline_failed``.
-
-    Sources the last *failed* baseline attempt from ``SharedState`` (see
-    :func:`_last_failed_baseline_attempt`) and lifts its ``error_excerpt`` /
-    ``error_class`` into a compact ``failure_summary``. Only benign upstream
-    WARN *lines* are stripped (the real error text is kept); when nothing
-    actionable remains, falls back to the attempt workspace's ``server.log``
-    terminal marker via :func:`server_log_death_excerpt`.
-
-    Best-effort: only fires for ``baseline_failed`` and returns ``None`` on any
-    error so the report still writes. ``session_dir`` is used only to render a
-    session-relative ``server_log`` path.
-
-    Args:
-        state: The session's shared state.
-        session_dir: Session root used only to render a session-relative
-            ``server_log`` path; ``None`` leaves the path absolute.
-
-    Returns:
-        A compact ``failure_summary`` dict, or ``None`` when the stop reason is
-        not ``baseline_failed``, no failed attempt exists, or any error occurs.
-    """
+    """Surface the real terminal error on ``baseline_failed``."""
     if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
         return None
     try:
@@ -304,8 +178,7 @@ def _build_failure_summary(
         error_text = "\n".join(kept_lines).strip()
 
         server_log_abs = _resolve_attempt_server_log(attempt)
-        # Only the benign WARN (or nothing) survived: dig the real terminal
-        # marker out of server.log when available.
+        # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
         if not error_text and server_log_abs is not None:
             try:
                 from ._subprocess_kill import server_log_death_excerpt
@@ -411,8 +284,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
     "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
-    # Retired reason names, kept so a report over an archived session still
-    # explains what it is reading.
+    # Retired reason names, kept so a report over an archived session still explains what it is reading.
     "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
@@ -439,16 +311,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
 
 
 def _explain_stop_reason(stop_reason, state=None):
-    """Return a human-readable explanation for a terminal ``stop_reason``.
-
-    ``sweep_done`` is the SWEEP exit for a concurrency sweep that reached a
-    terminal result, which includes one that declined to run at all and one
-    that spent its budget without a comparable pair. The generic wording then
-    tells the reader a sweep finished when none happened, so a skip is named
-    when ``state`` is available to say so.
-
-    Returns ``""`` for unknown/empty reasons so callers can omit the line.
-    """
+    """Return a human-readable explanation for a terminal ``stop_reason``."""
     reason = str(stop_reason or "").strip()
     text = _STOP_REASON_EXPLANATIONS.get(reason, "")
     if reason == "sweep_done" and text:
@@ -457,25 +320,12 @@ def _explain_stop_reason(stop_reason, state=None):
 
 
 def _explain_conc_sweep_skip(state) -> str:
-    """Name a skipped concurrency sweep, or ``""`` when one ran to a result.
-
-    A sweep that consumed its whole budget without reaching a comparable pair
-    is recorded as skipped too, and telling the reader it never ran is the
-    more expensive claim to believe in exactly the sessions where the budget
-    is the thing under investigation.
-
-    Args:
-        state: The session's shared state, or ``None``.
-
-    Returns:
-        str: The explanation line, or ``""`` when nothing was skipped.
-    """
+    """Name a skipped concurrency sweep, or ``\"\"`` when one ran to a result."""
     last = getattr(state, "last_conc_sweep", None)
     if not isinstance(last, dict) or not last.get("was_skipped"):
         return ""
-    # Imported here, not at module scope: ``kernel.conc_sweep`` imports the
-    # grid runner in this same package, so a top-level import is the edge
-    # CodeQL reports as a cycle.
+    # Imported here, not at module scope: ``kernel.conc_sweep`` imports the grid runner in this same package, so a
+    # top-level import is the edge CodeQL reports as a cycle.
     from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
 
     detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
@@ -488,25 +338,7 @@ def _explain_conc_sweep_skip(state) -> str:
 
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
-    """Platform record for the run report, scoped to this session's node count.
-
-    The record itself is built in ``hyperloom.common.platform_probe``; the only
-    thing added here is whether the session spans several nodes, which is
-    orchestrator state and does not belong in ``common``. It matters because
-    this samples the orchestrator's own node, which in a multi-node session is
-    usually not the benchmark node.
-
-    Read at report time rather than plumbed from CLI preflight: the sysfs read
-    is free, it needs no cross-process state, and sampling at both ends means a
-    knob toggled mid-session shows up as a mismatch rather than being silently
-    attributed to the optimizer.
-
-    Args:
-        gpu_type: Session ``--gpu-type``, used to resolve the gfx arch.
-
-    Returns:
-        dict[str, Any]: The platform record, always carrying ``status``.
-    """
+    """Platform record for the run report, scoped to this session's node count."""
     try:  # local import keeps this free of executor import order
         from ._multi_node_env import is_multi_node
 
@@ -555,24 +387,9 @@ def _build_summary_dict(
     external_baseline: dict[str, Any] | None = None,
     session_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Assemble the machine-readable session summary dict.
-
-    Args:
-        state (SharedState): The session's shared state.
-        ev_counts (dict[str, int]): Event counts keyed by bus topic.
-        highlights (list[dict]): Top-N highlighted decisions/verdicts.
-        external_baseline (dict[str, Any] | None): Optional external
-            baseline comparison block to embed.
-        session_dir (Path | None): Session root; when provided, a
-            ``failure_summary`` block is added on ``baseline_failed`` (#465).
-
-    Returns:
-        dict[str, Any]: The summary payload written to ``final.json``,
-        including an optional roofline-comparison block.
-    """
-    # The wind-down report is rendered inside closing_phase, before the loop
-    # assigns the terminal stop_reason; closing_phase is only entered on the
-    # wall-clock deadline, so fall back to time_exhausted rather than blank.
+    """Assemble the machine-readable session summary dict."""
+    # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
+    # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
     stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
     if not stop_reason and getattr(state, "closing_phase", False):
         stop_reason = "time_exhausted"
@@ -586,9 +403,8 @@ def _build_summary_dict(
         "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
-        # Read back by the graded-axes section: the persisted AgentX marker
-        # outlives the shell, so a report rendered from a resumed session
-        # still names the mode the run was graded under.
+        # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
+        # from a resumed session still names the mode the run was graded under.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
@@ -597,8 +413,7 @@ def _build_summary_dict(
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len": len(state.optimization_stack or []),
-        # Honesty annotations: surface unfinished/unvalidated work; read
-        # defensively for partial-state stubs.
+        # Honesty annotations: surface unfinished/unvalidated work; read defensively for partial-state stubs.
         "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
         "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
         "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
@@ -613,8 +428,7 @@ def _build_summary_dict(
         # Degraded-mode advisory: benchmark numbers reflect the text path only.
         "degraded_mode": bool(getattr(state, "degraded_mode", False)),
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
-        # The card's partition shape these numbers were measured in. A property
-        # of the session, not a result of it.
+        # The card's partition shape these numbers were measured in.
         "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
     }
     if external_baseline:
@@ -625,8 +439,8 @@ def _build_summary_dict(
     cmp = build_roofline_comparison_from_history(getattr(state, "roofline_snapshots", None))
     if cmp:
         summary["roofline_comparison"] = cmp
-    # Real terminal root cause on baseline_failed: promote the last failed
-    # baseline attempt's engine/worker fault over benign upstream WARNs.
+    # Real terminal root cause on baseline_failed: promote the last failed baseline attempt's engine/worker fault over
+    # benign upstream WARNs.
     failure_summary = _build_failure_summary(state, session_dir)
     if failure_summary:
         summary["failure_summary"] = failure_summary
@@ -634,15 +448,7 @@ def _build_summary_dict(
 
 
 def _format_md(summary: dict[str, Any]) -> str:
-    """Render the human-readable Markdown report from a summary dict.
-
-    Args:
-        summary (dict[str, Any]): The summary payload built by
-            :func:`_build_summary_dict`.
-
-    Returns:
-        str: The full Markdown report body.
-    """
+    """Render the human-readable Markdown report from a summary dict."""
     cb = summary.get("current_best") or {}
     cb_tput = cb.get("tput") if isinstance(cb, dict) else None
     lines: list[str] = []
@@ -672,8 +478,8 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU),
-    # scriptable xDiT reports per-image latency (e2el_mean_ms).
+    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
+    # (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
     _fw = summary.get("framework")
@@ -718,10 +524,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
     plat = summary.get("platform") or {}
     if plat.get("status") != "ok":
-        # Always emit the line, with the reason when there is one: a silent
-        # absence is indistinguishable from a host that was never checked, and
-        # the no-reason case is the one that needs saying -- it is a summary
-        # written before this field existed, not a probe that failed.
+        # Always emit the line, with the reason when there is one: a silent absence is indistinguishable from a host
+        # that was never checked, and the no-reason case is the one that needs saying -- it is a summary written
+        # before this field existed, not a probe that failed.
         why = str(plat.get("reason") or "").strip()
         lines.append(f"- platform       : not recorded{f' — {why}' if why else ''}")
     else:
@@ -788,18 +593,7 @@ def _format_md(summary: dict[str, Any]) -> str:
 
 
 def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
-    """Render the degraded-mode section (multimodal models run on the text path).
-
-    Empty when the run was not degraded. Lists each recorded model warning so
-    the reader knows benchmark numbers reflect the text decoder alone.
-
-    Args:
-        summary: The summary payload built by :func:`_build_summary_dict`.
-
-    Returns:
-        Markdown lines for the degraded-mode section, or ``[]`` when the run
-        was not degraded.
-    """
+    """Render the degraded-mode section (multimodal models run on the text path)."""
     warnings = summary.get("model_warnings") or []
     if not summary.get("degraded_mode") and not warnings:
         return []
@@ -822,19 +616,7 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
-    """State the compute-partition shape these numbers were measured in.
-
-    Only rendered for a partitioned card. An unpartitioned card is what every
-    other report in the corpus describes, so saying so on all of them would be
-    noise; a split card is the exception that changes how the numbers compare,
-    and it says so where someone reading two reports side by side will see it.
-
-    Args:
-        summary: The summary payload built by :func:`_build_summary_dict`.
-
-    Returns:
-        Markdown lines, or ``[]`` when the card was whole or unknown.
-    """
+    """State the compute-partition shape these numbers were measured in."""
     shape = summary.get("compute_partition") or {}
     partitions = int(shape.get("partitions") or 0)
     if not shape.get("mode") or partitions <= 1:
@@ -848,17 +630,14 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
     lines.append("")
     lines.append(f"- mode              : `{shape['mode']}` ({partitions} partitions)")
     if shape.get("cu_per_partition"):
-        # Absent is its own answer. The published environment cannot carry the
-        # provenance flag, so a shape recovered from it knows the count but not
-        # where it came from -- and reporting that as the board table would be
-        # the exact false provenance this section exists to prevent.
+        # Absent is its own answer.
         probed = shape.get("cu_probed")
         origin = "" if probed is None else (" (from the device)" if probed else " (derived from the board table)")
         lines.append(f"- CU per partition  : {shape['cu_per_partition']}{origin}")
     if shape.get("gib_per_partition"):
         lines.append(f"- HBM per partition : `{float(shape['gib_per_partition']):.1f}` GiB")
-    # Omitted where nothing fans out: the number would describe a placement that
-    # never happened, directly above a paragraph saying it did not.
+    # Omitted where nothing fans out: the number would describe a placement that never happened, directly above a
+    # paragraph saying it did not.
     if streams and shape.get("fanout_expected") is not False:
         lines.append(f"- streams/partition : {streams} ({streams * partitions} concurrent streams total)")
     lines.append("")
@@ -887,16 +666,7 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
-    """Render honesty annotations for work left unfinished (unvalidated
-    KEEPs, untried hot kernels, KEEPs awaiting integrate).
-
-    Args:
-        summary: The summary payload built by :func:`_build_summary_dict`.
-
-    Returns:
-        Markdown lines for the completeness annotations, or ``[]`` when nothing
-        is outstanding.
-    """
+    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
     untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
@@ -918,17 +688,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 
 
 def _extract_executive_summary(analysis_md_path: str) -> str:
-    """Extract the ``## Executive Summary`` block (up to the next level-2
-    heading) from analysis.md. Best-effort: returns a marker string when the
-    file is missing / unparseable rather than crashing the report.
-
-    Args:
-        analysis_md_path: Filesystem path to the analysis.md file.
-
-    Returns:
-        The extracted Executive Summary block (capped to ~2KB), or a marker
-        string when the path is empty, unreadable, or lacks the block.
-    """
+    """Extract the ``## Executive Summary`` block (up to the next level-2 heading) from analysis.md."""
     if not analysis_md_path:
         return "(no analysis.md path recorded)"
     try:
@@ -964,19 +724,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
 
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
-    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by
-    :func:`roofline_snapshot.build_roofline_comparison_from_history`).
-
-    Two modes: ``single_snapshot`` (only the PRELUDE bootstrap ran; one
-    Executive Summary + Base metric table) and ``before_after`` (a watermark
-    refresh produced a distinct snapshot; two summaries + Base/Opt/Δ table).
-
-    Args:
-        cmp: The roofline-comparison dict built from snapshot history.
-
-    Returns:
-        Markdown lines for the Roofline Comparison section.
-    """
+    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
     from ...kernel.roofline_snapshot import format_roofline_metrics_table
 
     lines: list[str] = ["## Roofline Comparison", ""]
@@ -1036,9 +784,8 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
-    # The ceiling is normally a session constant, but a runtime dtype /
-    # quantization change moves it — and then the two sides' Within % have
-    # different denominators, which the caveat has to say out loud.
+    # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the
+    # two sides' Within % have different denominators, which the caveat has to say out loud.
     anchor_note = (
         "The ceiling is a session-level constant "
         "(hardware + model + isl/osl don't change), so baseline and "
@@ -1081,19 +828,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
 
 
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
-    """Render the advisory external-baseline section (report-only).
-
-    ``ext`` comes from :func:`_load_external_baseline`. Facts only (no derived
-    gap %, no "should reach" wording) so it never reads as an implicit KPI.
-    Heading varies by ``ext['reason']``: ``ok`` (full reference-best),
-    ``no_target_gpu_configured`` ("(not requested)"), else "(advisory)".
-
-    Args:
-        ext: The external-baseline dict from :func:`_load_external_baseline`.
-
-    Returns:
-        Markdown lines for the advisory external-baseline section.
-    """
+    """Render the advisory external-baseline section (report-only)."""
     lines: list[str] = []
     status = str(ext.get("status") or "unknown")
     reason = str(ext.get("reason") or "").strip()
@@ -1169,30 +904,17 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 
 
 def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
-    """Render the concurrency-sweep curve section in the Markdown report.
-
-    Emits an embedded image reference when ``conc_sweep_curve_png`` is
-    present in the summary, otherwise returns an empty list.
-
-    Args:
-        summary: The full report summary dict (may contain
-            ``conc_sweep_curve_png``).
-
-    Returns:
-        Markdown lines for the curve section, or ``[]`` when no curve exists.
-    """
+    """Render the concurrency-sweep curve section in the Markdown report."""
     png_rel = summary.get("conc_sweep_curve_png")
     if not png_rel:
         return []
-    # final.md and the PNG both live in reports_dir, so the embed must be
-    # relative to final.md's own directory (its basename), not the
-    # session-root-relative path stored in final.json.
+    # final.md and the PNG both live in reports_dir, so the embed must be relative to final.md's own directory (its
+    # basename), not the session-root-relative path stored in final.json.
     png_md_rel = Path(str(png_rel)).name
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
-    # The PNG draws its own axis labels, and they differ by workload; naming
-    # them here too drifts from the chart.
+    # The PNG draws its own axis labels, and they differ by workload; naming them here too drifts from the chart.
     lines.append("The post-optimization concurrency ladder.  Red = baseline, orange = optimized.")
     lines.append("")
     lines.append(f"![Concurrency sweep curve]({png_md_rel})")
@@ -1205,23 +927,7 @@ def _render_conc_sweep_curve_for_report(
     output_dir: Path,
     state: SharedState,
 ) -> Path | None:
-    """Render the concurrency-sweep curve PNG into the reports directory.
-
-    Loads the full ``conc_sweep_summary.json`` (not the slim pointer), calls
-    :func:`render_conc_sweep_curve`, and returns the path on success. The
-    renderer drops a payload with nothing plottable on its own axes.
-
-    Args:
-        session_dir: Session directory used to locate
-            ``reports/conc_sweep_summary.json``.
-        output_dir: Reports directory where ``conc_sweep_curve.png`` is
-            written.
-        state: Shared state for model/GPU metadata passed to the plotter.
-
-    Returns:
-        Path to the written PNG, or ``None`` when the chart cannot be
-        produced (missing data, missing matplotlib, IO error).
-    """
+    """Render the concurrency-sweep curve PNG into the reports directory."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
@@ -1253,17 +959,7 @@ def _render_conc_sweep_curve_for_report(
 
 
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
-    """Best-effort load of ``target_analysis/target_baseline.json``; ``None``
-    when missing / unreadable (errors swallowed so a corrupt JSON never
-    breaks report generation).
-
-    Args:
-        session_dir: The session directory holding the target-analysis JSON.
-
-    Returns:
-        The parsed external-baseline mapping, or ``None`` when missing or
-        unreadable.
-    """
+    """Best-effort load of ``target_analysis/target_baseline.json``; ``None`` when missing / unreadable (errors swallowed so a corrupt JSON never breaks report generation)."""
     try:
         from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
@@ -1285,20 +981,7 @@ def _write_kernel_opt_summary(
     session_dir: Path,
     output_dir: Path,
 ) -> Path | None:
-    """Build + write ``reports/kernel_optimization_summary.json``.
-
-    Best-effort (failure logged, returns ``None`` so the final.json write
-    still happens). Aggregates ``kernel_opt_task_attempts`` with per-kernel
-    ``results/<kid>.json`` for the "why no optimized kernel?" view.
-
-    Args:
-        state: The session's shared state.
-        session_dir: The session directory used to locate per-kernel results.
-        output_dir: The reports output directory to write the summary into.
-
-    Returns:
-        The written summary path, or ``None`` on failure.
-    """
+    """Build + write ``reports/kernel_optimization_summary.json``."""
     try:
         from ...kernel.attempt_summary import build_kernel_optimization_summary
 
@@ -1328,17 +1011,7 @@ def _write_kernel_opt_summary(
 
 
 def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
-    """Build the small ``conc_sweep_summary`` pointer for ``final.json``
-    (report_path + status + summary); ``None`` when conc_sweep wrote no
-    summary.
-
-    Args:
-        session_dir: The session directory holding the conc-sweep summary.
-
-    Returns:
-        A compact pointer dict for ``final.json``, or ``None`` when no
-        conc-sweep summary exists or it is unreadable.
-    """
+    """Build the small ``conc_sweep_summary`` pointer for ``final.json`` (report_path + status + summary); ``None`` when conc_sweep wrote no summary."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
@@ -1366,15 +1039,7 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _read_ko_summary_totals(path: Path) -> dict[str, int]:
-    """Re-read totals so the final.json pointer doesn't drift from disk.
-
-    Args:
-        path: Path to the kernel-optimization summary JSON.
-
-    Returns:
-        A mapping of total counts read from disk, or ``{}`` on any read/parse
-        error.
-    """
+    """Re-read totals so the final.json pointer doesn't drift from disk."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         totals = data.get("totals") or {}
@@ -1384,17 +1049,7 @@ def _read_ko_summary_totals(path: Path) -> dict[str, int]:
 
 
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
-    """Pick the most useful 1-line summary out of an event's payload.
-
-    Args:
-        payload (dict): The bus event payload.
-        topic (str): The event topic, which selects the summary format.
-        from_agent (str): The agent that emitted the event.
-
-    Returns:
-        dict[str, Any]: A highlight record with ``topic``, ``from_agent``,
-        a 1-line ``summary``, and the original ``payload``.
-    """
+    """Pick the most useful 1-line summary out of an event's payload."""
     summary = ""
     if topic == "proposal":
         summary = f"action_name={payload.get('action_name')}"
@@ -1419,17 +1074,7 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 class ReportExecutor:
-    """ActionRunner for the ``report`` action.
-
-    Honours ``ctx.task.params``::
-
-        output_dir:        write final.{md,json} here (default
-                           ``$SESSION_DIR/reports``)
-        highlight_topics:  list of topics to surface in ``highlights``
-                           (default: proposal / review_verdict / decision /
-                            delegated_result / response / alert)
-        max_highlights:    cap the highlights list (default 50)
-    """
+    """ActionRunner for the ``report`` action."""
 
     DEFAULT_HIGHLIGHT_TOPICS = (
         "proposal",
@@ -1441,25 +1086,11 @@ class ReportExecutor:
     )
 
     def __init__(self, *, max_highlights: int = 50):
-        """Initialize the report executor.
-
-        Args:
-            max_highlights (int): Maximum number of highlight events to
-                include in the report. Defaults to ``50``.
-        """
+        """Initialize the report executor."""
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        """Run the report-generation action for the given context.
-
-        Args:
-            ctx: Action context; used to resolve the session directory
-                and report parameters.
-
-        Returns:
-            A result dict with a ``status`` field, failing when the
-            session directory cannot be resolved.
-        """
+        """Run the report-generation action for the given context."""
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {"status": "failed", "error": "report_executor: could not resolve session_dir"}
@@ -1486,8 +1117,8 @@ class ReportExecutor:
             for m in ev_rows:
                 if m.topic in highlight_topics:
                     h = _highlight(m.payload or {}, m.topic, m.from_agent)
-                    # On baseline_failed, suppress benign upstream WARN headlines
-                    # so they never become the top-level highlight.
+                    # On baseline_failed, suppress benign upstream WARN headlines so they never become the top-level
+                    # highlight.
                     if suppress_benign_highlights and _highlight_is_benign(h):
                         continue
                     highlights.append(h)
@@ -1504,8 +1135,7 @@ class ReportExecutor:
             session_dir=session_dir,
         )
 
-        # Kernel-optimization forensic summary in a separate file (pointer added
-        # to final.json).
+        # Kernel-optimization forensic summary in a separate file (pointer added to final.json).
         ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
         if ko_summary_path is not None:
             try:
@@ -1543,9 +1173,8 @@ class ReportExecutor:
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"
-        # Atomic write: a kill mid-flush must never leave a non-empty but
-        # invalid final.json on disk (issue #464 — downstream keys off it, and
-        # the crash-safe fallback would otherwise see garbled JSON).
+        # Atomic write: a kill mid-flush must never leave a non-empty but invalid final.json on disk (issue #464 —
+        # downstream keys off it, and the crash-safe fallback would otherwise see garbled JSON).
         _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
@@ -1566,19 +1195,7 @@ class ReportExecutor:
         }
 
     def _resolve_session_dir(self, ctx) -> Path | None:
-        """Best-effort session_dir resolution.
-
-        Order: ``ctx.extra['session_dir']`` → ``task.params['session_dir']``
-        → :func:`paths.session_dir` (only if it exists with ``state.json``)
-        → None (runner returns failed).
-
-        Args:
-            ctx: Action context carrying ``extra`` / task params.
-
-        Returns:
-            The resolved session directory, or ``None`` when it cannot be
-            resolved.
-        """
+        """Best-effort session_dir resolution."""
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
             return Path(extra["session_dir"])
@@ -1593,16 +1210,7 @@ class ReportExecutor:
         return None
 
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
-        """Best-effort publish hook for code-driven optimizer runs (opt-in
-        unless the results service URL is configured).
-
-        Args:
-            session_dir: The session directory to publish artifacts from.
-            state: The session's shared state (model/session identifiers).
-
-        Returns:
-            A dict describing whether publishing ran and its outcome.
-        """
+        """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
         auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
         if not service_url and auto_publish not in {"1", "true", "yes"}:

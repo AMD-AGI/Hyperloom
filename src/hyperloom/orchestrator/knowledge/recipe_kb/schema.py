@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Arbor-aligned data shapes for the local recipe-snapshot KB.
-
-The on-disk ``recipe.json`` layout follows the arbor ``Recipe`` dataclass so
-an operator who knows arbor can read our local files without translation:
-
-* ``model`` / ``hardware`` / ``best_config`` / ``best_throughput`` /
-  ``stack_fingerprint`` / ``last_profiled`` / ``sessions``
-  are all top-level fields.
-* The four experience arrays use arbor's names — ``what_worked`` /
-  ``what_failed`` / ``remaining_gaps`` / ``pitfalls``.
-* Each row has the same nested sub-shapes arbor uses.
-
-We keep a small superset of arbor fields:
-
-* ``canonical_id`` / ``version`` / ``created_at`` / ``updated_at`` —
-  store-managed metadata for the atomic-archive contract.
-* ``framework_name`` / ``framework_version`` / ``precision`` — the three
-  identity dimensions arbor lacks (arbor is a 2-tuple model+hardware).
-* ``lessons`` / ``authority`` / ``confidence`` / ``evidence_refs`` /
-  ``provenance`` — durable local knowledge and audit metadata.
-"""
+"""Arbor-aligned data shapes for the local recipe-snapshot KB."""
 
 from __future__ import annotations
 
@@ -71,14 +51,7 @@ def _best_config_split(
 
 
 def _normalize_best_config(best_config: Mapping[str, Any]) -> dict[str, Any]:
-    """Canonicalize a legacy ``{args, envs}`` best_config shape on read.
-
-    Some producers (KG-derived warm-start candidates, older writers) emit
-    ``args`` / ``envs`` (or a nested ``envs`` map) instead of the canonical
-    ``extra_server_args`` / ``extra_envs`` keys. Unwrap that shape here so
-    every in-memory ``Recipe`` uses the canonical keys; already-canonical
-    dicts and any other unknown keys pass through unchanged.
-    """
+    """Canonicalize a legacy ``{args, envs}`` best_config shape on read."""
     if "args" not in best_config and "envs" not in best_config:
         return dict(best_config)
     remapped = dict(best_config)
@@ -124,12 +97,7 @@ class Gap:
 
 @dataclass
 class Pitfall:
-    """A "watch out for X" — operator-readable description.
-
-    ``severity`` (e.g. ``crash`` / ``regress``) is a hyperloom superset field
-    the Coordinator stamps so the warm-start prompt can rank pitfalls by
-    disruption; arbor consumers ignore it.
-    """
+    """A \"watch out for X\" — operator-readable description."""
 
     description: str
     severity: str = ""
@@ -137,13 +105,7 @@ class Pitfall:
 
 @dataclass
 class Lesson:
-    """A "X is the lesson" insight — statement + optional impact.
-
-    We keep ``Lesson`` (arbor stores everything under ``what_worked``)
-    because the v2 wire contract has a dedicated ``lessons`` array and the
-    Coordinator emits these distinct from ``what_worked``. ``measured_impact``
-    is free-form (a structured dict or plain string) and preserved verbatim.
-    """
+    """A \"X is the lesson\" insight — statement + optional impact."""
 
     statement: str
     measured_impact: Any = ""
@@ -151,23 +113,14 @@ class Lesson:
 
 @dataclass
 class StackFingerprint:
-    """Software-stack identity — used to detect "is this recipe stale?"
-
-    Mirrors arbor's ``StackFingerprint`` exactly to keep binary readability
-    between arbor and our local KB.
-    """
+    """Software-stack identity — used to detect "is this recipe stale?"."""
 
     vllm_version: str = ""
     aiter_commit: str = ""
     rocm_version: str = ""
 
     def to_dict(self) -> dict[str, str]:
-        """Serialise the fingerprint to a plain dict.
-
-        Returns:
-            dict[str, str]: A dict with keys ``vllm_version``,
-                ``aiter_commit`` and ``rocm_version``.
-        """
+        """Serialise the fingerprint to a plain dict."""
         return {
             "vllm_version": self.vllm_version,
             "aiter_commit": self.aiter_commit,
@@ -176,17 +129,7 @@ class StackFingerprint:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StackFingerprint:
-        """Build a fingerprint from a (possibly partial) dict.
-
-        Missing keys default to empty strings.
-
-        Args:
-            d (dict[str, Any]): Source mapping; recognised keys are
-                ``vllm_version`` / ``aiter_commit`` / ``rocm_version``.
-
-        Returns:
-            StackFingerprint: The reconstructed fingerprint.
-        """
+        """Build a fingerprint from a (possibly partial) dict."""
         return cls(
             vllm_version=str(d.get("vllm_version") or ""),
             aiter_commit=str(d.get("aiter_commit") or ""),
@@ -196,18 +139,7 @@ class StackFingerprint:
 
 @dataclass
 class KernelOptimization:
-    """One KEEP'd kernel-optimization outcome — micro result + E2E verdict.
-
-    Hyperloom superset (arbor has no kernel-level concept). Captures a kernel
-    KEEP'd at the micro layer plus its end-to-end integrate verification
-    result. A kernel can be a genuine micro win yet show no end-to-end gain
-    because its share of total GPU time is tiny — that conclusion is valuable
-    warm-start signal.
-
-    ``e2e_gain_pct`` / ``e2e_tput`` default to 0.0 and ``integrated`` to False
-    for a kernel KEEP'd at the micro layer but never integrated (so warm-start
-    can tell "micro-only, E2E unknown" apart from "E2E-verified, no gain").
-    """
+    """One KEEP'd kernel-optimization outcome — micro result + E2E verdict."""
 
     kernel_id: str = ""
     source_file: str = ""
@@ -216,19 +148,13 @@ class KernelOptimization:
     decision: str = ""
     e2e_gain_pct: float = 0.0
     e2e_tput: float = 0.0
-    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW); ``decision``
-    # above stays the micro-layer KEEP.
+    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW); ``decision`` above stays the micro-layer KEEP.
     e2e_decision: str = ""
     integrated: bool = False
     ts: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise the kernel-optimization record to a plain dict.
-
-        Returns:
-            dict[str, Any]: All fields coerced to their JSON-friendly
-                types (floats, ints, strings, bool).
-        """
+        """Serialise the kernel-optimization record to a plain dict."""
         return {
             "kernel_id": str(self.kernel_id),
             "source_file": str(self.source_file),
@@ -244,18 +170,7 @@ class KernelOptimization:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> KernelOptimization:
-        """Build a kernel-optimization record from a dict.
-
-        Missing keys fall back to the dataclass defaults; numeric and
-        boolean fields are coerced.
-
-        Args:
-            d (dict[str, Any]): Source mapping matching the
-                :meth:`to_dict` shape.
-
-        Returns:
-            KernelOptimization: The reconstructed record.
-        """
+        """Build a kernel-optimization record from a dict."""
         return cls(
             kernel_id=str(d.get("kernel_id") or ""),
             source_file=str(d.get("source_file") or ""),
@@ -272,13 +187,7 @@ class KernelOptimization:
 
 @dataclass
 class SessionSummary:
-    """One optimisation-session entry — one row per CLOSE.
-
-    Superset of arbor's session log. ``session_id`` is required for
-    per-session dedup on rewrite and ``gain_pct`` feeds warm-replay. arbor's
-    ``date`` / ``throughput_before`` / ``throughput_after`` / ``actions_taken``
-    stay available (all default to empty so a hyperloom-only write is valid).
-    """
+    """One optimisation-session entry — one row per CLOSE."""
 
     date: str = ""
     throughput_before: float = 0.0
@@ -292,13 +201,7 @@ class SessionSummary:
 # Recipe — arbor superset
 @dataclass
 class Recipe:
-    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the
-    version + provenance metadata our atomic-archive needs.
-
-    The ``to_dict`` output is what lands in ``recipe.json``: an arbor
-    ``Recipe`` plus hyperloom superset keys (see the section comments on the
-    fields below).
-    """
+    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the version + provenance metadata our atomic-archive needs."""
 
     # ----- store-managed metadata -----
     canonical_id: str
@@ -325,9 +228,7 @@ class Recipe:
     stack_fingerprint: StackFingerprint = field(default_factory=StackFingerprint)
     sessions: list[SessionSummary] = field(default_factory=list)
 
-    # ----- hyperloom superset: KEEP'd kernel optimizations -----
-    # Kernel-level wins + their E2E verification outcome. Warm-start reads it
-    # to skip re-optimizing kernels already proven to have no E2E payoff.
+    # ----- hyperloom superset: KEEP'd kernel optimizations ----- Kernel-level wins + their E2E verification outcome.
     kernel_optimizations: list[KernelOptimization] = field(default_factory=list)
 
     # ----- v2 audit / wire-compat fields -----
@@ -340,16 +241,7 @@ class Recipe:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise the recipe to the on-disk ``recipe.json`` shape.
-
-        Nested sub-shapes (findings, failures, gaps, pitfalls,
-        lessons, sessions, kernel optimizations, stack fingerprint)
-        are expanded to plain dicts, and free-form ``extras`` are
-        splatted at the top level without shadowing well-known keys.
-
-        Returns:
-            dict[str, Any]: The arbor-shape recipe row.
-        """
+        """Serialise the recipe to the on-disk ``recipe.json`` shape."""
         out: dict[str, Any] = {
             "canonical_id": self.canonical_id,
             "version": int(self.version),
@@ -389,8 +281,7 @@ class Recipe:
             "evidence_refs": list(self.evidence_refs),
             "provenance": dict(self.provenance),
         }
-        # Splat extras at the top level (no nested ``extras`` key on disk);
-        # reserved keys above always win.
+        # Splat extras at the top level (no nested ``extras`` key on disk); reserved keys above always win.
         for key, val in self.extras.items():
             if key not in out:
                 out[key] = val
@@ -398,19 +289,7 @@ class Recipe:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Recipe:
-        """Build a recipe from an on-disk / wire dict.
-
-        Nested arrays are parsed back into their typed sub-shapes
-        (skipping non-dict entries), and any unrecognised top-level
-        keys are preserved verbatim in ``extras`` so a newer/older
-        writer's data is never dropped.
-
-        Args:
-            d (dict[str, Any]): Source mapping in arbor recipe shape.
-
-        Returns:
-            Recipe: The reconstructed recipe row.
-        """
+        """Build a recipe from an on-disk / wire dict."""
         # Well-known top-level keys we parse; anything else goes into ``extras``.
         well_known = {
             "canonical_id",
@@ -420,8 +299,8 @@ class Recipe:
             "model",
             "hardware",
             "framework_name",
-            # Legacy framework-identity key; consumed into framework_name below,
-            # listed here so it never leaks into extras.
+            # Legacy framework-identity key; consumed into framework_name below, listed here so it never leaks into
+            # extras.
             "framework",
             "framework_version",
             "precision",
@@ -440,8 +319,7 @@ class Recipe:
             "confidence",
             "evidence_refs",
             "provenance",
-            # Composite-KB provenance markers — dead weight in a local
-            # recipe row, never persisted into extras.
+            # Composite-KB provenance markers — dead weight in a local recipe row, never persisted into extras.
             "_field_sources",
             "_sources",
             "prs_tested",
@@ -531,11 +409,7 @@ class Recipe:
 # Attempt — append-only optimization-attempt record
 @dataclass
 class Attempt:
-    """One append-only evolutionary attempt against a recipe.
-
-    Attempts are not arbor-defined; this layer is identical to the v2 wire
-    ``Attempt`` shape, which the central server speaks on read too.
-    """
+    """One append-only evolutionary attempt against a recipe."""
 
     id: int = 0
     recipe_canonical_id: str = ""
@@ -549,15 +423,7 @@ class Attempt:
     rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise the attempt to a plain dict.
-
-        ``fitness`` is omitted entirely when ``None`` (rather than
-        emitted as null) to match the on-disk NDJSON contract.
-
-        Returns:
-            dict[str, Any]: The attempt row; includes ``fitness`` only
-                when it is set.
-        """
+        """Serialise the attempt to a plain dict."""
         out: dict[str, Any] = {
             "id": int(self.id),
             "recipe_canonical_id": str(self.recipe_canonical_id),
@@ -575,18 +441,7 @@ class Attempt:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Attempt:
-        """Build an attempt from a dict.
-
-        ``fitness`` stays ``None`` when absent; all other fields fall
-        back to their dataclass defaults.
-
-        Args:
-            d (dict[str, Any]): Source mapping matching the
-                :meth:`to_dict` shape.
-
-        Returns:
-            Attempt: The reconstructed attempt row.
-        """
+        """Build an attempt from a dict."""
         fitness = d.get("fitness")
         return cls(
             id=int(d.get("id") or 0),

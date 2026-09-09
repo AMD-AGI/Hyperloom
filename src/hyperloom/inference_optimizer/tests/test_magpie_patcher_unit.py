@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the idempotent, atomic Magpie ``benchmarker.py`` patcher
-(path resolution, sentinel/legacy detection, upstream-atomic awareness, and
-the classified atomic-reason outcomes)."""
+"""Unit tests for the idempotent, atomic Magpie ``benchmarker.py`` patcher (path resolution, sentinel/legacy detection, upstream-atomic awareness, and the classified atomic-reason outcomes)."""
 
 from __future__ import annotations
 
@@ -266,8 +264,8 @@ def test_apply_remote_trust_fdopen_write_error(tmp_path, monkeypatch):
 
 
 def test_apply_sglang_client_trust_applied_and_idempotent(tmp_path):
-    # A script carrying the local-server client path (either mi300x or mi355x —
-    # the client blocks are byte-identical) gets both client paths gated.
+    # A script carrying the local-server client path (either mi300x or mi355x — the client blocks are byte-identical)
+    # gets both client paths gated.
     f = tmp_path / "sglang_mi355x.sh"
     f.write_text(_SGLANG_MI355X_LEGACY, encoding="utf-8")
 
@@ -297,8 +295,8 @@ def test_apply_sglang_client_trust_rejects_drifted_local_shape(tmp_path):
 
 
 def test_apply_sglang_client_trust_remote_only_skips_local(tmp_path):
-    # Reduced script with only the remote-direct path (no local marker): remote
-    # gets gated, the local splice is skipped rather than reported as drift.
+    # Reduced script with only the remote-direct path (no local marker): remote gets gated, the local splice is
+    # skipped rather than reported as drift.
     f = tmp_path / "sglang_mi300x.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
 
@@ -312,9 +310,8 @@ def test_apply_sglang_client_trust_remote_only_skips_local(tmp_path):
 
 
 def test_apply_sglang_client_trust_full_mi300x_gets_local(tmp_path):
-    # A realistic mi300x script (with the local-server client path) gets BOTH
-    # the remote-direct and local-server trust gates — closing the gap where
-    # the earlier patch only ever reached mi355x.
+    # A realistic mi300x script (with the local-server client path) gets BOTH the remote-direct and local-server trust
+    # gates — closing the gap where the earlier patch only ever reached mi355x.
     f = tmp_path / "sglang_mi300x.sh"
     f.write_text(_SGLANG_MI355X_LEGACY, encoding="utf-8")
 
@@ -453,9 +450,7 @@ def test_eval_flag_stripped_from_inferencex_dir(tmp_path):
 
 
 def test_eval_concurrency_fixes_idempotent(tmp_path):
-    """Regression: a 2nd pass must stay ok. The parser patch leaves a legit
-    ``--concurrent-requests`` case in benchmark_lib.sh; the flag-strip scan must
-    skip the library rather than mis-report it as an unrecognised shape."""
+    """Regression: a 2nd pass must stay ok."""
     _make_inferencex(tmp_path)
     assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
     # Second pass: benchmark_lib.sh now carries the parser sentinel + flag.
@@ -467,12 +462,7 @@ def test_eval_concurrency_fixes_idempotent(tmp_path):
 
 
 def test_eval_fixes_run_when_benchmarker_missing(monkeypatch, tmp_path):
-    """Regression: a missing/stale benchmarker.py must NOT skip the eval fixes.
-
-    Previously ``magpie_scripts_patch_status`` early-returned when
-    ``benchmarker.py`` was unresolved, leaving the fatal ``--concurrent-requests``
-    flag live in the InferenceX copies that actually execute.
-    """
+    """Regression: a missing/stale benchmarker.py must NOT skip the eval fixes."""
     ix = _make_inferencex(tmp_path / "ix")
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.setenv("INFERENCEX_PATH", str(ix))
@@ -487,8 +477,9 @@ def test_eval_fixes_run_when_benchmarker_missing(monkeypatch, tmp_path):
 
 
 def test_full_flow_covers_inferencex_and_ordering(tmp_path):
-    """Full status flow: atomic + remote-trust + eval strip across both dirs,
-    with the remote-trust patch on sglang running BEFORE the generic strip."""
+    """Full status flow: atomic + remote-trust + eval strip across both dirs, with the remote-trust patch on sglang
+    running BEFORE the generic strip.
+    """
     magpie = _make_magpie(tmp_path / "magpie")
     # Add a flagged generic vllm script to the Magpie scripts dir too.
     (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").write_text(_VLLM_LEGACY, encoding="utf-8")
@@ -509,17 +500,13 @@ def test_full_flow_covers_inferencex_and_ordering(tmp_path):
     assert "--concurrent-requests" not in (ix / "benchmarks" / "vllm_mi355x.sh").read_text(encoding="utf-8")
 
 
-# ---- regression: run-time eval-concurrency compat (2026-07-27 outage) ------
-# Reproduces the exact failure that killed a Qwen3-8B optimization run:
-# preflight pip-installed Magpie into site-packages and cloned InferenceX
-# WITHOUT ever running the patcher (only install.sh did), so
-# ``Magpie/scripts/benchmark/sglang_mi355x.sh`` kept upstream's
-#     run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
-# Magpie's ``_prepare_benchmark_scripts`` then re-copied that script into
-# ``<inferencex>/benchmarks/`` at run time, InferenceX's ``run_lm_eval``
-# rejected the flag ("Unknown parameter: --concurrent-requests"), the benchmark
-# aborted with no ``results*.json``, and the run stopped with
-# ``baseline_accuracy_failed``.
+# ---- regression: run-time eval-concurrency compat (2026-07-27 outage) ------ Reproduces the exact failure that
+# killed a Qwen3-8B optimization run: preflight pip-installed Magpie into site-packages and cloned InferenceX WITHOUT
+# ever running the patcher (only install.sh did), so ``Magpie/scripts/benchmark/sglang_mi355x.sh`` kept upstream's
+# run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC Magpie's ``_prepare_benchmark_scripts`` then
+# re-copied that script into ``<inferencex>/benchmarks/`` at run time, InferenceX's ``run_lm_eval`` rejected the flag
+# ("Unknown parameter: --concurrent-requests"), the benchmark aborted with no ``results*.json``, and the run stopped
+# with ``baseline_accuracy_failed``.
 _SGLANG_MI355X_FLAGGED = (
     "#!/bin/bash\n"
     'if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then\n'
@@ -542,8 +529,7 @@ def _make_sitepackages_magpie(root: Path) -> Path:
 
 
 def test_ensure_eval_concurrency_compat_strips_sglang_mi355x(tmp_path):
-    """The public run-time entry point removes the flag from the Magpie tree
-    Magpie re-copies from, so the executed copy is clean."""
+    """The public run-time entry point removes the flag from the Magpie tree Magpie re-copies from, so the executed copy is clean."""
     magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
     ix = _make_inferencex(tmp_path / "ix", vllm=None)
 
@@ -551,16 +537,15 @@ def test_ensure_eval_concurrency_compat_strips_sglang_mi355x(tmp_path):
 
     script = (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
     assert "--concurrent-requests" not in script
-    # Concurrency still reaches lm-eval: run_lm_eval resolves it from
-    # EVAL_CONCURRENT_REQUESTS (fallback CONC), which the untouched call keeps.
+    # Concurrency still reaches lm-eval: run_lm_eval resolves it from EVAL_CONCURRENT_REQUESTS (fallback CONC), which
+    # the untouched call keeps.
     assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in script
     # The remote-direct shim (which never took the flag) is untouched.
     assert "magpie_run_eval_remote_direct || exit $?" in script
 
 
 def test_ensure_eval_concurrency_compat_makes_run_lm_eval_tolerant(tmp_path):
-    """Belt for Magpie's run-time re-copy: even if a flagged script slips into
-    ``<inferencex>/benchmarks/``, ``run_lm_eval`` must not abort on it."""
+    """Belt for Magpie's run-time re-copy: even if a flagged script slips into ``<inferencex>/benchmarks/``, ``run_lm_eval`` must not abort on it."""
     ix = _make_inferencex(tmp_path / "ix", vllm=None)
 
     assert mp.ensure_eval_concurrency_compat(None, str(ix)) is True
@@ -568,8 +553,8 @@ def test_ensure_eval_concurrency_compat_makes_run_lm_eval_tolerant(tmp_path):
     lib = (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
     assert mp._RUN_LM_EVAL_PARSER_SENTINEL in lib
     assert '--concurrent-requests|--concurrent_requests) concurrent_requests="$2"' in lib
-    # The catch-all that produced "Unknown parameter: --concurrent-requests" is
-    # now reached only by genuinely unknown flags.
+    # The catch-all that produced "Unknown parameter: --concurrent-requests" is now reached only by genuinely unknown
+    # flags.
     assert lib.index("--concurrent-requests|--concurrent_requests") < lib.index('echo "Unknown parameter: $1"')
 
 
@@ -604,8 +589,7 @@ def test_ensure_eval_concurrency_compat_idempotent(tmp_path):
 
 
 def test_ensure_eval_concurrency_compat_reports_unstrippable(tmp_path):
-    """An unrecognised flag shape must report False (callers fail loudly), not
-    silently leave a fatal flag live."""
+    """An unrecognised flag shape must report False (callers fail loudly), not silently leave a fatal flag live."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True, exist_ok=True)
@@ -655,9 +639,7 @@ def test_live_flag_scan_ignores_env_prefixed_patched_form(tmp_path):
 
 
 def test_compat_true_when_only_the_belt_fails(tmp_path):
-    """Regression: a reduced / already-fixed benchmark_lib.sh whose parser block
-    is unrecognised must NOT be reported as blocking. Nothing is actually
-    passing the flag, so accuracy eval runs fine."""
+    """Regression: a reduced / already-fixed benchmark_lib.sh whose parser block is unrecognised must NOT be reported as blocking."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     (ix / "benchmarks" / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
@@ -666,8 +648,7 @@ def test_compat_true_when_only_the_belt_fails(tmp_path):
 
 
 def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
-    """A flag shape the strip cannot rewrite is harmless once run_lm_eval parses
-    it — the belt is doing its job, so do not block the run."""
+    """A flag shape the strip cannot rewrite is harmless once run_lm_eval parses it — the belt is doing its job, so do not block the run."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True)
@@ -685,13 +666,7 @@ def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
 
 
 def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
-    """The one genuinely fatal state: a caller still passes the flag AND
-    run_lm_eval still rejects it.
-
-    This is exactly the shape that killed a run at baseline_accuracy_failed, so
-    it must report False and let the caller escalate rather than proceed into a
-    doomed eval.
-    """
+    """The one genuinely fatal state: a caller still passes the flag AND run_lm_eval still rejects it."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True)
@@ -700,8 +675,8 @@ def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
         '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n',
         encoding="utf-8",
     )
-    # A benchmark_lib.sh whose parser cannot be taught the flag either: no
-    # run_lm_eval definition at all, so the belt has nothing to patch.
+    # A benchmark_lib.sh whose parser cannot be taught the flag either: no run_lm_eval definition at all, so the belt
+    # has nothing to patch.
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     (ix / "benchmarks" / "benchmark_lib.sh").write_text("# no run_lm_eval here\n", encoding="utf-8")
@@ -713,12 +688,7 @@ def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
 
 # ---- unreadable files: the patcher must degrade, never crash a run ---------
 def _unreadable(path):
-    """A path that exists but raises OSError on read.
-
-    Uses a directory rather than chmod: these suites run as root, where mode
-    bits do not deny access, so a permission-based fixture would silently not
-    exercise the error branch at all.
-    """
+    """A path that exists but raises OSError on read."""
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -764,25 +734,16 @@ def test_parser_patch_reports_failure_when_the_lib_cannot_be_read(tmp_path):
 
 
 def test_parser_patch_reports_failure_on_an_unrecognised_parser_block(tmp_path):
-    """No legacy parser block to rewrite -> nothing patched, report False.
-
-    This is the shape that must NOT be mistaken for success: silently returning
-    True here would let a run proceed into an eval the parser still rejects.
-    """
+    """No legacy parser block to rewrite -> nothing patched, report False."""
     lib = tmp_path / "benchmark_lib.sh"
     lib.write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
 
     assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is False
 
 
-# ---- merged-case parser (InferenceX a4bb43af+) ----------------------------
-# The pinned InferenceX (a4bb43af) refactored run_lm_eval's arg parser into a
-# single merged ``--port|--task|...|--top-p)`` case with an inner dispatch and a
-# ``>&2`` / ``return 2`` catch-all. It already reads concurrency from
-# EVAL_CONCURRENT_REQUESTS/CONC and no caller passes --concurrent-requests, so
-# accuracy eval is NOT blocked. The old per-flag legacy block no longer matches,
-# which used to make eval_flag_ok=False and (post 3166da7f) fail install with a
-# false positive.
+# ---- merged-case parser (InferenceX a4bb43af+) ---------------------------- The pinned InferenceX (a4bb43af)
+# refactored run_lm_eval's arg parser into a single merged ``--port|--task|...|--top-p)`` case with an inner dispatch
+# and a ``>&2`` / ``return 2`` catch-all.
 _BENCHMARK_LIB_MERGED_CASE = (
     "#!/bin/bash\n"
     "run_lm_eval() {\n"
@@ -823,12 +784,7 @@ def test_merged_case_parser_is_taught_the_flag(tmp_path):
 
 
 def test_merged_case_env_only_ix_is_not_a_false_positive(tmp_path):
-    """Full status: merged-case parser + env concurrency + no live flag => ok.
-
-    Reproduces the shuoshuo-dev install failure: the defence-in-depth parser
-    patch could not match the refactored parser, but nothing passes the flag, so
-    the install must NOT be failed (status.ok stays True).
-    """
+    """Full status: merged-case parser + env concurrency + no live flag => ok."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
@@ -845,16 +801,15 @@ def test_merged_case_env_only_ix_is_not_a_false_positive(tmp_path):
     status = mp.magpie_scripts_patch_status(None, str(ix))
     # The merged-case parser was taught the flag, so the eval fix succeeded.
     assert status.eval_flag_ok is True
-    # atomic is a benign no-op here (no MAGPIE_PATH / benchmarker.py), not a
-    # genuine failure; install.sh treats reason=missing as fail-soft.
+    # atomic is a benign no-op here (no MAGPIE_PATH / benchmarker.py), not a genuine failure; install.sh treats
+    # reason=missing as fail-soft.
     assert status.atomic_reason == mp._ATOMIC_REASON_MISSING
     assert status.atomic_genuine_failure is False
     assert mp.live_eval_concurrency_flag_scripts(None, str(ix)) == []
 
 
 def test_unpatchable_parser_without_live_flag_is_not_fatal(tmp_path):
-    """Narrowed judgement: even a parser we cannot teach must not fail install
-    when no caller passes the flag (aligns install-time with run-time)."""
+    """Narrowed judgement: even a parser we cannot teach must not fail install when no caller passes the flag (aligns install-time with run-time)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
@@ -875,9 +830,8 @@ def test_unpatchable_parser_without_live_flag_is_not_fatal(tmp_path):
     assert status.eval_flag_ok is True
 
 
-# A benchmark_lib.sh with EARLIER functions that carry an identical ``*)``
-# catch-all (real a4bb43af has several before run_lm_eval, e.g. at lines 285 &
-# 451). The merged-case patch must skip these and only touch run_lm_eval's.
+# A benchmark_lib.sh with EARLIER functions that carry an identical ``*)`` catch-all (real a4bb43af has several before
+# run_lm_eval, e.g. at lines 285 & 451).
 _BENCHMARK_LIB_MULTI_CATCHALL = (
     "#!/bin/bash\n"
     "wait_for_server_ready() {\n"
@@ -905,9 +859,7 @@ _BENCHMARK_LIB_MULTI_CATCHALL = (
 
 
 def test_merged_case_patch_lands_inside_run_lm_eval_only(tmp_path):
-    """Regression for the mis-patch bug: with earlier functions sharing the same
-    ``*)`` catch-all, the flag case must be spliced into run_lm_eval, not the
-    first matching catch-all in the file."""
+    """Regression for the mis-patch bug: with earlier functions sharing the same ``*)`` catch-all, the flag case must be spliced into run_lm_eval, not the first matching catch-all in the file."""
     lib = tmp_path / "benchmark_lib.sh"
     lib.write_text(_BENCHMARK_LIB_MULTI_CATCHALL, encoding="utf-8")
 
@@ -933,13 +885,12 @@ def test_merged_case_patch_lands_inside_run_lm_eval_only(tmp_path):
 
 
 def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
-    """A sentinel/flag that lives OUTSIDE run_lm_eval must not be read as
-    run_lm_eval tolerating the flag (guards the fatal path)."""
+    """A sentinel/flag that lives OUTSIDE run_lm_eval must not be read as run_lm_eval tolerating the flag (guards the fatal path)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
-    # run_lm_eval itself is an unteachable stub (no flag inside), but an earlier
-    # function carries the sentinel + a --concurrent-requests case.
+    # run_lm_eval itself is an unteachable stub (no flag inside), but an earlier function carries the sentinel + a
+    # --concurrent-requests case.
     poisoned = (
         "#!/bin/bash\n"
         "other_fn() {\n"
@@ -954,19 +905,7 @@ def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
 
 
 def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
-    """Integration against a real benchmark_lib.sh, when one is checked in.
-
-    The fixture it names has never been in the tree, so this has always skipped
-    -- and because its docstring claimed the stub above covered it, the gap read
-    as intentional. The stub covers the *shape*; it cannot tell you whether the
-    file upstream actually pins still has that shape, which is the question a
-    pin bump raises and the one whose wrong answer makes install.sh die().
-
-    That question is now answered by ``test_inferencex_anchor_contract`` --
-    hermetically via a recorded ``magpie_patch`` entry, and against the real
-    pinned file when the repo is reachable. This case stays as a convenience for
-    dropping a local copy in to debug against, and says what it is.
-    """
+    """Integration against a real benchmark_lib.sh, when one is checked in."""
     fixture = Path(__file__).parent / "fixtures" / "benchmark_lib_a4bb43af.sh"
     if not fixture.is_file():
         pytest.skip(
@@ -987,15 +926,13 @@ def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
 
 
 def test_unpatchable_parser_with_live_flag_stays_fatal(tmp_path):
-    """The narrowed judgement must still fail when a live flag really survives
-    an unteachable parser (no false negative)."""
+    """The narrowed judgement must still fail when a live flag really survives an unteachable parser (no false negative)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
     (bench / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
-    # A caller that STILL passes the rejected flag in a shape the strip regex
-    # (which expects the $CONC variable) cannot remove: a literal value. The
-    # live-flag scan still recognises it, so it is a genuine, unstrippable blocker.
+    # A caller that STILL passes the rejected flag in a shape the strip regex (which expects the $CONC variable)
+    # cannot remove: a literal value.
     (bench / "vllm_mi355x.sh").write_text(
         "#!/bin/bash\n"
         'if [[ "$RUN_EVAL" = "true" ]]; then\n'

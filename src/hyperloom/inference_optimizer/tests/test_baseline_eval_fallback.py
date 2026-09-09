@@ -152,8 +152,8 @@ def test_eval_rooted_failure_scans_logs(tmp_path: Path):
 
 
 def test_eval_rooted_failure_climbs_from_round_subdir(tmp_path: Path):
-    # The result points at measure_round but the eval marker lives in the
-    # sibling warmup_round; the scan must climb to the task root.
+    # The result points at measure_round but the eval marker lives in the sibling warmup_round; the scan must climb to
+    # the task root.
     task = tmp_path / "task"
     warm_ws = task / "warmup_round" / "benchmark_sglang_x"
     warm_ws.mkdir(parents=True)
@@ -239,8 +239,8 @@ def test_no_eval_forces_run_eval_false(tmp_path):
 
 
 def test_eval_disabled_resolves_without_a_ctx_shared_state(tmp_path):
-    # The kernel integrate lane builds the executor with no shared_state= and a
-    # RunnerContext with no extra, so the flag has to come off the session dir.
+    # The kernel integrate lane builds the executor with no shared_state= and a RunnerContext with no extra, so the
+    # flag has to come off the session dir.
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="s1")
@@ -266,8 +266,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
         calls.append({"run_eval": run_eval})
         if run_eval != "false":
-            # Simulate a broken eval that aborts the script: no valid workspace,
-            # marker in stderr.
+            # Simulate a broken eval that aborts the script: no valid workspace, marker in stderr.
             return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
@@ -291,8 +290,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # Warmup tries eval=true, falls back to eval=false, then the measured
-    # baseline reuses the eval-disabled config.
+    # Warmup tries eval=true, falls back to eval=false, then the measured baseline reuses the eval-disabled config.
     assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
@@ -300,8 +298,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
 
 
 def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
-    """flag on + single-node: an eval crash is stamped as an eval-failure
-    contract with no RUN_EVAL=false salvage retry."""
+    """flag on + single-node: an eval crash is stamped as an eval-failure contract with no RUN_EVAL=false salvage retry."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -387,8 +384,7 @@ def _make_baseline_ctx(params: dict, shared_state) -> SimpleNamespace:
 
 # --- baseline accuracy missing -> stop the whole run -----------------------
 def test_baseline_missing_accuracy_stops_run(tmp_path):
-    """Serving baseline with eval expected but no accuracy result -> the run
-    halts with ``stop_reason=baseline_accuracy_failed`` (broken setup)."""
+    """Serving baseline with eval expected but no accuracy result -> the run halts with ``stop_reason=baseline_accuracy_failed`` (broken setup)."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -426,13 +422,7 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
 
 
 def test_baseline_operator_disabled_eval_still_stops(tmp_path):
-    """Disabling the serving eval on a genuine baseline is not an opt-out.
-
-    A baseline exists to establish the accuracy reference, so turning the eval
-    off does not make a missing accuracy acceptable -- it only means the
-    reference was never measured. The run halts either way, which is what makes
-    ``disable_run_eval`` useless as a way around the accuracy gate.
-    """
+    """Disabling the serving eval on a genuine baseline is not an opt-out."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -470,17 +460,7 @@ def test_baseline_operator_disabled_eval_still_stops(tmp_path):
 
 
 def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
-    """A genuine baseline whose eval aborted must stop the run IMMEDIATELY.
-
-    Regression (2026-07-27 Qwen3-8B outage): the executor used to re-run the
-    whole baseline with ``RUN_EVAL=false`` to "salvage the throughput
-    baseline", and ``_maybe_stop_on_missing_baseline_accuracy`` then halted the
-    run anyway (the fallback is tagged ``eval_unavailable``, which is NOT an
-    operator opt-out). That burned a second full server boot + benchmark to
-    produce a result guaranteed to be discarded. The retry is now skipped for a
-    genuine ``baseline`` task and the same ``baseline_accuracy_failed`` stop is
-    recorded straight away.
-    """
+    """A genuine baseline whose eval aborted must stop the run IMMEDIATELY."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -530,12 +510,7 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
 
 
 def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
-    """The fail-fast rule is scoped to genuine baselines.
-
-    ``replay_warm_recipe`` reuses this executor but does NOT establish the
-    quality reference, so a throughput-only result IS usable there and the
-    one-shot ``RUN_EVAL=false`` salvage must still run.
-    """
+    """The fail-fast rule is scoped to genuine baselines."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -636,9 +611,8 @@ def test_stop_serving_zero_accuracy():
 
 
 def test_stop_serving_operator_disabled_via_config():
-    # A YAML/reference-env RUN_EVAL=false folds into run_eval_disabled, but a
-    # genuine baseline has no opt-out: turning the eval off does not make a
-    # missing accuracy reference acceptable, so the run still stops.
+    # A YAML/reference-env RUN_EVAL=false folds into run_eval_disabled, but a genuine baseline has no opt-out: turning
+    # the eval off does not make a missing accuracy reference acceptable, so the run still stops.
     reason = _stopped(
         "sglang",
         {"status": "succeeded", "run_eval_disabled": True},
@@ -647,8 +621,7 @@ def test_stop_serving_operator_disabled_via_config():
 
 
 def test_no_stop_when_eval_is_disabled():
-    # --no-eval never asked for a reference, so the baseline anchors on
-    # throughput instead of halting.
+    # --no-eval never asked for a reference, so the baseline anchors on throughput instead of halting.
     reason = _stopped(
         "sglang",
         {"status": "succeeded", "run_eval_disabled": True},
@@ -658,8 +631,8 @@ def test_no_stop_when_eval_is_disabled():
 
 
 def test_no_stop_when_quality_ref_exempt():
-    # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt)
-    # are throughput-only A/B probes: no accuracy, no stop.
+    # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt) are throughput-only A/B probes: no
+    # accuracy, no stop.
     reason = _stopped(
         "sglang",
         {"status": "succeeded", "run_eval_disabled": True},
@@ -715,9 +688,7 @@ def _write_gsm8k_results(measure_round: Path, score: float) -> None:
 
 
 def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
-    # A sibling attempt already produced a valid gsm8k result; the deciding
-    # attempt's own RESULT_DIR is empty. The run must NOT stop -- the accuracy
-    # is salvaged from the sibling and promoted onto the result.
+    # A sibling attempt already produced a valid gsm8k result; the deciding attempt's own RESULT_DIR is empty.
     runs_baseline = tmp_path / "runs" / "baseline"
     good = runs_baseline / "786a793e" / "measure_round"
     _write_gsm8k_results(good, 0.9128)
@@ -740,12 +711,7 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
 
 
 def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
-    """A warmup-round eval is a valid accuracy source, so the run must not stop.
-
-    What a warmup discards is throughput -- the cold-boot window inflates later
-    gains. Accuracy is not timing-sensitive, and the baseline double-run now
-    evaluates only in the warmup round, so this is the sole score available.
-    """
+    """A warmup-round eval is a valid accuracy source, so the run must not stop."""
     runs_baseline = tmp_path / "runs" / "baseline"
     _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.9)
     deciding = runs_baseline / "retry2_bootsafe"
@@ -759,13 +725,7 @@ def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
 
 
 def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
-    """Every healthy double-run baseline reads its accuracy from the warmup round.
-
-    The measured round runs ``RUN_EVAL=false``, so it has no accuracy of its
-    own by construction. Reporting that handoff as a salvage -- in the log or
-    in the structured warnings the report and the specialists read -- made a
-    normal run look like it survived a fault.
-    """
+    """Every healthy double-run baseline reads its accuracy from the warmup round."""
     attempt = tmp_path / "runs" / "baseline" / "786a793e"
     _write_gsm8k_results(attempt / "warmup_round", 0.9128)
     deciding = attempt / "measure_round"
@@ -914,11 +874,7 @@ def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
 
 
 def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
-    """A tripped probe changes what a ~0 score means: the eval was cut short
-    because the model never stopped generating, not because it answered and got
-    them wrong. Without this the specialist is handed a bare ``accuracy=0.0``
-    and goes looking for a quality regression that never happened.
-    """
+    """A tripped probe changes what a ~0 score means: the eval was cut short because the model never stopped generating, not because it answered and got them wrong."""
     result = {
         "status": "succeeded",
         "accuracy": 0.0,
@@ -968,12 +924,7 @@ def test_eval_enablement_multi_node_falls_back_to_stop(monkeypatch):
 
 
 def test_eval_enablement_operator_optout_is_routed(monkeypatch):
-    """A disabled eval is not an opt-out: with enablement on it routes there.
-
-    Rather than stopping, the missing reference is stamped as an eval-failure
-    contract so enablement can repair the eval path. ``_is_promotable_result``
-    then keeps this baseline from anchoring tput / accuracy / config.
-    """
+    """A disabled eval is not an opt-out: with enablement on it routes there."""
     result = {"status": "succeeded", "run_eval_disabled": True}
     reason = _route(monkeypatch, "sglang", result)
     assert reason == ""
@@ -991,14 +942,9 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     assert BASELINE_EVAL_FAILED_KEY not in result
 
 
-# --- regression: the --concurrent-requests flag gate (2026-07-27 outage) ----
-# Magpie re-copies its own generic *.sh scripts into <inferencex>/benchmarks/ on
-# every run, and the InferenceX checkout is re-mirrored from scratch on every
-# run, so an install-time-only patch does not survive. A Magpie installed by
-# preflight (which never ran the patcher) re-introduced
-#     run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
-# into the executed copy; InferenceX's run_lm_eval rejected it and aborted the
-# benchmark before any results*.json existed.
+# --- regression: the --concurrent-requests flag gate (2026-07-27 outage) ---- Magpie re-copies its own generic *.sh
+# scripts into <inferencex>/benchmarks/ on every run, and the InferenceX checkout is re-mirrored from scratch on every
+# run, so an install-time-only patch does not survive.
 def _materialized_cfg(tmp_path: Path, *, run_eval: str, inferencex_path: str = "") -> Path:
     cfg = {
         "benchmark": {
@@ -1036,8 +982,7 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
 
 
 def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
-    """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the
-    benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
+    """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
@@ -1059,8 +1004,9 @@ def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
 
 
 def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
-    """RUN_EVAL=false runs never reach run_lm_eval, so the flag cannot bite:
-    an unpatchable script must not block a deliberately eval-less run."""
+    """RUN_EVAL=false runs never reach run_lm_eval, so the flag cannot bite: an unpatchable script must not block a
+    deliberately eval-less run.
+    """
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     cfg = _materialized_cfg(tmp_path, run_eval="false", inferencex_path=str(ix))
@@ -1081,8 +1027,7 @@ def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
 
 
 def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
-    """An exception from the patcher must surface as the same loud failure, not
-    as a silent 'best-effort skip'."""
+    """An exception from the patcher must surface as the same loud failure, not as a silent 'best-effort skip'."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
@@ -1099,9 +1044,7 @@ def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
 
 
 def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
-    """No mocks on the patcher: a real flagged sglang_mi355x.sh under
-    $MAGPIE_PATH is scrubbed, and the real benchmark_lib.sh parser is taught to
-    tolerate the flag, when the baseline materializes its config."""
+    """No mocks on the patcher: a real flagged sglang_mi355x.sh under $MAGPIE_PATH is scrubbed, and the real benchmark_lib.sh parser is taught to tolerate the flag, when the baseline materializes its config."""
     magpie = tmp_path / "site-packages"
     mbench = magpie / "Magpie" / "scripts" / "benchmark"
     mbench.mkdir(parents=True)
@@ -1121,9 +1064,8 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
         "        esac\n"
         "    done\n"
         "}\n"
-        # This test runs the patcher unmocked, so the file has to carry the
-        # anchors a real checkout carries: the hook now refuses to launch an
-        # eval whose patches could not be applied.
+        # This test runs the patcher unmocked, so the file has to carry the anchors a real checkout carries: the hook
+        # now refuses to launch an eval whose patches could not be applied.
         "run_eval() {\n"
         '    export EVAL_RESULT_DIR="$results_dir"\n'
         "}\n"
@@ -1146,9 +1088,7 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
 
 
 def test_end_to_end_live_flag_blocks_launch_without_mocks(tmp_path):
-    """Unmocked: a genuinely unremovable ``run_eval --concurrent-requests``
-    (unrecognised value shape, and a benchmark_lib.sh whose parser cannot be
-    taught to absorb it) short-circuits the baseline before the server boots."""
+    """Unmocked: a genuinely unremovable ``run_eval --concurrent-requests`` (unrecognised value shape, and a benchmark_lib.sh whose parser cannot be taught to absorb it) short-circuits the baseline before the server boots."""
     magpie = tmp_path / "site-packages"
     mbench = magpie / "Magpie" / "scripts" / "benchmark"
     mbench.mkdir(parents=True)

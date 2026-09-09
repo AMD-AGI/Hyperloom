@@ -274,8 +274,7 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
     session_dir,
     monkeypatch,
 ):
-    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only
-    ``action_name``; this drives the real 1-arg signature."""
+    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only ``action_name``; this drives the real 1-arg signature."""
     c = _silent_coordinator(session_dir)
     try:
 
@@ -303,8 +302,7 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
     session_dir,
     monkeypatch,
 ):
-    """The sync bridge marshals the coroutine onto the captured
-    coordinator loop and returns its rendered result."""
+    """The sync bridge marshals the coroutine onto the captured coordinator loop and returns its rendered result."""
     c = _silent_coordinator(session_dir)
     try:
 
@@ -429,12 +427,7 @@ def test_inbox_injection_does_not_forge_section_headers():
 
 
 def test_flatten_for_prompt_covers_all_splitlines_separators():
-    """Every separator str.splitlines() recognises must be folded.
-
-    This test is intentionally self-maintaining: it derives the separator set
-    from the stdlib rather than hardcoding it, so a future CPython addition
-    will turn this test red before it silently escapes into a section header.
-    """
+    """Every separator str.splitlines() recognises must be folded."""
     from hyperloom.agents.critic.runtime.inbox_parser import _SECTION_RE
     from hyperloom.common.prompt_safety import flatten_for_prompt
 
@@ -485,8 +478,7 @@ def test_format_variant_line_no_artifact_refs_when_absent():
 
 
 def test_format_variant_line_excerpt_tail_survives():
-    """error_excerpt on variant rows is a tail-1200 blob; the assertion at the
-    end must reach the prompt, not the banner at the start."""
+    """error_excerpt on variant rows is a tail-1200 blob; the assertion at the end must reach the prompt, not the banner at the start."""
     from hyperloom.orchestrator.state._shared_state.render import _RenderMixin
 
     banner = "[INFO] config dump line filler\n" * 60
@@ -511,10 +503,7 @@ def test_format_variant_line_excerpt_tail_survives():
     assert "\n" not in line
 
 
-# --- agent-routing split ---
-# Verifies the agent_name branch at conversation.py:751.
-# Orchestration must receive variant-level failure rows (max_variant_rows=3);
-# Critic and Robustness must not (max_variant_rows=0).
+# --- agent-routing split --- Verifies the agent_name branch at conversation.py:751.
 
 
 @pytest.mark.asyncio
@@ -646,7 +635,6 @@ def test_format_variant_line_ws_and_log_appear_with_real_task_id():
     line = _RenderMixin._format_variant_line(entry)
     assert f"fid={fid}" in line
     # With progressive degradation at least ws= should fit when log= is dropped.
-    # Test the invariant: at least one path anchor appears alongside fid.
     assert "ws=" in line or "log=" in line
 
 
@@ -654,8 +642,9 @@ def test_format_variant_line_ws_and_log_appear_with_real_task_id():
 
 
 def test_killed_overtime_enters_failures_and_mints_gap():
-    """_record_explore_variant_failures writes to failures[] and last_action_failures;
-    _extract_gaps_from_attempts then produces a #fail:explore:killed_overtime gap."""
+    """_record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
+    produces a #fail:explore:killed_overtime gap.
+    """
     from dataclasses import dataclass, field as dc_field
     from typing import Any
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -730,8 +719,7 @@ def test_short_session_reloop_boundary():
     st.last_conc_sweep = {"status": "succeeded"}
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
-    # Effective floor for 2h = max(min(10800, 2*3600*0.15), one 1800s variant grant).
-    # Remaining = 7200 - 3600 = 3600s (well above floor) → should reloop.
+    # The 2h floor is max(1080s session share, one 1800s variant grant).
     reloop, ev = ps.should_reloop_to_explore(st, now_unix=start_unix + 3600)
     assert reloop is True, f"expected reloop True, got evidence: {ev}"
     assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)

@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for integrate_patch helper functions: framework-root
-resolution, git apply / reverse / checkout spawn-failure handling, patch-path
-resolution, and the best-effort revert fallback chain."""
+"""Branch coverage for integrate_patch helper functions: framework-root resolution, git apply / reverse / checkout spawn-failure handling, patch-path resolution, and the best-effort revert fallback chain."""
 
 from __future__ import annotations
 
@@ -199,11 +197,7 @@ def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
 
 
 def test_patch_touched_paths_emits_deleted_path(tmp_path):
-    """A pure-deletion patch emits the OLD path so git add -A stages the removal.
-
-    Post-apply the file is gone (new == /dev/null); the old path must still be
-    returned, else the KEEP commits nothing and a later REVERT resurrects it.
-    """
+    """A pure-deletion patch emits the OLD path so git add -A stages the removal."""
     delete = "--- a/pkg/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-content\n"
     patch = tmp_path / "d.patch"
     patch.write_text(delete, encoding="utf-8")
@@ -252,12 +246,7 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
 
 
 def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
-    """The realized-diff harvest gates on this note: '' means HEAD advanced.
-
-    A no-op commit must report a non-empty note so the caller does not harvest
-    the previous KEEP's diff as this KEEP's realized change. This uses real git
-    to lock the exact contract the gate depends on.
-    """
+    """The realized-diff harvest gates on this note: '' means HEAD advanced."""
     import subprocess
 
     def _git(*args):
@@ -279,8 +268,8 @@ def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
     assert ok is True
     assert note == ""
 
-    # Re-committing the same, unchanged path is a benign no-op: HEAD does not
-    # advance, so the note must be non-empty and the harvest must be skipped.
+    # Re-committing the same, unchanged path is a benign no-op: HEAD does not advance, so the note must be non-empty
+    # and the harvest must be skipped.
     ok, note = ip._git_commit_kept(tmp_path, "keep-2", ["pkg/mod.py"])
     assert ok is True
     assert note == "nothing to commit"
@@ -518,12 +507,7 @@ def test_enforce_critic_gate_handles_state_without_verdict_method():
 
 
 def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
-    """The lane fetches a diff from a remote and applies it to the live tree.
-
-    PolicyGate does not re-validate a queued or resume-dispatched row, which is
-    why the specialist lane gates again in the executor; this lane ran the
-    fetch and the apply with no verdict check of its own.
-    """
+    """The lane fetches a diff from a remote and applies it to the live tree."""
     ex = ip.IntegratePatchExecutor(session_dir=tmp_path)
     ctx = types.SimpleNamespace(task=types.SimpleNamespace(task_id="t-cand"))
     params = {

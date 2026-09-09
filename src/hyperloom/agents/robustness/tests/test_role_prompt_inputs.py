@@ -21,9 +21,7 @@ def _prompt(shared: str, inbox: str, *, time_budget: str | None = None) -> str:
     return "\n".join(p for p in parts if p)
 
 
-# ---------------------------------------------------------------------------
 # Empty / no-messages cases
-# ---------------------------------------------------------------------------
 
 
 def test_empty_prompt_returns_empty_context():
@@ -100,8 +98,9 @@ def test_inbox_parses_multiple_messages_with_python_repr_payload():
 
 
 def test_inbox_parses_per_topic_summary_fields_without_a_payload():
-    """``delegated_result`` renders ``kind=/state=/error=`` and no ``payload=``;
-    the repeated-failure signal reads those keys, so they must survive."""
+    """``delegated_result`` renders ``kind=/state=/error=`` and no ``payload=``; the repeated-failure signal reads
+    those keys, so they must survive.
+    """
     prompt = _prompt(
         "session_id=sess-2b\ncrash_count=0\n",
         textwrap.dedent(
@@ -116,8 +115,8 @@ def test_inbox_parses_per_topic_summary_fields_without_a_payload():
     ctx = from_coordinator_prompt(prompt)
     first, second, third = ctx.inbox
     assert first.payload == {"kind": "baseline", "state": "succeeded", "gain": 4.875, "kept": True}
-    # A quoted value owns its inner ``k=v``; splitting there would corrupt the
-    # error text and invent a bogus ``k`` key.
+    # A quoted value owns its inner ``k=v``; splitting there would corrupt the error text and invent a bogus ``k``
+    # key.
     assert second.msg_id == ""
     assert second.payload == {
         "kind": "explore",
@@ -205,9 +204,7 @@ def test_payload_with_topic_substring_does_not_break_topic_field():
     assert item.payload["summary"] == "oops topic=alert again"
 
 
-# ---------------------------------------------------------------------------
 # Time-budget section (consumed by signals/budget.py)
-# ---------------------------------------------------------------------------
 
 
 def test_time_budget_section_parses_into_snapshot():
@@ -317,9 +314,7 @@ def test_optimization_stack_size_zero_when_none():
     assert ctx.shared_state.optimization_stack_size == 0
 
 
-# ---------------------------------------------------------------------------
 # explore_started — flips True iff an explore-family ``last_*`` line is non-``(none)``.
-# ---------------------------------------------------------------------------
 
 
 def test_explore_started_false_when_all_last_explore_keys_are_none():
@@ -366,9 +361,7 @@ def test_explore_started_default_false_when_keys_absent():
     assert ctx.shared_state.explore_started is False
 
 
-# ---------------------------------------------------------------------------
 # Phase block parsing
-# ---------------------------------------------------------------------------
 
 
 def test_phase_block_parsed_correctly():
@@ -395,9 +388,7 @@ def test_phase_block_absent_gives_empty_string():
     assert ctx.phase == ""
 
 
-# ---------------------------------------------------------------------------
 # Phase budget telemetry parsing
-# ---------------------------------------------------------------------------
 
 
 def test_phase_budget_parsed_correctly():
@@ -439,48 +430,3 @@ def test_phase_budget_absent_gives_empty_list():
     prompt = "=== Shared session state ===\nsession_id=s\n=== Inbox for robustness ===\n(no new messages)\n"
     ctx = from_coordinator_prompt(prompt)
     assert ctx.phase_budget == []
-
-
-# ---------------------------------------------------------------------------
-# Conversation progress parsing
-# ---------------------------------------------------------------------------
-
-
-def test_conversation_progress_parsed_correctly():
-    prompt = (
-        "=== Conversation progress ===\n"
-        "ticks_without_progress=5 threshold=12 severity=ok last_progress_tick=42\n"
-        "=== Shared session state ===\n"
-        "session_id=s\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
-    ctx = from_coordinator_prompt(prompt)
-    assert ctx.conversation_progress is not None
-    cp = ctx.conversation_progress
-    assert cp.ticks_without_progress == 5
-    assert cp.threshold == 12
-    assert cp.severity == "ok"
-    assert cp.last_progress_tick == 42
-
-
-def test_conversation_progress_high_severity():
-    prompt = (
-        "=== Conversation progress ===\n"
-        "ticks_without_progress=15 threshold=12 severity=high last_progress_tick=3\n"
-        "WARNING: no observable progress ...\n"
-        "=== Shared session state ===\n"
-        "session_id=s\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
-    ctx = from_coordinator_prompt(prompt)
-    assert ctx.conversation_progress is not None
-    assert ctx.conversation_progress.severity == "high"
-    assert ctx.conversation_progress.ticks_without_progress == 15
-
-
-def test_conversation_progress_absent_gives_none():
-    prompt = "=== Shared session state ===\nsession_id=s\n=== Inbox for robustness ===\n(no new messages)\n"
-    ctx = from_coordinator_prompt(prompt)
-    assert ctx.conversation_progress is None

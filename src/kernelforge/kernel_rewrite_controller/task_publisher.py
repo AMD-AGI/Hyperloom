@@ -178,16 +178,7 @@ def publish_complete_staged_tasks(
     now: Callable[[], float] = time.time,
     refused: dict[str, float] | None = None,
 ) -> tuple[TaskPublicationResult, ...]:
-    """Publish every staged task that is complete and no longer being written.
-
-    ``refused`` remembers the modification time each rejected draft was refused
-    at. A refusal is deliberately not destructive -- the draft stays so the agent
-    can revise it -- and this scan runs on a half-second timer beside the live
-    agent, so without that memory one bad draft is re-validated thousands of times
-    across an analysis window, respawning the Git probes its contract check needs
-    on every pass. Keying on the mtime rather than the name alone is what still
-    lets a revised draft be offered again.
-    """
+    """Publish every staged task that is complete and no longer being written."""
     root = layout.agent_staging_root
     if not root.is_dir():
         return ()
@@ -197,12 +188,9 @@ def publish_complete_staged_tasks(
             continue
         if not (entry / "task.json").is_file() or not (entry / "driver.py").is_file():
             continue
-        # Both files existing is not a completion signal: this runs on a timer
-        # beside the live agent, and taking a directory mid-write copies a
-        # truncated driver.py -- whose contents nothing downstream validates --
-        # and then deletes the agent's working copy. Publication is also
-        # one-way, so a task revised right after it was written would lose the
-        # revision. Wait for the tree to go quiet instead.
+        # Both files existing is not a completion signal: this runs on a timer beside the live agent, and taking a
+        # directory mid-write copies a truncated driver.py -- whose contents nothing downstream validates -- and then
+        # deletes the agent's working copy.
         newest = _newest_mtime(entry)
         if float(now()) - newest < float(quiescent_sec):
             continue
@@ -212,9 +200,8 @@ def publish_complete_staged_tasks(
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
         else:
-            # The agent gets no feedback channel, so a rejected draft is
-            # otherwise invisible: it stays in staging and the run just reports
-            # one fewer task than the agent believes it wrote.
+            # The agent gets no feedback channel, so a rejected draft is otherwise invisible: it stays in staging and
+            # the run just reports one fewer task than the agent believes it wrote.
             log.warning("rejected staged task %s: %s", entry.name, result.reason)
             if refused is not None:
                 refused[entry.name] = newest

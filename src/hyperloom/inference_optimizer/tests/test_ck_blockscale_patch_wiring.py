@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CK block-scale patch wiring tests at the env-materialization choke point.
-
-The ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` env only yields a speedup on a
-KernelForge-patched sglang ``fp8_utils.py`` (M-aware CK routing), so
-``materialize_config_with_envs`` must call ``ensure_sglang_patched_for_ck_blockscale``
-whenever it injects the env. These tests pin the wiring: the patcher is invoked
-exactly when (sglang framework + env present + ``HYPERLOOM_ENABLE_PATCH`` on),
-never otherwise, and a fail-soft patch result must not break materialization.
-"""
+"""CK block-scale patch wiring tests at the env-materialization choke point."""
 
 from __future__ import annotations
 

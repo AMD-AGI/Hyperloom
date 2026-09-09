@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Aggregate kernel-optimization attempts into a single forensic report.
-
-Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_task_attempts`)
-with the kernel-agent run results to explain why the kernel-agent did not
-produce an optimized kernel. All public helpers are pure functions over
-``SharedState`` + ``session_dir`` returning JSON-ready dicts; never raise on
-missing files.
-"""
+"""Aggregate kernel-optimization attempts into a single forensic report."""
 
 from __future__ import annotations
 
@@ -44,8 +37,8 @@ KNOWN_REJECTION_REASONS = (
     "revert_decision",
     "max_partial_attempts_without_keep",
     "max_failures_without_keep",
-    # Retired without a backend ever running, so it must not inflate the
-    # reverted count that reads as "optimization was tried and lost".
+    # Retired without a backend ever running, so it must not inflate the reverted count that reads as "optimization
+    # was tried and lost".
     "unresolved_source",
 )
 
@@ -69,17 +62,7 @@ _ARTIFACT_LOG_SUFFIXES = (
 
 
 def _is_real_artifact_path(path: str) -> bool:
-    """True only when ``path`` looks like a real kernel artifact.
-
-    Excludes stdout/stderr/log dumps kernel-agent writes on early-failure
-    paths and stuffs into ``optimized_path``.
-
-    Args:
-        path: Candidate artifact path string.
-
-    Returns:
-        True when the path looks like a real kernel artifact.
-    """
+    """True only when ``path`` looks like a real kernel artifact."""
     if not path:
         return False
     p = path.strip()
@@ -114,17 +97,7 @@ _RE_CORRECTNESS_FAILED = re.compile(
 def _classify_attempt_failure(
     attempt: dict[str, Any],
 ) -> tuple[str, str]:
-    """Classify a failed/partial attempt into ``(error_class, error_message)``.
-
-    Priority: timeout → preprocess → compile → correctness → agent_error →
-    unknown. ``succeeded`` attempts get ``("", "")``.
-
-    Args:
-        attempt: One attempt record dict.
-
-    Returns:
-        An ``(error_class, error_message)`` tuple.
-    """
+    """Classify a failed/partial attempt into ``(error_class, error_message)``."""
     status = str(attempt.get("status") or "").strip().lower()
     if status == "succeeded":
         return "", ""
@@ -183,18 +156,7 @@ FIELD_GLOSSARY: dict[str, str] = {
 
 
 def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
-    """Return ``<sd>/kernel-agent/runs/<key>/results`` or ``None``.
-
-    ``key`` lookup order: ``session_dir.name``, then ``state.session_id``,
-    then a lone subdir under ``kernel-agent/runs/`` (migrated-key recovery).
-
-    Args:
-        session_dir: Session directory root.
-        session_id: State session id used as a fallback lookup key.
-
-    Returns:
-        The results directory path, or ``None`` when none is found.
-    """
+    """Return ``<sd>/kernel-agent/runs/<key>/results`` or ``None``."""
     from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_root
 
     runs_root = kernel_agent_runs_root(Path(session_dir))
@@ -218,18 +180,7 @@ def _load_kernel_result(
     results_dir: Path | None,
     kernel_id: str,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Read the raw kernel-agent ``results/<kid>.json`` payload.
-
-    Returns ``(payload_dict_or_None, unavailable_reason)``; reused by ladder
-    harvesting and verification passthrough.
-
-    Args:
-        results_dir: Directory holding ``<kid>.json`` result files, or ``None``.
-        kernel_id: Kernel id whose result is loaded.
-
-    Returns:
-        A ``(payload_or_None, unavailable_reason)`` tuple.
-    """
+    """Read the raw kernel-agent ``results/<kid>.json`` payload."""
     if results_dir is None:
         return None, "kernel_agent_results_dir_missing"
     fpath = results_dir / f"{kernel_id}.json"
@@ -248,24 +199,7 @@ def _load_backend_ladder(
     results_dir: Path | None,
     kernel_id: str,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Parse one kernel's kernel-agent ``results/<kid>.json`` attempts.
-
-    Returns ``(ladder, unavailable_reason)``:
-    * ``ladder`` is the list of compact per-backend rows (empty when
-      unavailable); each row carries ``backend / status / attempt_id /
-      produced_artifact / elapsed_sec / error_class / error_message``.
-    * ``unavailable_reason`` is empty on success or one of
-      ``kernel_agent_results_dir_missing``,
-      ``kernel_agent_result_file_missing``, ``parse_error``,
-      ``no_attempts_recorded``.
-
-    Args:
-        results_dir: Directory holding ``<kid>.json`` result files, or ``None``.
-        kernel_id: Kernel id whose ladder is parsed.
-
-    Returns:
-        A ``(ladder, unavailable_reason)`` tuple.
-    """
+    """Parse one kernel's kernel-agent ``results/<kid>.json`` attempts."""
     data, reason = _load_kernel_result(results_dir, kernel_id)
     if data is None:
         return [], reason
@@ -299,15 +233,7 @@ def _load_backend_ladder(
 
 
 def _relative_to_session(p: Path, session_dir: Path) -> str:
-    """Render ``p`` as a path relative to ``session_dir`` when possible.
-
-    Args:
-        p: The path to render.
-        session_dir: Session directory to make ``p`` relative to.
-
-    Returns:
-        The relative path string, or the absolute string when not nested.
-    """
+    """Render ``p`` as a path relative to ``session_dir`` when possible."""
     try:
         return str(p.relative_to(session_dir))
     except ValueError:
@@ -315,18 +241,7 @@ def _relative_to_session(p: Path, session_dir: Path) -> str:
 
 
 def _rejected_reason_of(entry: dict[str, Any]) -> str:
-    """Return the rejection reason recorded on a ledger row (``""`` when none).
-
-    A grouped kernel's rejection is stamped on the task row as
-    ``integration_rejected_reason``; a single-kernel rejection uses
-    ``rejected_reason``. Both are the same fact and the summary must read either.
-
-    Args:
-        entry: The kernel's attempts ledger row.
-
-    Returns:
-        The rejection reason, or ``""`` when the row records none.
-    """
+    """Return the rejection reason recorded on a ledger row (``\"\"`` when none)."""
     return str(entry.get("rejected_reason") or entry.get("integration_rejected_reason") or "").strip()
 
 
@@ -336,17 +251,7 @@ def _entry_integration_status(entry: dict[str, Any]) -> str:
 
 
 def _rejection_bucket(reason: str) -> str:
-    """Map a rejection reason onto a :data:`KNOWN_REJECTION_REASONS` bucket.
-
-    Threshold-encoding reasons (``max_partial_attempts_3``) collapse onto their
-    canonical key; anything unrecognised lands in ``other``.
-
-    Args:
-        reason: The recorded rejection reason.
-
-    Returns:
-        The breakdown key to increment.
-    """
+    """Map a rejection reason onto a :data:`KNOWN_REJECTION_REASONS` bucket."""
     if reason in KNOWN_REJECTION_REASONS:
         return reason
     if reason.startswith("max_partial_attempts_"):
@@ -363,22 +268,7 @@ def _classify_attempted(
     rejected_ids: set[str],
     kernel_id: str,
 ) -> str:
-    """Decide the category for a kernel that has an attempts ledger row.
-
-    The row's own terminal decision is authoritative alongside the id sets: a
-    rejected *group* task deliberately stays out of ``rejected_kernel_ids`` (its
-    members can be re-dispatched under another task), so a summary keyed only on
-    that set reports a terminally rejected kernel as ``IN_FLIGHT``.
-
-    Args:
-        entry: The kernel's attempts ledger row.
-        integrated_ids: Kernel ids already integrated.
-        rejected_ids: Kernel ids that were rejected.
-        kernel_id: The kernel id being classified.
-
-    Returns:
-        The outcome category constant.
-    """
+    """Decide the category for a kernel that has an attempts ledger row."""
     last_decision = str(entry.get("last_decision") or "").upper()
     integration_status = _entry_integration_status(entry)
     if kernel_id in integrated_ids or integration_status == "integrated":
@@ -394,29 +284,7 @@ def _kernel_outcome_class(
     category: str,
     backend_ladder: list[dict[str, Any]],
 ) -> str:
-    """Map a kernel's category + backend ladder to a terminal outcome bucket.
-
-    Closed 4-value vocabulary (``success`` / ``fail`` / ``timeout`` / ``skip``),
-    derived only from structured signals so the dashboard reads one uniform
-    field across backends:
-
-    * ``success`` — kept/integrated (a KEEP reached).
-    * ``skip``    — every recorded attempt self-skipped before real work
-      (``skipped`` marker, e.g. forge bailed on a compile-only/unsupported/
-      non-git kernel).
-    * ``timeout`` — at least one attempt timed out (``error_class == timeout``)
-      and none of the above.
-    * ``fail``    — anything else that was attempted (compile/correctness/agent
-      errors, no measurable improvement, or a non-terminal ``IN_FLIGHT``).
-
-    Args:
-        category: The kernel's outcome category constant.
-        backend_ladder: Per-backend attempt rows for the kernel.
-
-    Returns:
-        One of ``OUTCOME_SUCCESS`` / ``OUTCOME_SKIP`` / ``OUTCOME_TIMEOUT`` /
-        ``OUTCOME_FAIL``.
-    """
+    """Map a kernel's category + backend ladder to a terminal outcome bucket."""
     if category in (CATEGORY_INTEGRATED, CATEGORY_KEEP_PENDING):
         return OUTCOME_SUCCESS
     ladder = backend_ladder or []
@@ -429,18 +297,7 @@ def _kernel_outcome_class(
 
 
 def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
-    """Roll per-kernel ``outcome_class`` up to one session-level verdict.
-
-    Precedence: any ``success`` -> ``success``; else if every kernel is
-    ``skip`` (or there are no kernels) -> ``skip``; else ``timeout`` only when a
-    timeout is present and no real ``fail``; otherwise ``fail``.
-
-    Args:
-        by_kernel: The per-kernel summary rows (each carrying ``outcome_class``).
-
-    Returns:
-        The session-level kernel-optimization outcome bucket.
-    """
+    """Roll per-kernel ``outcome_class`` up to one session-level verdict."""
     classes = [str(r.get("outcome_class") or "") for r in by_kernel if r.get("outcome_class")]
     if not classes:
         return OUTCOME_SKIP
@@ -504,13 +361,7 @@ def _summary_in_flight(
 
 
 class _CategoryHandling(NamedTuple):
-    """One row of :data:`CATEGORY_DISPATCH`.
-
-    Attributes:
-        count_key: The ``totals`` counter this category increments.
-        summary: Deterministic ``(entry, backend_ladder, artifact_error) ->
-            str`` one-line summary builder for this category.
-    """
+    """One row of :data:`CATEGORY_DISPATCH`."""
 
     count_key: str
     summary: Callable[[dict[str, Any], list[dict[str, Any]], str], str]
@@ -528,16 +379,7 @@ CATEGORY_DISPATCH: dict[str, _CategoryHandling] = {
 
 
 def _category_count_key(category: str) -> str:
-    """Resolve the ``totals`` counter for ``category`` via :data:`CATEGORY_DISPATCH`.
-
-    Unknown or blank categories fall back to the ``in_flight`` counter.
-
-    Args:
-        category: The kernel outcome category constant.
-
-    Returns:
-        The ``totals`` dict key to increment for this category.
-    """
+    """Resolve the ``totals`` counter for ``category`` via :data:`CATEGORY_DISPATCH`."""
     handling = CATEGORY_DISPATCH.get(category)
     return handling.count_key if handling is not None else "in_flight"
 
@@ -549,17 +391,7 @@ def _summary_one_line(
     backend_ladder: list[dict[str, Any]],
     artifact_error: str,
 ) -> str:
-    """One-line natural-language summary, deterministic, never LLM.
-
-    Args:
-        category: The kernel outcome category.
-        entry: The kernel's attempt ledger row.
-        backend_ladder: Per-backend attempt rows.
-        artifact_error: Verification error detail, when any.
-
-    Returns:
-        A one-line summary string (``""`` for unknown categories).
-    """
+    """One-line natural-language summary, deterministic, never LLM."""
     handling = CATEGORY_DISPATCH.get(category)
     if handling is None:
         return ""
@@ -572,21 +404,7 @@ def build_kernel_optimization_summary(
     *,
     schema_version: int = 1,
 ) -> dict[str, Any]:
-    """Build the full summary block for one session.
-
-    Combines the kernel ledger / optimization_stack / rejected ids / top15
-    with the per-kernel kernel-agent
-    ``results/<kid>.json`` files. Returns a JSON-ready dict for atomic write to
-    ``<session_dir>/reports/kernel_optimization_summary.json``.
-
-    Args:
-        state: The session ``SharedState`` instance.
-        session_dir: Session directory (path or string).
-        schema_version: Schema version stamped onto the output.
-
-    Returns:
-        A JSON-ready summary dict.
-    """
+    """Build the full summary block for one session."""
     sd_path = Path(session_dir)
     session_id = str(getattr(state, "session_id", "") or "")
     results_dir = _backend_results_dir(sd_path, session_id)
@@ -642,9 +460,7 @@ def build_kernel_optimization_summary(
         processed_kids.add(kid)
         attempt = attempts_map.get(kid)
         if attempt is None:
-            # A hot kernel none of the recorded lanes touched. Source-level
-            # rewrite is the controller's, and it accounts for its own work, so
-            # a missing row here is silence rather than a verdict.
+            # A hot kernel none of the recorded lanes touched.
             continue
         counts["attempted"] += 1
         category = _classify_attempted(
@@ -680,9 +496,8 @@ def build_kernel_optimization_summary(
             kernel_id=kid,
         )
         counts[_category_count_key(category)] += 1
-        # Same accounting as the top15 loop above: a rejected kernel that only
-        # has a ledger row must land in the breakdown too, or the totals and the
-        # per-reason split disagree.
+        # Same accounting as the top15 loop above: a rejected kernel that only has a ledger row must land in the
+        # breakdown too, or the totals and the per-reason split disagree.
         if category == CATEGORY_ATTEMPTED_REJECTED:
             bucket = _rejection_bucket(_rejected_reason_of(attempt))
             rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
@@ -729,22 +544,7 @@ def _render_attempted_row(
     session_dir: Path,
     last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Build a summary row for a kernel that was attempted.
-
-    Loads the backend ladder and kernel result, then assembles a row
-    capturing the attempt outcome and verification details.
-
-    Args:
-        top_entry: The kernel's roofline/top-list entry.
-        attempt: The recorded attempt metadata.
-        category: Outcome category for the row.
-        results_dir: Directory holding per-kernel result artifacts.
-        session_dir: Session directory for the run.
-        last_kernel_opt: Most recent kernel-optimization record, if any.
-
-    Returns:
-        A row dict describing the attempt and its results.
-    """
+    """Build a summary row for a kernel that was attempted."""
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
     kernel_result, _ = _load_kernel_result(results_dir, kid)
@@ -753,8 +553,7 @@ def _render_attempted_row(
         "compile_passed": attempt.get("compile_passed"),
         "correctness_passed": attempt.get("correctness_passed"),
     }
-    # Detail-file passthrough for kernels that don't populate ledger
-    # compile/correctness fields.
+    # Detail-file passthrough for kernels that don't populate ledger compile/correctness fields.
     if isinstance(kernel_result, dict):
         ver_block = kernel_result.get("verification")
         if isinstance(ver_block, dict):
@@ -839,18 +638,7 @@ _ERROR_CLASS_TO_BUCKET = {
 
 
 def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int]:
-    """Count high-level failure modes across attempted-rejected kernels.
-
-    Priority: ``error_class``-derived buckets trump legacy structural buckets
-    so root causes don't get buried in ``other``; falls back to structural
-    classification when no ladder attempt carries an error_class.
-
-    Args:
-        by_kernel: The per-kernel summary rows.
-
-    Returns:
-        Mapping of failure-mode bucket to count.
-    """
+    """Count high-level failure modes across attempted-rejected kernels."""
     breakdown: dict[str, int] = {
         # Structural buckets (used when no error_class is available).
         "ladder_all_failed": 0,
@@ -910,17 +698,7 @@ def _build_top_takeaways(
     rejection_breakdown: dict[str, int],
     failure_reason_breakdown: dict[str, int],
 ) -> list[str]:
-    """Deterministic 2-4 sentence summary, no LLM.
-
-    Args:
-        counts: Per-category totals.
-        by_kernel: The per-kernel summary rows.
-        rejection_breakdown: Counts of rejection reasons.
-        failure_reason_breakdown: Counts of failure modes.
-
-    Returns:
-        A list of takeaway sentences.
-    """
+    """Deterministic 2-4 sentence summary, no LLM."""
     out: list[str] = []
     attempted = counts.get("attempted", 0)
     integrated = counts.get("integrated", 0)
@@ -931,10 +709,7 @@ def _build_top_takeaways(
             f"{integrated} of {attempted} attempted kernels reached KEEP and integrated; {rejected} were rejected."
         )
     else:
-        # Says only what this ledger knows. Source-level rewrite is the rewrite
-        # controller's to run and to account for, so an empty ledger no longer
-        # means the workload went unoptimized -- it means nothing reached the
-        # lanes that report here.
+        # Says only what this ledger knows.
         out.append("No kernels were attempted through the lanes recorded here.")
 
     ladder_all = failure_reason_breakdown.get("ladder_all_failed", 0)
@@ -963,17 +738,7 @@ def _build_top_takeaways(
 def _find_highest_impact_missed(
     by_kernel: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Pick the missed kernel with the highest ``gpu_pct``.
-
-    "Missed" = anything not ``INTEGRATED`` / ``KEEP_PENDING`` (i.e.
-    ``ATTEMPTED_REJECTED`` or still ``IN_FLIGHT``).
-
-    Args:
-        by_kernel: The per-kernel summary rows.
-
-    Returns:
-        The highest-``gpu_pct`` missed row, or ``None`` when none qualify.
-    """
+    """Pick the missed kernel with the highest ``gpu_pct``."""
     best: dict[str, Any] | None = None
     best_gpu = -1.0
     for row in by_kernel:
@@ -989,17 +754,7 @@ def _find_highest_impact_missed(
 
 
 def _to_float(v: Any) -> float | None:
-    """Coerce a value to a 4-decimal float, or ``None`` on failure.
-
-    Wraps :func:`hyperloom.common.coerce.to_float` (rejects bool/None/dirty
-    input) and rounds the result to 4 decimals for the forensic report.
-
-    Args:
-        v: Arbitrary value to convert.
-
-    Returns:
-        The rounded float, or ``None`` if it cannot be parsed.
-    """
+    """Coerce a value to a 4-decimal float, or ``None`` on failure."""
     parsed = to_float(v)
     return round(parsed, 4) if parsed is not None else None
 

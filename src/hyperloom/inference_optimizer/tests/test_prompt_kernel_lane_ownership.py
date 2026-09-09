@@ -3,16 +3,9 @@
 
 """The assembled KERNEL_AGENT prompt agrees with the request-kind ownership tables.
 
-``run_gemm_tuning`` / ``run_fusion`` are Coordinator-owned lanes that
-PolicyGate denies from an LLM, so no part of the prompt -- generated sections or
-the ``orchestration.md`` rules fragment -- may advertise them as requestable.
-
-Ownership is only half of it. A lane that is retired rather than reassigned
-leaves no entry in these tables at all, so every assertion derived from them
-passes while the prompt goes on teaching the lane. That is how the collective
-lane's request kind and inbox responses survived its removal, and why
-:func:`test_no_retired_request_kind_survives_in_the_prompt` names the retired
-vocabulary directly instead of deriving it.
+A retired lane leaves no entry in those tables, so every assertion derived from them passes while the prompt goes on
+teaching it. :func:`test_no_retired_request_kind_survives_in_the_prompt` therefore names the retired vocabulary
+directly instead of deriving it.
 """
 
 from __future__ import annotations
@@ -36,8 +29,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 
 
-# ``trace_analyze`` owns no action, so it is absent from the ownership tables
-# and cannot be derived from them.
+# ``trace_analyze`` owns no action, so it is absent from the ownership tables and cannot be derived from them.
 _UNOWNED_REQUESTABLE_KINDS = frozenset({"trace_analyze"})
 
 _BACKTICKED = re.compile(r"`([a-z_]+)`")
@@ -84,8 +76,8 @@ def test_no_request_template_exists_for_a_coordinator_owned_kind(kernel_prompt):
         for template in (f"kind: '{kind}'", f"kind='{kind}'", f'kind="{kind}"'):
             assert template not in kernel_prompt, f"{kind} still has a request template"
 
-    # The requestable kinds keep theirs, so the assertions above cannot pass by
-    # the whole reference section having vanished.
+    # The requestable kinds keep theirs, so the assertions above cannot pass by the whole reference section having
+    # vanished.
     assert "kind: 'trace_analyze'" in kernel_prompt
     assert "kind: 'integrate'" in kernel_prompt
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" in kernel_prompt

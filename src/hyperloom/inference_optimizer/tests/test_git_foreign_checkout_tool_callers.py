@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The tool-side git callers must survive a foreign-owned checkout.
-
-The framework explorer's isolation helpers and the pod-side TraceLens patcher
-build their own argv instead of going through ``executors/_git.py``, and the
-trees they drive are the ones the documented container recipe bind-mounts. Git
-refuses every call on them, and the refusals read as facts about the
-repository: "no default branch", "HEAD is unresolvable".
-
-``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the
-tests need no root and no foreign-owned directory. The repo is built first and
-only then declared foreign, otherwise the fixture could not commit.
-"""
+"""The tool-side git callers must survive a foreign-owned checkout."""
 
 from __future__ import annotations
 
@@ -59,13 +48,7 @@ def _multinode_patcher():
     return module
 
 
-# ---------------------------------------------------------------------------
 # isolation: its own _run_git, located by cwd rather than -C
-# ---------------------------------------------------------------------------
 def test_isolation_run_git_locates_the_repo_from_cwd(foreign_repo):
-    """``_run_git`` raises on a non-zero exit, so a refusal aborts provisioning.
-
-    It passes ``cwd=`` and never ``-C``, so the executors/_git.py fix could not
-    reach it and the helper has to resolve the repo from the working directory.
-    """
+    """``_run_git`` raises on a non-zero exit, so a refusal aborts provisioning."""
     isolation._run_git(["git", "status", "--porcelain"], cwd=foreign_repo, timeout_sec=60)

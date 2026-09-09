@@ -253,8 +253,7 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
     # Control characters cannot corrupt the prompt structure.
     for char in ("\x00", "\x07", "\x1b"):
         assert char not in block
-    # The injection prose survives as text, which is exactly why the disclaimer
-    # has to precede it.
+    # The injection prose survives as text, which is exactly why the disclaimer has to precede it.
     assert HOSTILE_TITLE in block
     assert prompt.index(UNTRUSTED_PREFIX) < prompt.index(HOSTILE_TITLE)
 

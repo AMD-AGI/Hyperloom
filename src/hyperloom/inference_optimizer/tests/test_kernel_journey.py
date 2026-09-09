@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the additive ``kernel_journey`` breakdown section.
-
-Covers the recorder substreams (discovery / dispatch / backend_result / e2e),
-their assembly into the kernel-major view, and the guarantee that the section
-stays absent (so historical breakdowns are byte-for-byte unchanged) when no
-substream was recorded.
-"""
+"""Tests for the additive ``kernel_journey`` breakdown section."""
 
 from __future__ import annotations
 
@@ -38,11 +32,7 @@ def _init_git_repo(path: Path) -> str:
 
 
 def _distribution_version() -> str:
-    """The version forge's provenance entry must now report.
-
-    Resolved independently of ``instrument``'s own probe so the assertion is an
-    oracle rather than a tautology.
-    """
+    """The version forge's provenance entry must now report."""
     from importlib.metadata import version
 
     return version("hyperloom-inference_optimizer")
@@ -238,8 +228,8 @@ def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> N
 
 
 def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
-    # The recorder maps kernel-agent's elapsed_s / created_at / error_type and
-    # the kernel-level best speedup onto the journey attempt + entry.
+    # The recorder maps kernel-agent's elapsed_s / created_at / error_type and the kernel-level best speedup onto the
+    # journey attempt + entry.
     instrument.record_kernel_backend_result(
         tmp_path,
         {
@@ -275,8 +265,7 @@ def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
 
 
 def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
-    # Discovery + backend recording feed the top-level versions map (one object
-    # per tool, keyed by tool name).
+    # Discovery + backend recording feed the top-level versions map (one object per tool, keyed by tool name).
     instrument.record_kernel_discovery(
         tmp_path,
         source="tracelens",
@@ -305,8 +294,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
 
 
 def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
-    # A forge attempt keeps backend="forge" in the journey and mints a distinct
-    # versions["forge"] provenance entry.
+    # A forge attempt keeps backend="forge" in the journey and mints a distinct versions["forge"] provenance entry.
     sha = _init_git_repo(tmp_path)
     instrument.record_kernel_discovery(
         tmp_path,
@@ -335,17 +323,15 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     assert atts[0]["backend"] == "forge"
     versions = out["versions"]
     assert versions["forge"]["tool"] == "forge"
-    # KernelForge ships inside this distribution, so its version IS Hyperloom's;
-    # there is no separate checkout left to ``git rev-parse``. The producer-supplied
-    # root_dir still yields a commit, so provenance keeps both halves.
+    # KernelForge ships inside this distribution, so its version IS Hyperloom's; there is no separate checkout left to
+    # ``git rev-parse``.
     assert versions["forge"]["version"] == _distribution_version()
     assert versions["forge"]["version"] != sha
     assert versions["forge"]["commit"] == sha
 
 
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: Path, monkeypatch) -> None:
-    # With no producer-supplied root, ``geak`` falls back to $GEAK_ROOT so
-    # versions["geak"] records that repo's SHA.
+    # With no producer-supplied root, ``geak`` falls back to $GEAK_ROOT so versions["geak"] records that repo's SHA.
     geak_root = tmp_path / "GEAK"
     geak_root.mkdir()
     geak_sha = _init_git_repo(geak_root)
@@ -373,9 +359,8 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
 
 
 def test_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
-    # The kernel phase records a GEAK run under the "bypass" route label the
-    # dashboard groups by, while version provenance follows "geak" -- the
-    # toolchain that actually ran. Only an explicit tool= separates the two.
+    # The kernel phase records a GEAK run under the "bypass" route label the dashboard groups by, while version
+    # provenance follows "geak" -- the toolchain that actually ran.
     instrument.record_kernel_discovery(
         tmp_path,
         source="bypass",
@@ -398,10 +383,7 @@ def test_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
 
 
 def test_bypass_discovery_mints_a_versioned_bypass_entry(tmp_path: Path) -> None:
-    # The trace-analyze handler passes no tool=, so a bypass run keys its own
-    # versions entry. The reader ships inside this distribution, so that entry
-    # must carry Hyperloom's version rather than the all-empty shell it wrote
-    # while "bypass" was missing from the provenance registry.
+    # The trace-analyze handler passes no tool=, so a bypass run keys its own versions entry.
     instrument.record_kernel_discovery(
         tmp_path,
         source="bypass",
@@ -437,9 +419,8 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
-    # forge -> the distribution version: it is vendored into Hyperloom, not a
-    # checkout, so the git strategy geak uses does not apply to it. The commit
-    # still comes from the root the caller passed.
+    # forge -> the distribution version: it is vendored into Hyperloom, not a checkout, so the git strategy geak uses
+    # does not apply to it.
     meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
     assert meta_forge["commit"] == sha
     assert meta_forge["version"] == _distribution_version()
@@ -542,8 +523,8 @@ def test_merge_phase_timeline_unit_keeps_collector_and_dedups() -> None:
 def test_build_phase_timeline_merges_journal_and_kernel_lanes(
     tmp_path: Path,
 ) -> None:
-    # A recorder phase_timeline fragment must NOT erase the optimization_journal
-    # KEEP/REVERT or the kernel_opt/integrate lanes the collector folds in.
+    # A recorder phase_timeline fragment must NOT erase the optimization_journal KEEP/REVERT or the
+    # kernel_opt/integrate lanes the collector folds in.
     import json
 
     from hyperloom.inference_optimizer.breakdown import exporter

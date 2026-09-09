@@ -1,7 +1,4 @@
-"""Coverage tests for rocprofv3 CSV parser and compiler-output parser.
-
-Pure logic — CSV fixtures via tmp_path, no GPU / no rocprofv3.
-"""
+"""Coverage tests for rocprofv3 CSV parser and compiler-output parser."""
 
 from __future__ import annotations
 

@@ -253,9 +253,7 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     tmp_path: Path,
     caplog,
 ) -> None:
-    # The probe fires about once a second for up to ninety minutes. A per-tick
-    # line would bury the run, and none at all is what let a probe fail for a
-    # whole campaign while every interim patch went unpublished.
+    # The probe fires about once a second for up to ninety minutes.
     invocation = ForgeLoopInvocation(
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         workspace=tmp_path,

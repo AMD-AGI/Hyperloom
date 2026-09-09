@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Smoke tests for the shared _nogit_patch module.
-
-Verifies the extracted helpers in isolation (no git, no GPU, no gateway).
-"""
+"""Smoke tests for the shared _nogit_patch module."""
 
 from __future__ import annotations
 
@@ -203,8 +200,7 @@ PATCH_B = """\
 
 
 def test_backup_names_unique_across_patches_same_basename(tmp_path):
-    """Two patches touching a file with the same basename must not overwrite each
-    other's backup when seq_offset is maintained across calls."""
+    """Two patches touching a file with the same basename must not overwrite each other's backup when seq_offset is maintained across calls."""
     target = tmp_path / "common.py"
     target.write_text("original_a\n", encoding="utf-8")
 
@@ -315,8 +311,8 @@ def test_revert_action_restore_old_puts_back_source(tmp_path):
 
 
 def test_rename_patch_tracked_as_two_records(tmp_path):
-    """A rename hunk (old != new, neither /dev/null) produces two backup records:
-    one for the old source (restore_old) and one for the new destination (delete).
+    """A rename hunk (old != new, neither /dev/null) produces two backup records: one for the old source (restore_old)
+    and one for the new destination (delete).
     """
     old_file = tmp_path / "old_name.py"
     old_file.write_text("moved_content\n", encoding="utf-8")
@@ -347,8 +343,7 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
 
 
 def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatch):
-    """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with
-    an ApplyFeedback carrying the accumulated per-level stderr."""
+    """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with an ApplyFeedback carrying the accumulated per-level stderr."""
     import subprocess as _sp
 
     patch_file = tmp_path / "bad.patch"
@@ -613,8 +608,7 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
 
 
 def test_apply_real_failure_collects_rej(tmp_path):
-    """When dry-run passes for a level but the real apply fails, we surface a
-    nogit ApplyFeedback (with any .rej content) rather than raising."""
+    """When dry-run passes for a level but the real apply fails, we surface a nogit ApplyFeedback (with any .rej content) rather than raising."""
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -944,8 +938,7 @@ def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
 
 
 def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """When the real apply fails AND source-context extraction throws, feedback
-    still returns with empty source_context (real-apply exception branch)."""
+    """When the real apply fails AND source-context extraction throws, feedback still returns with empty source_context (real-apply exception branch)."""
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -977,8 +970,7 @@ def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatc
 
 
 def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """If reading source context throws on total dry-run failure, feedback still
-    returns with an empty source_context (exception branch)."""
+    """If reading source context throws on total dry-run failure, feedback still returns with an empty source_context (exception branch)."""
 
     patch_file = tmp_path / "bad.patch"
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
@@ -1058,12 +1050,7 @@ def test_sanitize_no_op_returns_input_unchanged():
 
 @pytest.mark.skipif(shutil.which("patch") is None, reason="patch CLI unavailable")
 def test_apply_no_git_tolerates_placeholder_index_header(tmp_path):
-    """A modification hunk carrying a placeholder all-zero index still applies.
-
-    GNU ``patch`` reads the zero old blob as a creation and refuses the hunk
-    because the target already exists. Regression guard for the warm-replay
-    nogit cases, which only fail where the ``patch`` CLI is actually present.
-    """
+    """A modification hunk carrying a placeholder all-zero index still applies."""
     root = tmp_path / "tree"
     target = root / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)

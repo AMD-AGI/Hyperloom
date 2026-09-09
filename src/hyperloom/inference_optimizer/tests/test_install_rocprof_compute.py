@@ -1,40 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavioural + static guards for ``ensure_rocprof_compute()``.
-
-forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
-and only degrades to the thin rocprofv3 "PMC" path when the tool is missing OR
-unusable. Two things break it on a stock ROCm serving image:
-
-  1. rocprofiler-compute (the ``rocprof-compute`` CLI, resolved by KernelForge at
-     ``<ROCM_PATH>/libexec/rocprofiler-compute/rocprof_compute_base.py``) is not
-     installed — the image ships only rocprofv3.
-  2. Even once installed, its 3.4.x CSV converter assumes pandas' legacy
-     ``object`` string dtype; pandas>=3.0 (future.infer_string=True) makes its
-     Agent_Id merge fail -> "No profiling data found" -> silent PMC fallback.
-
-  3. Its Python dependencies (dash / kaleido / matplotlib / plotille / tqdm) are
-     not base deps of anything installed by default; they live in the
-     ``forge-profiling`` extra, which nothing used to request.
-
-``ensure_rocprof_compute()`` installs that extra, apt-installs the tool, and pins
-``pandas<3`` in the forge interpreter. The extra install is the one step with an
-escape hatch, ``SKIP_FORGE_PROFILING=1`` -- an opt-OUT, because an opt-in would
-recreate exactly the silent-PMC failure below. It runs UNCONDITIONALLY — in particular it
-is not gated on ``KERNEL_OPT_BACKEND_ORDER``: install.sh runs at setup time under
-the default geak backend and the carrier only sets
-``KERNEL_OPT_BACKEND_ORDER=forge`` later on the optimize command, so a backend
-gate would skip the install and a later forge session would still profile on PMC.
-It used to be gated on a KernelForge checkout at ``$FORGE_PATH`` instead; forge
-now ships in this distribution, so that gate would have become a permanent skip.
-Every branch is FAIL-SOFT: a missing tool / failed apt / failed pin logs and
-returns 0 (forge still runs on PMC) — it must never abort install.sh.
-
-Regression cover for the 2026-07-30 investigation where every forge run profiled
-on PMC (optimization-potential estimable=NO): first because rocprof-compute was
-absent, then because pandas 3.0 silently disabled its CSV conversion.
-"""
+"""Behavioural + static guards for ``ensure_rocprof_compute()``."""
 
 from __future__ import annotations
 
@@ -51,8 +18,8 @@ IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" 
 APT_MARKER = "apt-install-called"
 PIP_MARKER = "pip-install-called"
 
-# coreutils the extracted bash + the stubs need; PATH is curated so we control
-# whether apt-get is discoverable (for the no-apt branch).
+# coreutils the extracted bash + the stubs need; PATH is curated so we control whether apt-get is discoverable (for
+# the no-apt branch).
 _PATH_TOOLS = (
     "bash",
     "sh",
@@ -98,16 +65,7 @@ def _curated_bindir(tmp_path: Path, *, with_apt: bool, apt_stub: Path | None) ->
 
 
 def _fake_python(tmp_path: Path) -> Path:
-    """Stub ``$PYTHON``.
-
-    * ``-m pip install ...``  -> append the argv to PIP_MARKER, exit ``$PIP_RC``
-      (default 0). Recording the argv (rather than just touching a flag) is what
-      lets a test tell the Step-0 ``[forge-profiling]`` install apart from the
-      Step-2 pandas pin — both go through this one stub.
-    * ``-``  (version-check heredoc on stdin) -> decide the pandas version:
-        - after a pandas pip install AND ``PIP_FIXES=1`` -> print 2.3.3, exit 0 (<3)
-        - else per ``PANDAS_STATE``: absent->exit 3, v2->2.3.3/exit0, v3->3.0.3/exit1
-    """
+    """Stub ``$PYTHON``."""
     pip_marker = tmp_path / PIP_MARKER
     body = f"""#!/usr/bin/env bash
 if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "pip" ]; then
@@ -182,8 +140,7 @@ def _run(
         tool_base.parent.mkdir(parents=True, exist_ok=True)
         tool_base.write_text("", encoding="utf-8")
 
-    # $FORGE_PATH is no longer read by this function at all; the tests set it
-    # only to prove that.
+    # $FORGE_PATH is no longer read by this function at all; the tests set it only to prove that.
     forge_line = f'export FORGE_PATH="{forge_path}"' if forge_path is not None else "unset FORGE_PATH || true"
 
     fake_py = _fake_python(tmp_path)
@@ -260,8 +217,8 @@ echo "[harness] reached-end rc=$?"
 
 
 def test_installs_under_default_geak(tmp_path: Path) -> None:
-    # THE key regression: install.sh runs under geak (forge is set only later at
-    # optimize time), so a geak install MUST still set forge's profiling up.
+    # THE key regression: install.sh runs under geak (forge is set only later at optimize time), so a geak install
+    # MUST still set forge's profiling up.
     r = _run(
         tmp_path,
         backend_order="geak",
@@ -283,9 +240,7 @@ def test_installs_when_backend_unset(tmp_path: Path) -> None:
 
 
 def test_runs_with_forge_path_unset(tmp_path: Path) -> None:
-    # Regression for the vendoring: forge ships in this distribution, so an unset
-    # FORGE_PATH is the normal case. The old checkout gate would have skipped
-    # here, silently uninstalling roofline profiling on every pod.
+    # Regression for the vendoring: forge ships in this distribution, so an unset FORGE_PATH is the normal case.
     r = _run(tmp_path, forge_path=None, tool_present=False, apt_creates_tool=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["apt_called"], r["out"]
@@ -294,8 +249,8 @@ def test_runs_with_forge_path_unset(tmp_path: Path) -> None:
 
 
 def test_a_stale_forge_path_changes_nothing(tmp_path: Path) -> None:
-    # The mirror image: a leftover pointer at a directory that is not a forge
-    # checkout must not resurrect the old gate and skip the install.
+    # The mirror image: a leftover pointer at a directory that is not a forge checkout must not resurrect the old gate
+    # and skip the install.
     stale = tmp_path / "stale-checkout"
     stale.mkdir()
     r = _run(tmp_path, forge_path=str(stale), tool_present=False, apt_creates_tool=True, pandas_state="v2")
@@ -307,8 +262,7 @@ def test_a_stale_forge_path_changes_nothing(tmp_path: Path) -> None:
 
 
 def test_installs_the_forge_profiling_extra(tmp_path: Path) -> None:
-    # The tool is a Python program; without dash/kaleido/matplotlib/plotille/tqdm
-    # it cannot run. Nothing else in install.sh requests that extra.
+    # The tool is a Python program; without dash/kaleido/matplotlib/plotille/tqdm it cannot run.
     r = _run(tmp_path, tool_present=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["extra_installed"], f"the forge-profiling extra must be installed:\n{r['pip_calls']}"
@@ -316,15 +270,7 @@ def test_installs_the_forge_profiling_extra(tmp_path: Path) -> None:
 
 
 def test_forge_profiling_extra_is_installed_editable(tmp_path: Path) -> None:
-    """Same shape as the main install, or pip replaces it with a copy.
-
-    install.sh installs the repo editable at Step 1 and this extra at the very
-    last step. pip records the editable marker in direct_url.json and treats a
-    non-editable request for the same local path as a mismatch, so dropping
-    ``-e`` here silently converts the whole installation: source edits stop
-    taking effect, and each setup rebuilds a wheel from a tree that vendoring
-    forge doubled in size. Asserting on the extra alone cannot see that.
-    """
+    """Same shape as the main install, or pip replaces it with a copy."""
     r = _run(tmp_path, tool_present=True, pandas_state="v2")
     calls = [c for c in r["pip_calls"] if "[forge-profiling]" in c]
     assert calls, r["pip_calls"]
@@ -333,15 +279,8 @@ def test_forge_profiling_extra_is_installed_editable(tmp_path: Path) -> None:
 
 
 def test_skip_forge_profiling_opts_out(tmp_path: Path) -> None:
-    """``SKIP_FORGE_PROFILING=1`` is an opt-OUT, and only skips this one step.
-
-    The extra is ~20 wheels, so an environment that cannot afford them needs a
-    way out. It is not an opt-in for the reason the module docstring gives: an
-    opt-in is what the old ``$FORGE_PATH`` gate effectively was, and it made
-    every pod profile on PMC without saying so.
-    """
-    # pandas 3 so the later pin step has work to do: the opt-out must skip the
-    # extra and nothing else.
+    """``SKIP_FORGE_PROFILING=1`` is an opt-OUT, and only skips this one step."""
+    # pandas 3 so the later pin step has work to do: the opt-out must skip the extra and nothing else.
     r = _run(tmp_path, tool_present=True, pandas_state="v3", skip_forge_profiling="1")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert not r["extra_installed"], f"SKIP_FORGE_PROFILING=1 must skip the extra:\n{r['pip_calls']}"
@@ -363,14 +302,7 @@ def test_forge_profiling_extra_install_is_fail_soft(tmp_path: Path) -> None:
 
 
 def test_forge_profiling_fallback_never_names_the_distribution(tmp_path: Path) -> None:
-    """A packaged install has no checkout, and must not re-resolve itself.
-
-    ``pip install hyperloom-inference_optimizer[forge-profiling]`` asks an index
-    for the *distribution*, which can overwrite the very installation that is
-    running with a published build of another version. The fallback reads
-    Requires-Dist off the installed metadata instead, so it can only ever
-    request the profiling dependencies.
-    """
+    """A packaged install has no checkout, and must not re-resolve itself."""
     r = _run(tmp_path, repo_root="", tool_present=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert not any("hyperloom-inference_optimizer[" in call for call in r["pip_calls"]), (
@@ -414,9 +346,7 @@ def test_failsoft_when_apt_fails_to_produce_tool(tmp_path: Path) -> None:
 
 
 def test_failsoft_when_apt_log_never_created(tmp_path: Path) -> None:
-    # Regression: an unwritable TMPDIR makes the `>"$apt_log"` redirect fail, so
-    # the log is never created. The diagnostic `tail "$apt_log" | while ...` must
-    # NOT abort install.sh under set -euo pipefail (bare pipe + pipefail would).
+    # Regression: an unwritable TMPDIR makes the `>"$apt_log"` redirect fail, so the log is never created.
     missing_tmp = tmp_path / "no_such_tmpdir"  # deliberately never created
     r = _run(
         tmp_path,
@@ -448,9 +378,8 @@ def test_no_pin_when_pandas_lt3(tmp_path: Path) -> None:
 
 
 def test_installs_pandas_when_absent_precludes_later_3x(tmp_path: Path) -> None:
-    # Regression for the ordering window: if pandas is not yet installed, we must
-    # proactively install pandas<3 (not skip) so a later unconstrained
-    # `pip install pandas` (datasets/evaluate) cannot drag pandas>=3 back in.
+    # Regression for the ordering window: if pandas is not yet installed, we must proactively install pandas<3 (not
+    # skip) so a later unconstrained `pip install pandas` (datasets/evaluate) cannot drag pandas>=3 back in.
     r = _run(tmp_path, tool_present=True, pandas_state="absent", pip_fixes=True)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pandas_pinned"], f"pandas<3 should be installed when absent:\n{r['out']}"
@@ -459,8 +388,8 @@ def test_installs_pandas_when_absent_precludes_later_3x(tmp_path: Path) -> None:
 
 
 def test_probe_fallback_warns_but_still_pins(tmp_path: Path) -> None:
-    # If no candidate interpreter can run `rocprof-compute --help`, fall back to
-    # $PYTHON (best effort) with a warning — but still pin, never abort.
+    # If no candidate interpreter can run `rocprof-compute --help`, fall back to $PYTHON (best effort) with a warning
+    # — but still pin, never abort.
     r = _run(tmp_path, tool_present=True, pandas_state="v3", pip_fixes=True, probe_rc=1)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert "could not confirm which interpreter" in r["out"]
@@ -500,38 +429,34 @@ def test_static_ungated() -> None:
     # Must NOT gate on the backend order (that was the ordering bug)...
     assert "_forge_backend_selected" not in body
     assert "backend not selected" not in body
-    # ...nor on a KernelForge checkout, which no longer exists: forge ships in
-    # this distribution, so such a gate would be a permanent skip.
+    # ...nor on a KernelForge checkout, which no longer exists: forge ships in this distribution, so such a gate would
+    # be a permanent skip.
     assert "_kernel_forge_root" not in body
     assert "FORGE_PATH" not in body
 
 
 def test_static_call_ordered_after_all_pip_steps() -> None:
-    # The bare top-level call must run after EVERY pip-installing step, so no later
-    # step can re-pull pandas>=3 and the pin's re-check is the truthful final
-    # state. Derive the pip-installing steps instead of hardcoding them, so a
-    # future refactor that adds a pip step or moves the call is caught.
+    # The bare top-level call must run after EVERY pip-installing step, so no later step can re-pull pandas>=3 and the
+    # pin's re-check is the truthful final state.
     text = IO_INSTALL.read_text(encoding="utf-8")
     call = text.rindex("\nensure_rocprof_compute\n")
 
-    # Top-level invocations: a line that is exactly a function name (col 0), i.e.
-    # ensure_*/chain_* CALLS (definitions are `name() {`, which this won't match).
+    # Top-level invocations: a line that is exactly a function name (col 0), i.e. ensure_*/chain_* CALLS (definitions
+    # are `name() {`, which this won't match).
     invocations = [(m.start(), m.group(1)) for m in re.finditer(r"^(ensure_[a-z_]+|chain_[a-z_]+)$", text, re.M)]
     pip_steps_before = []
     for pos, name in invocations:
         if name == "ensure_rocprof_compute":
             continue
-        # Only consider names that are DEFINED in this file, and whose body runs
-        # a pip install.
+        # Only consider names that are DEFINED in this file, and whose body runs a pip install.
         if not re.search(rf"^{name}\(\) \{{", text, re.M):
             continue
         body = _extract_fn(name)
         if "pip install" in body:
             pip_steps_before.append((pos, name))
 
-    # chain_kernel_agent installs INDIRECTLY (it shells out to another
-    # install.sh), so it has no literal "pip install" in its body — include it
-    # explicitly as a pip step that must precede the pin.
+    # chain_kernel_agent installs INDIRECTLY (it shells out to another install.sh), so it has no literal "pip install"
+    # in its body — include it explicitly as a pip step that must precede the pin.
     chain = text.rindex("\nchain_kernel_agent\n") + 1
     pip_steps_before.append((chain, "chain_kernel_agent"))
 
@@ -564,10 +489,8 @@ def test_static_pins_pandas_lt3() -> None:
 
 
 def test_static_fail_soft_no_hard_abort() -> None:
-    # Neither function may hard-abort the installer: no die, and no bash-level
-    # `exit` STATEMENT (a line whose first token is `exit`). This ignores
-    # `sys.exit(...)` inside the embedded Python probe (the fail-soft mechanism —
-    # it returns a code to the surrounding `if`) and "exit" mentioned in comments.
+    # Neither function may hard-abort the installer: no die, and no bash-level `exit` STATEMENT (a line whose first
+    # token is `exit`).
     for name in ("ensure_rocprof_compute", "_ensure_pandas_lt3_for_rocpc"):
         body = _extract_fn(name)
         assert "die " not in body, f"{name} must be fail-soft (no die)"

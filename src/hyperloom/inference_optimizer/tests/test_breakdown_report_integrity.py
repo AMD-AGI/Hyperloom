@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Report integrity: reported counts must mean what the schema says they mean.
-
-These tests pin contracts the breakdown pipeline previously stated in comments
-but never enforced:
-
-* ``CapabilityEntry.keeps`` counts kernels adopted at *integrate*. A KEEP that
-  only cleared the micro benchmark is not an adoption and must not inflate it.
-* ``keeps`` counts distinct kernels, so a kernel re-tried across runs is one
-  adoption. ``attempts`` deliberately stays a count of invocation rows -- "how
-  many tries did this take" is the question it answers -- so the two fields
-  carry different units on purpose.
-* Only a ``KEEP`` verdict is an adoption. ``NEEDS_REVIEW`` and a missing
-  decision mean the verdict is not in yet, and a lane holding one must not
-  read as ``kept``.
-* Timeline de-duplication must not fold two different tasks into one row just
-  because they share an action and a wall-clock second.
-* A section skipped for lack of data still carries evidence ("this never ran");
-  that evidence must reach the reader instead of being dropped silently.
-* A sweep variant whose ``benchmark_report.json`` is missing, truncated, empty,
-  or not a JSON object is ``failed`` / ``skipped``, never silently ``ok``.
-  ``abort_reason.json`` without a report is ``failed``. ``ok`` does not require
-  selectable throughput.
-"""
+"""Report integrity: reported counts must mean what the schema says they mean."""
 
 from __future__ import annotations
 
@@ -39,16 +17,7 @@ from hyperloom.inference_optimizer.breakdown.reporters.base import RenderedSecti
 
 
 def _integrate_state(kernel_id: str, decision: str, gain: float | None = None) -> dict[str, Any]:
-    """Build a ``state`` carrying one integrate verdict for ``kernel_id``.
-
-    Args:
-        kernel_id (str): Kernel the integrate attempt refers to.
-        decision (str): Terminal integrate decision, e.g. ``"KEEP"`` / ``"REVERT"``.
-        gain (float | None): Best end-to-end gain percentage, if any.
-
-    Returns:
-        dict[str, Any]: A minimal ``state.json`` shaped mapping.
-    """
+    """Build a ``state`` carrying one integrate verdict for ``kernel_id``."""
     return {
         "kernel_integrate_attempts": {
             "attempt-1": {
@@ -72,8 +41,8 @@ def test_micro_only_keep_is_not_an_integrate_adoption() -> None:
     assert cap["forge"]["attempts"] == 1
     assert cap["forge"]["keeps"] == 0, "micro-only KEEP must not be reported as an integrate adoption"
     assert cap["forge"]["micro_only_keeps"] == 1
-    # Not "kept": nothing was adopted end-to-end, so the executive summary must
-    # not advertise this lane as a capability that paid off.
+    # Not "kept": nothing was adopted end-to-end, so the executive summary must not advertise this lane as a
+    # capability that paid off.
     assert cap["forge"]["status"] == "attempted"
 
 
@@ -151,10 +120,7 @@ def test_missing_integrate_decision_is_not_an_adoption() -> None:
 
 
 def test_adopted_patch_is_not_undone_by_a_reverted_sibling() -> None:
-    """``kernel_integrate_attempts`` is keyed by kernel|patch|args, so one
-    kernel holds several rows. Folding them by kernel id must not let whichever
-    row happens to be iterated last decide the outcome.
-    """
+    """``kernel_integrate_attempts`` is keyed by kernel|patch|args, so one kernel holds several rows."""
     state = {
         "kernel_integrate_attempts": {
             # Ordered so the REVERT is visited last: overwriting loses the KEEP.
@@ -264,8 +230,7 @@ def test_promoted_geak_route_marks_capability_kept() -> None:
     cap = collectors.collect_capability_summary(state, [], [], geak=geak)
 
     assert cap["geak"]["attempts"] == 2
-    # ONE promotion is ONE keep. The canonical ledger books a single adoption
-    # for the route-level win, and the two counters must not disagree.
+    # ONE promotion is ONE keep.
     assert cap["geak"]["keeps"] == 1
     assert cap["geak"]["status"] == "kept"
 
@@ -274,11 +239,7 @@ def test_promoted_geak_route_marks_capability_kept() -> None:
 
 
 def test_item_filename_seq_matches_envelope_seq(tmp_path: Path) -> None:
-    """A keyless item spends one sequence number, not two.
-
-    The filename and the envelope must agree, or a ``seq=N`` trace line points
-    at a file that does not exist.
-    """
+    """A keyless item spends one sequence number, not two."""
     rec = Recorder(tmp_path, producer="coordinator")
 
     path = rec.record_item("measurements", {"value": 1})
@@ -325,12 +286,7 @@ def test_same_key_still_rewrites_one_fragment(tmp_path: Path) -> None:
 
 
 def test_legacy_reuse_does_not_resurrect_the_collision(tmp_path: Path) -> None:
-    """A legacy filename only belongs to a key that sanitizing left untouched.
-
-    ``a/b`` and ``a:b`` both sanitize to ``a-b``. Reusing a legacy ``a-b.json``
-    for either of them puts the digest back where it started: two entities
-    merged into one file.
-    """
+    """A legacy filename only belongs to a key that sanitizing left untouched."""
     rec = Recorder(tmp_path, producer="coordinator")
     legacy = tmp_path / "measurements__coordinator__a-b.json"
     legacy.write_text(
@@ -380,11 +336,7 @@ def test_distinct_tasks_in_the_same_second_are_not_folded() -> None:
 
 
 def test_exporter_keeps_distinct_tasks_from_recorder_fragments() -> None:
-    """The exporter merges recorder fragments and must fold them as the collector does.
-
-    Recorder-only rows never pass through the collector, so an exporter with its
-    own weaker identity silently drops events the collector would have kept.
-    """
+    """The exporter merges recorder fragments and must fold them as the collector does."""
     from hyperloom.inference_optimizer.breakdown.exporter import _merge_phase_timeline
 
     fragment = [
@@ -492,12 +444,7 @@ def test_section_without_producer_is_not_a_data_quality_flag() -> None:
 
 
 def test_every_registered_section_reaches_the_report() -> None:
-    """A section that renders but is never grouped is invisible work.
-
-    ``geak_invocations`` / ``forge_invocations`` rendered for months without a
-    group entry, so the report quoted their adoption counts while showing none
-    of the attempts behind them.
-    """
+    """A section that renders but is never grouped is invisible work."""
     from hyperloom.inference_optimizer.breakdown.reporters import compose
     from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
 
@@ -509,13 +456,7 @@ def test_every_registered_section_reaches_the_report() -> None:
 
 
 def test_sections_without_producer_list_matches_reality(tmp_path: Path) -> None:
-    """Recompute the dead-section list; the constant must still match.
-
-    Wiring up a producer, or registering another section nothing fills, has to
-    fail here rather than silently drift. The scan reads ``breakdown.get("x")``
-    literals, so a renderer that computes its key at runtime would be missed --
-    none do today.
-    """
+    """Recompute the dead-section list; the constant must still match."""
     import re
 
     from hyperloom.inference_optimizer.breakdown import exporter
@@ -555,27 +496,14 @@ def test_live_section_warnings_are_unchanged() -> None:
 
 
 def test_data_quality_flags_survive_an_llm_summary() -> None:
-    """A model that ignores the flags must not be able to erase them.
-
-    The flags are where a skipped section's evidence ends up, and the LLM
-    summary replaces the deterministic one wholesale, so a narrative that never
-    mentions them would otherwise delete them from the report.
-    """
+    """A model that ignores the flags must not be able to erase them."""
     from hyperloom.inference_optimizer.breakdown.reporters.compose import render_session_report
 
     class _SilentLLM:
         """Answers well-formed JSON that never mentions a flag."""
 
         def complete(self, *, system: str, user: str) -> str:
-            """Return a summary with no data-quality content.
-
-            Args:
-                system (str): System prompt (ignored).
-                user (str): User prompt (ignored).
-
-            Returns:
-                str: A valid response envelope.
-            """
+            """Return a summary with no data-quality content."""
             return json.dumps({"executive_summary": "Everything went fine.", "section_narratives": {}})
 
     result = render_session_report({}, llm_client=_SilentLLM())
@@ -615,15 +543,7 @@ def test_capability_table_shows_unadopted_outcomes() -> None:
 
 
 def _parse(exec_summary: str = "ok", **narratives: str) -> dict[str, Any]:
-    """Run ``parse_llm_response`` over a well-formed response envelope.
-
-    Args:
-        exec_summary (str): Executive summary the model supposedly returned.
-        **narratives (str): Section narratives keyed by section id.
-
-    Returns:
-        dict[str, Any]: The parsed and sanitized result.
-    """
+    """Run ``parse_llm_response`` over a well-formed response envelope."""
     return llm_prompt.parse_llm_response(
         json.dumps({"executive_summary": exec_summary, "section_narratives": narratives})
     )
@@ -656,12 +576,7 @@ def test_unterminated_html_comment_is_rejected() -> None:
 
 
 def test_any_block_opener_rejects_the_whole_narrative() -> None:
-    """Repairing the prose would leave text the model never wrote.
-
-    Enumerating safe HTML was the wrong shape for this: CommonMark opens a
-    block many ways and missing one fails silently, so the rule matches the
-    act of opening a block instead.
-    """
+    """Repairing the prose would leave text the model never wrote."""
     openers = [
         "## Injected Heading\nThe sweep found a better concurrency.",
         "Here is the config:\n```yaml\nkey: value\n```",
@@ -710,12 +625,7 @@ _SWEEP_STATUSES = frozenset({"ok", "failed", "skipped"})
 
 
 def _write_report_text(variant_dir: Path, text: str) -> None:
-    """Write ``benchmark_report.json`` under ``variant_dir``.
-
-    Args:
-        variant_dir (Path): Sweep variant directory.
-        text (str): File contents, well-formed or deliberately corrupt.
-    """
+    """Write ``benchmark_report.json`` under ``variant_dir``."""
     (variant_dir / "benchmark_report.json").write_text(text, encoding="utf-8")
 
 
@@ -726,14 +636,7 @@ def _write_abort_reason(
     error_class: str,
     error: str,
 ) -> None:
-    """Write a grid-runner shaped ``abort_reason.json``.
-
-    Args:
-        variant_dir (Path): Sweep variant directory.
-        name (str): Variant name stored on the marker.
-        error_class (str): Short failure class.
-        error (str): Failure detail.
-    """
+    """Write a grid-runner shaped ``abort_reason.json``."""
     (variant_dir / "abort_reason.json").write_text(
         json.dumps(
             {
@@ -749,11 +652,7 @@ def _write_abort_reason(
 
 
 def _ok_benchmark_report() -> dict[str, Any]:
-    """Return a readable successful benchmark report with metrics.
-
-    Returns:
-        dict[str, Any]: A report the collector treats as ``status=ok``.
-    """
+    """Return a readable successful benchmark report with metrics."""
     return {
         "success": True,
         "output_throughput": 800.0,

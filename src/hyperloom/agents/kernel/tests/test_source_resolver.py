@@ -5,11 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the version-robust v2 source resolver + its latency timer.
-
-These build a tiny fake ``csrc`` tree on disk so resolution is exercised against
-a real index without needing an installed vLLM/SGLang/aiter.
-"""
+"""Unit tests for the version-robust v2 source resolver + its latency timer."""
 
 from __future__ import annotations
 
@@ -114,8 +110,8 @@ def test_resolve_unresolved_returns_reason(tmp_path):
 
 
 def test_non_patchable_ck_symbol_is_flagged(tmp_path):
-    # CK template instantiations are detected from the symbol alone (no JSON):
-    # they have no single editable __global__ source, so the gate bails early.
+    # CK template instantiations are detected from the symbol alone (no JSON): they have no single editable __global__
+    # source, so the gate bails early.
     fw = _fake_framework(tmp_path)
     index = kernel_source_index.build_index(fw)
     res = source_resolver.resolve(
@@ -130,8 +126,8 @@ def test_non_patchable_ck_symbol_is_flagged(tmp_path):
 
 
 def test_ck_marker_is_namespace_boundary_not_substring():
-    # Names that merely end in "ck" must NOT be gated as CK (regression: the
-    # unbounded "ck::" substring dropped unrelated kernels silently).
+    # Names that merely end in "ck" must NOT be gated as CK (regression: the unbounded "ck::" substring dropped
+    # unrelated kernels silently).
     for sym in (
         "void vllm::block::my_kernel(float*)",
         "void unpack::helper_kernel(int*)",
@@ -144,8 +140,8 @@ def test_ck_marker_is_namespace_boundary_not_substring():
 
 
 def test_ck_detection_falls_back_to_mangled_without_cxxfilt(monkeypatch):
-    # With c++filt unavailable, a mangled CK symbol must still be classified from
-    # its length-prefixed namespace, so the verdict does not depend on binutils.
+    # With c++filt unavailable, a mangled CK symbol must still be classified from its length-prefixed namespace, so
+    # the verdict does not depend on binutils.
     monkeypatch.setattr(source_resolver, "_cxxfilt_base", lambda _m: "")
     assert source_resolver._non_patchable_kind("_ZN2ck15kernel_moe_gemmIiEEvPf") == "aiter_ck"
     # A non-CK mangled symbol is not misclassified by the fallback.
@@ -158,14 +154,14 @@ def test_legacy_tuple_preserves_non_patchable(tmp_path):
     res = source_resolver.resolve(
         "ck::op", framework="vllm", device_kernel_name="ck_tile::Gemm<half>(void*)", index=index
     )
-    # non_patchable carries an empty source_file but must NOT collapse to
-    # "unresolved" -- callers distinguish "known not rewritable" from "not found".
+    # non_patchable carries an empty source_file but must NOT collapse to "unresolved" -- callers distinguish "known
+    # not rewritable" from "not found".
     assert res.as_legacy_tuple() == ("", "non_patchable")
 
 
 def test_header_declaration_not_selected_over_definition(tmp_path):
-    # A header holding only a forward declaration must not outrank the .cu that
-    # actually defines the kernel (regression: shorter header path won on ties).
+    # A header holding only a forward declaration must not outrank the .cu that actually defines the kernel
+    # (regression: shorter header path won on ties).
     csrc = tmp_path / "csrc"
     (csrc / "include").mkdir(parents=True)
     (csrc / "kernels").mkdir(parents=True)
@@ -229,9 +225,8 @@ def test_fingerprint_is_stable(tmp_path):
 
 
 def test_fingerprint_detects_nested_edit(tmp_path):
-    # A modification to a file in a NESTED subdir must change the fingerprint
-    # (regression: the old signature used only the root's mtime + child count and
-    # missed nested edits, so GEAK's own .cu rewrites reused a stale index).
+    # A modification to a file in a NESTED subdir must change the fingerprint (regression: the old signature used only
+    # the root's mtime + child count and missed nested edits, so GEAK's own .cu rewrites reused a stale index).
     import time
 
     csrc = tmp_path / "csrc"

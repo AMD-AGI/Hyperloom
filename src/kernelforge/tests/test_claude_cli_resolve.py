@@ -1,7 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for robust claude CLI resolution (RCA root cause 1): env override,
-PATH discovery, and graceful fallback when the binary is absent."""
+"""Tests for robust claude CLI resolution (RCA root cause 1): env override, PATH discovery, and graceful fallback when
+the binary is absent.
+"""
 
 from __future__ import annotations
 
@@ -45,8 +46,8 @@ def test_explicit_runtime_cli_path(tmp_path, monkeypatch):
 
 
 def test_env_override_ignored_when_not_executable(tmp_path, monkeypatch):
-    # A non-existent override must not be returned; falls through to which/search,
-    # ending at either a real executable on this host or the bare name.
+    # A non-existent override must not be returned; falls through to which/search, ending at either a real executable
+    # on this host or the bare name.
     bad = str(tmp_path / "nope")
     monkeypatch.setenv("FORGE_AGENT_CLI", bad)
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -65,9 +66,8 @@ def test_path_discovery(tmp_path, monkeypatch):
 
 
 def test_resolve_returns_existing_or_bare(tmp_path, monkeypatch):
-    # With no env override and a stripped PATH, the resolver returns either a
-    # real existing executable (a common prefix on this host) or the bare name
-    # "claude" as last resort -- never a stale path that does not exist.
+    # With no env override and a stripped PATH, the resolver returns either a real existing executable (a common
+    # prefix on this host) or the bare name "claude" as last resort -- never a stale path that does not exist.
     monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -184,11 +184,7 @@ def test_claude_hook_mapping_is_environment_independent():
 
 
 def test_prepare_claude_environment_keeps_the_operators_route(monkeypatch):
-    """Apply the root sandbox flag and leave the operator's route alone.
-
-    The CLI speaks the Anthropic protocol and owns its own path suffixes, so
-    rewriting the route here would only hide misconfiguration.
-    """
+    """Apply the root sandbox flag and leave the operator's route alone."""
 
     def fake_geteuid() -> int:
         """Simulate a root process in any CI environment."""
@@ -208,13 +204,7 @@ def test_prepare_claude_environment_keeps_the_operators_route(monkeypatch):
 
 
 def test_prepare_claude_environment_drops_a_duplicated_version_suffix(monkeypatch):
-    """The CLI appends /v1/messages, so a base already carrying /v1 404s.
-
-    Measured against a LiteLLM proxy, which publishes its base that way: the
-    doubled path comes back as "There's an issue with the selected model ... it
-    may not exist or you may not have access to it", pointing at a model and a
-    permission that were never the problem.
-    """
+    """The CLI appends /v1/messages, so a base already carrying /v1 404s."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/llm-proxy/v1")
 
     _prepare_claude_environment()
@@ -223,11 +213,7 @@ def test_prepare_claude_environment_drops_a_duplicated_version_suffix(monkeypatc
 
 
 def test_prepare_claude_environment_expands_header_env_refs(monkeypatch):
-    """The CLI reads this variable itself, so ${VAR} must be resolved first.
-
-    Left alone, the reference text would travel as the header value and the
-    gateway would reject a subscription key it never received.
-    """
+    """The CLI reads this variable itself, so ${VAR} must be resolved first."""
     monkeypatch.setenv("MY_SUB_KEY", "expanded-secret")
     monkeypatch.setenv(
         "ANTHROPIC_CUSTOM_HEADERS",

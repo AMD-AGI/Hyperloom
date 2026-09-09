@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""structured gaps[] ledger tests.
-
-Covers the SharedState ``gaps`` field + write helpers, the PolicyGate lock,
-Coordinator ``_refresh_gaps`` extraction, the ``to_gaps_summary`` rendering,
-and specialist-param warmup.
-"""
+"""structured gaps[] ledger tests."""
 
 from __future__ import annotations
 

@@ -156,15 +156,14 @@ def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path:
 
 
 def test_a_staged_task_still_being_written_is_left_alone(tmp_path: Path) -> None:
-    # The scan runs on a timer beside the live agent, so a directory whose files
-    # were touched a moment ago may still be mid-write. Taking it would copy a
-    # truncated driver.py and delete the agent's working copy.
+    # The scan runs on a timer beside the live agent, so a directory whose files were touched a moment ago may still
+    # be mid-write.
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
 
-    # Default window against real time: the files were just written, which is
-    # what a scan landing in the same poll tick as the agent's write sees.
+    # Default window against real time: the files were just written, which is what a scan landing in the same poll
+    # tick as the agent's write sees.
     results = publish_complete_staged_tasks(layout)
 
     assert results == ()
@@ -191,11 +190,7 @@ def test_a_quiescent_staged_task_is_published(tmp_path: Path) -> None:
 
 
 def test_a_refused_draft_is_not_revalidated_until_it_changes(tmp_path: Path) -> None:
-    """Refusal keeps the draft, and this scan runs on a half-second timer.
-
-    Without a memory of the refusal one bad draft is contract-checked thousands
-    of times across an analysis window, respawning Git probes on every pass.
-    """
+    """Refusal keeps the draft, and this scan runs on a half-second timer."""
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)

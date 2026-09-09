@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Serve-safe split-K capping for dense a8w8_blockscale tuning.
-
-The aiter tuner can select a splitK the production dispatch cannot run
-("This GEMM is not supported!" -> engine-init crash). ``_cap_splitk_to_serve_safe``
-re-selects the fastest serve-safe (splitK <= max) candidate from the profile and
-reports whether the deployed CSV still carries any split-K>0 (drives force_candidate).
-"""
+"""Serve-safe split-K capping for dense a8w8_blockscale tuning."""
 
 from __future__ import annotations
 
@@ -97,8 +91,8 @@ def test_high_errratio_safe_candidate_rejected(tmp_path):
 
 
 def test_profile_missing_column_skips_candidate(tmp_path):
-    # F2/F4: a profile row lacking a column the deployed CSV has must be skipped
-    # (never deploy a malformed row / never silently bypass the errRatio filter).
+    # F2/F4: a profile row lacking a column the deployed CSV has must be skipped (never deploy a malformed row / never
+    # silently bypass the errRatio filter).
     art = tmp_path / "artifact.csv"
     prof = tmp_path / "profile.csv"
     _write(art, [_row(64, 5120, 17408, 9, 3, 39.0, "sk3")])  # unsafe
@@ -130,8 +124,8 @@ def test_missing_artifact_is_noop(tmp_path):
 
 
 def test_support_fn_keeps_splitk_within_per_shape_max(tmp_path):
-    # Per-shape production limit: shape A supports splitK=3 (keep it), shape B only
-    # supports 2 (downgrade its splitK=3 pick). Captures gain cap=2 would drop.
+    # Per-shape production limit: shape A supports splitK=3 (keep it), shape B only supports 2 (downgrade its splitK=3
+    # pick).
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     _write(art, [_row(16, 5120, 5120, 9, 3, 10.0, "A3"), _row(64, 5120, 5120, 9, 3, 20.0, "B3")])
@@ -155,9 +149,8 @@ def test_support_fn_keeps_splitk_within_per_shape_max(tmp_path):
 
 
 def test_support_fn_tightens_below_static_cap(tmp_path):
-    # Per-shape max BELOW the static cap: a shape whose production kernel only
-    # supports splitK<=1 must DOWNGRADE a splitK=2 pick the static cap=2 would
-    # otherwise keep -- keeping it would crash serve ("not supported").
+    # Per-shape max BELOW the static cap: a shape whose production kernel only supports splitK<=1 must DOWNGRADE a
+    # splitK=2 pick the static cap=2 would otherwise keep -- keeping it would crash serve ("not supported").
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     _write(art, [_row(64, 5120, 5120, 8, 2, 20.0, "B2")])
@@ -189,8 +182,8 @@ def test_support_fn_none_falls_back_to_static_cap(tmp_path):
 
 
 def test_schema_without_errratio_does_not_crash(tmp_path):
-    # A CSV schema lacking the errRatio column must not KeyError-crash the tuner
-    # (relevant when --splitK is extended to other dense tuners); absent -> 0.
+    # A CSV schema lacking the errRatio column must not KeyError-crash the tuner (relevant when --splitK is extended
+    # to other dense tuners); absent -> 0.
     hdr = [
         "gfx",
         "cu_num",
@@ -226,10 +219,8 @@ def test_schema_without_errratio_does_not_crash(tmp_path):
 
 
 def test_cap_header_case_insensitive_no_unsafe_passthrough(tmp_path):
-    # A differently-cased deployed header must NOT make the cap bail early and
-    # pass an unsafe splitK row through unchanged (-> serve crash). With the
-    # case-insensitive column lookup the cap still engages: the splitK=3 row is
-    # capped/dropped so no splitK>max survives.
+    # A differently-cased deployed header must NOT make the cap bail early and pass an unsafe splitK row through
+    # unchanged (-> serve crash).
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     hdr = [

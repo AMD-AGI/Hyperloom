@@ -1,8 +1,4 @@
-"""vLLM TraceLens patch version-fallback resolution.
-
-Covers the tolerant patch picker so a freshly-bumped vLLM image still gets a
-nearby (backward-compatible) patch instead of silently losing roofline.
-"""
+"""vLLM TraceLens patch version-fallback resolution."""
 
 from __future__ import annotations
 

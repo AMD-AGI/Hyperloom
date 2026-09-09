@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Request and result models for framework/ref exploration.
-
-``ExploreRequest.gap_description`` feeds :mod:`hyperloom.agents.framework.keywords` for
-perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
-candidate sources (e.g. ``("pr_monitor", "github")`` unions both, with
-pr_monitor hard-failing and GitHub best-effort).
-"""
+"""Request and result models for framework/ref exploration."""
 
 from __future__ import annotations
 
@@ -29,19 +23,7 @@ class Baseline:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Baseline":
-        """Parse raw dict into Baseline; throughput must be > 0.
-
-        Args:
-            raw (dict[str, Any]): Mapping with ``throughput`` (or
-                ``output_throughput``), optional ``accuracy``, and optional
-                ``completed``.
-
-        Returns:
-            Baseline: The parsed baseline.
-
-        Raises:
-            ValueError: If the resolved throughput is not greater than 0.
-        """
+        """Parse raw dict into Baseline; throughput must be > 0."""
         throughput = float(raw.get("throughput") or raw.get("output_throughput") or 0.0)
         if throughput <= 0:
             raise ValueError("baseline.throughput must be > 0")
@@ -63,15 +45,7 @@ class Thresholds:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "Thresholds":
-        """Parse raw dict; missing keys fall back to defaults.
-
-        Args:
-            raw (dict[str, Any] | None): Mapping with optional
-                ``min_throughput_ratio`` and ``max_accuracy_drop``.
-
-        Returns:
-            Thresholds: The parsed thresholds, with defaults for missing keys.
-        """
+        """Parse raw dict; missing keys fall back to defaults."""
         raw = raw or {}
         return cls(
             min_throughput_ratio=float(raw.get("min_throughput_ratio", 1.05)),
@@ -81,12 +55,7 @@ class Thresholds:
 
 @dataclass(frozen=True)
 class PRMonitorConfig:
-    """Configuration for the pr_monitor service.
-
-    When present on :class:`ExploreRequest`, the agent routes PR candidate
-    enumeration through this service. Errors are hard-failed by callers
-    (see :mod:`hyperloom.agents.framework.sources.pr_monitor`).
-    """
+    """Configuration for the pr_monitor service."""
 
     base_url: str
     timeout_sec: float = 10.0
@@ -94,18 +63,7 @@ class PRMonitorConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PRMonitorConfig":
-        """Parse pr_monitor block; base_url is mandatory.
-
-        Args:
-            raw (dict[str, Any]): Mapping with ``base_url`` and optional
-                ``timeout_sec`` / ``default_label``.
-
-        Returns:
-            PRMonitorConfig: The parsed config.
-
-        Raises:
-            ValueError: If ``base_url`` is missing or empty.
-        """
+        """Parse pr_monitor block; base_url is mandatory."""
         base_url = str(raw.get("base_url") or "").strip()
         if not base_url:
             raise ValueError("pr_monitor.base_url is required when pr_monitor block is set")
@@ -128,18 +86,7 @@ class CommandSpec:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "CommandSpec":
-        """Parse a command block; command text is mandatory.
-
-        Args:
-            raw (dict[str, Any]): Mapping with ``command`` and optional
-                ``timeout_sec`` / ``required``.
-
-        Returns:
-            CommandSpec: The parsed command spec.
-
-        Raises:
-            ValueError: If ``command`` is missing or empty.
-        """
+        """Parse a command block; command text is mandatory."""
         command = str(raw.get("command") or "").strip()
         if not command:
             raise ValueError("command spec requires a non-empty command")
@@ -152,10 +99,7 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, pr_monitor, or GitHub).
-
-    ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
-    """
+    """A single PR or git ref candidate (explicit, pr_monitor, or GitHub)."""
 
     ref: str
     repo: str
@@ -181,12 +125,7 @@ class Candidate:
 
     @property
     def slug(self) -> str:
-        """Filesystem-safe slug derived from ref (used for candidate_dir name).
-
-        Returns:
-            str: A lowercased slug with non-alphanumeric characters (except
-                ``.-_``) replaced by hyphens, defaulting to ``"candidate"``.
-        """
+        """Filesystem-safe slug derived from ref (used for candidate_dir name)."""
         out = []
         for ch in self.ref.lower():
             if ch.isalnum():
@@ -200,12 +139,7 @@ class Candidate:
 
     @property
     def pr_number(self) -> int | None:
-        """Return the PR number when ref starts with ``PR:``; else None.
-
-        Returns:
-            int | None: The parsed PR number, or ``None`` when the ref is not a
-                ``PR:`` ref or the number is unparseable.
-        """
+        """Return the PR number when ref starts with ``PR:``; else None."""
         if not self.ref.startswith("PR:"):
             return None
         try:
@@ -216,15 +150,7 @@ class Candidate:
 
 @dataclass(frozen=True)
 class PrFilter:
-    """Client-side filter applied to enumerated PR candidates.
-
-    Every dimension (labels, author, dates, paths, counts) is evaluated
-    locally in ``explorer._passes_filter``; no part of this filter is pushed
-    into the pr_monitor query (the only server-side narrowing is the
-    separate ``PRMonitorConfig.default_label``). Path filters require
-    Stage 2 enrichment (``changed_files`` populated). Labels are
-    case-insensitive.
-    """
+    """Client-side filter applied to enumerated PR candidates."""
 
     include_paths: tuple[str, ...] = ()
     exclude_paths: tuple[str, ...] = ()
@@ -238,17 +164,7 @@ class PrFilter:
 
     @staticmethod
     def _as_tuple(raw: Any) -> tuple[str, ...]:
-        """Coerce string/list/None into a clean tuple of non-empty strings.
-
-        Args:
-            raw (Any): ``None``, a string, or a list/tuple of values.
-
-        Returns:
-            tuple[str, ...]: Trimmed, non-empty string values.
-
-        Raises:
-            ValueError: If ``raw`` is neither None, a string, nor a list/tuple.
-        """
+        """Coerce string/list/None into a clean tuple of non-empty strings."""
         if raw is None:
             return ()
         if isinstance(raw, str):
@@ -259,17 +175,7 @@ class PrFilter:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "PrFilter":
-        """Parse pr_filter block; missing keys fall back to empty defaults.
-
-        Args:
-            raw (dict[str, Any] | None): The ``pr_filter`` object, or ``None``.
-
-        Returns:
-            PrFilter: The parsed filter (empty when ``raw`` is ``None``).
-
-        Raises:
-            ValueError: If ``raw`` is present but not an object.
-        """
+        """Parse pr_filter block; missing keys fall back to empty defaults."""
         if raw is None:
             return cls()
         if not isinstance(raw, dict):
@@ -288,11 +194,7 @@ class PrFilter:
 
     @property
     def is_empty(self) -> bool:
-        """True when no constraint is set (filter is a no-op).
-
-        Returns:
-            bool: ``True`` if every filter field is unset/zero, else ``False``.
-        """
+        """True when no constraint is set (filter is a no-op)."""
         return (
             not self.include_paths
             and not self.exclude_paths
@@ -311,19 +213,7 @@ _VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
 
 
 def _parse_pr_states(raw: Any) -> tuple[str, ...]:
-    """Coerce an optional ``pr_states`` field into a validated tuple.
-
-    None/empty -> ``("open",)``; string -> single; list/tuple -> items.
-
-    Args:
-        raw: The raw ``pr_states`` value.
-
-    Returns:
-        A tuple of validated PR-state names.
-
-    Raises:
-        ValueError: If ``raw`` is the wrong type or contains an unknown state.
-    """
+    """Coerce an optional ``pr_states`` field into a validated tuple."""
     if raw is None or raw == "":
         return ("open",)
     if isinstance(raw, str):
@@ -341,20 +231,7 @@ def _parse_pr_states(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_keywords(raw: Any) -> tuple[str, ...]:
-    """Coerce an optional ``keywords`` field into a tuple of trimmed strings.
-
-    None/empty -> ``()`` (auto-extract from gap_description); string ->
-    split on comma/whitespace; list/tuple -> trimmed non-empty items.
-
-    Args:
-        raw: The raw ``keywords`` value to coerce.
-
-    Returns:
-        A tuple of trimmed keyword strings (empty when unset).
-
-    Raises:
-        ValueError: If ``raw`` is present but not a list/tuple/str.
-    """
+    """Coerce an optional ``keywords`` field into a tuple of trimmed strings."""
     if raw is None or raw == "":
         return ()
     if isinstance(raw, str):
@@ -367,19 +244,7 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to pr_monitor + GitHub.
-
-    Args:
-        raw (Any): ``None``/empty (defaults applied), a single mode string, or a
-            list/tuple of mode names.
-
-    Returns:
-        tuple[str, ...]: The validated search-mode names.
-
-    Raises:
-        ValueError: If ``raw`` is not a string/list, or contains an unknown
-            mode name.
-    """
+    """Coerce a list of mode names; default to pr_monitor + GitHub."""
     if raw is None or raw == "":
         return ("pr_monitor", "github")
     if isinstance(raw, str):
@@ -398,12 +263,7 @@ def _parse_search_modes(raw: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ExploreRequest:
-    """Top-level request for `fa explore` / `fa candidates`.
-
-    When no ``pr_monitor`` block is supplied, local mode derives the co-hosted
-    PR Monitor from the default KB Service URL. Runtime preflight may suppress
-    that default by marking PR Monitor unavailable.
-    """
+    """Top-level request for `fa explore` / `fa candidates`."""
 
     framework: str
     repo_url: str
@@ -442,19 +302,7 @@ class ExploreRequest:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ExploreRequest":
-        """Parse a JSON request payload into ExploreRequest, validating required fields.
-
-        Args:
-            raw (dict[str, Any]): The decoded JSON request payload.
-
-        Returns:
-            ExploreRequest: The fully parsed and validated request.
-
-        Raises:
-            ValueError: If a required field (``framework``, ``repo_url``,
-                ``baseline``) is missing/invalid, or a nested block has the
-                wrong type.
-        """
+        """Parse a JSON request payload into ExploreRequest, validating required fields."""
         framework = str(raw.get("framework") or "").strip().lower()
         if not framework:
             raise ValueError("framework is required")
@@ -525,29 +373,17 @@ class CommandResult:
 
     @property
     def ok(self) -> bool:
-        """True iff returncode == 0 and command did not time out.
-
-        Returns:
-            bool: ``True`` when the command succeeded and did not time out.
-        """
+        """True iff returncode == 0 and command did not time out."""
         return self.returncode == 0 and not self.timed_out
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output.
-
-        Returns:
-            dict[str, Any]: A dataclass-derived dict of all fields.
-        """
+        """Serialize to a plain dict for JSON output."""
         return asdict(self)
 
 
 @dataclass(frozen=True)
 class Finding:
-    """A single distilled observation suitable for KB contribution.
-
-    Used by :func:`hyperloom.agents.framework.kb.synthesize_findings`. Keeping the
-    record frozen + flat keeps the markdown rendering deterministic.
-    """
+    """A single distilled observation suitable for KB contribution."""
 
     title: str
     body: str = ""
@@ -576,12 +412,7 @@ class CandidateResult:
     files_json_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output, expanding nested fields.
-
-        Returns:
-            dict[str, Any]: A dict with the nested ``candidate`` and
-                ``commands`` fields expanded to plain dicts.
-        """
+        """Serialize to a plain dict for JSON output, expanding nested fields."""
         data = asdict(self)
         data["candidate"] = asdict(self.candidate)
         data["commands"] = [c.to_dict() for c in self.commands]

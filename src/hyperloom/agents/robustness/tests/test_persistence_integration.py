@@ -31,9 +31,7 @@ from hyperloom.agents.robustness.sources.base import SourceData
 from hyperloom.agents.robustness.state_store import DetectorStateStore
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _fresh_classifier(
@@ -58,7 +56,7 @@ def _fresh_classifier(
                 min_pending_ticks=ray_min_pending_ticks,
             ),
             "progress": ProgressConfig(
-                gain_window_ticks=3,
+                gain_window_actions=3,
                 gain_epsilon_pct=0.1,
                 no_levers_min_minutes=10_000.0,  # disable no_levers_found in this test
             ),
@@ -78,6 +76,8 @@ def _ctx_with_tick(
         tick_index=tick,
         shared_state=SharedStateSnapshot(
             tick=tick,
+            # One completed measurement per tick; the plateau window counts those.
+            gain_gated_action_count=tick,
             cumulative_gain_validated=cumulative_gain_validated,
             optimization_stack_size=optimization_stack_size,
         ),
@@ -110,9 +110,7 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
     )
 
 
-# ---------------------------------------------------------------------------
 # GpuLeakDetector — consecutive-tick rule
-# ---------------------------------------------------------------------------
 
 
 def test_gpu_leak_fires_only_after_2_subprocesses_see_leak(
@@ -159,16 +157,13 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
     assert all(s.name != "gpu_memory_leaked" for s in syms)
     store2.flush_atomic()
 
-    # Tick 3: leak again without owner. Counter starts from 1 again,
-    # not 2, so it should NOT fire.
+    # Tick 3: leak again without owner.
     c3, store3 = _fresh_classifier(tmp_path)
     syms3 = c3.classify(_leak_data(), _ctx_with_tick(3))
     assert all(s.name != "gpu_memory_leaked" for s in syms3)
 
 
-# ---------------------------------------------------------------------------
 # RayPendingDetector — ≥3 consecutive ticks
-# ---------------------------------------------------------------------------
 
 
 def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
@@ -183,15 +178,13 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
     assert any(s.name == "ray_pending_starvation" for s in syms3)
 
 
-# ---------------------------------------------------------------------------
 # ProgressDetector — rolling-window plateau
-# ---------------------------------------------------------------------------
 
 
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Flat 3-tick window across 3 fresh classifiers; stack_size=1 bypasses the no_levers early-return to hit the plateau path.
+    # Flat 3-measurement window across 3 fresh classifiers; stack_size=1 bypasses the no_levers early-return to hit the plateau path.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(
@@ -201,7 +194,7 @@ def test_gain_plateau_history_survives_subprocess_restarts(
         )
         c.classify(SourceData(), ctx)
         store.flush_atomic()
-    # After three flat ticks the rolling window is full and delta is 0
+    # After three flat measurements the rolling window is full and delta is 0
     # → ``gain_plateau`` should fire on a 4th classifier instance.
     c4, store4 = _fresh_classifier(tmp_path)
     syms = c4.classify(
@@ -215,9 +208,7 @@ def test_gain_plateau_history_survives_subprocess_restarts(
     assert any(s.name == "gain_plateau" for s in syms)
 
 
-# ---------------------------------------------------------------------------
 # ActionLadder cooldown — persists across subprocesses
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -230,7 +221,7 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
         evidence={},
         source="local",
     )
-    cfg = ActionLadderConfig(cooldown_ticks=5)
+    cfg = ActionLadderConfig(cooldown_sec=5.0)
 
     store1 = DetectorStateStore(session_dir=tmp_path)
     ladder1 = ActionLadder(
@@ -245,8 +236,7 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
     assert any(i.type.value == "alert" for i in result1.intents)
     store1.flush_atomic()
 
-    # A fresh ladder instance against the same state file. Tick 11 is
-    # within the 5-tick cooldown of tick 10 → no alert this time.
+    # A fresh ladder instance against the same state file.
     store2 = DetectorStateStore(session_dir=tmp_path)
     ladder2 = ActionLadder(
         config=cfg,
@@ -262,9 +252,7 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
     assert intent_types == ["send_message"]
 
 
-# ---------------------------------------------------------------------------
 # RcaThrottle cooldown — persists across subprocesses
-# ---------------------------------------------------------------------------
 
 
 def test_rca_throttle_cooldown_persists(tmp_path: Path):
@@ -299,9 +287,7 @@ def test_rca_throttle_cooldown_persists(tmp_path: Path):
     assert throttle3.should_call(sym, now_unix=1090.0, tick_id=3) is True
 
 
-# ---------------------------------------------------------------------------
 # state_store_enabled=False → behaviour reverts to in-memory only
-# ---------------------------------------------------------------------------
 
 
 def test_classifier_without_state_store_is_in_memory(tmp_path: Path):

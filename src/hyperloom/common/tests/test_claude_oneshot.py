@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the single-shot Claude completion transport.
-
-The SDK is stubbed at :func:`hyperloom.common.claude_oneshot._load_sdk`, so
-these tests pin the request the module builds and the result it flattens
-without spawning the Claude CLI.
-"""
+"""Unit tests for the single-shot Claude completion transport."""
 
 from __future__ import annotations
 

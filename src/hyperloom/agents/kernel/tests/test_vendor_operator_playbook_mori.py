@@ -5,25 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Vendor-operator-playbook routing for mori's EP dispatch/combine.
-
-Closes the gap KernelForge PR #88 left explicit: Hyperloom's own
-TraceLens-driven pipeline had no path to mori (a pip-installed compiled
-library, classified ``vendor_binary`` with no rewritable source) even though
-a validated KernelForge forge-loop task bundle exists for it. These tests
-pin, end to end within Hyperloom's own boundary:
-
-1. the registry matcher recognizes mori dispatch/combine by name (
-   ``_vendor_operator_playbooks``);
-2. ``classify_patchability`` + ``_finalize_candidates`` route both candidates
-   to ``reusable_native_kernel=True`` / ``patch_strategy="vendor_playbook"``
-   and sum their GPU share (dispatch+combine are one logical round trip);
-3. the anchor a matched playbook names resolves to an absolute path, against
-   either the packaged bundle or a ``$KERNELFORGE_PROJECT_ROOT`` substitution.
-
-Dispatching a matched playbook was ``forge_submit.submit()``'s job and went
-with it; the rewrite controller now owns that side.
-"""
+"""Vendor-operator-playbook routing for mori's EP dispatch/combine."""
 
 from __future__ import annotations
 
@@ -108,17 +90,7 @@ def test_match_vendor_operator_playbook_matches_mori_dispatch_and_combine():
 
 
 def test_role_haystack_takes_trailing_segment_of_fully_qualified_operation():
-    """A fully-qualified ``operation`` must not reintroduce the dispatch/
-    combine ambiguity _last_symbol_segment() exists to resolve.
-
-    This repo's own convention (_task_group_contract.logical_operator_name,
-    _bypass_report.py's task-group builder) is to set ``operation`` to a
-    fully-qualified ``Class::method`` symbol. ``EpDispatchCombineOp`` itself
-    contains the substring "dispatch", so taking ``operation`` verbatim
-    would make a *combine* candidate whose operation is
-    ``mori::EpDispatchCombineOp::combine`` match "dispatch" first (registry
-    order), mislabeling it (PR #1191 review finding #6).
-    """
+    """A fully-qualified ``operation`` must not reintroduce the dispatch/ combine ambiguity _last_symbol_segment() exists to resolve."""
     combine_candidate = {
         "name": "mori::EpDispatchCombineOp::combine",
         "operation": "mori::EpDispatchCombineOp::combine",
@@ -146,23 +118,14 @@ def test_match_vendor_operator_playbook_ignores_unrelated_kernels():
         "library": "aiter",
     }
     assert match_vendor_operator_playbook(gemm_candidate) is None
-    # "mori" alone (no dispatch/combine marker) must not match either --
-    # the registry requires both an identity marker and a role marker.
+    # "mori" alone (no dispatch/combine marker) must not match either -- the registry requires both an identity marker
+    # and a role marker.
     mori_other = {"name": "mori::shmem::init", "library": "mori"}
     assert match_vendor_operator_playbook(mori_other) is None
 
 
 def test_match_vendor_operator_playbook_matches_via_trace_launcher_file_when_graph_captured():
-    """A CUDA/HIP-graph-captured launch is reconstructed by TraceLens as a
-    "Synthetic Op" (e.g. ``vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16
-    (Synthetic Op)`` or ``hipGraphLaunch->EpCombineIntraNodeKernel_bf16_nop2p
-    (Synthetic Op)``) with no surviving module chain, so ``library``,
-    ``source_file``, and ``kernel_repo`` all resolve empty -- this is the
-    actual shape produced end to end for a real DeepSeek-V2 EP+DP vLLM
-    serving trace, not a hypothetical. The only field that still carries the
-    mori identity marker is ``trace_launcher_file``, the Python frame that
-    first launched the op (``.../site-packages/mori/jit/hip_driver.py``).
-    """
+    """A CUDA/HIP-graph-captured launch is reconstructed by TraceLens as a "Synthetic Op" (e.g."""
     dispatch_candidate = {
         "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
         "device_kernel_name": "EpDispatchIntraNodeKernel_bf16",
@@ -205,12 +168,7 @@ def test_classify_patchability_routes_mori_dispatch_and_combine():
 
 
 def test_classify_patchability_routes_graph_captured_mori_synthetic_ops():
-    """Same as ``test_classify_patchability_routes_mori_dispatch_and_combine``
-    but for the real, graph-captured candidate shape (empty library/
-    source_file/kernel_repo, mori identity only in ``trace_launcher_file``)
-    -- without the ``_candidate_haystack`` fix this fell through to
-    ``"source file not resolved"`` instead of routing to the playbook.
-    """
+    """Same as ``test_classify_patchability_routes_mori_dispatch_and_combine`` but for the real, graph-captured candidate shape (empty library/ source_file/kernel_repo, mori identity only in ``trace_launcher_file``) -- without the ``_candidate_haystack`` fix this fell through to ``"source file not resolved"`` instead of routing to the playbook."""
     dispatch_candidate = {
         "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
         "library": "",
@@ -274,14 +232,7 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
 
 
 def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
-    """mori's dispatch/combine are compiled bindings with no on-disk .py/.cu
-    source -- TraceLens realistically hands classify_patchability a candidate
-    with an *empty* source_file (unlike the fixtures above, which set one for
-    unrelated reasons). Confirm _finalize_candidates still fills in a
-    path-shaped stand-in so kernel_optimization.py's CLI gate (which skips
-    any candidate with a falsy source_file as "missing_native_source" before
-    it is ever dispatched) does not reject the candidate.
-    """
+    """mori's dispatch/combine are compiled bindings with no on-disk .py/.cu source -- TraceLens realistically hands classify_patchability a candidate with an *empty* source_file (unlike the fixtures above, which set one for unrelated reasons)."""
     candidates = [
         _mori_dispatch_candidate(source_file=""),
         _mori_combine_candidate(source_file=""),
@@ -296,21 +247,13 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         source_file = str(item.get("source_file") or "")
         assert source_file, "source_file must not be empty (would be skipped as missing_native_source)"
         assert source_file.endswith("mori_ep_config.py")
-        # The stand-in must look like a real path so it survives
-        # looks_like_source_path()/the non-empty CLI gate either way.
+        # The stand-in must look like a real path so it survives looks_like_source_path()/the non-empty CLI gate
+        # either way.
         assert tla.looks_like_source_path(source_file)
 
 
 def test_playbook_anchor_overrides_a_same_word_grep_collision():
-    """A registry match outranks whatever the grep tier guessed.
-
-    These operators reduce to the keywords "dispatch" and "combine", which
-    collide with unrelated vendor files (``mxfp4_moe_aux_dispatch.h``,
-    ``fmha_fwd_d64_bf16_combine.cu``) once the search roots actually resolve.
-    The registry is a curated statement that the operator is tuned through a
-    task bundle, so handing a backend the colliding path would rewrite the
-    wrong file.
-    """
+    """A registry match outranks whatever the grep tier guessed."""
     collision = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/x_dispatch.h"
     candidates = [
         _mori_dispatch_candidate(source_file=collision),
@@ -325,15 +268,7 @@ def test_playbook_anchor_overrides_a_same_word_grep_collision():
 
 
 def test_playbook_anchor_also_overrides_a_correct_grep_hit():
-    """The override does not depend on the guess being wrong.
-
-    ``dispatch_combine.py`` under site-packages really is where these operators
-    live, so this is the case where the grep tier was right. The anchor still
-    wins: the registry says the operator is tuned through a task bundle, and a
-    backend handed the device source has nothing to rewrite there. The
-    displaced path stays on the row so the override is auditable rather than
-    silent.
-    """
+    """The override does not depend on the guess being wrong."""
     candidates = [
         _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
         _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
@@ -347,13 +282,7 @@ def test_playbook_anchor_also_overrides_a_correct_grep_hit():
 
 
 def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
-    """Nothing displaced, nothing recorded.
-
-    The search roots are emptied so the grep tier cannot resolve anything: on a
-    host with the frameworks installed it reaches the same-word collision this
-    file's other cases describe, which is a displacement rather than the
-    graph-captured no-source shape under test here.
-    """
+    """Nothing displaced, nothing recorded."""
     monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
     candidates = [_mori_dispatch_candidate(source_file="")]
     out = tla._finalize_candidates(candidates, total_dur=1000.0)
@@ -363,17 +292,7 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
 
 
 def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog, tmp_path):
-    """The anchorless entry is kept out of the pipeline, not guarded against.
-
-    Every consumer of a match overrides ``source_file`` with the anchor, so an
-    entry without one substitutes nothing for whatever tier resolved the path
-    and lands the candidate as ``missing_native_source``. Guarding each consumer
-    was tried and went wrong in a way the data never justified: the guard's
-    marker gated on ``source_file``, so a row with neither anchor nor path read
-    as anchor-backed, went into ``protected_ids``, and the row most in need of
-    the review was refused it. Refusing the entry at load makes the shape
-    unreachable instead.
-    """
+    """The anchorless entry is kept out of the pipeline, not guarded against."""
     registry = tmp_path / "vendor_operator_playbooks.json"
     registry.write_text(
         json.dumps(
@@ -387,8 +306,8 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
         ),
         encoding="utf-8",
     )
-    # Redirect the registry rather than patching ``Path.read_text``, which is
-    # ``pathlib.Path``'s and would answer for every read in the process.
+    # Redirect the registry rather than patching ``Path.read_text``, which is ``pathlib.Path``'s and would answer for
+    # every read in the process.
     monkeypatch.setattr("_vendor_operator_playbooks._REGISTRY_PATH", registry)
     _reset_vendor_operator_playbooks_cache()
     with caplog.at_level(logging.WARNING, logger="_vendor_operator_playbooks"):
@@ -401,12 +320,7 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
 
 
 def _write_fake_mori_bundle(project_root: Path) -> Path:
-    """Plant a substitute bundle where ``resource_path`` looks before the package.
-
-    ``$KERNELFORGE_PROJECT_ROOT`` is the surviving override now that $FORGE_PATH
-    is gone: the layout under it mirrors the packaged data tree, so the same
-    relative path resolves against either.
-    """
+    """Plant a substitute bundle where ``resource_path`` looks before the package."""
     bundle = project_root / "examples" / "mori_ep_dispatch_combine"
     bundle.mkdir(parents=True)
     (bundle / "mori_ep_config.py").write_text("def get_ep_launch_config():\n    return {}\n", encoding="utf-8")
@@ -416,21 +330,15 @@ def _write_fake_mori_bundle(project_root: Path) -> Path:
 
 
 def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
-    """A relative ``source_file`` stand-in is later reinterpreted by
-    ``Path(...).resolve()`` against whatever the apply-stage process's CWD
-    happens to be, not against the KernelForge bundle it was meant to name
-    -- resolve_kernel_anchor_path() must never return a bare relative string,
-    whether it resolves against the packaged tree or against an operator's
-    $KERNELFORGE_PROJECT_ROOT substitution (PR #1191 review finding #8).
-    """
+    """A relative ``source_file`` stand-in is later reinterpreted by ``Path(...).resolve()`` against whatever the apply-stage process's CWD happens to be, not against the KernelForge bundle it was meant to name -- resolve_kernel_anchor_path() must never return a bare relative string, whether it resolves against the packaged tree or against an operator's $KERNELFORGE_PROJECT_ROOT substitution (PR #1191 review finding #8)."""
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     assert playbook is not None
 
     packaged_anchor = resolve_kernel_anchor_path(playbook)
     assert packaged_anchor
     assert Path(packaged_anchor).is_absolute()
-    # With the bundle packaged, the stand-in names a file that actually exists
-    # rather than a synthetic /nonexistent-forge-path placeholder.
+    # With the bundle packaged, the stand-in names a file that actually exists rather than a synthetic
+    # /nonexistent-forge-path placeholder.
     assert Path(packaged_anchor).is_file()
 
     project_root = tmp_path / "kernelforge-project"
@@ -443,8 +351,7 @@ def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
 
 
 def test_registry_json_is_valid_and_ships_in_package_data():
-    """The JSON registry parses and pyproject.toml declares it as package-data
-    (mirrors KernelForge's own wheel-packaging regression for framework/mori/)."""
+    """The JSON registry parses and pyproject.toml declares it as package-data (mirrors KernelForge's own wheel-packaging regression for framework/mori/)."""
     registry_path = _TOOLS_DIR / "vendor_operator_playbooks.json"
     data = json.loads(registry_path.read_text(encoding="utf-8"))
     playbook_ids = {p["id"] for p in data["playbooks"]}

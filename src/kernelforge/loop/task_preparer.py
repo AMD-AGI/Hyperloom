@@ -1,47 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pre-loop task preparation ("self-healing") for forge-loop.
-
-Callers of forge-loop do not always hand it a task that already meets the driver
-contract: some pass a driver that prints the wrong lines, some pass none at all.
-This module runs BEFORE the optimization loop and, when needed, invokes a single
-LLM agent to author/repair the measurement scaffolding (a ``driver.py`` and any
-helper files it needs) so the task becomes optimizable — WITHOUT ever touching
-the kernel/source being optimized.
-
-Design (mirrors ``source_map.py`` for the pre-loop LLM pattern):
-
-  * ``preflight_task`` — deterministic gate. Reuses the exact tools forge-loop
-    itself uses to read a driver (``test_correctness`` + ``bench_wallclock``), so
-    "conforms" here means "conforms to what the loop will parse".
-  * ``prepare_task`` — bounded repair loop. Protects ONLY the source under
-    optimization, lets the agent freely author/modify the driver and any other
-    non-source files, then re-runs the deterministic preflight as the
-    authoritative verdict. On success it commits the scaffolding; on failure it
-    rolls the workspace back (via git + a source byte-snapshot) and reports it.
-
-Guarantees requested by the integration:
-  1. Source protection ONLY — the kernel and every ``source_files`` entry are
-     restored after each attempt and on failure; the agent is told they are
-     off-limits. Every OTHER file (driver, helpers, configs) is fair game.
-  2. CUDA/HIP graph timing is strongly recommended and handed to the agent as an
-     embedded reference harness, but NOT forced: an operator that cannot be
-     captured into a static-input graph may use equivalent GPU-only timing.
-  3. Explicit return contract — ``PrepareResult`` reports success, or rolls back
-     and reports failure (``rolled_back=True``).
-  4. Hard wall-clock budget with no orphan processes — the agent CLI runs in its
-     own session/process group and is killed with ``killpg`` on timeout.
-  5. Git-safe — prep commits BEFORE the loop captures its pristine ``base_sha``,
-     so scaffolding is pristine, not part of the solution diff, and never
-     collides with the loop's keep/revert.
-  6. Preflight judges the driver in the same filesystem state the loop's baseline
-     will run it in. Authoring-only material (the reference example bundle) is
-     retired BEFORE the verdict, and the one task input a driver may legitimately
-     read at runtime — the invocation specification — is durable and committed
-     with the driver. Validating a state that preparation then dismantles once
-     certified a driver that crashed on the very first baseline bench.
-"""
+"""Pre-loop task preparation (\"self-healing\") for forge-loop."""
 
 from __future__ import annotations
 
@@ -86,55 +46,24 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 log = logging.getLogger(__name__)
 
 
-# Bounded repair budget. PREPARE_MAX_WALL_SEC is a single deadline across ALL
-# attempts; each attempt is additionally capped by PER_ATTEMPT_CAP_SEC.
-#
-# COLD-JIT SIZING: this wall must cover the driver-gen agent (~600-900s of LLM
-# authoring) PLUS the deterministic preflight run, whose correctness/bench stages
-# JIT-compile CK/aiter GEMM kernels on first run (~44s+/module, serial baton-lock
-# on gfx950). At the old 1200s a slow author left <5min for a cold preflight, so
-# the preflight timed out (clamped by the remaining wall, never reaching its own
-# PREFLIGHT_*_TIMEOUT_S ceilings) -> task_preparation_failed even though the
-# driver was fine. Raise the wall so agent + cold preflight both fit; it is
-# additionally clamped to the per-kernel deadline_unix the caller passes, so a
-# larger value never overruns the outer budget.
+# Bounded repair budget.
 PREPARE_MAX_ATTEMPTS = int(os.environ.get("FORGE_PREPARE_MAX_ATTEMPTS", "3") or "3")
 PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "3000")
-# Derived from the wall so it scales with it; a fixed constant falls below the
-# wall/attempts ratio as soon as either grows.
+# Derived from the wall so it scales with it; a fixed constant falls below the wall/attempts ratio as soon as either
+# grows.
 PER_ATTEMPT_CAP_SEC = int(
     os.environ.get("FORGE_PREPARE_ATTEMPT_CAP") or max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
 )
-# Smallest budget worth spending on a RETRY. Measured over 25 recorded attempts:
-# successful ones ran 350-896s, and every retry that started with less than that
-# floor (150s, 298s, 300s, 325s) burned its whole budget without writing a byte.
-# A first attempt always runs, however little time it has — a long shot is still
-# better than not trying — but handing the scraps to a retry only converts the
-# tail of the wall into tokens and a misleading "FAILED after 2 attempts".
+# Smallest budget worth spending on a RETRY.
 PREPARE_MIN_RETRY_SEC = int(os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350")
 # Wall seconds reserved per attempt for the salvage preflight after a timeout.
 _SALVAGE_RESERVE_SEC: float = float(os.environ.get("FORGE_SALVAGE_RESERVE", "120") or "120")
 
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
-# These deliberately differ from bench_wallclock's measurement defaults (10/30,
-# which the loop's baseline and every candidate use): preflight only decides
-# whether the driver PRINTS what the loop parses, and the first run of a CK/aiter
-# driver JIT-compiles its kernels (44s+ per module). Tripling the timed iterations
-# to match the baseline would spend that budget re-measuring a number preflight
-# throws away, and cold preflight timeouts have already failed otherwise-valid
-# preparations (see PREPARE_MAX_WALL_SEC). The counts a driver is judged on are
-# passed to it as --warmup/--iters, so nothing about the contract depends on them.
 PREFLIGHT_WARMUP = 3
 PREFLIGHT_ITERS = 10
 
-# The prep agent reads REAL reference example files (not just prompt text). We copy
-# the shipped examples into this workspace subdir so the agent can Read them within
-# its cwd. It is AUTHORING-ONLY scaffolding: it is removed before the deterministic
-# preflight that accepts the driver, so preflight judges the driver in the same
-# filesystem state the loop's baseline will run it in, and it is never committed.
-# Nothing a driver needs at runtime may live here; the invocation specification,
-# which a driver legitimately reads, goes beside the driver instead (see
-# _materialize_invocation_spec).
+# The prep agent reads REAL reference example files (not just prompt text).
 REFERENCE_SUBDIR = ".forge_task_reference"
 INVOCATION_SPEC_FILENAME = "invocation_spec.json"
 MAX_INVOCATION_SPEC_BYTES = 1024 * 1024
@@ -146,9 +75,7 @@ _INVOCATION_SPEC_NAME_RE = re.compile(r"^invocation_spec_[A-Za-z0-9._-]+\.json$"
 _REFERENCE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.log", "forge_experiments", ".git")
 
 
-# ---------------------------------------------------------------------------
 # Preflight — deterministic driver-contract validation
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -164,13 +91,8 @@ class PreflightResult:
     reasons: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)
     # Raw stdout+stderr tail per failed stage ("correctness", "bench", ...).
-    # ``reasons`` only carries the verdict ("DRIVER CRASHED (exit 1)"), which on
-    # its own tells the repair agent nothing about WHY — it then burns its whole
-    # attempt re-running the driver to rediscover a traceback we already had.
     diagnostics: dict = field(default_factory=dict)
-    # Wall time the whole check took, with per-stage seconds in ``details``. The
-    # audit recorded no timing at all, so "which stage ate the budget" could only
-    # be guessed at from file mtimes — which lie (see _audit_driver).
+    # Wall time the whole check took, with per-stage seconds in ``details``.
     duration_sec: float = 0.0
 
     def summary(self) -> str:
@@ -190,15 +112,7 @@ class PreflightResult:
 
     @property
     def all_failures_are_timeouts(self) -> bool:
-        """True when every primary failure is a TIMEOUT, none a CRASH.
-
-        Cascading reasons like "cannot verify graph timing because bench
-        produced no timing" are not primary failures — they just report
-        that a downstream check could not run *because an earlier stage
-        failed*. However, a "could not verify" reason that itself
-        contains a timeout token IS a primary timeout (the graph probe
-        ran and timed out).
-        """
+        """True when every primary failure is a TIMEOUT, none a CRASH."""
         if self.ok or not self.reasons:
             return False
         _CASCADING = ("cannot verify", "could not verify")
@@ -209,19 +123,9 @@ class PreflightResult:
         return all(any(t in r for t in _TIMEOUT_TOKENS) for r in primary) and not any("CRASHED" in r for r in primary)
 
 
-# Counts ACTUAL torch.cuda.CUDAGraph.replay calls (HIP graphs go through the same
-# API on ROCm), detecting real graph timing independently of whatever the driver
-# prints: an eager driver replays zero times, a graph-timed one replays once per
-# timed iteration.
-#
-# Installed as a sitecustomize module rather than a wrapper around the driver so
-# that it also covers the ranks of a self-launching multi-GPU driver. Those
-# re-exec themselves under torchrun, which puts every replay in a child process
-# where a wrapper's patch does not exist -- the parent then counts zero and a
-# perfectly graph-timed collective driver is rejected as eager. Python imports
-# sitecustomize in each of those children too, so each rank counts its own
-# replays into $GRAPH_PROBE_OUT.<pid>; the caller validates the rank set and
-# uses the least replayed rank.
+# Counts ACTUAL torch.cuda.CUDAGraph.replay calls (HIP graphs go through the same API on ROCm), detecting real graph
+# timing independently of whatever the driver prints: an eager driver replays zero times, a graph-timed one replays
+# once per timed iteration.
 _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os
 
@@ -413,26 +317,19 @@ atexit.register(_dump)
 '''
 
 
-# First-run JIT compilation of CK/aiter GEMM kernels on gfx950/rocm (serial
-# baton-lock builds, ~44s+ per module) routinely blows the old 120s correctness
-# / 300s bench preflight budgets, so task_preparation fails ("could not produce
-# a conforming driver within the budget") before the loop even starts — even
-# though the driver is fine and just needs to compile once. Give first-run JIT
-# real headroom; override via env if a build farm is unusually slow/fast. Same
-# root-cause family as kernelforge.gemm_tune's FORGE_TUNE_TASK_TIMEOUT (7200s), a
-# different knob on the same JIT-latency problem.
+# First-run JIT compilation of CK/aiter GEMM kernels on gfx950/rocm (serial baton-lock builds, ~44s+ per module)
+# routinely blows the old 120s correctness / 300s bench preflight budgets, so task_preparation fails ("could not
+# produce a conforming driver within the budget") before the loop even starts — even though the driver is fine and
+# just needs to compile once.
 PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800")
 PREFLIGHT_BENCH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800")
-# graph-replay and profiling preflight run *after* bench, so the JIT cache is
-# usually warm by then, but on a cold first run a fresh module can still compile
-# here. Keep them generous and overridable rather than the old bare 300s.
+# graph-replay and profiling preflight run *after* bench, so the JIT cache is usually warm by then, but on a cold
+# first run a fresh module can still compile here.
 PREFLIGHT_GRAPH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_GRAPH_TIMEOUT", "900") or "900")
 PREFLIGHT_PROFILE_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_PROFILE_TIMEOUT", "900") or "900")
 
 
-# How much of a failed stage's stdout+stderr to carry into the audit record and
-# the repair agent's next prompt. The producing tools already cap their capture
-# at 2000 chars; a traceback plus the lines that led to it fits well inside this.
+# How much of a failed stage's stdout+stderr to carry into the audit record and the repair agent's next prompt.
 DIAG_TAIL_CHARS = int(os.environ.get("FORGE_PREFLIGHT_DIAG_CHARS", "1500") or "1500")
 
 
@@ -515,13 +412,12 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         if rank_value is None:
             if local_rank_value is not None:
                 return PROBE_FAILED, f"incomplete rank identity in {Path(shard).name}"
-            # Launcher/helper processes are not workers even if they inherited
-            # a WORLD_SIZE value from their environment.
+            # Launcher/helper processes are not workers even if they inherited a WORLD_SIZE value from their
+            # environment.
             unranked_replays.append(replays)
             continue
         if "local_rank" in payload and local_rank_value is None:
-            # A self-launcher can inherit RANK/WORLD_SIZE from its caller. Only
-            # torchrun workers receive LOCAL_RANK, so this shard is not rank 0.
+            # A self-launcher can inherit RANK/WORLD_SIZE from its caller.
             unranked_replays.append(replays)
             continue
         if world_size_value is None:
@@ -568,9 +464,7 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
                 f"the benchmark ran single-process; this task declares {expected_world_size} ranks, so the "
                 "driver must re-exec itself under torch.distributed.run when RANK is absent",
             )
-        # A normal single-process driver writes one shard. If helper processes
-        # also imported sitecustomize, summing their partial counts could let
-        # several eager/partial processes collectively satisfy one replay gate.
+        # A normal single-process driver writes one shard.
         return max(unranked_replays, default=0), ""
     if len(world_sizes) != 1:
         return PROBE_FAILED, "graph probe rank shards disagree on world_size"
@@ -618,8 +512,7 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         if violation:
             return PROBE_DISTRIBUTED_VIOLATION, violation
 
-    # Unranked launcher shards and ranked helper descendants must not count as
-    # workers. Each real rank must independently satisfy the caller's iters gate.
+    # Unranked launcher shards and ranked helper descendants must not count as workers.
     return min(worker_replays), ""
 
 
@@ -681,18 +574,13 @@ async def _count_graph_replays(
     timeout_sec: float = 300,
     require_ranks: int = 1,
 ) -> tuple[int, str]:
-    """Run the driver and return its effective CUDA graph replay count.
-
-    Returns (replay_count, tail). replay_count == -1 signals the probe itself
-    failed (timeout / spawn error), distinct from a genuine 0 (eager timing).
-    """
+    """Run the driver and return its effective CUDA graph replay count."""
     fd, out_path = tempfile.mkstemp(prefix="forge_graph_probe_")
     os.close(fd)
     probe_dir = tempfile.mkdtemp(prefix="forge_graph_probe_site_")
     pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
-    # PYTHONPATH rather than a wrapper script: torchrun children of a
-    # self-launching driver inherit the environment, so each rank imports the
-    # counter and reports its own replays.
+    # PYTHONPATH rather than a wrapper script: torchrun children of a self-launching driver inherit the environment,
+    # so each rank imports the counter and reports its own replays.
     env = dict(
         os.environ,
         GRAPH_PROBE_OUT=out_path,
@@ -836,9 +724,7 @@ async def _preflight_async(
             reasons=[f"driver file not found: {driver}"],
         )
 
-    # Correctness: the driver must EMIT a parseable metric and not crash. Whether
-    # the baseline passes the SNR threshold is a separate (kernel) concern; here
-    # we only validate contract conformance.
+    # Correctness: the driver must EMIT a parseable metric and not crash.
     correctness_ok = False
     stage_started = time.monotonic()
     try:
@@ -872,8 +758,8 @@ async def _preflight_async(
         reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
         diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 
-    # Benchmark: the driver must accept --warmup/--iters/--bench-mode and print
-    # per-iteration wall_ms or a single median_ms/mean_ms aggregate.
+    # Benchmark: the driver must accept --warmup/--iters/--bench-mode and print per-iteration wall_ms or a single
+    # median_ms/mean_ms aggregate.
     bench_ok = False
     stage_started = time.monotonic()
     try:
@@ -888,11 +774,7 @@ async def _preflight_async(
         details["bench"] = {k: bres.get(k) for k in ("success", "median_ms", "message")}
         details["bench"]["case_count"] = len(reported_cases)
         details["bench"]["seconds"] = _stage_seconds(stage_started)
-        # The declared suite is the contract, in both directions. Accepting a
-        # non-empty subset is what let a driver be certified against fewer cases
-        # than the task declares; accepting extra ones lets it be scored on more,
-        # because the baseline takes its case table from what the driver prints,
-        # so an undeclared case joins the mean the KEEP/REVERT decision reads.
+        # The declared suite is the contract, in both directions.
         declared = set(expected_case_ids or ())
         missing_cases = sorted(declared - set(reported_cases))
         undeclared_cases = sorted(set(reported_cases) - declared) if declared else []
@@ -927,12 +809,8 @@ async def _preflight_async(
         reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
         diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 
-    # Graph timing: required only for prepass-produced drivers. Detected for real
-    # by counting actual torch.cuda.CUDAGraph replays during the benchmark (not by
-    # trusting a printed label), so a driver that times eagerly — or whose capture
-    # silently fell back to eager — performs < iters replays and is rejected.
-    # One probe run answers both stages: it counts replays and, for a task that
-    # declares several ranks, reports what the ranks actually did.
+    # Graph timing: required only for prepass-produced drivers. One probe run answers both stages: it counts
+    # CUDAGraph replays and, for a task that declares several ranks, reports what the ranks actually did.
     graph_ok = True
     ranks_ok = require_ranks <= 1
     if require_graph:
@@ -1027,15 +905,7 @@ def preflight_task(
     deadline_unix: float = 0.0,
     expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
-    """Synchronous deterministic check of a driver against the loop's contract.
-
-    Set ``require_graph`` to also require the benchmark to run under a CUDA/HIP
-    graph (used for prepass-produced drivers; the CLI's initial gate leaves it off
-    so a conforming caller-provided driver is never rejected on this basis).
-
-    ``expected_case_ids`` is the suite the task declares (see
-    ``declared_case_ids``); the driver must report a ``case_ms`` line for each.
-    """
+    """Synchronous deterministic check of a driver against the loop's contract."""
 
     return asyncio.run(
         _preflight_async(
@@ -1052,18 +922,11 @@ def preflight_task(
     )
 
 
-# ---------------------------------------------------------------------------
 # Prepare — bounded LLM repair loop with snapshot/rollback
-# ---------------------------------------------------------------------------
 
 
 class ScaffoldRetirementError(RuntimeError):
-    """The authoring-only reference bundle survived the retirement before a verdict.
-
-    Preparation cannot continue: the state the driver would be judged in is no
-    longer the state it will be committed and re-run in, which is the whole
-    invariant the retirement exists to hold.
-    """
+    """The authoring-only reference bundle survived the retirement before a verdict."""
 
 
 @dataclass
@@ -1110,13 +973,7 @@ def _abs(workspace: Path, path_like: str) -> Path:
 
 
 def _git(workspace: Path, *args: str) -> tuple[int, str]:
-    """Run one git command, returning ``(exit code, stdout+stderr)``.
-
-    A git that could not be launched at all reports 128, git's own code for a
-    fatal error, so a caller reading the exit code cannot mistake it for one of
-    git's per-path answers (``ls-files --error-unmatch`` exits 1 for "not in the
-    index", which is a very different fact from "the query never ran").
-    """
+    """Run one git command, returning ``(exit code, stdout+stderr)``."""
     try:
         r = git(*args, cwd=workspace, check=False)
     except OSError as exc:
@@ -1130,23 +987,14 @@ def _git_head(workspace: Path) -> str:
 
 
 def _git_diff_patch(workspace: Path, base_sha: str) -> str:
-    """Capture the working tree's uncommitted tracked modifications vs HEAD.
-
-    Returned as a git patch (binary-safe) so a failure rollback can restore the
-    caller's pre-prep uncommitted changes instead of blanket-resetting to HEAD.
-    """
+    """Capture the working tree's uncommitted tracked modifications vs HEAD."""
     if not base_sha:
         return ""
     return git("diff", "--binary", "HEAD", cwd=workspace).stdout
 
 
 def _git_apply_patch(workspace: Path, patch: str) -> None:
-    """Re-apply a patch captured by ``_git_diff_patch`` (no-op for an empty patch).
-
-    A rollback that cannot put the caller's own uncommitted work back has left
-    the workspace in a state nobody declared, so it says so rather than
-    reporting a clean rollback over a dirty tree.
-    """
+    """Re-apply a patch captured by ``_git_diff_patch`` (no-op for an empty patch)."""
     if not patch.strip():
         return
     git("apply", "--whitespace=nowarn", cwd=workspace, input=patch)
@@ -1161,13 +1009,7 @@ def _git_untracked(workspace: Path) -> set[str]:
 
 
 def _git_indexed(workspace: Path, path: Path) -> bool | None:
-    """Whether ``path`` is in the workspace's index, i.e. will be committed.
-
-    ``None`` when the question could not be answered — the path does not sit under
-    the workspace, or git itself failed. Collapsing that into ``False`` sent the
-    caller's failure message on to blame the workspace's ignore rules, which is
-    the wrong thing to look at when nothing ever checked them.
-    """
+    """Whether ``path`` is in the workspace's index, i.e. will be committed."""
     try:
         relative = path.resolve().relative_to(workspace.resolve()).as_posix()
     except (OSError, ValueError):
@@ -1175,8 +1017,7 @@ def _git_indexed(workspace: Path, path: Path) -> bool | None:
     code, out = _git(workspace, "ls-files", "--cached", "--error-unmatch", "--", relative)
     if code == 0:
         return True
-    # ``--error-unmatch`` exits 1 for a path the index does not hold; anything else
-    # is git failing, not git answering.
+    # ``--error-unmatch`` exits 1 for a path the index does not hold; anything else is git failing, not git answering.
     return False if code == 1 else None
 
 
@@ -1210,13 +1051,7 @@ def _safe_unlink(path: Path) -> None:
 
 
 def _find_reference_harness(ref_dir: Path | None) -> str | None:
-    """Return the text of a capture-guarded graph harness from the reference tree.
-
-    Used to pre-place a known-good ``graph_harness.py`` in the workspace so the
-    agent imports a correct ``cuda_graph_bench`` (one that accepts ``dirty``/
-    ``verify``) instead of writing its own — a self-written harness can silently
-    mismatch its own driver calls and degrade graph timing to eager.
-    """
+    """Return the text of a capture-guarded graph harness from the reference tree."""
     if ref_dir is None or not ref_dir.is_dir():
         return None
     for cand in sorted(ref_dir.rglob("graph_harness.py")):
@@ -1230,14 +1065,7 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
 
 
 def _materialize_reference(workspace: Path) -> Path | None:
-    """Make the shipped reference examples available for the agent to Read.
-
-    Copies the packaged/source ``examples`` tree into ``workspace/REFERENCE_SUBDIR``
-    so the agent reads REAL, complete reference tasks (driver.py, graph_harness.py,
-    README contract) within its cwd — not truncated prompt text. Falls back to
-    writing a compact contract + driver template when the examples tree cannot be
-    resolved (e.g. a misconfigured install). Returns the reference dir, or None.
-    """
+    """Make the shipped reference examples available for the agent to Read."""
     ref_dir = workspace / REFERENCE_SUBDIR
     _safe_rmtree(ref_dir)
 
@@ -1249,8 +1077,8 @@ def _materialize_reference(workspace: Path) -> Path | None:
     except Exception:
         _safe_rmtree(ref_dir)
 
-    # Fallback: no examples tree resolved — materialize the compact contract and a
-    # driver template so the agent still has real files to Read.
+    # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
+    # has real files to Read.
     try:
         ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
@@ -1269,9 +1097,8 @@ def _reference_note(ref_dir: Path | None, workspace: Path) -> str:
     lines = [
         "## Reference files to Read (real, complete — do NOT rely on memory)",
         f"A copy of KernelForge's shipped reference material is in `./{rel_root}/`.",
-        # A driver authored against this directory passed validation and then
-        # crashed on the loop's first baseline bench, because the directory is
-        # deleted between the two. Say so where the agent reads the path.
+        # A driver authored against this directory passed validation and then crashed on the loop's first baseline
+        # bench, because the directory is deleted between the two.
         f"`./{rel_root}/` is TEMPORARY authoring scaffolding: it is DELETED before "
         "your driver is validated and committed, so read it now but never read it "
         "at runtime — do not open, import, or glob anything under it from the "
@@ -1303,28 +1130,7 @@ def _materialize_invocation_spec(
     source_file: str,
     durable_dir: Path | None,
 ) -> tuple[Path | None, str]:
-    """Place the invocation spec where the prepared driver can keep reading it.
-
-    ``durable_dir`` is the driver's own directory, not the temporary reference
-    bundle: the spec carries the declared case table, so a driver that derives
-    its cases from the task (as the contract demands) legitimately reads it at
-    runtime, and it therefore has to survive preparation and be committed with
-    the driver.
-
-    Returns the destination and the authoritative text at that destination. An
-    equivalent payload already sitting there is left byte-identical — an external
-    driver bundle ships its own spec next to the driver, and the artifact
-    transaction guards that file as a read-only caller input, so a canonical
-    rewrite of the same data would abort the publish.
-
-    Anything else already occupying that name belongs to the caller and is left
-    alone: the directory is the caller's, and preparation's rollback restores the
-    driver and the Git-tracked state, so an untracked file replaced here could
-    not be recovered. A symlink is refused for the same reason one step further
-    out — writing through it would edit a file outside the directory this
-    function was handed. Both cases return no destination, which the caller
-    already reports as preparation continuing without the spec.
-    """
+    """Place the invocation spec where the prepared driver can keep reading it."""
     if not source_file or durable_dir is None:
         return None, ""
     try:
@@ -1363,23 +1169,7 @@ def _materialize_invocation_spec(
 
 
 def declared_case_ids(spec_path: Path | str | None) -> list[str]:
-    """Case ids the task declares its driver must benchmark, sorted.
-
-    ``tests.driver_contract.case_selectors`` is the task's own statement of the
-    suite, and the prep prompt hands those ids to the agent verbatim. Preflight
-    checks the driver's ``case_ms`` lines against this list so "conforms" means
-    "measures the declared task", not merely "printed at least one case".
-
-    An empty list means "this task declares no suite", which disables the gate,
-    and only a spec that says so may produce one. A spec that was supplied and
-    cannot be read is an error instead: returning empty for it switches the gate
-    off, so the run optimizes and scores a case set nobody verified and says so
-    in one log line among thousands of others. The operator named the file.
-
-    Raises:
-        ValueError: If ``spec_path`` names a file that cannot be read or does not
-            hold a JSON object.
-    """
+    """Case ids the task declares its driver must benchmark, sorted."""
     if not spec_path:
         return []
     try:
@@ -1401,15 +1191,7 @@ def declared_case_ids(spec_path: Path | str | None) -> list[str]:
 
 
 class _SpecInline(NamedTuple):
-    """The spec's text, or a statement of why it is not below.
-
-    Three different things stop a spec from being inlined -- it could not be
-    read, it is empty, it is too big -- and they call for three different next
-    moves. Collapsing them into one empty string means the note has to guess,
-    and the guess is wrong twice out of three times. This is the same defect
-    the module's own quick reference had, one level up: a renderer that cannot
-    distinguish absent from empty will state one when it means the other.
-    """
+    """The spec's text, or a statement of why it is not below."""
 
     text: str
     #: Completes "The specification at `./<path>` ...". Empty when ``text`` is.
@@ -1426,19 +1208,7 @@ _SPEC_RECOVER_FROM_SOURCE = (
 
 
 def _invocation_spec_text(spec_path: Path) -> _SpecInline:
-    """Return the spec verbatim, or say precisely why it is not inlined.
-
-    Handed to the agent whole rather than summarised. Every selective rendering
-    has to decide what an absent field looks like, and both ways of deciding are
-    wrong: a heading over nothing claims the field is known and empty, while
-    dropping the heading leaves no trace that the field exists at all. In the
-    raw JSON an absent key is unambiguously absent, and the agent is reading the
-    same bytes the driver will read at runtime.
-
-    Content is NOT validated as JSON, deliberately. A corrupt document is what
-    the driver will hit at runtime, and showing the agent the corruption beats
-    replacing it with an empty note that says nothing happened.
-    """
+    """Return the spec verbatim, or say precisely why it is not inlined."""
     try:
         text = spec_path.read_text(encoding="utf-8").strip()
     except (OSError, ValueError) as error:
@@ -1456,9 +1226,8 @@ def _invocation_spec_text(spec_path: Path) -> _SpecInline:
             _SPEC_RECOVER_FROM_SOURCE,
         )
     if len(text.encode("utf-8")) > _SPEC_INLINE_MAX_BYTES:
-        # Nothing observed comes close -- the document is bounded by the operand
-        # count -- but a prompt is the wrong place to find out that some
-        # producer emitted a megabyte.
+        # Nothing observed comes close -- the document is bounded by the operand count -- but a prompt is the wrong
+        # place to find out that some producer emitted a megabyte.
         return _SpecInline(
             "",
             f"is larger than the {_SPEC_INLINE_MAX_BYTES // 1024} KB inline "
@@ -1507,17 +1276,7 @@ signatures, tensor shapes, dtypes, or correctness rules.
 
 
 def _kill_process_group(proc) -> None:
-    """Kill the child and ALL its descendants (no orphans).
-
-    The child is spawned with ``start_new_session=True``, so its pid IS its
-    process-group id at creation. Signal *that* pgid directly. We deliberately do
-    NOT consult ``os.getpgid(pid)`` first: once the leader exits and its pid is
-    recycled, getpgid can resolve the reused pid to an *unrelated* live process's
-    group and we'd SIGKILL innocents. The original pgid (== pid) is the only id we
-    can trust, and it still reaps ninja/clang compile children that keep the group
-    alive after the python driver leader has died (that leak left a cold CK
-    compile burning a core for >26 min after a preflight timeout).
-    """
+    """Kill the child and ALL its descendants (no orphans)."""
     pid = getattr(proc, "pid", None)
     if pid is None:
         return
@@ -1590,22 +1349,12 @@ async def _run_prepare_agent(
         timeout_sec=max(1, int(timeout_sec)),
         additional_directories=[directory for directory in (additional_dirs or []) if directory],
         target_files=list(target_files or []),
-        # Deliberately no driver_script. That field declares the measurement
-        # driver whose content a turn must preserve, which is the opposite of
-        # this turn's job: preparation exists to author that file. Declaring it
-        # snapshots the driver as protected, so the agent's rewrite is reported
-        # as a protected file changed and rolled back. The driver is a target
-        # here, and target_files already carries it.
+        # Deliberately no driver_script.
         protected_globs=protected_globs,
         allow_dirty_targets=True,
         allow_untracked=True,
-        # Preparation authors its own scaffolding before the agent starts: the
-        # reference bundle's harness/config files and the durable invocation
-        # spec, all of which match protected_globs and none of which are
-        # targets. A provider guard that judges the worktree against HEAD reads
-        # them as protected files the turn created, rejects it, and rolls the
-        # driver back -- so the agent's edit is undone and every retry fails the
-        # same way. Judge deviations from the state the turn inherited instead.
+        # Preparation authors its own scaffolding before the agent starts: the reference bundle's harness/config files
+        # and the durable invocation spec, all of which match protected_globs and none of which are targets.
         allow_dirty_baseline=True,
         tool_policy=AgentToolPolicy(
             read=True,
@@ -1733,17 +1482,7 @@ RETRY_HEADING_NO_EDIT = "Your previous attempt did not change the driver at all"
 
 
 def _distributed_contract_note(nproc: int) -> str:
-    """What a driver must do when the task runs on more than one rank.
-
-    The loop passes ``--nproc-per-node`` to its profiler, which then expects one
-    artifact set per rank. Nothing else launches those ranks: a driver that runs
-    single-process leaves the profiler looking for ranks that never existed, and
-    any timing it does produce describes a collective that never happened.
-
-    Only the driver knows how to build its kernel's context (an IPC handle, a
-    registered buffer, a communicator), so that setup belongs here rather than
-    in a generic template.
-    """
+    """What a driver must do when the task runs on more than one rank."""
     if nproc <= 1:
         return ""
     return f"""
@@ -1935,13 +1674,7 @@ async def prepare_task(
     nproc_per_node: int = 1,
     usage=None,
 ) -> PrepareResult:
-    """Author/repair the driver so the task conforms; roll back on failure.
-
-    ``expected_case_ids`` is the suite the task declares, passed in rather than
-    re-derived here (see :func:`declared_case_ids`). The caller already gates its
-    own driver on that list, and deriving it a second time from the materialized
-    copy made the two agree only while materialization kept succeeding.
-    """
+    """Author/repair the driver so the task conforms; roll back on failure."""
 
     if deadline_unix > 0:
         deadline_sec = min(
@@ -1982,14 +1715,12 @@ async def prepare_task(
                 experiments_rel = experiments_dir.resolve().relative_to(driver_path.parent)
                 if experiments_rel.parts:
                     # Runtime logs/results can change while the agent is running.
-                    # Exclude their complete top-level subtree from the staged
-                    # driver/helper transaction.
                     external_exclusions.append(driver_path.parent / experiments_rel.parts[0])
                 elif audit_dir is not None:
                     external_exclusions.append(audit_dir)
             except (OSError, ValueError):
-                # Keep the conservative workspace exclusion when the external
-                # experiments path cannot be relativized safely.
+                # Keep the conservative workspace exclusion when the external experiments path cannot be relativized
+                # safely.
                 pass
         protected_external_inputs = [Path(path) for path in [*(read_only_files or []), invocation_spec_file] if path]
         try:
@@ -2055,35 +1786,30 @@ async def prepare_task(
             path = audit_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(driver_path, path)
-            # copy2 carries the SOURCE mtime across, so every snapshot in the
-            # audit trail claimed the driver's own mtime rather than when it was
-            # captured — reconstructing a timeline from this directory (the
-            # obvious thing to do when a prep fails) then yields wildly wrong
-            # durations. Stamp the capture time instead.
+            # copy2 carries the SOURCE mtime across, so every snapshot in the audit trail claimed the driver's own
+            # mtime rather than when it was captured — reconstructing a timeline from this directory (the obvious
+            # thing to do when a prep fails) then yields wildly wrong durations.
             os.utime(path, None)
         except OSError:
-            # A missing audit copy is non-fatal; the staged driver remains the
-            # authoritative preparation artifact.
+            # A missing audit copy is non-fatal; the staged driver remains the authoritative preparation artifact.
             pass
 
     if preflight is not None:
         _audit_json("initial_preflight.json", asdict(preflight))
 
-    # (1) Protect ONLY the source under optimization: kernel + declared source
-    # files. Everything else (driver, helpers, harness) is the agent's to author.
+    # (1) Protect ONLY the source under optimization: kernel + declared source files.
     protected = {_abs(workspace, kernel)}
     for s in source_files:
         if s:
             protected.add(_abs(workspace, s))
 
-    # Rollback anchors: a byte-snapshot of the protected source (guaranteed
-    # restore even if untracked) plus the git state, so ANY other file the agent
-    # creates/modifies can be undone on failure without knowing it in advance.
+    # Rollback anchors: a byte-snapshot of the protected source (guaranteed restore even if untracked) plus the git
+    # state, so ANY other file the agent creates/modifies can be undone on failure without knowing it in advance.
     src_snapshot = _snapshot(list(protected))
     prep_base_sha = _git_head(workspace)
     pre_untracked = _git_untracked(workspace)
-    # The caller's pre-prep uncommitted tracked modifications, captured so a
-    # failure rollback restores them instead of resetting the whole tree to HEAD.
+    # The caller's pre-prep uncommitted tracked modifications, captured so a failure rollback restores them instead of
+    # resetting the whole tree to HEAD.
     pre_diff = _git_diff_patch(workspace, prep_base_sha)
 
     def _restore_sources() -> None:
@@ -2092,11 +1818,9 @@ async def prepare_task(
             _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
 
     def _restore_kernel_workspace() -> None:
-        # Undo everything the agent did while preserving the caller's pre-prep
-        # state: reset tracked files to HEAD, drop only prep-created untracked
-        # files, re-apply the caller's original uncommitted tracked modifications,
-        # then authoritatively restore the protected source bytes (covers untracked
-        # source too). Never blanket-discards the caller's uncommitted work.
+        # Undo everything the agent did while preserving the caller's pre-prep state: reset tracked files to HEAD,
+        # drop only prep-created untracked files, re-apply the caller's original uncommitted tracked modifications,
+        # then authoritatively restore the protected source bytes (covers untracked source too).
         if prep_base_sha:
             _git(workspace, "reset", "-q")
             _git(workspace, "checkout", "--", ".")
@@ -2118,13 +1842,10 @@ async def prepare_task(
         preflight=preflight,
     )
 
-    # Give the agent REAL reference files to Read (copied into the workspace so
-    # they are inside its cwd). Authoring-only: retired before every preflight
-    # verdict and on cleanup, never committed.
+    # Give the agent REAL reference files to Read (copied into the workspace so they are inside its cwd).
     ref_dir = _materialize_reference(workspace)
-    # Kept apart from the bundle's own file list so an attempt whose
-    # re-materialization failed can drop that list and keep these (see
-    # ``_open_scaffold``).
+    # Kept apart from the bundle's own file list so an attempt whose re-materialization failed can drop that list and
+    # keep these (see ``_open_scaffold``).
     reference_prefix = ""
     if driver_external:
         reference_prefix = (
@@ -2136,17 +1857,15 @@ async def prepare_task(
             "deterministic validation succeeds. Existing task metadata and invocation "
             "specifications are read-only.\n\n"
         )
-    # The spec lives beside the driver, NOT in the reference bundle: the driver
-    # may read it at runtime, so it has to outlive preparation and be committed
-    # alongside the driver it feeds.
+    # The spec lives beside the driver, NOT in the reference bundle: the driver may read it at runtime, so it has to
+    # outlive preparation and be committed alongside the driver it feeds.
     spec_path, canonical_spec = _materialize_invocation_spec(
         invocation_spec_file,
         driver_path.parent,
     )
     if invocation_spec_file and spec_path is None:
-        # Not a default: an explicitly supplied spec that cannot be used costs the
-        # prompt's case table, the driver's durable runtime input and the
-        # committed-alongside check all at once, and the caller asked for it.
+        # Not a default: an explicitly supplied spec that cannot be used costs the prompt's case table, the driver's
+        # durable runtime input and the committed-alongside check all at once, and the caller asked for it.
         log.warning(
             "could not materialize the invocation specification %s beside the "
             "driver; preparation continues without its case table, without a "
@@ -2162,12 +1881,9 @@ async def prepare_task(
         *([spec_path.as_posix()] if spec_path is not None else []),
     ]
 
-    # (2) Pre-place a correct, capture-guarded graph_harness.py so the agent can
-    # import a known-good cuda_graph_bench (accepting dirty/verify) instead of
-    # writing its own — a self-written harness can silently mismatch its driver
-    # calls and degrade graph timing to eager. NOT forced: the agent may still do
-    # custom timing in the driver for non-capturable ops. We only place it when
-    # the task did not ship its own, and we keep it correct across attempts.
+    # (2) Pre-place a correct, capture-guarded graph_harness.py so the agent can import a known-good cuda_graph_bench
+    # (accepting dirty/verify) instead of writing its own — a self-written harness can silently mismatch its driver
+    # calls and degrade graph timing to eager.
     canonical_harness = None if harness_path.is_file() else _find_reference_harness(ref_dir)
     provided_harness = canonical_harness is not None
     if provided_harness:
@@ -2190,9 +1906,8 @@ async def prepare_task(
             return
         materialized = _materialize_reference(workspace)
         if materialized is None:
-            # The note enumerates the contract and the reference drivers by path,
-            # in a prompt that also tells the agent not to rely on memory, so
-            # keeping it would send this attempt to Read files that are gone.
+            # The note enumerates the contract and the reference drivers by path, in a prompt that also tells the
+            # agent not to rely on memory, so keeping it would send this attempt to Read files that are gone.
             log.warning(
                 "could not re-materialize the authoring reference bundle at %s; "
                 "this attempt's prompt drops its file list",
@@ -2201,14 +1916,8 @@ async def prepare_task(
         reference_note = reference_prefix + _reference_note(materialized, agent_workspace)
 
     def _reset_scaffold() -> None:
-        # Put the workspace into the exact state the driver will be judged in —
-        # which is also the state the loop's baseline will run it in. Protected
-        # source and the provided harness are restored, the durable invocation
-        # spec is un-tampered, and the authoring-only reference bundle is RETIRED:
-        # validating with scaffolding that the prep commit then deletes certifies
-        # a filesystem that never exists again, which is exactly how a driver
-        # reading its case table from the bundle passed preflight and crashed on
-        # the very first baseline bench.
+        # Put the workspace into the exact state the driver will be judged in — which is also the state the loop's
+        # baseline will run it in.
         if external_transaction is not None:
             _restore_kernel_workspace()
             external_transaction.restore_passthroughs()
@@ -2216,9 +1925,8 @@ async def prepare_task(
             _restore_sources()
         _safe_rmtree(ref_dir)
         if ref_dir is not None and ref_dir.exists():
-            # A partial removal leaves both halves of the invariant broken at once
-            # and neither is visible later: preflight judges the driver against
-            # scaffolding the prep commit then deletes, and `git add -A` carries
+            # A partial removal leaves both halves of the invariant broken at once and neither is visible later:
+            # preflight judges the driver against scaffolding the prep commit then deletes, and `git add -A` carries
             # what survived into the pristine commit.
             raise ScaffoldRetirementError(
                 f"could not retire the authoring reference bundle at {ref_dir}; the "
@@ -2236,8 +1944,8 @@ async def prepare_task(
         pf: PreflightResult,
         attempt_count: int,
     ) -> PrepareResult:
-        # Drop an unused provided harness so it does not become persistent
-        # scaffolding when the driver does not import it.
+        # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not import
+        # it.
         if provided_harness and not driver_external:
             try:
                 uses_harness = "graph_harness" in driver_path.read_text()
@@ -2246,9 +1954,7 @@ async def prepare_task(
             if not uses_harness:
                 _safe_unlink(harness_path)
         if driver_external:
-            # Publish the complete validated driver/helper change set from the
-            # isolated staging tree. The editable kernel repository is restored
-            # first and is never part of this external artifact transaction.
+            # Publish the complete validated driver/helper change set from the isolated staging tree.
             _restore_kernel_workspace()
             assert external_transaction is not None
             external_transaction.restore_passthroughs()
@@ -2281,17 +1987,9 @@ async def prepare_task(
                 audit_dir=audit_dir_str,
             )
 
-        # In-repository task scaffolding must become part of pristine before
-        # IterationLoop captures its base SHA. Stage every newly authored source
-        # file with -A (unlike the loop's -u), but exclude forge_experiments:
-        # it holds the campaign's own run state, candidates and workspace.lock,
-        # which are not part of the task and must never enter the pristine commit.
-        # The authoring-only reference bundle is already gone (_reset_scaffold).
+        # In-repository task scaffolding must become part of pristine before IterationLoop captures its base SHA.
         _git(workspace, "add", "-A", "--", ".", ":(exclude)forge_experiments")
-        # The driver is about to become pristine; anything it reads at runtime has
-        # to become pristine with it. An ignored spec would leave a committed
-        # driver whose input is untracked and can be cleaned away at any point
-        # after this — checked before the commit so there is nothing to undo.
+        # The driver is about to become pristine; anything it reads at runtime has to become pristine with it.
         spec_indexed = None if spec_path is None else _git_indexed(workspace, spec_path)
         if spec_path is not None and spec_indexed is not True:
             _rollback()
@@ -2345,12 +2043,8 @@ async def prepare_task(
         )
 
     start = time.monotonic()
-    # The in-loop preflight must respect the preparation wall (deadline_sec), not
-    # only the outer per-kernel deadline_unix. Anchored here (matching the loop's
-    # own `remaining` accounting), this absolute deadline caps every preflight so
-    # a late one can't run past the prep wall; each stage still additionally
-    # clamps to deadline_unix. _deadline_timeout recomputes the remaining budget
-    # per call, so a fixed absolute anchor shrinks correctly as time passes.
+    # The in-loop preflight must respect the preparation wall (deadline_sec), not only the outer per-kernel
+    # deadline_unix.
     preflight_deadline_unix = time.time() + deadline_sec
     if deadline_unix > 0:
         preflight_deadline_unix = min(preflight_deadline_unix, deadline_unix)
@@ -2359,12 +2053,8 @@ async def prepare_task(
     prior_failure_heading = RETRY_HEADING_DEFAULT
     last_pf = preflight
     external_rollback_error = ""
-    # An attempt that leaves the driver byte-identical is a distinct failure from
-    # one that edited it badly, and the two need different guidance. Observed in
-    # a real run: both attempts hit the agent timeout having written nothing, yet
-    # the retry prompt said "your previous attempt still did NOT pass", and the
-    # operator-facing failure quoted preflight reasons that made a never-touched
-    # driver look broken.
+    # An attempt that leaves the driver byte-identical is a distinct failure from one that edited it badly, and the
+    # two need different guidance.
     edited_any_attempt = False
     starved_retry_sec = 0.0
     scaffold_error = ""
@@ -2380,8 +2070,8 @@ async def prepare_task(
             is_last_attempt = attempts >= PREPARE_MAX_ATTEMPTS
             spendable = max(0.0, remaining - _SALVAGE_RESERVE_SEC)
             attempt_timeout = spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))
-            # Each attempt authors against the reference bundle; the preceding
-            # attempt's verdict retired it (see _reset_scaffold).
+            # Each attempt authors against the reference bundle; the preceding attempt's verdict retired it (see
+            # _reset_scaffold).
             _open_scaffold()
             prompt = _build_prompt(
                 evidence,
@@ -2436,8 +2126,7 @@ async def prepare_task(
                     "\n".join(progress_log),
                 )
                 _reset_scaffold()
-                # The Agent may have completed a valid driver before getting
-                # stuck on self-verification. Salvage it deterministically.
+                # The Agent may have completed a valid driver before getting stuck on self-verification.
                 last_pf = await _preflight_async(
                     driver_path.as_posix(),
                     snr_threshold,
@@ -2530,12 +2219,12 @@ async def prepare_task(
                     },
                 )
 
-            # (1) Source protection: whatever the agent did, restore source (and
-            # the provided harness) to pristine before we judge the driver.
+            # (1) Source protection: whatever the agent did, restore source (and the provided harness) to pristine
+            # before we judge the driver.
             _reset_scaffold()
 
-            # require_graph=True: a produced driver must actually time under a
-            # CUDA/HIP graph, not eagerly (nor silently fall back to eager).
+            # require_graph=True: a produced driver must actually time under a CUDA/HIP graph, not eagerly (nor
+            # silently fall back to eager).
             last_pf = await _preflight_async(
                 driver_path.as_posix(),
                 snr_threshold,
@@ -2594,15 +2283,13 @@ async def prepare_task(
                 if not external_rollback_error:
                     external_rollback_error = f"staging cleanup failed: {exc}"
 
-    # (3) Failure: roll the workspace back to its exact pre-prep state (tracked
-    # files reset to HEAD, caller's uncommitted mods re-applied, prep-created
-    # untracked removed, protected source restored). See _rollback.
+    # (3) Failure: roll the workspace back to its exact pre-prep state (tracked files reset to HEAD, caller's
+    # uncommitted mods re-applied, prep-created untracked removed, protected source restored).
     _rollback()
     rolled_back = not external_rollback_error
     if scaffold_error:
-        # Lead with it: the preflight reasons describe a driver judged in a state
-        # that was never valid, so quoting them first would send the operator after
-        # the driver.
+        # Lead with it: the preflight reasons describe a driver judged in a state that was never valid, so quoting
+        # them first would send the operator after the driver.
         log.error("%s", scaffold_error)
         return PrepareResult(
             ok=False,
@@ -2648,9 +2335,7 @@ def prepare_task_sync(**kwargs) -> PrepareResult:
     return asyncio.run(prepare_task(**kwargs))
 
 
-# ---------------------------------------------------------------------------
 # Embedded canonical assets (examples/ is not packaged in the wheel)
-# ---------------------------------------------------------------------------
 
 DRIVER_CONTRACT_SPEC = """\
 ## forge-loop driver contract (what the driver MUST satisfy)

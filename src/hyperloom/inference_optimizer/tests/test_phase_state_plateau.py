@@ -748,8 +748,8 @@ def test_collect_phase_breakdown_buckets_by_phase():
     }
     out = collect_attribution(state, [], [], [])
     pb = out["phase_breakdown"]
-    # The KEEP landed inside FRAMEWORK_AGENT, but it moved a config lever, so
-    # it belongs to the config bucket rather than the upstream-PR one.
+    # The KEEP landed inside FRAMEWORK_AGENT, but it moved a config lever, so it belongs to the config bucket rather
+    # than the upstream-PR one.
     assert pb["explore"]["total_gain_pct"] == 5.0
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
     assert pb["framework"]["total_gain_pct"] == 0.0

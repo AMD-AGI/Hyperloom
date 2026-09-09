@@ -1,32 +1,4 @@
-"""
-PMC L2 / HBM efficiency analyzer.
-
-Parses rocprofv3 PMC counter-collection CSV(s) and reports L2 cache behaviour
-and HBM read efficiency for a kernel.  Complements hotspot_analyzer.py, which
-reads ATT instruction timing (no cache counters).
-
-Counters expected (collect via capture-kernel-trace "PMC mode"):
-    L2 hit rate:        TCC_HIT_sum, TCC_MISS_sum, TCC_REQ_sum
-    line utilization:   TCC_EA0_RDREQ_sum, TCC_EA0_RDREQ_32B_sum
-    HBM traffic:        TCC_EA0_RDREQ_DRAM_sum
-    L1->L2:             TCP_TCC_READ_REQ_sum
-
-Usage:
-    python pmc_l2_analyzer.py <pmc_csv> [<pmc_csv> ...] \
-        [--kernel pa_decode_ps_kernel_0] [--ideal-gb 8.59] [--ea-channels 2]
-
-Interpretation:
-    L2 hit rate    : HIT/(HIT+MISS).  For decode with independent per-sequence
-                     paged KV there is no inter-CTA reuse, so ~1-3% is EXPECTED
-                     and correct (streaming).  A high value only appears when
-                     the workload has real reuse (e.g. shared-prefix serving).
-    32B fraction   : TCC_EA0_RDREQ_32B / TCC_EA0_RDREQ.  Fraction of HBM reads
-                     that are partial 32B lines.  High % => scattered access /
-                     poor spatial locality => wasted bandwidth.  ~0% => full
-                     64B lines, no line-level waste.
-    over-fetch     : measured HBM read bytes / ideal bytes.  ~1.0 => the kernel
-                     reads exactly what it needs; >>1.0 => redundant fetches.
-"""
+"""PMC L2 / HBM efficiency analyzer."""
 
 import argparse
 import csv

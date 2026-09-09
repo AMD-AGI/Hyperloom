@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-decision write-owner functions.
-
-SharedState is a passive persisted record; the functions that *own kernel
-decisions* (recording kernel-opt / integrate / gemm-tuning outcomes,
-kernel-patch identity, pending-keep bookkeeping, hot-kernel reuse) live here.
-They take ``state`` as their first argument and read/mutate it; SharedState
-keeps thin forwarding shims so existing callers keep working.
-
-Also carries the "honest E2E" hardening-flag helper (``_honest_flag`` + its
-constants), shared by both this cluster and the request handlers that stayed
-in the origin module.
-
-Dependencies on retry/default settings come from
-``state.kernel_decision_settings`` so this module does not import
-``shared_state``.
-"""
+"""Kernel-decision write-owner functions."""
 
 from __future__ import annotations
 
@@ -62,33 +47,12 @@ INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "fusion"})
 UNRESOLVED_SOURCE_REASON = "unresolved_source"
 
 
-# "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
-# whole mode on; each fix also has a per-fix override that wins over the umbrella
-# (set it to an explicit falsey value to opt a single fix out of the umbrella).
+# "Honest E2E" hardening flags.
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 
 def _honest_flag(specific_env: str) -> bool:
-    """Resolve a per-fix honest-E2E flag against the umbrella flag.
-
-    Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
-    is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
-    per-fix value always wins (lets one fix opt out of the umbrella). The
-    umbrella defaults ON. Opt the whole cohort back out with ``HL_HONEST_E2E=0``
-    (or a single fix via its per-fix env).
-
-    The per-fix layer uses :func:`trace_env.env_flag` (the canonical superset
-    vocabulary that recognizes ``0/false/no/off`` as an *explicit* False and
-    falls back to its ``default`` for unset/unrecognized values), so an
-    unrecognized per-fix value defers to the umbrella exactly as before. The
-    umbrella layer is :func:`common.env.env_bool` (default ON).
-
-    Args:
-        specific_env: The per-fix environment variable name.
-
-    Returns:
-        bool: Whether the gated behavior should be enabled.
-    """
+    """Resolve a per-fix honest-E2E flag against the umbrella flag."""
     return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
 
 
@@ -148,11 +112,9 @@ def _queue_kernel_keep(
 ) -> dict[str, Any] | None:
     """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
     if entry.get("vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP has no deployable artifact -- see
-        # Refusing to queue it here means _auto_enqueue_pending_integrations()
-        # never dispatches an integrate for it; integrate_handler() still
-        # checks this flag independently for an LLM-initiated request that
-        # names the kernel_id directly.
+        # A vendor-playbook KEEP has no deployable artifact -- see Refusing to queue it here means
+        # _auto_enqueue_pending_integrations() never dispatches an integrate for it; integrate_handler() still checks
+        # this flag independently for an LLM-initiated request that names the kernel_id directly.
         return None
     decision = str(entry.get("last_decision") or "").upper()
     try:
@@ -225,8 +187,8 @@ def _queue_kernel_keep(
             "framework_applyback": dict(entry.get("last_framework_applyback") or {}),
         }
     else:
-        # The patch snapshot is immutable, but trace-local routing metadata must
-        # follow the task when ordinals are reassigned on a later profile.
+        # The patch snapshot is immutable, but trace-local routing metadata must follow the task when ordinals are
+        # reassigned on a later profile.
         queued = queue[integration_id]
         if isinstance(queued, dict):
             queued["task_key"] = task_key
@@ -246,72 +208,15 @@ def _queue_kernel_keep(
 def enqueue_nominated_patch(
     state, *, patch, lane: str = "fusion", keep_threshold_pct: float = 3.0
 ) -> dict[str, Any] | None:
-    """Queue one self-nominated sibling patch for the shared integrate lane.
-
-    Two lanes land through this one queue, distinguished ONLY by whether the
-    record carries the four fusion fields:
-
-    * ``lane="fusion"`` (default -- every pre-existing caller is byte-identical):
-      stamps ``source="forge_fusion"``/``action_label="fusion"`` plus the fusion
-      env flags and keep bar. The drain re-fetches this record from state, its
-      ``source == "forge_fusion"`` gate fires, and the KEEP lifts as
-      ``action="fusion"`` -- feeding the idempotency short-circuit and the
-      remote-recipe fusion exporter.
-    * ``lane="rewrite"`` (the auto-nomination rewrite path): OMITS all four
-      fields. The same gate is then False, so the KEEP lifts as the generic
-      ``action="integrate"`` -- landing in the rewrite Recipe column and staying
-      clear of both fusion consumers. Verified end-to-end: the lane label is
-      never itself read downstream; only the presence of ``source`` decides.
-
-    The fusion lane used to integrate inline (apply + e2e re-baseline + KEEP)
-    right where the run finished. Under the nomination contract each kept recipe
-    is instead written here as one ``status="pending"`` record and drained by the
-    SWEEP-entry integrate loop, so the same-file collapse, cross-file
-    independence, and patch budget the rewrite/gemm lanes already get
-    (``pending_kernel_integration_records``) apply to fusion siblings too.
-
-    Three fusion-specific facts ride on the record because the generic drain and
-    writeback cannot infer them:
-
-    * ``fusion_env_flags`` -- the fused path is env-gated; unset, the patch is the
-      eager path, so ``_fill_integrate_defaults_from_state`` merges these into the
-      re-baseline server's envs or a real win is measured un-fused and REVERTED.
-    * ``keep_threshold_pct`` -- fusion keeps its own e2e bar (default 3.0%),
-      distinct from the generic integrate default, so the KEEP/REVERT verdict is
-      unchanged from the pre-contract inline path.
-    * ``action_label="fusion"`` -- the promoted stack row must read ``fusion`` (not
-      ``integrate``) or the idempotency short-circuit and the remote-recipe fusion
-      export both go blind; ``last_fusion_integrate`` is set off the same signal.
-
-    Eviction-safe: a distinct ``integration_id`` at ``status="pending"`` survives
-    ``_ensure_kernel_task_state`` (evict_terminal keeps non-terminal records; the
-    re-queue loop only ADDS). Idempotent on ``(source_file, artifact_path)``.
-
-    The fusion workspace path is a constant, so a re-discovered recipe collapses
-    onto its own earlier record. A ``dispatch_failed`` one is revived for another
-    attempt -- the drain crashed, the patch never got a verdict. A record already
-    ``integrated`` or ``rejected`` is left exactly as it is: reviving a verdict to
-    pending misreports it and, since evict_terminal only reaps terminal records,
-    would keep it in the queue forever.
-
-    Args:
-        state: SharedState (mutated in place).
-        patch: A ``NominatedPatch`` (duck-typed) from ``parse_outcome``.
-        keep_threshold_pct: The fusion-specific e2e KEEP bar to carry.
-
-    Returns:
-        The queued record, or ``None`` when the patch has no artifact to apply or
-        its record already carries a verdict.
-    """
+    """Queue one self-nominated sibling patch for the shared integrate lane."""
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
     kernel_name = str(getattr(patch, "kernel_name", "") or "").strip()
     artifact_path = str(getattr(patch, "patch_path", "") or "").strip()
     source_file = str(getattr(patch, "target_file", "") or "").strip()
     if not artifact_path or not source_file:
-        # Nothing to apply / no same-source key to collapse on: refusing to queue
-        # keeps a malformed sibling off the serial lane rather than dispatching a
-        # patch that can only fail the apply gate.
+        # Nothing to apply / no same-source key to collapse on: refusing to queue keeps a malformed sibling off the
+        # serial lane rather than dispatching a patch that can only fail the apply gate.
         return None
     env_flag = str(getattr(patch, "env_flag", "") or "").strip()
     fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
@@ -330,10 +235,9 @@ def enqueue_nominated_patch(
         ),
         "",
     )
-    # Each lane owns its own task_key / kernel_id namespace so the two lanes get
-    # distinct integration_ids and distinct kernel-rejection identities; the
-    # prefix is a state key only -- no consumer reads it (they gate on the
-    # ``source`` field), so it cannot mis-route.
+    # Each lane owns its own task_key / kernel_id namespace so the two lanes get distinct integration_ids and distinct
+    # kernel-rejection identities; the prefix is a state key only -- no consumer reads it (they gate on the ``source``
+    # field), so it cannot mis-route.
     lane_prefix = "forge_fusion" if lane == "fusion" else "forge_rewrite"
     task_key = f"{lane_prefix}:{kernel_name}" if kernel_name else f"{lane_prefix}:{source_file}"
     integration_id = existing_integration_id or _kernel_integration_id(
@@ -367,20 +271,14 @@ def enqueue_nominated_patch(
         "framework_applyback": {},
     }
     if lane == "fusion":
-        # Fusion-only: the generic drain / writeback read these back to lift the
-        # KEEP as action="fusion". Omitting them on the rewrite lane is exactly
-        # what makes that lane land as the generic action="integrate".
+        # Fusion-only: the generic drain / writeback read these back to lift the KEEP as action="fusion".
         record["source"] = "forge_fusion"
         record["action_label"] = "fusion"
         record["fusion_env_flags"] = fusion_env_flags
         record["keep_threshold_pct"] = float(keep_threshold_pct)
     elif fusion_env_flags:
-        # Rewrite lane deliberately drops the env flags (it lands as the generic
-        # action="integrate", which does not carry them into the re-baseline). A
-        # rewrite patch is expected to be self-activating (an in-source edit); if
-        # forge ever emits an env-GATED rewrite, the drain would re-bench the
-        # un-activated eager path and REVERT a genuine win. Surface that here so
-        # the contract violation is visible rather than a silent regression.
+        # Rewrite lane deliberately drops the env flags (it lands as the generic action="integrate", which does not
+        # carry them into the re-baseline).
         log.warning(
             "nomination rewrite patch %s carries env_flag %r; rewrite lane cannot "
             "activate it and the KEEP re-baseline will run the un-gated path",
@@ -390,15 +288,13 @@ def enqueue_nominated_patch(
     if integration_id not in queue:
         queue[integration_id] = record
     else:
-        # Re-enqueue of the same sibling: refresh the mutable fields (the patch
-        # snapshot identity is immutable) so a re-run's env/threshold win. The
-        # fusion-specific fields are re-stamped ONLY on the fusion lane, or a
-        # rewrite re-enqueue would resurrect fusion identity onto its record.
+        # Re-enqueue of the same sibling: refresh the mutable fields (the patch snapshot identity is immutable) so a
+        # re-run's env/threshold win.
         queued = queue[integration_id]
         if isinstance(queued, dict):
             if str(queued.get("status") or "") in VERDICT_STATUSES:
-                # A settled verdict is not re-litigated: reviving it to pending
-                # both misreports it and puts it beyond evict_terminal's reach.
+                # A settled verdict is not re-litigated: reviving it to pending both misreports it and puts it beyond
+                # evict_terminal's reach.
                 log.info(
                     "nomination re-offers %s patch %s (%s); keeping the verdict, not re-queueing",
                     queued.get("status"),
@@ -417,12 +313,7 @@ def enqueue_nominated_patch(
 
 
 def _patch_budget_for(state) -> int:
-    """How many sibling patches one round may land, env-overridable.
-
-    ``HL_KERNEL_PATCH_BUDGET`` lets an operator widen or narrow the ceiling; the
-    default is the module constant. Kept here so both the eviction cap and the
-    pending-record clamp read one number.
-    """
+    """How many sibling patches one round may land, env-overridable."""
     return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
 
 
@@ -432,11 +323,7 @@ def _ensure_kernel_task_state(state) -> None:
         state.kernel_opt_task_attempts = {}
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
-    # The queue's only deletion point. Terminal records (integrated / rejected /
-    # dispatch-failed) were once only status-flipped and never removed, so the
-    # dict grew every round and was rescanned in full each time. Reap them here,
-    # keeping a bounded tail for triage, before the re-queue below repopulates
-    # the live KEEPs.
+    # The queue's only deletion point.
     state.pending_kernel_integrations = evict_terminal(
         state.pending_kernel_integrations,
         budget=_patch_budget_for(state),
@@ -476,9 +363,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         task_group_key = str(record.get("task_group_key") or "")
         task_group_aliases = {str(alias) for alias in (record.get("legacy_task_group_keys") or []) if str(alias)}
         kernel_id = str(record.get("kernel_id") or "")
-        # One spelling on both sides: the integrated-stack scan below writes
-        # ``target_file or source_file`` too, so reading only ``source_file``
-        # here would let a same-source sibling slip past the exclusion.
+        # One spelling on both sides: the integrated-stack scan below writes ``target_file or source_file`` too, so
+        # reading only ``source_file`` here would let a same-source sibling slip past the exclusion.
         source_file = record_source_path(record)
         artifact_path = str(record.get("artifact_path") or "")
         stable_entry = state.kernel_opt_task_attempts.get(str(record.get("task_key") or "")) or {}
@@ -507,9 +393,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
                 source_file=source_file,
                 task_group_aliases=task_group_aliases,
             )
-            # Match only on a real patch_path: an attempted entry with a blank
-            # patch_path used to match {"", artifact_path}, so one empty-path
-            # attempt dropped the whole sibling family from the pending list.
+            # Match only on a real patch_path: an attempted entry with a blank patch_path used to match {"",
+            # artifact_path}, so one empty-path attempt dropped the whole sibling family from the pending list.
             and (not artifact_path or str(attempted.get("patch_path") or "") == artifact_path)
             for attempted in attempted_entries
         ):
@@ -527,11 +412,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         record["integration_id"] = str(record.get("integration_id") or integration_id)
         candidates.append((impact, micro, integration_id, record))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    # Collapse only genuine same-source siblings: two whole-file overwrites of one
-    # file cannot both land, so the strongest wins. Siblings on *different* files
-    # are kept -- that is the whole point of a batch. The source key is read the
-    # same way it is written (target_file or source_file), so a record whose path
-    # lives under target_file is no longer mistaken for source-less.
+    # Collapse only genuine same-source siblings: two whole-file overwrites of one file cannot both land, so the
+    # strongest wins.
     claimed_sources: set[str] = set()
     deduped: list[dict[str, Any]] = []
     for _impact, _micro, _integration_id, record in candidates:
@@ -541,11 +423,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         if source_file:
             claimed_sources.add(source_file)
         deduped.append(record)
-    # Cap how many siblings dispatch this round. The overflow is deferred, not
-    # dropped: it stays pending (its queue record is untouched) and is
-    # reconsidered next macro cycle, because a patch below this round's cut may
-    # clear the next round's. The integrate lane is serial, so this ceiling is a
-    # wall-clock guard, not a preference.
+    # Cap how many siblings dispatch this round.
     fit, _deferred = clamp_by_budget(deduped, _patch_budget_for(state))
     return fit
 
@@ -554,32 +432,12 @@ def _resolve_kernel_patch_identity(
     state,
     payload: dict[str, Any] | None,
 ) -> tuple[str, str, str, str]:
-    """Resolve a kernel patch's identity tuple from a result/intent payload.
-
-    Pulls ``kernel_id`` / patch path / target file / extra server args
-    from the envelope, back-filling the patch path from
-    :attr:`last_kernel_opt` when the payload omits it but names a
-    matching kernel. Extra launch args are read from the canonical
-    ``extra_server_args`` field.
-
-    Args:
-        payload (dict[str, Any] | None): The kernel_opt result or LLM
-            intent envelope (``None`` treated as empty).
-
-    Returns:
-        tuple[str, str, str, str]: ``(kernel_id, patch_path,
-            target_file, extra_args)``; any unresolved component is an
-            empty string.
-    """
+    """Resolve a kernel patch's identity tuple from a result/intent payload."""
     payload = payload or {}
     kernel_id = str(payload.get("kernel_id") or "")
     patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
-    # The last_kernel_opt back-fill is a single-patch convenience: it lends the
-    # one just-optimized patch to a result that omitted its own path. A batch
-    # sibling carries an integration_id and must never borrow it -- last_kernel_opt
-    # holds whichever sibling finished most recently, so borrowing would key this
-    # result under another sibling's identity. When a sibling omits its path it
-    # is resolved from its own pending record, not from here.
+    # The last_kernel_opt back-fill is a single-patch convenience: it lends the one just-optimized patch to a result
+    # that omitted its own path.
     if (
         not patch_path
         and kernel_id
@@ -597,16 +455,7 @@ def _resolve_kernel_patch_identity(
 
 
 def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:
-    """Compute the dedup key for a kernel patch.
-
-    Args:
-        payload (dict[str, Any] | None): The kernel_opt result or intent
-            envelope.
-
-    Returns:
-        str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
-            either ``kernel_id`` or ``patch_path`` cannot be resolved.
-    """
+    """Compute the dedup key for a kernel patch."""
     kernel_id, patch_path, _target_file, extra_args = _resolve_kernel_patch_identity(state, payload)
     if not kernel_id or not patch_path:
         return ""
@@ -617,16 +466,7 @@ def find_rejected_kernel_patch(
     state,
     payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Look up a previously-rejected patch matching ``payload``.
-
-    Args:
-        payload (dict[str, Any] | None): The kernel_opt result or intent
-            envelope identifying the patch.
-
-    Returns:
-        dict[str, Any] | None: The matching rejected-patch entry, or
-            ``None`` when the key is unresolvable or not on record.
-    """
+    """Look up a previously-rejected patch matching ``payload``."""
     key = kernel_patch_key(state, payload)
     if not key:
         return None
@@ -668,56 +508,18 @@ def record_kernel_integrate_result(
     keep_threshold_pct: float = 1.0,
     max_fault_attempts: int | None = None,
 ) -> dict[str, Any] | None:
-    """Persist one integrate E2E result and reject exhausted patch attempts.
-
-    Appends the attempt to the per-key ``kernel_integrate_attempts``
-    ledger. Two terminal paths are kept distinct:
-
-    * **Gate verdict** — a genuine REVERT (gain below threshold / accuracy
-      regression), or ``max_attempts`` non-fault attempts without a KEEP,
-      moves the patch into ``rejected_kernel_patches`` and records its
-      ``kernel_id`` in ``rejected_kernel_ids`` (terminal).
-    * **Integration fault** — an environment/apply/bench crash (see
-      :meth:`SharedState._is_integrate_fault`) that never fairly measured the
-      patch. Faults do *not* consume the REVERT quota; they get an independent
-      ``max_fault_attempts`` budget and are marked ``retryable`` so the
-      pending-integrate driver re-enqueues them, only being rejected once
-      that fault budget is exhausted.
-
-    Args:
-        result (dict[str, Any]): The integrate E2E result envelope.
-        max_attempts (int): Max non-fault attempts before rejecting a
-            non-KEEP patch (default 3).
-        keep_threshold_pct (float): The gain threshold recorded on the
-            rejection row for context (default 1.0).
-        max_fault_attempts (int): Independent budget for total integration-
-            fault attempts (initial + retries) before they are rejected as
-            ``fault_attempts_exhausted`` (default 2 = one retry).
-
-    Returns:
-        dict[str, Any] | None: The updated attempts entry (carrying a
-            ``rejected`` sub-dict when rejection fired, or
-            ``retryable=True`` for an un-exhausted fault), or ``None`` when
-            ``result`` is not a dict or its patch key is unresolvable.
-    """
+    """Persist one integrate E2E result and reject exhausted patch attempts."""
     if max_fault_attempts is None:
         max_fault_attempts = _MAX_INTEGRATE_FAULT_ATTEMPTS
 
     if not isinstance(result, dict):
         return None
-    # Bind the result to its queued record first, by integration_id alone. An
-    # integration_id is now required: the old fallback grabbed the first sibling
-    # matching only the kernel name and accepted an empty artifact_path, which
-    # could stamp integrated/rejected onto the wrong member of a batch. Every
-    # auto-dispatched integrate carries its integration_id (the drain and
-    # auto-enqueue drivers both pass it), and the LLM path that once dispatched by
-    # bare kernel_id is now closed, so the fallback has no legitimate caller left.
+    # Bind the result to its queued record first, by integration_id alone.
     integration_id = str(result.get("integration_id") or "")
     pending_record = (state.pending_kernel_integrations or {}).get(integration_id) if integration_id else None
     if isinstance(pending_record, dict):
-        # A sibling result may omit its own patch path -- resolve it from the
-        # bound record rather than from last_kernel_opt, which would borrow a
-        # different sibling's identity and key the ledger wrong.
+        # A sibling result may omit its own patch path -- resolve it from the bound record rather than from
+        # last_kernel_opt, which would borrow a different sibling's identity and key the ledger wrong.
         if not str(result.get("patch_path") or result.get("best_artifact_path") or ""):
             result = {**result, "patch_path": str(pending_record.get("artifact_path") or "")}
         if not str(result.get("target_file") or result.get("source_file") or ""):
@@ -794,17 +596,13 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # Record the integrate outcome into the breakdown recorder (idempotent per
-    # kernel_id, best-effort).
+    # Record the integrate outcome into the breakdown recorder (idempotent per kernel_id, best-effort).
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         sdir = getattr(state, "_session_dir", None)
         if not sdir or not kernel_id:
-            # Checked before the recorder is reached, so the recorder's own
-            # guard never rules on it. On a KEEP this is the adoption that
-            # credits the integrate, and nothing downstream can tell its
-            # absence from a step that earned nothing.
+            # Checked before the recorder is reached, so the recorder's own guard never rules on it.
             trace_recording_skipped(
                 "kernel_e2e",
                 reason="no session_dir" if not sdir else "no kernel_id",
@@ -823,10 +621,9 @@ def record_kernel_integrate_result(
                 target_file=target_file,
                 extra_server_args=extra_args,
                 result=result,
-                # The id recovered above, not the one on the result: a result
-                # that reached us without one still belongs to the pending
-                # integrate we matched it to, and that is the integrate whose
-                # readings must not be written over by a later one.
+                # The id recovered above, not the one on the result: a result that reached us without one still
+                # belongs to the pending integrate we matched it to, and that is the integrate whose readings must not
+                # be written over by a later one.
                 occurrence=integration_id or None,
                 validation_tier=(str(result.get("validation_tier") or "integrate_e2e") if _dec == "KEEP" else ""),
             )
@@ -860,8 +657,7 @@ def record_kernel_integrate_result(
             )
         return entry
 
-    # Integration fault: never measured fairly. Retry on its own budget instead
-    # of burning the REVERT quota, only rejecting once that budget is exhausted.
+    # Integration fault: never measured fairly.
     if is_fault:
         if fault_count < max_fault_attempts:
             entry["retryable"] = True
@@ -869,8 +665,7 @@ def record_kernel_integrate_result(
             return entry
         reason = f"fault_attempts_exhausted_{max_fault_attempts}"
     else:
-        # Gate verdict path: a genuine REVERT, or too many non-fault attempts
-        # without a KEEP.
+        # Gate verdict path: a genuine REVERT, or too many non-fault attempts without a KEEP.
         should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
         if not should_reject:
             return entry
@@ -897,11 +692,8 @@ def record_kernel_integrate_result(
         r for r in state.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
     ]
     state.rejected_kernel_patches.append(rejected)
-    # A grouped task's members stay out of ``rejected_kernel_ids``: the ids are
-    # synthetic per trace and a member can be re-dispatched under another task.
-    # The task-level rejection below is the terminal fact, so consumers must
-    # read the ledger row (``integration_status`` /
-    # ``integration_rejected_reason``) rather than this set alone.
+    # A grouped task's members stay out of ``rejected_kernel_ids``: the ids are synthetic per trace and a member can
+    # be re-dispatched under another task.
     if kernel_id and not task_group_key and kernel_id not in state.rejected_kernel_ids:
         state.rejected_kernel_ids.append(kernel_id)
     entry["rejected"] = rejected
@@ -921,15 +713,7 @@ def record_kernel_integrate_result(
 
 
 def record_gemm_tuning(state, result: dict[str, Any]) -> None:
-    """Capture the GEAK GEMM tuning result for sequencing and prompts.
-
-    Snapshots the result into ``last_gemm_tuning`` and appends it to the
-    capped ``gemm_tuning_attempts`` history. A non-dict result is
-    normalized into a failure record.
-
-    Args:
-        result (dict[str, Any]): The GEMM tuning result envelope.
-    """
+    """Capture the GEAK GEMM tuning result for sequencing and prompts."""
     if not isinstance(result, dict):
         result = {"status": "failed", "error": "non-dict gemm tuning result"}
     entry = dict(result)
@@ -956,13 +740,7 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
-    """kernel_ids already absorbed into optimization_stack by a kernel lane.
-
-    Returns:
-        set[str]: The set of ``kernel_id`` values that appear on an
-            :data:`INTEGRATING_STACK_ACTIONS` entry of
-            :attr:`optimization_stack`.
-    """
+    """kernel_ids already absorbed into optimization_stack by a kernel lane."""
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
@@ -971,13 +749,7 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
 
 
 def _source_files_in_optimization_stack(state) -> set[str]:
-    """source_file paths already touched by an integrating kernel lane; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
-
-    Returns:
-        set[str]: The set of ``target_file`` / ``source_file`` paths
-            referenced by :data:`INTEGRATING_STACK_ACTIONS` entries of
-            :attr:`optimization_stack`.
-    """
+    """source_file paths already touched by an integrating kernel lane; enforces \"same source_file, only strongest KEEP integrated\" (apply_kernel_patch is a whole-file overwrite)."""
     sources: set[str] = set()
     for e in state.optimization_stack or []:
         if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
@@ -1010,19 +782,7 @@ def _record_matches_task(
 
 
 def _kernel_ids_with_integrate_attempts(state) -> set[str]:
-    """kernel_ids that already received a *terminal* E2E integrate verdict.
-
-    A kernel_id whose only integrate attempts are un-exhausted integration
-    faults (``retryable``) is intentionally excluded so the pending-integrate
-    driver re-enqueues it for a fault retry. A kernel_id is treated as
-    attempted once *any* of its entries reached a non-retryable terminal
-    state (KEEP / real REVERT / fault budget exhausted); a terminal entry on
-    one patch key wins over a retryable entry on another.
-
-    Returns:
-        set[str]: The kernel_ids with at least one non-retryable terminal
-            integrate entry.
-    """
+    """kernel_ids that already received a *terminal* E2E integrate verdict."""
     terminal: set[str] = set()
     for entry in (state.kernel_integrate_attempts or {}).values():
         if not isinstance(entry, dict):
@@ -1037,22 +797,7 @@ def _kernel_ids_with_integrate_attempts(state) -> set[str]:
 
 
 def integrate_attempt_count_for_kernel(state, kernel_id: str) -> int:
-    """Total *recorded* integrate attempts for a kernel_id.
-
-    Sums ``attempt_count`` across every ``kernel_integrate_attempts`` entry
-    sharing this ``kernel_id`` (one kernel may produce more than one patch
-    key). The count only advances inside
-    :func:`record_kernel_integrate_result`, so it is a reliable in-flight
-    signal for the KERNEL-phase auto-integrate driver: an unchanged count
-    means a dispatched integrate has not yet been recorded (still in flight),
-    an advanced count means it completed.
-
-    Args:
-        kernel_id (str): The kernel identifier to total attempts for.
-
-    Returns:
-        int: Recorded integrate attempts (0 when unknown/blank).
-    """
+    """Total *recorded* integrate attempts for a kernel_id."""
     kid = str(kernel_id or "").strip()
     if not kid:
         return 0
@@ -1091,16 +836,7 @@ def integrate_attempt_count_for_integration(
 
 
 def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
-    """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last.
-
-    Args:
-        kernel_id (str): The kernel identifier to look up in the latest
-            trace-analyze ``hot_kernels_top15``.
-
-    Returns:
-        float: The kernel's ``gpu_pct`` impact, or ``0.0`` when blank,
-            unknown, or unparseable.
-    """
+    """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last."""
     kid = str(kernel_id or "").strip()
     if not kid:
         return 0.0
@@ -1118,32 +854,13 @@ def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
 
 
 def next_pending_keep_kernel_id(state) -> str:
-    """Return next KEEP kernel_id awaiting integrate ("" if drained).
-
-    Ordering favors trace impact (``gpu_pct``) over kernel micro speedup:
-    E2E validation should test the highest-impact hot kernel first, not
-    merely the patch with the largest isolated microbenchmark win.
-
-    Returns:
-        str: The highest-impact pending KEEP ``kernel_id``, or ``""``
-            when the queue is drained.
-    """
+    """Return next KEEP kernel_id awaiting integrate (\"\" if drained)."""
     pending = pending_keep_kernel_ids(state)
     return pending[0] if pending else ""
 
 
 def pending_keep_kernel_ids(state) -> list[str]:
-    """All KEEP kernel_ids awaiting integrate, sorted impact-first.
-
-    Kernels that already have an integrate attempt (including
-    ``NEEDS_REVIEW``) are excluded so a noisy near-threshold result does not
-    automatically rerun the same patch up to the historical max-attempt cap.
-    Positive ``NEEDS_REVIEW`` rows are handled by stack validation instead.
-
-    Returns:
-        list[str]: Pending KEEP ``kernel_id`` values sorted impact-first
-            (trace ``gpu_pct``, then micro speedup), one per source file.
-    """
+    """All KEEP kernel_ids awaiting integrate, sorted impact-first."""
     return [
         str(record.get("kernel_id") or "")
         for record in pending_kernel_integration_records(state)
@@ -1152,28 +869,12 @@ def pending_keep_kernel_ids(state) -> list[str]:
 
 
 def has_keep_pending_integrate(state) -> bool:
-    """Whether any KEEP kernel is still awaiting integrate.
-
-    Returns:
-        bool: ``True`` when :meth:`next_pending_keep_kernel_id` is
-            non-empty.
-    """
+    """Whether any KEEP kernel is still awaiting integrate."""
     return bool(next_pending_keep_kernel_id(state))
 
 
 def index_attempts_by_kernel_id(attempts: Any) -> dict[str, dict]:
-    """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``.
-
-    The ordinal id is not an identity — reranking moves it between operators, so
-    two stable entries can claim the same one. The latest-stamped entry wins,
-    which is the one currently occupying the ordinal slot.
-
-    Args:
-        attempts: A ``kernel_opt_task_attempts`` mapping, or anything falsy.
-
-    Returns:
-        ``{current_kernel_id: attempt}``, holding the ledger's own entry dicts.
-    """
+    """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``."""
     latest: dict[str, tuple[str, dict]] = {}
     for entry in (attempts or {}).values():
         if not isinstance(entry, dict):
@@ -1193,12 +894,7 @@ def _entry_by_kernel_id(state, kernel_id: str) -> dict | None:
 
 
 def kernel_opt_attempts_count(state) -> int:
-    """Number of distinct kernel tasks with recorded kernel_opt attempts.
-
-    Returns:
-        int: The size of the ``kernel_opt_task_attempts`` ledger (one entry
-            per stable task identity, not per ordinal kernel_id).
-    """
+    """Number of distinct kernel tasks with recorded kernel_opt attempts."""
     _ensure_kernel_task_state(state)
     return len(state.kernel_opt_task_attempts or {})
 
@@ -1209,18 +905,7 @@ def untried_hot_reusable_kernels(
     min_gpu_pct: float | None = None,
     top_n: int | None = None,
 ) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group.
-
-    Args:
-        min_gpu_pct (float | None): Minimum GPU-share threshold; when
-            ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``.
-        top_n (int | None): Cap on enforced kernels by gpu_pct; when
-            ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``.
-
-    Returns:
-        list[str]: The untried hot-reusable ``kernel_id`` values (one per
-            task_group), sorted strongest-first.
-    """
+    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group."""
     info = state.last_trace_analyze or {}
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     task_groups = info.get("task_groups") or []
@@ -1266,28 +951,23 @@ def untried_hot_reusable_kernels(
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
 
-    # Sort by gpu_pct desc so dedup picks the strongest member of each
-    # task_group.
+    # Sort by gpu_pct desc so dedup picks the strongest member of each task_group.
     rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     for k in hot:
         if not isinstance(k, dict):
             continue
         if k.get("reusable_native_kernel") is not True:
             continue
-        # Bypass path tags a kernel non-dispatchable when its shape is
-        # geometry-only (launch_grid/tile_name) and would fail the kernel-opt
-        # gate. Skip those so they never re-enter the untried queue. Absent field
-        # (TraceLens path) is treated as dispatchable to avoid regressing it.
+        # Bypass path tags a kernel non-dispatchable when its shape is geometry-only (launch_grid/tile_name) and would
+        # fail the kernel-opt gate.
         if k.get("shape_dispatchable") is False:
             continue
         try:
             gpu_pct = float(k.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
             gpu_pct = 0.0
-        # Vendor-playbook groups (mori's dispatch+combine) are gated on the
-        # sum of the group's members, not each member's own share, and may
-        # pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's
-        # docstring. Ranking below still sorts on the per-row gpu_pct.
+        # Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the group's members, not each
+        # member's own share, and may pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's docstring.
         if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
             continue
         kid = str(k.get("kernel_id") or "")
@@ -1297,8 +977,7 @@ def untried_hot_reusable_kernels(
         group_info = kid_to_group.get(kid)
         members = sorted(group_info[0]) if group_info else [kid]
         group_key = group_info[1] if group_info else ""
-        # Identity of the underlying kernel, independent of the synthetic
-        # per-row kernel_id. Used only as a dedup fallback (see below).
+        # Identity of the underlying kernel, independent of the synthetic per-row kernel_id.
         identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
         rows.append((gpu_pct, kid, src, members, group_key, identity))
     rows.sort(key=lambda x: x[0], reverse=True)
@@ -1310,14 +989,9 @@ def untried_hot_reusable_kernels(
         dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
         if dedup_key in seen_groups:
             continue
-        # Fallback dedup: when the trace carries no ``task_groups`` metadata
-        # every row degenerates to its own group, so the SAME kernel appearing
-        # under several synthetic ids (identical source_file+name+gpu_pct, e.g.
-        # k001/k002) is treated as several distinct hot kernels. The first gets
-        # attempted and rejected while its twin stays forever "untried", so
-        # kernel_work_pending() never goes False and KERNEL_AGENT spins until
-        # the wall-clock cap -- while the twin is not even in the candidate
-        # registry, so no agent can ever act on it. Collapse by identity.
+        # Fallback dedup: when the trace carries no ``task_groups`` metadata every row degenerates to its own group,
+        # so the SAME kernel appearing under several synthetic ids (identical source_file+name+gpu_pct, e.g.
+        # k001/k002) is treated as several distinct hot kernels.
         identity = row[5]
         if identity[0] and identity[1]:
             if identity in seen_identities:
@@ -1330,19 +1004,7 @@ def untried_hot_reusable_kernels(
     untried: list[str] = []
 
     def _attempt_for_member(member_id: str) -> dict[str, Any]:
-        """Ledger entry covering ``member_id``, tolerating synthetic-id churn.
-
-        ``current_kernel_id`` tracks whichever synthetic id the agent last
-        asked for, so for a kernel that shows up under several ids (k001/k002
-        for one CK GEMM) it flip-flops. Matching on it alone makes the entry
-        invisible under the *other* id, which is exactly how a rejected kernel
-        gets re-reported as untried forever. Fall back to the membership the
-        ledger itself records -- a task_group's members, and the op-fanout
-        siblings the batch filter merged into the row's representative. The
-        latter matters because the merge is reported as an unattempted skip,
-        which writes no row of its own: without it the sibling resolves to no
-        entry at all and stays in this queue for a dispatch that cannot happen.
-        """
+        """Ledger entry covering ``member_id``, tolerating synthetic-id churn."""
         for value in attempts.values():
             if not isinstance(value, dict):
                 continue
@@ -1423,12 +1085,8 @@ def untried_hot_reusable_kernels(
         )
         if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
             continue
-        # Resolve through ``_attempt_for_member`` rather than comparing ids
-        # inline: a row's own id is not the only id it covers. An op-fanout
-        # representative covers the siblings the batch filter merged into it,
-        # and those merges are reported as unattempted skips that write no row
-        # of their own -- so a sibling compared by id alone finds nothing and
-        # keeps owing an attempt no dispatch will make.
+        # Resolve through ``_attempt_for_member`` rather than comparing ids inline: a row's own id is not the only id
+        # it covers.
         if not group_key and any(
             _matches_current_task(member, group_key, src)
             and int((_attempt_for_member(member) or {}).get("attempts", 0)) > 0

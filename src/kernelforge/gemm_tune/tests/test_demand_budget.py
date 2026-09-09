@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for sizing the demand shape list against the mode's real cost.
-
-A `--libtype all` shape does not cost what a hipblaslt-only shape costs. A
-per-backend breakdown over four shapes on an 8-GPU MI355X box measured 169s for
-hipblaslt+asm+triton+skinny+opus+torch together and 1458s for flydsl on its own
--- and flydsl is not droppable, it won two of the four shapes (by 37% at M=16,
-N=1536, K=7168). Thorough mode is genuinely ~5.5x more expensive per shape.
-
-Sizing it with the fast figure is not a mild over-estimate: the batch claims
-5.5x the shapes it can finish, `--shape_grouped` spends the entire allowance on
-the first few, and the remainder are written as nothing. The report then cannot
-distinguish that from a tuner that ran fine and found no improvement, which is
-the reading that hid the original breakage.
-"""
+"""Tests for sizing the demand shape list against the mode's real cost."""
 
 from __future__ import annotations
 
@@ -65,8 +52,8 @@ def test_garbage_override_falls_back_to_the_measured_cost(monkeypatch):
 
 
 def test_never_claims_zero_shapes():
-    # A budget smaller than one shape still has to tune something, or the run
-    # reports "no shapes" for what is really "no time".
+    # A budget smaller than one shape still has to tune something, or the run reports "no shapes" for what is really
+    # "no time".
     assert adc._demand_budget(_Ctx(1, thorough=True)) == 1
     assert adc._demand_budget(_Ctx(0)) == 1
 

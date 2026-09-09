@@ -172,22 +172,7 @@ def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> N
 
 
 def _ignore_forge_loop_output(workspace: Path) -> None:
-    """Hide forge-loop's own output directory from Git inside one worktree.
-
-    forge-loop optimizes a Git workspace while writing its campaign state and
-    JIT caches into that same workspace, and its workspace guard rejects any
-    untracked path the caller did not declare. It therefore requires the
-    workspace to ignore that directory -- the packaged examples satisfy this by
-    writing a ``.gitignore`` themselves. A framework repository never does, so
-    without this the first JIT compile inside an operator worktree fails the
-    iteration for infrastructure output rather than for anything the agent did.
-
-    The rule is a ``.gitignore`` inside the directory rather than
-    ``$GIT_DIR/info/exclude``: Git resolves ``info/`` against the common
-    directory, so an exclude file would be ignored for this worktree and instead
-    leak into the shared repository. Matching ``*`` also covers the file itself,
-    which keeps it untracked and therefore out of the exported patch.
-    """
+    """Hide forge-loop's own output directory from Git inside one worktree."""
     output_root = workspace / FORGE_LOOP_OUTPUT_DIRNAME
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / ".gitignore").write_text("*\n", encoding="utf-8")
@@ -365,21 +350,13 @@ def changed_files_from_base(
     *,
     best_commit: str,
 ) -> tuple[str, ...]:
-    """List the repo-relative paths one KEEP changes against the controller base.
-
-    Read from Git rather than from the forge-loop manifest. The manifest is the
-    optimizer's own account of what it edited; this is what the published patch
-    will actually apply, and only the second one bounds what integration commits.
-    The task's ``source_files`` do not bound it either -- forge-loop treats them
-    as orientation, not as an edit allowlist -- so without this the scope of a
-    published patch is not recorded anywhere its consumer can check.
-    """
+    """List the repo-relative paths one KEEP changes against the controller base."""
     best = str(best_commit or "").strip().lower()
     if not best:
         return ()
     output = git(
-        # Without this Git renders a path holding any non-ASCII byte as a quoted,
-        # escaped string, and the consumer stages what the name says.
+        # Without this Git renders a path holding any non-ASCII byte as a quoted, escaped string, and the consumer
+        # stages what the name says.
         "-c",
         "core.quotePath=false",
         "diff",

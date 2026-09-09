@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node detection is env-only for the kernel-agent patch tool.
-
-Regression guard for the hardening that gates multi-node fan-out solely on the
-trusted in-process ``$INFERENCE_OPTIMIZER_NODES`` signal, so a co-tenant cannot
-force multi-node behavior by planting a world-writable multi-node state file.
-"""
+"""Multi-node detection is env-only for the kernel-agent patch tool."""
 
 from __future__ import annotations
 
@@ -76,12 +71,11 @@ def test_coerce_rebuild_command_rejects_shell_control(akp):
 
 
 def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, monkeypatch):
-    # SWSPLAT-42362 (all-or-nothing): an invalid rebuild_command must fail
-    # BEFORE the live target is overwritten — the target keeps its original
-    # bytes, no partial apply.
+    # SWSPLAT-42362 (all-or-nothing): an invalid rebuild_command must fail BEFORE the live target is overwritten — the
+    # target keeps its original bytes, no partial apply.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
-    # Non-.py target avoids the python-source completeness check so the flow
-    # reaches the rebuild_command coercion (the point under test).
+    # Non-.py target avoids the python-source completeness check so the flow reaches the rebuild_command coercion (the
+    # point under test).
     orig_bytes = "// ORIGINAL kernel\nint main() { return 0; }\n"
     target = tmp_path / "kernel.cpp"
     target.write_text(orig_bytes, encoding="utf-8")
@@ -103,9 +97,8 @@ def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, 
 
 
 def test_invalid_rebuild_command_rejected_before_snapshot_mutation(akp, tmp_path, monkeypatch):
-    # SWSPLAT-42362 (all-or-nothing, snapshot path): the _apply_kernel_patch_snapshot
-    # early coercion must reject an invalid rebuild_command BEFORE any snapshot
-    # write touches the live target — the target keeps its original bytes.
+    # SWSPLAT-42362 (all-or-nothing, snapshot path): the _apply_kernel_patch_snapshot early coercion must reject an
+    # invalid rebuild_command BEFORE any snapshot write touches the live target — the target keeps its original bytes.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -113,8 +106,8 @@ def test_invalid_rebuild_command_rejected_before_snapshot_mutation(akp, tmp_path
     target = repo / "kernel.cpp"
     target.write_text(orig_bytes, encoding="utf-8")
 
-    # Manifest: a single 'write' descriptor for kernel.cpp (snapshot mode reads
-    # the byte-exact content from snapshot_dir, not the diff body).
+    # Manifest: a single 'write' descriptor for kernel.cpp (snapshot mode reads the byte-exact content from
+    # snapshot_dir, not the diff body).
     patch = tmp_path / "fusion.patch"
     patch.write_text(
         "\n".join(

@@ -318,8 +318,9 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     tmp_path,
     monkeypatch,
 ):
-    """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
-    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit, expand the GPU list to 0..TP-1 so vllm/sglang
+    sees enough devices.
+    """
     import yaml
 
     monkeypatch.setenv("TP", "8")
@@ -435,11 +436,7 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     tmp_path,
     monkeypatch,
 ):
-    """vLLM: OSL=1024, CONC=32, R unset → capture capped at 128, delay=6080.
-
-    Capture is the serialization-safe cap (default 128); delay keeps the
-    warmup formula OSL*(R+1)*3 - max_iters/2 = 1024*2*3 - 64 = 6080.
-    """
+    """vLLM: OSL=1024, CONC=32, R unset → capture capped at 128, delay=6080."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -477,14 +474,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     monkeypatch,
     caplog,
 ):
-    """A candidate with args_mode="replace" must not strip the profiler bounds.
-
-    Once ``current_best`` carries ``args_mode="replace"``, the candidate's flag
-    string overwrote EXTRA_VLLM_ARGS wholesale and took the injected
-    ``max_iterations`` with it. vLLM reads a missing ``max_iterations`` as
-    "profile until stop_profile", which grew host RAM at ~60 MiB/s until the
-    cgroup OOM-killer took the engine process out mid-roofline.
-    """
+    """A candidate with args_mode=\"replace\" must not strip the profiler bounds."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -500,9 +490,8 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
         },
     )
     caplog.set_level("WARNING")
-    # Verbatim from the gemma-4-26B-A4B roofline that was OOM-killed, JSON flag
-    # included -- the restore has to survive a string the arg merger refuses to
-    # tokenize.
+    # Verbatim from the gemma-4-26B-A4B roofline that was OOM-killed, JSON flag included -- the restore has to survive
+    # a string the arg merger refuses to tokenize.
     candidate = '--no-enable-prefix-caching --compilation-config {"cudagraph_capture_sizes":[17,34,1088]}'
     out = _materialize_config_with_envs(
         src,
@@ -587,15 +576,7 @@ def test_materialize_profile_cap_wins_over_a_max_iterations_pinned_in_the_yaml(
     tmp_path,
     monkeypatch,
 ):
-    """The computed cap has to override a YAML-pinned value, not defer to it.
-
-    The cap is a serialization-safe budget (``HYPERLOOM_PROFILE_MAX_STEPS_CAP`` /
-    steady-floor); a hand-written ``max_iterations 100000`` is unbounded in practice.
-    Injecting unconditionally and letting the repeated flag win last is what enforces
-    that -- skipping injection because the name is already present hands the run the
-    YAML value and silently discards the budget. ``HYPERLOOM_PROFILE_MAX_ITERS`` is
-    the operator override channel, not the YAML.
-    """
+    """The computed cap has to override a YAML-pinned value, not defer to it."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -646,8 +627,9 @@ def test_materialize_profile_annotation_flag_wins_over_a_stale_yaml_value(
     tmp_path,
     monkeypatch,
 ):
-    """A YAML that disables the annotation would leave the trace unlabelled,
-    so the injected value has to land after it and win the last-wins resolution."""
+    """A YAML that disables the annotation would leave the trace unlabelled, so the injected value has to land after it
+    and win the last-wins resolution.
+    """
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -673,12 +655,7 @@ def test_materialize_profile_restore_rejects_a_zero_max_iterations(
     monkeypatch,
     caplog,
 ):
-    """``max_iterations 0`` is vLLM's own spelling of "no limit".
-
-    Matching the flag by name alone accepted it, so the guard logged that it had made
-    the profiler bounded while the run stayed unbounded -- worse than not guarding,
-    because the warning sends the next investigation the wrong way.
-    """
+    """``max_iterations 0`` is vLLM's own spelling of \"no limit\"."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -721,8 +698,9 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     tmp_path,
     monkeypatch,
 ):
-    """A frontend profiler left on tracks no iterations and captures the whole range;
-    that is how an API-server process became an OOM victim."""
+    """A frontend profiler left on tracks no iterations and captures the whole range; that is how an API-server process
+    became an OOM victim.
+    """
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -775,13 +753,7 @@ def test_materialize_profile_bounds_outlive_remove_args(
     monkeypatch,
     caplog,
 ):
-    """``remove_args`` runs after the merges, so the re-assertion has to be the last write.
-
-    The two arrive together in practice: ``args_mode="replace"`` exists precisely
-    because the KEEP carried ``remove_args`` (profile.py copies both off
-    ``base_*``), so a restore that lands before ``remove_server_args`` can be
-    undone by it -- while still logging that it restored the bounds.
-    """
+    """``remove_args`` runs after the merges, so the re-assertion has to be the last write."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -804,12 +776,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     tmp_path,
     monkeypatch,
 ):
-    """``delay_iterations`` is a bad sentinel: it is ``max_iterations`` that bounds the capture.
-
-    A candidate that happens to carry a delay flag used to satisfy the guard and
-    leave the run with no cap at all -- exactly the unbounded profiler this is
-    meant to prevent.
-    """
+    """``delay_iterations`` is a bad sentinel: it is ``max_iterations`` that bounds the capture."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -875,13 +842,7 @@ def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
     monkeypatch,
     caplog,
 ):
-    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor.
-
-    CONC=32/OSL=1024/R=1.0 -> steady_floor=ceil(1024*2/64)=32, far above the
-    AgentX cap of 8. The manual HYPERLOOM_PROFILE_MAX_ITERS override already
-    warns in this situation; the AgentX auto-clamp must match it instead of
-    silently capturing a trace with no steady-state window.
-    """
+    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -900,12 +861,7 @@ def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
     monkeypatch,
     caplog,
 ):
-    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden.
-
-    Without this, an operator who explicitly raised the cap (e.g. to widen the
-    profiler's steady-state window) would see it clamped back to 8 by the
-    AgentX branch with no indication their override had no effect.
-    """
+    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -925,15 +881,7 @@ def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound
     monkeypatch,
     caplog,
 ):
-    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else.
-
-    HYPERLOOM_PROFILE_MAX_ITERS is applied after the AgentX clamp and wins, so
-    it restores exactly the host-RAM exposure the clamp exists to remove. The
-    two pre-existing warnings cannot cover this: ``cap`` defaults to
-    _DEFAULT_PROFILE_MAX_STEPS (128), so an override of 128 is neither below
-    steady_floor's band nor above the cap, and the bound would be lifted in
-    silence.
-    """
+    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -984,8 +932,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     tmp_path,
     monkeypatch,
 ):
-    """Capture is always the serialization cap (default 128), even for a small
-    OSL whose steady floor is far below it (OSL=256, CONC=64 ⇒ floor=4)."""
+    """Capture is always the serialization cap (default 128), even for a small OSL whose steady floor is far below it (OSL=256, CONC=64 ⇒ floor=4)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1031,9 +978,7 @@ def test_materialize_profile_force_overrides_user_num_prompts(
     tmp_path,
     monkeypatch,
 ):
-    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an
-    under-sized value (skill default `max_concurrency * 1`) would
-    silently empty the trace."""
+    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an under-sized value (skill default `max_concurrency * 1`) would silently empty the trace."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1150,8 +1095,7 @@ def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains
-    --enable-shape-discovery-for-cuda-graph-profile."""
+    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains --enable-shape-discovery-for-cuda-graph-profile."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1163,8 +1107,7 @@ def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
         "",
     )
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
-    # Per-framework dispatch in reverse: the vLLM patcher must NOT be
-    # invoked when the YAML's framework is SGLang.
+    # Per-framework dispatch in reverse: the vLLM patcher must NOT be invoked when the YAML's framework is SGLang.
     assert counts == {"vllm": 0, "sglang": 1}, counts
 
 
@@ -1172,8 +1115,7 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher returns False ⇒ no shape-discovery flag (otherwise
-    SGLang argparse errors on the unknown flag)."""
+    """Patcher returns False ⇒ no shape-discovery flag (otherwise SGLang argparse errors on the unknown flag)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1191,11 +1133,7 @@ def test_materialize_profile_sglang_drops_annotations_when_patch_fails(
     tmp_path,
     monkeypatch,
 ):
-    """A failed patch also clears the annotation-only capture options.
-
-    Without the server-side patch the trace carries no ``kernel_shape_profiler``
-    events, so requesting shape discovery / detailed annotations only pays the
-    capture cost. The vLLM branch already drops its equivalent flag."""
+    """A failed patch also clears the annotation-only capture options."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1231,10 +1169,7 @@ def test_materialize_profile_sglang_keeps_annotations_when_patch_not_attempted(
     tmp_path,
     monkeypatch,
 ):
-    """HYPERLOOM_ENABLE_PATCH=0 must not degrade the capture options.
-
-    Patching disabled is not the same as patching failed: the image may ship the
-    TraceLens patch already applied, in which case the annotations still work."""
+    """HYPERLOOM_ENABLE_PATCH=0 must not degrade the capture options."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1254,11 +1189,7 @@ def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
     tmp_path,
     monkeypatch,
 ):
-    """``--disable-cuda-graph`` and ``--enable-profile-cuda-graph`` contradict.
-
-    The eager flag arrives via ``extra_server_args`` while the graph-capture
-    profiling flag comes from the profile YAML, so the two only meet after the
-    merges. An eager server captures no graph, leaving nothing to profile."""
+    """``--disable-cuda-graph`` and ``--enable-profile-cuda-graph`` contradict."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1375,8 +1306,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
     tmp_path,
     monkeypatch,
 ):
-    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes
-    CUDA-graph capture); --enable-profile-cuda-graph still applies."""
+    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes CUDA-graph capture); --enable-profile-cuda-graph still applies."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1549,8 +1479,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
     tmp_path,
     monkeypatch,
 ):
-    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for
-    Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
+    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1617,9 +1546,7 @@ def test_profile_server_args_sanitizer_drops_torch_compile_flags():
 
 
 def test_profile_server_args_sanitizer_preserves_json_value_quotes():
-    """Regression: embedded JSON values (e.g. --speculative-config) must keep
-    their inner double-quotes. POSIX shlex.split would strip them, yielding the
-    unparseable {method:...} and failing every profile/roofline server boot."""
+    """Regression: embedded JSON values (e.g. --speculative-config) must keep their inner double-quotes."""
     spec = '--speculative-config {"method":"deepseek_mtp","num_speculative_tokens":1}'
     assert _sanitize_profile_server_args(spec) == spec
 
@@ -1721,13 +1648,11 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
     """FRAMEWORK=atom falls through to the normal profile path (the atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
-    # Anchor session/runs paths under the test tmp dir. Without this the
-    # executor falls back to the ``/workspace/hyperloom`` default, which is
-    # not writable on a clean CI runner (PermissionError on ``/workspace``).
+    # Anchor session/runs paths under the test tmp dir.
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     pe = ProfileExecutor()
-    # Sentinel-patch the parent __call__ so we can prove the normal path
-    # is reached without launching Magpie in this unit test.
+    # Sentinel-patch the parent __call__ so we can prove the normal path is reached without launching Magpie in this
+    # unit test.
     called = {"parent": False}
 
     async def _fake_parent(self, ctx):
@@ -1874,11 +1799,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
-    """A parseable measurement must not launder a non-zero process exit into success.
-
-    The round cannot be the number a later comparison anchors to. Same contract
-    ``run_grid`` enforces for a variant.
-    """
+    """A parseable measurement must not launder a non-zero process exit into success."""
     db = SqliteConnection(tmp_path / "baseline.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2285,8 +2206,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the
-    benchmark workspace, under the profile task's ``capture_traces`` dir."""
+    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2363,12 +2283,7 @@ def _check_row(health: dict, check_id: str) -> dict:
 
 
 def test_zero_cpu_op_is_not_a_failed_input_dims_check(tmp_path):
-    """The structured check must not contradict the advisory beside it.
-
-    The prose branch says zero ``cpu_op`` on ROCm/SGLang is an event-naming
-    difference rather than a capture regression, while the check row called it
-    ``failed`` -- and the row is the copy consumers query by id.
-    """
+    """The structured check must not contradict the advisory beside it."""
     from hyperloom.orchestrator.actions.executors import profile as pf
 
     _capture_trace_dir(tmp_path, cpu_ops=0, with_input_dims=0)
@@ -2415,8 +2330,8 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "top_k": 5,
         "dry_run": True,
         "budget_minutes": 1,
-        # Exercise the structured-result plumbing via the explicit bypass route
-        # (the default is now the TraceLens agent route, which needs a real root).
+        # Exercise the structured-result plumbing via the explicit bypass route (the default is now the TraceLens
+        # agent route, which needs a real root).
         "analysis_route": "bypass",
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
@@ -2449,8 +2364,7 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the
-    TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2601,8 +2515,7 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
-    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even
-    for a text-gen framework (explicit env route wins over the default)."""
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even for a text-gen framework (explicit env route wins over the default)."""
     monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2630,8 +2543,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route
-    (the shipped default). Bypass is reached only via an explicit route."""
+    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2711,9 +2623,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only
-    (must NOT reach bypass, which would crash argparse -> degraded), while
-    --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only (must NOT reach bypass, which would crash argparse -> degraded), while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2752,8 +2662,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     session_dir,
     monkeypatch,
 ):
-    """The bypass route surfaces a kernel_journey discovery run labelled
-    source="bypass", carrying the real hot kernels."""
+    """The bypass route surfaces a kernel_journey discovery run labelled source="bypass", carrying the real hot kernels."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2810,9 +2719,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
     session_dir,
     monkeypatch,
 ):
-    """Without an explicit ``top_k`` the handler must NOT pass
-    ``--top-k`` so tracelens_analysis.py applies its own large-pool default
-    (candidate-build cap decoupled from the dispatch-side budget)."""
+    """Without an explicit ``top_k`` the handler must NOT pass ``--top-k`` so tracelens_analysis.py applies its own large-pool default (candidate-build cap decoupled from the dispatch-side budget)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -2839,11 +2746,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
     session_dir,
     monkeypatch,
 ):
-    """``top_k`` is not a tool flag; the live dial is ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``.
-
-    A payload still carrying the key must be ignored rather than reach an
-    argparse that no longer defines it.
-    """
+    """``top_k`` is not a tool flag; the live dial is ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -2871,8 +2774,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     session_dir,
     monkeypatch,
 ):
-    """Fail-loud bypass pipeline -> discovery run status=failed with the
-    error text and an empty hot-kernel list, still labelled source="bypass"."""
+    """Fail-loud bypass pipeline -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="bypass"."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2911,8 +2813,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     session_dir,
     monkeypatch,
 ):
-    """High-idle gate suppresses hot kernels but the run still succeeds -> a
-    bypass discovery run with status=ok and hot_kernel_count=0."""
+    """High-idle gate suppresses hot kernels but the run still succeeds -> a bypass discovery run with status=ok and hot_kernel_count=0."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2952,15 +2853,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     session_dir,
     monkeypatch,
 ):
-    """The LLM/agent route keeps source="tracelens" (regression guard for the
-    bypass relabel), while the scan still names the route the caller asked for.
-
-    ``source`` is the toolchain label the dashboard groups by, so ``agent``
-    reports as ``tracelens``. ``scan["analysis_route"]`` is the route id, which
-    has to stay in the ``agent`` / ``bypass`` vocabulary the handler accepts --
-    recording ``tracelens`` there put a value in the field that no caller could
-    ever pass.
-    """
+    """The LLM/agent route keeps source="tracelens" (regression guard for the bypass relabel), while the scan still names the route the caller asked for."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -3601,13 +3494,7 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
 
 
 def test_format_last_trace_analyze_renders_low_compute_warning_numbers(session_dir):
-    """The compact line must carry the numbers the Coordinator routes on.
-
-    ``low_gpu_compute_pct`` exists to send a run to comm/params instead of
-    kernel rewriting, and telling a comm-bound window from a host-bound one
-    needs ``exposed_comm_pct``. A per-field ``if`` chain that only knew
-    ``idle_pct`` rendered this warning as a bare code with every number gone.
-    """
+    """The compact line must carry the numbers the Coordinator routes on."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -3960,9 +3847,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
 
 # Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
 def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a
-    typical ``run_optimization`` batch does NOT serialize behind an asyncio
-    semaphore tighter than Ray's view of the cluster."""
+    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a typical ``run_optimization`` batch does NOT serialize behind an asyncio semaphore tighter than Ray's view of the cluster."""
     assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
@@ -4141,16 +4026,7 @@ def _gz_trace(path: Path, payload_bytes: int) -> Path:
 
 
 def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tmp_path):
-    """Splitter chunks must never lead the discovered trace list.
-
-    Two consumers fall back to ``trace_files[0]`` when ``main_trace_path`` is
-    absent (the roofline trace extractor and the writeback path). Under
-    alphabetical order a 900-byte ``trace_split/`` chunk sorted ahead of
-    ``rank_0.trace.json.gz``, and a single chunk handed to ``--trace-input``
-    takes the single-file branch of discovery, where the multi-candidate probing
-    downstream cannot rescue it. This function already excludes ``capture_traces``
-    sidecars for the same reason.
-    """
+    """Splitter chunks must never lead the discovered trace list."""
     trace_dir = tmp_path / "torch_trace"
     chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
     capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
@@ -4164,13 +4040,7 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
 
 
 def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
-    """Size ordering, so the fallback does not depend on a naming rule.
-
-    The real discriminator between a fragment and a capture is that one is
-    hundreds of bytes and the other is hundreds of kilobytes. Ranking on size
-    gets this right without knowing any of the splitter's filename conventions,
-    which it is free to change.
-    """
+    """Size ordering, so the fallback does not depend on a naming rule."""
     trace_dir = tmp_path / "torch_trace"
     small = _gz_trace(trace_dir / "aaa_first_by_name.trace.json.gz", 16)
     large = _gz_trace(trace_dir / "zzz_last_by_name.trace.json.gz", 60_000)
@@ -4291,12 +4161,7 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
 
 
 def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):
-    """An ancestor named ``trace_split`` must not empty the list.
-
-    The exclusion is relative to the scanned directory. Tested absolutely, a
-    capture that happened to live below such a directory would have every one of
-    its traces excluded, and the caller reads an empty list as "no traces here".
-    """
+    """An ancestor named ``trace_split`` must not empty the list."""
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
     capture = _gz_trace(trace_dir / "rank_0.trace.json.gz", 40_000)
 

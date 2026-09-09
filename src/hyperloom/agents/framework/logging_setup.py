@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured logging setup for framework-agent.
-
-Public API:
-
-* :func:`configure_logging`  — explicit init (called by ``fa`` CLI).
-* :func:`get_logger`         — module-level helper that lazy-inits.
-* :func:`stage_log`          — context manager emitting start/done/failed
-                               envelopes around a per-stage block.
-
-No import-time side effects. Single root logger ``framework_agent`` with
-module-prefixed children. Text format by default; JSON Lines via
-``FRAMEWORK_AGENT_LOG_JSON=1``. Level resolution: explicit arg >
-``FRAMEWORK_EXPLORER_LOG_LEVEL`` > ``FRAMEWORK_AGENT_LOG_LEVEL`` > ``INFO``.
-Optional file sink via ``--log-file`` / env. Re-entrant (replaces handlers).
-"""
+"""Structured logging setup for framework-agent."""
 
 from __future__ import annotations
 
@@ -41,17 +27,7 @@ _FILE_ENV = "FRAMEWORK_AGENT_LOG_FILE"
 
 
 def _resolve_level(explicit: str | int | None) -> int:
-    """Pick the effective log level (explicit > env > INFO).
-
-    Args:
-        explicit (str | int | None): An explicit level as an int, a numeric
-            string, or a level name (e.g. ``"DEBUG"``). ``None`` defers to the
-            environment variables in :data:`_LEVEL_ENVS`.
-
-    Returns:
-        int: The resolved :mod:`logging` level constant, defaulting to
-            ``logging.INFO``.
-    """
+    """Pick the effective log level (explicit > env > INFO)."""
     if explicit is not None:
         if isinstance(explicit, int):
             return explicit
@@ -73,25 +49,10 @@ def _resolve_level(explicit: str | int | None) -> int:
 
 
 class _JsonLineFormatter(logging.Formatter):
-    """Emit one JSON object per log record (machine-friendly sink).
-
-    Includes any ``record.extra_*`` attribute so callers can attach
-    structured fields via ``logger.info("msg", extra={"extra_pr": 25748})``.
-    """
+    """Emit one JSON object per log record (machine-friendly sink)."""
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
-        """Serialise a log record to a single JSON line.
-
-        Promotes any ``extra_*`` record attribute to a top-level field (with
-        the ``extra_`` prefix stripped) and includes a formatted traceback when
-        exception info is present.
-
-        Args:
-            record (logging.LogRecord): The record to format.
-
-        Returns:
-            str: A JSON object encoded as a single line.
-        """
+        """Serialise a log record to a single JSON line."""
         payload: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
             "level": record.levelname,
@@ -113,20 +74,7 @@ def configure_logging(
     log_file: str | Path | None = None,
     quiet_third_party: bool = True,
 ) -> logging.Logger:
-    """Initialise the framework-agent root logger and return it.
-
-    Idempotent: each call clears previously attached handlers so re-running
-    does not stack duplicates.
-
-    Args:
-        level: Log level (name or int); resolved from env when ``None``.
-        json_output: Force JSON line output; resolved from env when ``None``.
-        log_file: Optional file path to also write logs to.
-        quiet_third_party: Raise noisy third-party loggers to WARNING.
-
-    Returns:
-        The configured root logger.
-    """
+    """Initialise the framework-agent root logger and return it."""
     use_json = json_output if json_output is not None else os.environ.get(_JSON_ENV, "").strip() in ("1", "true", "yes")
     effective_level = _resolve_level(level)
     resolved_file = log_file if log_file is not None else os.environ.get(_FILE_ENV)
@@ -172,19 +120,7 @@ def configure_logging(
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
-    """Return a child logger under the ``framework_agent`` root.
-
-    When ``name`` is a fully-qualified module name (``framework_agent.xxx``),
-    it is returned as-is; otherwise it is treated as a leaf under the root.
-
-    Args:
-        name (str | None): Logger name. ``None`` or empty returns the root
-            logger; a name already under the root is used verbatim; any other
-            name becomes a leaf under ``framework_agent``.
-
-    Returns:
-        logging.Logger: The resolved child (or root) logger.
-    """
+    """Return a child logger under the ``framework_agent`` root."""
     if not name:
         return logging.getLogger(_ROOT_NAME)
     if name == _ROOT_NAME or name.startswith(_ROOT_NAME + "."):
@@ -200,18 +136,7 @@ def stage_log(
     candidate: str | None = None,
     **fields: Any,
 ) -> Iterator[dict[str, Any]]:
-    """Bracket a per-stage block with start/done/failed envelopes.
-
-    Args:
-        logger: Logger to emit the stage envelopes on.
-        stage: Stage name included in each envelope.
-        candidate: Optional candidate ref for context.
-        **fields: Extra structured fields attached to the envelopes.
-
-    Yields:
-        A mutable dict so the caller can attach result metrics (e.g.
-        ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
-    """
+    """Bracket a per-stage block with start/done/failed envelopes."""
     started = time.monotonic()
     base: dict[str, Any] = {"stage": stage}
     if candidate:

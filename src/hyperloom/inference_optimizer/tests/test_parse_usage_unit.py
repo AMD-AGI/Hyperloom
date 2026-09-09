@@ -93,8 +93,7 @@ def test_parse_turn_usages_one_row_per_response_in_order(tmp_path):
     usages = pu.parse_claude_stream_json_turn_usages(log)
     assert len(usages) == 2
     assert usages[0]["input_tokens"] == 10 and usages[1]["input_tokens"] == 20
-    # The start-of-stream placeholders (1, 2) give way to the result row's 500,
-    # which lands on the final turn.
+    # The start-of-stream placeholders (1, 2) give way to the result row's 500, which lands on the final turn.
     assert usages[0]["output_tokens"] is None
     assert usages[1]["output_tokens"] == 500
 

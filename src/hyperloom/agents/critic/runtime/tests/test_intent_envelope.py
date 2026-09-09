@@ -11,12 +11,12 @@ from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.intent_envelope import (
     ALLOWED_VERDICTS,
     ALLOWED_VERDICT_SOURCES,
-    DEFAULT_HEARTBEAT_TOPIC,
+    DEFAULT_IDLE_BODY,
     Intent,
     IntentEnvelope,
     build_advice_intent,
     build_envelope,
-    build_heartbeat_intent,
+    build_idle_intent,
     build_review_verdict_intent,
     validate_envelope,
 )
@@ -77,10 +77,11 @@ def test_build_review_verdict_rejects_empty_target():
         build_review_verdict_intent(target_proposal_msg_id="", verdict="approve")
 
 
-def test_build_heartbeat_intent_default():
-    h = build_heartbeat_intent()
+def test_build_idle_intent_default():
+    h = build_idle_intent()
     assert h.intent_type == "send_message"
-    assert h.payload["topic"] == DEFAULT_HEARTBEAT_TOPIC
+    assert h.payload["topic"] == "observation"
+    assert h.payload["body_md"] == DEFAULT_IDLE_BODY
 
 
 def test_build_envelope_with_intents_validates():
@@ -95,12 +96,12 @@ def test_build_envelope_with_intents_validates():
     assert d["intents"][0]["payload"]["target_proposal_msg_id"] == "m1"
 
 
-def test_build_envelope_empty_falls_back_to_heartbeat():
+def test_build_envelope_empty_falls_back_to_idle_observation():
     env = build_envelope([])
     d = env.to_dict()
     assert len(d["intents"]) == 1
     assert d["intents"][0]["intent_type"] == "send_message"
-    assert d["intents"][0]["payload"]["topic"] == DEFAULT_HEARTBEAT_TOPIC
+    assert d["intents"][0]["payload"]["topic"] == "observation"
 
 
 def test_validate_envelope_accepts_well_formed_dict():
@@ -154,6 +155,6 @@ def test_advice_intent_carries_optional_target():
 
 
 def test_intent_to_dict_round_trip():
-    a = Intent(intent_type="send_message", payload={"topic": "heartbeat"})
+    a = Intent(intent_type="send_message", payload={"topic": "observation"})
     out = validate_envelope({"intents": [a.to_dict()]})
     assert out.intents[0].intent_type == "send_message"

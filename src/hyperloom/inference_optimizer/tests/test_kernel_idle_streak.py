@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The KERNEL idle streak measures forward motion, not the ledger's opinion.
-
-``MachinePhase._track_kernel_idle_streak`` used to reset ``kernel_idle_ticks``
-whenever ``kernel_work_pending`` was true. That predicate reports whether the
-attempt ledger still lists anything unresolved, so a session holding three
-attempts that could never be advanced answered "yes" on all 1130 consecutive
-idle ticks of a real 24h run: the counter never left zero, the wind-down guard
-never even reached its branch, and KERNEL spun for 10.4h with all 8 GPUs idle.
-
-The streak is now driven by a progress fingerprint plus the task registry:
-
-* the fingerprint changes when the ledger, the rejected ids, the last kernel_opt
-  result, the stack depth or the in-flight task set changes -> streak restarts;
-* kernel-lane work queued or running freezes the streak, so a 30-minute build or
-  benchmark is never mistaken for a stall;
-* only genuine dead air grows it.
-
-Covered here end-to-end through ``_advance_phase_if_needed`` so the counter and
-the guard that reads it are exercised together.
-"""
+"""The KERNEL idle streak measures forward motion, not the ledger's opinion."""
 
 from __future__ import annotations
 
@@ -74,11 +55,7 @@ def _arm_kernel_phase(st):
 
 
 def _stall_the_ledger(st):
-    """Three attempts that can never be advanced: kernel_work_pending stays True.
-
-    Mirrors the production state — a PARTIAL/empty-decision attempt is always
-    "work pending" to the ledger, no matter how long nothing happens to it.
-    """
+    """Three attempts that can never be advanced: kernel_work_pending stays True."""
     st.kernel_opt_task_attempts = {
         f"k{idx:03d}": {
             "current_kernel_id": f"k{idx:03d}",
@@ -104,8 +81,8 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     _arm_kernel_phase(st)
     _stall_the_ledger(st)
 
-    # First scan opens the streak (no fingerprint stored yet), the rest observe
-    # an unchanged fingerprint and no in-flight task, so the counter grows.
+    # First scan opens the streak (no fingerprint stored yet), the rest observe an unchanged fingerprint and no
+    # in-flight task, so the counter grows.
     await c._advance_phase_if_needed()
     assert st.kernel_idle_ticks == 0
     assert st.kernel_idle_since_unix > 0.0
@@ -141,12 +118,12 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
     )
     await c.tasks.transition(build.task_id, "running")
 
-    # A real build compiles and benchmarks for 30+ minutes without writing a
-    # single ledger field while ticks keep arriving every few seconds.
+    # A real build compiles and benchmarks for 30+ minutes without writing a single ledger field while ticks keep
+    # arriving every few seconds.
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 20):
         await c._advance_phase_if_needed()
-        # Even an aged streak clock must not help: the in-flight branch rebases
-        # it every scan, so no idle window can accumulate under the build.
+        # Even an aged streak clock must not help: the in-flight branch rebases it every scan, so no idle window can
+        # accumulate under the build.
         _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
@@ -156,13 +133,7 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
 
 @pytest.mark.asyncio
 async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
-    """An ``integrate`` is awaited in the intent router, not queued as a task.
-
-    So the registry probe reports nothing in flight for its whole duration. A
-    real nine-minute ``integrate`` re-baseline accrued the full streak and wound
-    KERNEL down to SWEEP four seconds after it returned, stranding nine selected
-    candidates including the two hottest kernels on the trace.
-    """
+    """An ``integrate`` is awaited in the intent router, not queued as a task."""
     c = kernel_coordinator
     st = c.shared_state
     _arm_kernel_phase(st)
@@ -199,8 +170,8 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
 
 @pytest.mark.asyncio
 async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
-    # A task waiting on a resource lane is work the phase is committed to, not
-    # dead air; it must hold the phase exactly like a running one.
+    # A task waiting on a resource lane is work the phase is committed to, not dead air; it must hold the phase
+    # exactly like a running one.
     c = kernel_coordinator
     st = c.shared_state
     _arm_kernel_phase(st)
@@ -231,8 +202,8 @@ async def test_ledger_progress_restarts_the_streak(kernel_coordinator):
         await c._advance_phase_if_needed()
     assert st.kernel_idle_ticks >= ps.KERNEL_IDLE_MAX_TICKS
 
-    # An attempt resolves: real forward motion resets the streak, and the aged
-    # clock is re-stamped so the floor restarts from this moment too.
+    # An attempt resolves: real forward motion resets the streak, and the aged clock is re-stamped so the floor
+    # restarts from this moment too.
     _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
     st.kernel_opt_task_attempts["k000"]["last_decision"] = "REVERT"
     await c._advance_phase_if_needed()
@@ -270,8 +241,8 @@ def test_fingerprint_ignores_fields_that_are_not_progress():
     )
     before = ps.compute_kernel_progress_fingerprint(base)
 
-    # A field outside the progress set churning must not look like progress,
-    # otherwise incidental writes would keep restarting the streak forever.
+    # A field outside the progress set churning must not look like progress, otherwise incidental writes would keep
+    # restarting the streak forever.
     base.kernel_opt_task_attempts["k000"]["last_micro_speedup"] = 2.0
     assert ps.compute_kernel_progress_fingerprint(base) == before
 
@@ -301,11 +272,7 @@ def test_fingerprint_tracks_inflight_task_ids():
 
 @pytest.mark.asyncio
 async def test_running_specialist_counts_as_kernel_lane_work(kernel_coordinator):
-    """A specialist admitted to KERNEL must reach ``_inflight_kernel_task_ids``.
-
-    The kind filter is the phase allowlist, so admitting ``specialist`` there is
-    what stops the idle guard from reading a live investigation as dead air.
-    """
+    """A specialist admitted to KERNEL must reach ``_inflight_kernel_task_ids``."""
     c = kernel_coordinator
     task = await c.tasks.create(kind="specialist", params={}, idempotency_key="spec-idle")
     await c.tasks.transition(task.task_id, "running")

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-iteration objective outcome ledger for the forge-loop.
-
-Persists the objective facts written by the loop and gate: the ``git`` diff
-summary of each iteration's net change, the measured outcome
-(validation/bench/keep-revert), and real error signatures. Free-form Implementer
-session records live only in :mod:`kernelforge.loop.lessons`; this ledger does
-not compress them into one-line conclusions.
-
-Rendered into the next agent prompt as:
-    ## Observed toolchain constraints      <- deduped, distilled from failures
-    ## Recent iterations                   <- last K compact entries
-
-Also flushed to ``<workspace>/forge_experiments/forge_experience.md`` for
-inspection and possible later promotion into the knowledge base. Scope is
-per-campaign; cross-campaign accumulation is intentionally out of scope.
-"""
+"""Cross-iteration objective outcome ledger for the forge-loop."""
 
 from __future__ import annotations
 
@@ -33,8 +18,7 @@ from kernelforge.experience_distillation import (
 )
 
 
-# Known error-signature -> crisp, reusable constraint. Extend as new recurring
-# failure modes are observed. Keep each constraint short and actionable.
+# Known error-signature -> crisp, reusable constraint.
 _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
     (
         re.compile(r"#arith\.fastmath<(?:True|False)>|FastMathFlags"),
@@ -158,12 +142,7 @@ class ExperienceLedger:
 
     # ── recording ────────────────────────────────────────────────────────────
     def _learn_from_entry(self, entry: ExperienceEntry) -> None:
-        """Promote objective failure signatures into reusable constraints.
-
-        Only machine-verifiable error signatures feed the factual toolchain
-        observations. The agent's narrative lives in full in the per-iteration
-        lesson documents and is never distilled here.
-        """
+        """Promote objective failure signatures into reusable constraints."""
         self.memory.distill(entry.error_sig, entry.outcome)
 
     def record_iteration(
@@ -202,14 +181,7 @@ class ExperienceLedger:
         )
 
     def render_for_prompt(self, include_recent: bool = True) -> str:
-        """Bounded text for the agent prompt.
-
-        With ``include_recent=True`` (default) renders distilled constraints AND
-        the last K iteration entries. With ``include_recent=False`` renders ONLY
-        the constraints — used when the candidate-archive digest is present,
-        since its trajectory and diffs would duplicate the ledger's recent
-        iteration rows.
-        """
+        """Bounded text for the agent prompt."""
         entries = self.entries[-self.keep_recent :] if include_recent else []
         return self._render(entries)
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for pure helpers in ``kernel_attempt_summary``.
-
-Targets the small, file-/dict-only functions (artifact path check, failure
-classification, kernel-agent results harvesting, per-kernel classification)
-that the higher-level ``build_kernel_optimization_summary`` tests do not
-exercise directly.
-"""
+"""Unit tests for pure helpers in ``kernel_attempt_summary``."""
 
 from __future__ import annotations
 
@@ -264,9 +258,8 @@ def test_kernel_outcome_class_mapping():
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
 
 
-# CATEGORY_DISPATCH — single source of truth consumed by the summary builder
-# and both count sites; pin the count-key mapping + per-category summary output
-# so the three formerly-duplicated dispatch sites can never drift apart.
+# CATEGORY_DISPATCH — single source of truth consumed by the summary builder and both count sites; pin the count-key
+# mapping + per-category summary output so the three formerly-duplicated dispatch sites can never drift apart.
 def test_category_dispatch_count_keys():
     # The table covers exactly the four terminal categories.
     assert set(kas.CATEGORY_DISPATCH) == {
@@ -280,8 +273,7 @@ def test_category_dispatch_count_keys():
     assert kas._category_count_key(kas.CATEGORY_KEEP_PENDING) == "keep_pending"
     assert kas._category_count_key(kas.CATEGORY_ATTEMPTED_REJECTED) == "rejected"
     assert kas._category_count_key(kas.CATEGORY_IN_FLIGHT) == "in_flight"
-    # Unknown/blank category falls back to the ``in_flight`` counter (the old
-    # ``else`` branch), never a KeyError.
+    # Unknown/blank category falls back to the ``in_flight`` counter (the old ``else`` branch), never a KeyError.
     assert kas._category_count_key("NOT_A_CATEGORY") == "in_flight"
     assert kas._category_count_key("") == "in_flight"
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Why a hot kernel is undispatchable, as a class rather than prose.
-
-The routing gate reduces a rich verdict to one boolean plus a sentence, and the
-sentence had no consumer. These pin the classification that keeps the verdict
-actionable, and the split that matters: classes nothing can rescue, versus the
-one class worth spending a search budget on.
-"""
+"""Why a hot kernel is undispatchable, as a class rather than prose."""
 
 from __future__ import annotations
 
@@ -27,9 +21,9 @@ def test_a_reusable_kernel_with_a_resolved_source_is_resolved() -> None:
 
 
 def test_a_reusable_kernel_without_a_source_is_not_resolved() -> None:
-    """Reusable-in-principle is not dispatch-ready without a resolved source:
-    such a row belongs in the search-budget bucket, not the located count, or the
-    "how many hotspots did we rescue" metric over-reports resolved."""
+    """Reusable-in-principle is not dispatch-ready without a resolved source: such a row belongs in the search-budget
+    bucket, not the located count, or the "how many hotspots did we rescue" metric over-reports resolved.
+    """
     assert _classify("source file not resolved", reusable=True, source_file="") == ksc.CLASS_SOURCE_NOT_RESOLVED
     # Even with no verdict text, a reusable row with no source is unresolved.
     assert _classify("", reusable=True, source_file="") == ksc.CLASS_SOURCE_NOT_RESOLVED

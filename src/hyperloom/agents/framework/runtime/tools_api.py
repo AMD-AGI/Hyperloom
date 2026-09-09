@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Library entry-points for LLM specialists (Arbor / TBO / Hyperloom).
-
-Two helpers wrapping framework-agent internals without a full
-:class:`ExploreRequest` JSON:
-
-* :func:`find_relevant_prs_smart`  - cross-repo PR discovery via
-  pr_monitor + (optional) anonymous GitHub Search.
-* :func:`evaluate_candidate_outcome` - stateless winner check given
-  pre-computed benchmark/accuracy JSON blobs.
-
-The CLI reaches these helpers indirectly via ``explorer``; this module
-never imports the CLI.
-"""
+"""Library entry-points for LLM specialists (Arbor / TBO / Hyperloom)."""
 
 from __future__ import annotations
 
@@ -32,16 +20,7 @@ from ..sources.pr_monitor import (
 
 
 def _pr_to_candidate(pr: GitHubPr, repo_url: str, source: str) -> Candidate:
-    """Map a GitHubPr record into the shared Candidate shape.
-
-    Args:
-        pr (GitHubPr): Source PR record from a discovery backend.
-        repo_url (str): Repo URL to record on the candidate.
-        source (str): Origin tag (e.g. ``"pr_monitor"`` or ``"github"``).
-
-    Returns:
-        Candidate: A candidate carrying the PR ref, repo, title, and URL.
-    """
+    """Map a GitHubPr record into the shared Candidate shape."""
     return Candidate(
         ref=pr.ref,
         repo=repo_url,
@@ -62,31 +41,7 @@ def find_relevant_prs_smart(
     pr_monitor_label: str | None = None,
     include_github: bool = True,
 ) -> list[Candidate]:
-    """Discover candidate PRs across one or more repos.
-
-    Plain-arg version of
-    :func:`hyperloom.agents.framework.sources.enumerate_candidates`. Each repo is
-    queried via pr_monitor (hard-fail) when ``pr_monitor_url`` is set;
-    GitHub Search is a best-effort secondary when ``include_github=True``
-    (returns ``[]``, never raises). Results are de-duped by
-    ``(repo_url, ref)`` so pr_monitor wins ties.
-
-    Args:
-        gap_description: Description used to drive GitHub search relevance.
-        repos: Repos to query; ``None``/empty yields ``[]``.
-        pr_monitor_url: PR Monitor base URL; enables that source.
-        pr_monitor_timeout_sec: Per-request timeout for PR Monitor calls.
-        limit_per_repo: Max candidates per repo per source.
-        pr_monitor_state: PR state filter for PR Monitor (e.g. ``"open"``).
-        pr_monitor_label: Optional label filter for PR Monitor.
-        include_github: Whether to also query GitHub search.
-
-    Returns:
-        De-duplicated candidate list across all repos and sources.
-
-    Raises:
-        PRMonitorError: If a PR Monitor query fails when configured.
-    """
+    """Discover candidate PRs across one or more repos."""
     if not repos:
         return []
     seen: set[tuple[str, str]] = set()
@@ -134,27 +89,7 @@ def evaluate_candidate_outcome(
     min_throughput_ratio: float = 1.05,
     max_accuracy_drop: float = 0.05,
 ) -> dict:
-    """Stateless winner check given pre-computed benchmark/accuracy data.
-
-    Gate logic matches the CLI's winner decision. Inputs accept a dict, a
-    Path, or a string path; missing/invalid inputs yield a ``False`` verdict
-    with a reason rather than raising.
-
-    Args:
-        benchmark: Benchmark data (dict, JSON path, or ``None``).
-        accuracy: Accuracy data (dict, JSON path, or ``None``).
-        baseline_throughput: Baseline throughput; must be positive.
-        baseline_accuracy: Baseline accuracy, if accuracy is gated.
-        min_throughput_ratio: Minimum throughput ratio to win.
-        max_accuracy_drop: Maximum tolerated accuracy drop.
-
-    Returns:
-        A dict with keys ``winner``, ``reason``, ``throughput``,
-        ``accuracy``, ``throughput_ratio``, and ``completed``.
-
-    Raises:
-        ValueError: If ``baseline_throughput`` is not a positive float.
-    """
+    """Stateless winner check given pre-computed benchmark/accuracy data."""
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")
 

@@ -22,12 +22,8 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
-# event per phase and macro cycle that dispatched the work. Their sub-steps are
-# nested in ``ext`` rather than emitted as sibling events, because none of them
-# is dispatchable on its own: roofline's profile / analysis are atomic halves of
-# one action, a kernel event's lanes only exist inside a phase entry, and a
-# baseline's rounds only exist inside a measurement.
+# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one event per phase and macro cycle that
+# dispatched the work.
 _EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
@@ -92,20 +88,7 @@ def _read_event_file(
 
 
 def timeline_sequence(event: Mapping[str, Any]) -> int | None:
-    """Return the storage sequence stamped on ``event``, if it has one.
-
-    The sequence is private to this module's on-disk layout, so callers that
-    need to carry it -- onto an event-level fragment, or back onto an event
-    they are updating -- go through this and :func:`set_timeline_sequence`
-    rather than naming the key.
-
-    Args:
-        event (Mapping[str, Any]): An event dict, or an event-level fragment
-            payload that stored the sequence under the same name.
-
-    Returns:
-        int | None: The sequence, or ``None`` when absent or unparseable.
-    """
+    """Return the storage sequence stamped on ``event``, if it has one."""
     raw = event.get(_STORAGE_SEQUENCE_KEY, event.get("timeline_sequence"))
     if raw is None:
         return None
@@ -116,44 +99,19 @@ def timeline_sequence(event: Mapping[str, Any]) -> int | None:
 
 
 def set_timeline_sequence(event: dict[str, Any], sequence: int) -> None:
-    """Stamp ``sequence`` onto ``event`` so writing it updates that entry.
-
-    Args:
-        event (dict[str, Any]): The event dict, mutated in place.
-        sequence (int): The storage sequence to update.
-    """
+    """Stamp ``sequence`` onto ``event`` so writing it updates that entry."""
     event[_STORAGE_SEQUENCE_KEY] = int(sequence)
 
 
 def write_timeline_event(event: dict[str, Any]) -> Path:
-    """Persist one event into the bound session.
-
-    Args:
-        event (dict[str, Any]): The event dict, mutated in place with its
-            storage sequence so a later write updates the same file.
-
-    Returns:
-        Path: The event file written.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-        ValueError: If the event type is not a V6 timeline type, or its
-            sequence belongs to an event of another type.
-    """
+    """Persist one event into the bound session."""
     from .session_binding import bound_session
 
     return write_timeline_event_at(bound_session(), event)
 
 
 def write_timeline_event_at(session_dir: Path | str, event: dict[str, Any]) -> Path:
-    """Persist one event without replacing an earlier run of the same stage.
-
-    For the writers that own a session directory without being under its
-    binding: the pre-session CLI stages, which write ``install`` and
-    ``model_gate`` events for a session the coordinator has not started yet.
-    Everything recorded during a run goes through :func:`write_timeline_event`
-    instead.
-    """
+    """Persist one event without replacing an earlier run of the same stage."""
     event_type = _validate_event_type(str(event.get("type") or "").strip())
     history = _history_files(session_dir)
 

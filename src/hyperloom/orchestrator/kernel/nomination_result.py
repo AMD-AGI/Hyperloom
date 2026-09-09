@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What Hyperloom reads back when forge picked the kernels itself.
-
-Three rules shape this module, all of them about not letting one bad entry
-cost a whole round:
-
-1. A patch missing any of its three required fields is dropped; its siblings
-   still land. The batch is N independent results, not a transaction.
-2. Duplicate kernel names collapse to the strongest one, because the ledger
-   keys on the name -- duplicates would share one retry budget and one
-   rejection.
-3. An empty ``patches`` array with a clean exit is a valid answer, not a
-   failure. Phase exit is a latch, not an inference from emptiness.
-"""
+"""What Hyperloom reads back when forge picked the kernels itself."""
 
 from __future__ import annotations
 
@@ -82,23 +70,7 @@ class NominationOutcome:
 
 
 def parse_outcome(payload: Any) -> NominationOutcome:
-    """Read a forge result envelope into usable patches plus explained drops.
-
-    Never raises on content: a malformed entry becomes a drop so the rest of
-    the batch survives.
-
-    Only an explicit ``patches: []`` is a clean empty selection. An absent key,
-    a non-list, a non-mapping envelope, or a list whose every entry was refused
-    means the envelope could not be read -- reporting those as "selected
-    nothing" hides a schema skew and lets the phase latch on it.
-
-    Args:
-        payload: The parsed forge result envelope.
-
-    Returns:
-        The outcome, with patches ordered strongest-first by micro speedup, and
-        ``schema_error`` set when the envelope itself was unreadable.
-    """
+    """Read a forge result envelope into usable patches plus explained drops."""
     if not isinstance(payload, dict):
         return NominationOutcome(schema_error=f"result envelope is {type(payload).__name__}, not an object")
     entries = payload.get("patches")
@@ -124,8 +96,7 @@ def parse_outcome(payload: Any) -> NominationOutcome:
         if incumbent is None:
             kept[patch.kernel_name] = patch
             continue
-        # Same name twice would share one ledger key. Keep the stronger claim
-        # and report the other rather than letting either win silently.
+        # Same name twice would share one ledger key.
         weaker = patch if patch.micro_speedup <= incumbent.micro_speedup else incumbent
         stronger = incumbent if weaker is patch else patch
         kept[patch.kernel_name] = stronger
@@ -139,8 +110,8 @@ def parse_outcome(payload: Any) -> NominationOutcome:
     summary = payload.get("nomination")
     summary = summary if isinstance(summary, dict) else {}
     ordered = sorted(kept.values(), key=lambda patch: patch.micro_speedup, reverse=True)
-    # Offered patches of which none survived: forge believed it nominated, so
-    # this is a contract disagreement rather than a round that selected nothing.
+    # Offered patches of which none survived: forge believed it nominated, so this is a contract disagreement rather
+    # than a round that selected nothing.
     schema_error = f"every one of the {len(rows)} offered patch entries was refused" if rows and not ordered else ""
     return NominationOutcome(
         patches=tuple(ordered),

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Path-boundary tests for the breakdown collectors.
-
-Artifact locations recorded in ``state.json`` are data, not trusted input:
-a session directory lives on a shared filesystem and the exporter reads the
-files those fields point at. These tests pin the boundary so a recorded path
-can only ever resolve inside its own session.
-"""
+"""Path-boundary tests for the breakdown collectors."""
 
 from __future__ import annotations
 
@@ -55,8 +49,7 @@ def test_rerooting_wins_over_a_colliding_path_on_this_host(tmp_path: Path) -> No
     sd = _session(tmp_path)
     mine = sd / "runs" / "benchmark_1"
     mine.mkdir()
-    # Stand in for the container-side root existing on this host and holding a
-    # different session's data.
+    # Stand in for the container-side root existing on this host and holding a different session's data.
     foreign_root = tmp_path / "container"
     (foreign_root / "runs" / "benchmark_1").mkdir(parents=True)
 

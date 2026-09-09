@@ -107,15 +107,7 @@ def _select_trusted_result(
     manifest: dict[str, Any] | None,
     sidecar: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Choose between the two trusted views of one workspace's best result.
-
-    They are not equally attested. A manifest is trusted only once
-    ``describes_current_best`` has confirmed a complete bundle behind it, while
-    the sidecar needs an ``improved`` flag and a commit. So the manifest wins
-    whenever both name the same commit, and when they name different ones the
-    newer iteration wins -- a sidecar left from an earlier keep must not pull the
-    published patch backwards, which is what preferring it outright allowed.
-    """
+    """Choose between the two trusted views of one workspace's best result."""
     if sidecar is None:
         return manifest, "best manifest"
     if manifest is None:
@@ -126,8 +118,7 @@ def _select_trusted_result(
     sidecar_iteration = _iteration_of(sidecar)
     if manifest_iteration is not None and sidecar_iteration is not None and sidecar_iteration > manifest_iteration:
         return sidecar, "forge result sidecar"
-    # Either the manifest is at least as new, or one of them names no iteration
-    # to compare on. Keep the better-attested view rather than guessing.
+    # Either the manifest is at least as new, or one of them names no iteration to compare on.
     return manifest, "best manifest"
 
 
@@ -244,14 +235,9 @@ def recover_task_result(
             best_commit=best_commit,
         )
     except Exception as error:
-        # A validated best commit that cannot be shipped is the one recovery
-        # outcome that says something went wrong rather than that nothing was
-        # found, so it is worth a line of its own.
         log.warning(
-            "could not publish %s for %s at %s: %s",
-            source,
+            "could not publish result for %s: %s",
             task.operator_id,
-            best_commit,
             error,
         )
         return RecoveryResult(

@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Project a gemm tuning session into independent per-tuner candidates.
-
-A gemm session runs at most one MoE tuner and one dense tuner (the router is a
-set of mutually exclusive precision/quant branches), and the two write disjoint
-config tables read through disjoint environment variables. Yet the report used
-to collapse both into one ``recommended_env`` blob under one ``micro_decision``:
-the MoE result and the dense result could only be accepted or rejected together.
-When one tuner wins and the other regresses, all-or-nothing forces a choice
-between deploying a regression and discarding a win.
-
-The nomination contract lands patches as independent siblings -- apply, re-bench,
-KEEP or REVERT each on its own. This module produces the per-tuner projection
-that makes that possible for gemm: one :class:`TunerCandidate` per tuner that
-actually produced a deployable artifact, each carrying only its own environment
-and artifact so Hyperloom can KEEP the winner and REVERT the loser.
-
-Everything here is a pure function over :class:`TuneResult`; the report builder
-forwards to it. The single-blob ``recommended_env`` / ``artifacts`` fields are
-still emitted alongside for the legacy consumer, so this is additive.
-"""
+"""Project a gemm tuning session into independent per-tuner candidates."""
 
 from __future__ import annotations
 
@@ -32,14 +13,7 @@ from .tuners.base import TuneResult
 
 @dataclass(frozen=True)
 class TunerCandidate:
-    """One tuner's deployable result, landable on its own.
-
-    A candidate exists only when the tuner produced something worth validating at
-    e2e: a real micro improvement, or an explicitly forced candidate (split-K
-    tuning whose benefit is e2e-only and reports ``no_improvement`` at the micro
-    level). ``env`` is exactly this tuner's variables and no sibling's, so
-    applying one candidate cannot drag another's table into the run.
-    """
+    """One tuner's deployable result, landable on its own."""
 
     tuner: str
     env: dict[str, str]
@@ -62,14 +36,7 @@ class TunerCandidate:
 
 
 def _tuner_env(result: TuneResult) -> dict[str, str]:
-    """This tuner's environment, single var and the extra map merged.
-
-    A tuner may report a primary ``env_var``/``env_value`` pair, a bag of
-    ``env_vars``, or both. Merged into one map keyed by variable so the candidate
-    carries a self-contained apply set. The primary pair is written first so an
-    ``env_vars`` entry that repeats the same key (should not happen, but is cheap
-    to be right about) reflects the tuner's own last word.
-    """
+    """This tuner's environment, single var and the extra map merged."""
     env: dict[str, str] = {}
     if result.env_var and result.env_value:
         env[result.env_var] = result.env_value
@@ -79,35 +46,14 @@ def _tuner_env(result: TuneResult) -> dict[str, str]:
 
 
 def is_candidate(result: TuneResult) -> bool:
-    """Whether a tuner result is a deployable candidate.
-
-    Mirrors the report builder's promotion rule exactly so the per-tuner view and
-    the collapsed view never disagree about what counts:
-
-    * ``ok`` / ``partial_output`` with a real improvement -- the rows it wrote
-      are a valid artifact even when some shapes were lost; the shortfall is
-      reported separately rather than by discarding the result;
-    * an explicitly forced ``candidate`` in any non-failed status -- split-K
-      tuning delivers e2e-only benefit and reports ``no_improvement`` at micro.
-    """
+    """Whether a tuner result is a deployable candidate."""
     if result.status in ("ok", "partial_output") and result.has_improvement:
         return True
     return bool(result.candidate) and result.status != "failed"
 
 
 def per_tuner_candidates(results: Iterable[TuneResult]) -> list[TunerCandidate]:
-    """Every tuner that produced a deployable artifact, as its own candidate.
-
-    A tuner with no artifact path is not landable no matter its status, so it is
-    dropped here rather than emitted as an empty candidate the integrate lane
-    would fail on. Order follows the input (the router's priority order).
-
-    Args:
-        results: Results from tuners that actually ran.
-
-    Returns:
-        One :class:`TunerCandidate` per deployable tuner; empty when none won.
-    """
+    """Every tuner that produced a deployable artifact, as its own candidate."""
     candidates: list[TunerCandidate] = []
     for result in results:
         if not isinstance(result, TuneResult):
@@ -132,19 +78,7 @@ def per_tuner_candidates(results: Iterable[TuneResult]) -> list[TunerCandidate]:
 
 
 def failed_tuner_records(results: Iterable[TuneResult]) -> list[dict[str, Any]]:
-    """Every crashed tuner, listed regardless of whether a sibling won.
-
-    A sibling tuner succeeding must not make a crash invisible: a single winning
-    dense tuner used to mask fourteen MoE failures as "no headroom". Each record
-    names the tuner and its error so the failure survives into the report even
-    when the session's overall decision is a KEEP.
-
-    Args:
-        results: Results from tuners that actually ran.
-
-    Returns:
-        One record per failed tuner; empty when none failed.
-    """
+    """Every crashed tuner, listed regardless of whether a sibling won."""
     records: list[dict[str, Any]] = []
     for result in results:
         if not isinstance(result, TuneResult) or result.status != "failed":

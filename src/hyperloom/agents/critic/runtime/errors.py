@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed errors raised by the Critic runtime adapter.
-
-The errors are deliberately granular so the CLI / SKILL can map them to
-deterministic recovery paths (e.g. dead-letter, fall back to
-``needs_review``, or surface ``required_context`` to the caller).
-
-``RuntimeAdapterError`` itself is re-exported from
-``hyperloom.common.subprocess_bridge``; this module keeps ownership of the
-granular subclasses below.
-"""
+"""Typed errors raised by the Critic runtime adapter."""
 
 from __future__ import annotations
 

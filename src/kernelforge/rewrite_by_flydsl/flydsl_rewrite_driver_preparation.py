@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Author or repair a rewrite-specific dual-path measurement driver.
-
-This module deliberately does not depend on ``loop.task_preparer``.  A rewrite
-driver has a different contract and lifecycle: it owns a source reference path,
-a not-yet-implemented FlyDSL candidate path, and two independently timed modes.
-Keeping the preparation engine here prevents either contract from silently
-changing the other.
-
-The agent works in an isolated temporary git repository containing read-only
-copies of the task evidence.  Only one self-contained driver file can be
-published.  The caller's source tree and candidate are therefore never writable
-during preparation, and the destination driver is replaced only while the
-deterministic rewrite contract is being checked.
-"""
+"""Author or repair a rewrite-specific dual-path measurement driver."""
 
 from __future__ import annotations
 
@@ -338,15 +325,8 @@ async def _run_agent(
         writable=True,
         timeout_sec=timeout_sec,
         target_files=[str(stage_driver)],
-        # Deliberately no driver_script, for the reason task_preparer records at
-        # its own AgentRunSpec: that field declares the measurement surface the
-        # guard must defend, so it snapshots the driver as protected. Here the
-        # driver is the artifact being authored, and naming it both target and
-        # protected made every attempt end in
-        #   "protected tracked files changed: <driver>"
-        # followed by a rollback to the placeholder -- the agent wrote a working
-        # driver, verified it in --ref-bench-mode, and had the file reverted out
-        # from under it three times in a row. target_files already carries it.
+        # Deliberately no driver_script, for the reason task_preparer records at its own AgentRunSpec: that field
+        # declares the measurement surface the guard must defend, so it snapshots the driver as protected.
         protected_globs=[path.name for path in evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,
