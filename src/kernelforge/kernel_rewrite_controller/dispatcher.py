@@ -69,8 +69,15 @@ def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     return "forge-loop produced no validated improvement"
 
 
+#: What ``_visible_gpu_count`` returns when nothing could answer. Distinct from
+#: zero, which is itself an answer: an empty device mask says this dispatch has
+#: no GPU, and refusing a task for that is right, while refusing one because
+#: the count could not be read would ground every task on such a host.
+GPU_COUNT_UNKNOWN = -1
+
+
 def _visible_gpu_count() -> int:
-    """How many GPUs this dispatch can actually give a task, or 0 if unknown.
+    """How many GPUs this dispatch can give a task, or ``GPU_COUNT_UNKNOWN``.
 
     The masking variables come first because they are what really bounds the
     child, and reading them costs nothing. ``torch`` is the fallback rather than
@@ -81,15 +88,15 @@ def _visible_gpu_count() -> int:
         raw = os.environ.get(variable)
         if raw is None:
             continue
-        entries = [item for item in raw.split(",") if item.strip()]
-        # An empty mask means no GPU at all, which is a real answer.
-        return len(entries)
+        # An empty mask is an answer -- no GPU at all -- so it is returned as
+        # zero rather than folded into "could not tell".
+        return len([item for item in raw.split(",") if item.strip()])
     try:
         import torch
 
         return int(torch.cuda.device_count())
     except Exception:  # noqa: BLE001 - no torch, no driver, no answer
-        return 0
+        return GPU_COUNT_UNKNOWN
 
 
 def _insufficient_gpus(task: KernelRewriteTask) -> str:
@@ -106,9 +113,9 @@ def _insufficient_gpus(task: KernelRewriteTask) -> str:
     if task.world_size <= 1:
         return ""
     visible = _visible_gpu_count()
-    if visible and visible < task.world_size:
-        return f"task declares {task.world_size} ranks but only {visible} GPU(s) are visible to this dispatch"
-    return ""
+    if visible == GPU_COUNT_UNKNOWN or visible >= task.world_size:
+        return ""
+    return f"task declares {task.world_size} ranks but only {visible} GPU(s) are visible to this dispatch"
 
 
 def _keep_preparation_audit(

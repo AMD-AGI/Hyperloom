@@ -121,6 +121,38 @@ def test_gathering_every_rank_time_is_accepted_instead_of_max(tmp_path):
     assert (replays, reason) == (30, "")
 
 
+def test_taking_the_maximum_to_rank_zero_is_accepted(tmp_path):
+    """``dist.reduce(op=MAX, dst=0)`` reports the slowest rank just as well.
+
+    Only rank 0 prints, so reducing to it is the natural way to write this.
+    Watching ``all_reduce`` alone reported such a driver as never having taken
+    the slowest rank -- a refusal earned by which collective it chose, not by
+    what it measured.
+    """
+    for rank in range(4):
+        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=["RedOpType.SUM", "RedOpType.MAX"]))
+
+    replays, reason = _read(tmp_path)
+
+    assert (replays, reason) == (30, "")
+
+
+def test_the_refusal_does_not_claim_to_know_why_a_reduction_happened(tmp_path):
+    """The hook sees every reduction, including the correctness reference's.
+
+    A conforming driver checks against a distributed collective, whose SUM
+    lands in the same op set, so the message cannot say the benchmark reduced
+    with SUM. What it can say is that nothing took a maximum or gathered.
+    """
+    for rank in range(4):
+        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=["RedOpType.SUM"]))
+
+    _replays, reason = _read(tmp_path)
+
+    assert "never took a maximum or gathered" in reason
+    assert "the benchmark reduced" not in reason
+
+
 def test_a_run_that_reduced_nothing_is_not_second_guessed(tmp_path):
     """No observed reduction is no evidence, and must not become a rejection.
 

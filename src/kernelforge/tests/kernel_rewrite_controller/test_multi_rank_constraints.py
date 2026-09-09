@@ -195,11 +195,25 @@ def test_a_count_nobody_can_answer_does_not_ground_the_task(monkeypatch) -> None
     """Refusing on an unknown count would stop every task on such a host."""
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(dispatcher, "_visible_gpu_count", lambda: 0)
+    monkeypatch.setattr(dispatcher, "_visible_gpu_count", lambda: dispatcher.GPU_COUNT_UNKNOWN)
 
     task = type("_Task", (), {"world_size": 8})()
 
     assert dispatcher._insufficient_gpus(task) == ""
+
+
+def test_no_gpu_at_all_is_an_answer_and_refuses(monkeypatch) -> None:
+    """Zero and "could not tell" are different facts and must not share a value.
+
+    Folding them together is what made the empty-mask answer unusable: the
+    caller treated the zero as falsy and let a task through onto a dispatch
+    that had told it there were no devices.
+    """
+    monkeypatch.setattr(dispatcher, "_visible_gpu_count", lambda: 0)
+
+    task = type("_Task", (), {"world_size": 8})()
+
+    assert "only 0 GPU(s)" in dispatcher._insufficient_gpus(task)
 
 
 def test_a_single_rank_task_never_consults_the_gpu_count(monkeypatch) -> None:
@@ -212,11 +226,12 @@ def test_a_single_rank_task_never_consults_the_gpu_count(monkeypatch) -> None:
     assert dispatcher._insufficient_gpus(type("_Task", (), {"world_size": 1})()) == ""
 
 
-def test_an_empty_mask_is_an_answer_not_a_silence(monkeypatch) -> None:
+def test_an_empty_mask_reports_zero_rather_than_unknown(monkeypatch) -> None:
     """No visible device is a real count, and must refuse rather than pass."""
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
 
     assert dispatcher._visible_gpu_count() == 0
+    assert dispatcher._visible_gpu_count() != dispatcher.GPU_COUNT_UNKNOWN
 
 
 # --- the parallelism suffix ---------------------------------------------------

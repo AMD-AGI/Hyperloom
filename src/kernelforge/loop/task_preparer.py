@@ -288,13 +288,11 @@ def _install_dist():
     if not hasattr(dist, "all_reduce"):
         return False
 
-    orig_all_reduce = dist.all_reduce
-    _sentinel = object()
-
-    def _all_reduce(tensor, op=_sentinel, *a, **k):
+    def _record_op(*a, **k):
+        """Note which reduction a call asked for, positionally or by keyword."""
         try:
-            if op is not _sentinel:
-                _reduce_ops.add(str(op))
+            if len(a) > 1:
+                _reduce_ops.add(str(a[1]))
             elif "op" in k:
                 _reduce_ops.add(str(k["op"]))
             else:
@@ -302,11 +300,21 @@ def _install_dist():
                 _reduce_ops.add("ReduceOp.SUM")
         except Exception:
             pass
-        if op is _sentinel:
-            return orig_all_reduce(tensor, *a, **k)
-        return orig_all_reduce(tensor, op, *a, **k)
 
-    dist.all_reduce = _all_reduce
+    def _wrap_reduction(fn):
+        def _reduction(*a, **k):
+            _record_op(*a, **k)
+            return fn(*a, **k)
+
+        return _reduction
+
+    # dist.reduce as well as dist.all_reduce: taking the max to rank 0 is a
+    # legitimate way to report the slowest rank, and counting only all_reduce
+    # reported such a driver as never having taken it.
+    for name in ("all_reduce", "reduce"):
+        original = getattr(dist, name, None)
+        if original is not None:
+            setattr(dist, name, _wrap_reduction(original))
 
     for name in ("all_gather", "all_gather_into_tensor", "gather"):
         orig_gather = getattr(dist, name, None)
@@ -464,8 +472,14 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
 
     ``expected_world_size`` additionally holds the shards to the distributed
     contract: the declared rank count must be the one that actually launched,
-    each rank must own its own device, and the run must reduce across ranks and
-    tear its process group down.
+    each rank must own its own device, and no rank may exit with its process
+    group still standing.
+
+    It does not require a cross-rank reduction. A run that reduced nothing is
+    left alone deliberately, because an empty op set is as easily a driver that
+    bound its collectives before the probe patched them as one that never
+    reduced -- see ``_distributed_contract_violation``. What is refused is
+    reducing across ranks without ever taking the slowest one.
     """
     unranked_replays: list[int] = []
     ranked_processes: dict[
@@ -645,10 +659,16 @@ def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
         except (TypeError, ValueError):
             pass
     if observed_ops and not any("MAX" in op for op in observed_ops) and not gathers:
+        # Purpose is not observable: the hook sees every reduction the process
+        # made, and a conforming driver's correctness reference is itself a
+        # distributed collective, so its SUM lands here too. What can be said
+        # is that nothing in the run took a maximum or gathered, which no
+        # driver reporting the slowest rank can be true of.
         return (
-            f"the benchmark reduced across ranks with {sorted(observed_ops)} and never took the slowest "
-            "rank. A collective is as fast as its laggard, so an averaging reduction reports a speedup a "
-            "slow rank did not earn: reduce latency with ReduceOp.MAX (or gather every rank's time)"
+            f"the run reduced across ranks only with {sorted(observed_ops)} and never took a maximum or "
+            "gathered per-rank values, so nothing here reported the slowest rank. A collective is as fast "
+            "as its laggard, so an averaging reduction reports a speedup a slow rank did not earn: reduce "
+            "latency with ReduceOp.MAX, or gather every rank's time and take the max"
         )
     return ""
 

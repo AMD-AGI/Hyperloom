@@ -114,10 +114,18 @@ def editable_roots() -> list[str]:
 
 
 def needs_inplace(kernel_repo: str) -> bool:
-    """True when kernel_repo is (or contains/sits under) an editable-finder root.
+    """True when kernel_repo is, contains, or sits under an editable-finder root.
 
     In that case forge must edit the live repo in place (the finder imports the
     live path; a worktree copy would be invisible -> the loop would no-op).
+
+    The containment half is worth stating plainly, because it decides the fate
+    of a whole tree: one editable subpackage anywhere inside a monorepo makes
+    the monorepo itself the borrowed workspace, force-checked-out onto a
+    campaign branch and restored path by path afterwards. ``_require_tree_at``
+    keeps that from folding somebody else's uncommitted work into the patch by
+    refusing to borrow a tree that is not the base commit it claims, but the
+    scope of what gets borrowed is decided here.
     """
     if not kernel_repo:
         return False
