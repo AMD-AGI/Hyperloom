@@ -261,6 +261,41 @@ def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
     return text[-limit:] if text else "no build output"
 
 
+def llm_spend_lines(usage: dict) -> list[str]:
+    """Render a campaign's LLM spend: the total, then the split by role.
+
+    Four token columns, not two. Priced across the 316 recorded end-to-end
+    campaigns, ``cache_read`` is 39.5% of the bill and ``cache_creation`` 32.9%,
+    against 1.6% for uncached input -- so a summary that reports only ``in`` and
+    ``out`` hides roughly three quarters of what was actually paid for. It also
+    hides the effect of any change that shrinks the prompt, because what such a
+    change moves is exactly these two columns: the campaign whose prefix fell
+    83% reported the same ``in``/``out`` line as the one whose prefix did not.
+
+    Counters are read with a default so a usage dict recorded by an older run --
+    or a partial one checkpointed mid-campaign -- renders as 0 rather than
+    raising while reporting a result that has already been computed.
+    """
+
+    def _row(counters: dict, cost_available: bool) -> str:
+        cost = f"${counters.get('total_cost_usd', 0.0):.2f}" if cost_available else "cost unavailable"
+        return (
+            f"{counters.get('input_tokens', 0):,} in / "
+            f"{counters.get('output_tokens', 0):,} out / "
+            f"{counters.get('cache_creation_input_tokens', 0):,} cache-write / "
+            f"{counters.get('cache_read_input_tokens', 0):,} cache-read tokens, "
+            f"{cost} ({counters.get('calls', 0)} calls)"
+        )
+
+    cost_available = usage.get("cost_available", "total_cost_usd" in usage)
+    lines = [f"  LLM spend: {_row(usage, cost_available)}"]
+    # The total alone says a campaign was expensive; it never says what was
+    # expensive. Print the split so the next cut can be aimed.
+    for name, counters in (usage.get("by_role") or {}).items():
+        lines.append(f"    {name}: {_row(counters, cost_available)}")
+    return lines
+
+
 def _patch_paths(patch: str, *, cwd: str) -> list[str]:
     """Every workspace path a patch writes, as git itself reads them."""
     handle = tempfile.NamedTemporaryFile("w", suffix=".diff", encoding="utf-8", delete=False)
@@ -5619,27 +5654,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"{self._refused_round}"
             )
         if self.llm_usage.get("calls"):
-            cost_available = self.llm_usage.get(
-                "cost_available",
-                "total_cost_usd" in self.llm_usage,
-            )
-            cost_text = f"${self.llm_usage['total_cost_usd']:.2f}" if cost_available else "cost unavailable"
-            print(
-                f"  LLM spend: {self.llm_usage['input_tokens']:,} in / "
-                f"{self.llm_usage['output_tokens']:,} out tokens, "
-                f"{cost_text} "
-                f"({self.llm_usage['calls']} calls)"
-            )
-            # The total alone says a campaign was expensive; it never says what
-            # was expensive. Print the split so the next cut can be aimed.
-            by_role = self.llm_usage.get("by_role") or {}
-            for name, counters in by_role.items():
-                role_cost = f"${counters['total_cost_usd']:.2f}" if cost_available else "cost unavailable"
-                print(
-                    f"    {name}: {counters['input_tokens']:,} in / "
-                    f"{counters['output_tokens']:,} out tokens, "
-                    f"{role_cost} ({counters['calls']} calls)"
-                )
+            for line in llm_spend_lines(self.llm_usage):
+                print(line)
             # Printed next to the bill because that is where a reader asking
             # "why was this expensive" is looking. rtk degrades silently by
             # design; the degradation should not also be invisible.
