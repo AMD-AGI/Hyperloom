@@ -130,6 +130,20 @@ def _scan_server_logs(session_dir: Path) -> list[Path]:
 _GPU_POWER_KEYS = ("power_watts", "power_w", "power")
 _GPU_TEMP_KEYS = ("temperature_c", "temp_c", "temperature")
 _GPU_CLOCK_KEYS = ("gpu_clock_mhz", "clock_mhz", "sclk_mhz")
+# Occupancy, in percent. ``gpu_util_pct`` / ``vram_pct`` are what the multi-node
+# harvester writes (see ``benchmark_result._row_to_gpu_sample``); the rest are
+# spellings of the same percentage that a producer might reasonably use.
+#
+# Percent-named aliases only, deliberately. An absolute reading -- ``vram_used_mb``,
+# ``memory_used_bytes`` -- is a different quantity, and folding one into a field
+# called ``_pct`` would put 81920 where a percentage belongs. Absolute VRAM is
+# worth reporting, but as its own field, not by widening these tuples.
+_GPU_UTIL_KEYS = ("gpu_util_pct", "gpu_utilization_pct", "gpu_use_pct", "utilization_pct")
+_GPU_VRAM_KEYS = ("vram_pct", "vram_usage_pct", "vram_used_pct", "memory_used_pct")
+
+# Every metric this collector knows how to read. A block counts as contributing
+# when it yields any one of them.
+_GPU_ALL_KEYS = (_GPU_POWER_KEYS, _GPU_TEMP_KEYS, _GPU_CLOCK_KEYS, _GPU_UTIL_KEYS, _GPU_VRAM_KEYS)
 
 
 def _gpu_source(block: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -202,6 +216,14 @@ def _aggregate_gpu_monitor(
     not express that -- a real 0.0 fell through to the alias, and an all-absent
     metric shipped as a plausible-looking zero. Returns ``{}`` when no report
     carried a ``gpu_monitor`` block.
+
+    Utilization and VRAM answer questions power and temperature cannot -- whether
+    the GPU was compute-idle, and whether it was memory-constrained -- but only
+    the multi-node harvester emits them today. Magpie's single-node ``GPUMonitor``
+    reports power, temperature and both clocks and nothing else, so those two come
+    back ``None`` on a single-node session. That is the honest answer, and it is
+    why they are read through the same tri-state path as everything else rather
+    than defaulted to zero.
     """
     blocks: list[dict[str, Any]] = []
     for r in reports:
@@ -237,9 +259,7 @@ def _aggregate_gpu_monitor(
     # this function can report, and crediting it would put a large sample count
     # beside a row of ``None``.
     contributing = [
-        w
-        for b, w in zip(blocks, weights)
-        if any(_gpu_source(b, keys) is not None for keys in (_GPU_POWER_KEYS, _GPU_TEMP_KEYS, _GPU_CLOCK_KEYS))
+        w for b, w in zip(blocks, weights) if any(_gpu_source(b, keys) is not None for keys in _GPU_ALL_KEYS)
     ]
 
     def _avg(keys: tuple[str, ...]) -> float | None:
@@ -271,6 +291,10 @@ def _aggregate_gpu_monitor(
         "avg_temp_c": _avg(_GPU_TEMP_KEYS),
         "max_temp_c": _max(_GPU_TEMP_KEYS),
         "avg_clock_mhz": _avg(_GPU_CLOCK_KEYS),
+        "avg_gpu_util_pct": _avg(_GPU_UTIL_KEYS),
+        "max_gpu_util_pct": _max(_GPU_UTIL_KEYS),
+        "avg_vram_pct": _avg(_GPU_VRAM_KEYS),
+        "max_vram_pct": _max(_GPU_VRAM_KEYS),
     }
 
 

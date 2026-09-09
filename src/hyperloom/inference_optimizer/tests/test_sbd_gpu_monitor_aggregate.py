@@ -178,6 +178,112 @@ def test_section_is_omitted_when_no_block_was_found(tmp_path):
     assert "gpu_monitor_aggregate" not in section
 
 
+def test_multi_node_flat_samples_carry_util_and_vram(tmp_path):
+    """The multi-node harvester's own field names, aggregated rather than ignored.
+
+    ``gpu_util_pct`` / ``vram_pct`` are what ``benchmark_result._row_to_gpu_sample``
+    writes. They were being dropped, which is why the breakdown could not say
+    whether a slow round was compute-idle or short of memory.
+    """
+    flat = [
+        {"power_w": 100.0, "gpu_util_pct": 80.0, "vram_pct": 40.0},
+        {"power_w": 200.0, "gpu_util_pct": 90.0, "vram_pct": 50.0},
+    ]
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", flat)], [])
+
+    assert out["avg_gpu_util_pct"] == 85.0
+    assert out["max_gpu_util_pct"] == 90.0
+    assert out["avg_vram_pct"] == 45.0
+    assert out["max_vram_pct"] == 50.0
+
+
+def test_nested_util_and_vram_pick_the_right_statistic(tmp_path):
+    """The Magpie-style pre-aggregated shape, should its monitor ever report these.
+
+    Magpie does not sample utilization or VRAM today, so this pins the parsing
+    rather than a live producer: the mean comes from ``avg`` and the peak from
+    ``max``, exactly as for power.
+    """
+    block = {
+        "sample_count": 100,
+        "gpu_util_pct": {"min": 5.0, "max": 99.0, "avg": 72.5},
+        "vram_pct": {"min": 10.0, "max": 88.0, "avg": 61.25},
+    }
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["avg_gpu_util_pct"] == 72.5
+    assert out["max_gpu_util_pct"] == 99.0
+    assert out["avg_vram_pct"] == 61.25
+    assert out["max_vram_pct"] == 88.0
+    assert out["samples"] == 100
+
+
+def test_real_magpie_block_reports_no_util_or_vram(tmp_path):
+    """Single-node reality: the monitor samples neither, so both stay ``None``.
+
+    Not zero. A 0% utilization reading would say the GPU sat idle through the
+    round, which is the opposite of what an unsampled metric means.
+    """
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", MAGPIE_BLOCK)], [])
+
+    assert out["avg_gpu_util_pct"] is None
+    assert out["max_gpu_util_pct"] is None
+    assert out["avg_vram_pct"] is None
+    assert out["max_vram_pct"] is None
+    # The metrics it does carry are unaffected by the new ones being absent.
+    assert out["avg_power_w"] == 300.6
+
+
+def test_absolute_vram_is_not_folded_into_the_percent_field(tmp_path):
+    """A MiB reading under a ``_pct`` name would be a units error, not a fallback."""
+    block = {"vram_used_mb": 81920.0, "memory_used_bytes": 85899345920.0}
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["avg_vram_pct"] is None
+    assert out["max_vram_pct"] is None
+    # And a block carrying only unreadable keys measured nothing this collector reports.
+    assert out["blocks"] == 1
+    assert out["samples"] == 0
+
+
+def test_util_only_block_still_counts_as_contributing(tmp_path):
+    """A source that reports occupancy but no power is a real reading, not an empty block."""
+    block = {"sample_count": 40, "gpu_util_pct": 55.0}
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["samples"] == 40
+    assert out["avg_gpu_util_pct"] == 55.0
+    assert out["avg_power_w"] is None
+
+
+def test_measured_zero_utilization_is_a_reading(tmp_path):
+    """A genuinely idle GPU is the finding this section exists to surface."""
+    out = _aggregate_gpu_monitor(
+        [_report(tmp_path, "r.json", {"gpu_util_pct": 0.0, "vram_pct": 0.0})],
+        [],
+    )
+
+    assert out["avg_gpu_util_pct"] == 0.0
+    assert out["max_gpu_util_pct"] == 0.0
+    assert out["avg_vram_pct"] == 0.0
+    assert out["samples"] == 1
+
+
+def test_mixed_topology_reports_util_from_the_source_that_has_it(tmp_path):
+    """A session with both shapes must not lose the multi-node occupancy readings."""
+    reports = [
+        _report(tmp_path, "single.json", MAGPIE_BLOCK),
+        _report(tmp_path, "multi.json", [{"power_w": 250.0, "gpu_util_pct": 95.0, "vram_pct": 70.0}]),
+    ]
+    out = _aggregate_gpu_monitor(reports, [])
+
+    assert out["blocks"] == 2
+    assert out["max_gpu_util_pct"] == 95.0
+    assert out["max_vram_pct"] == 70.0
+    # Weighted by sample_count, so the 1391-sample Magpie block dominates power.
+    assert out["max_power_w"] == 316.0
+
+
 def test_malformed_report_warns_without_raising(tmp_path):
     """A bad report degrades to a warning; a good one alongside it still counts."""
     bad = tmp_path / "bad.json"
