@@ -2,8 +2,8 @@
 title: Integrating standalone assembly - lessons from Evolve AttnRes
 kind: guide
 gens: [gfx950]
-status: source-inspected; integration checks proposed
-updated: 2026-09-08
+status: source-inspected; experimental gfx950 harness validated
+updated: 2026-09-09
 ---
 
 <!--
@@ -47,6 +47,8 @@ but launcher integration is a separate step.
 | Specialization | gfx950 support guard and fixed Kimi-K3 dimensions; some tensor properties are asserted. | Check the actual architecture, BF16/FP32 types, device, shapes, strides, and launch geometry. The inner H dimension must have the layout the ISA assumes; shape checks alone do not prove this. Preserve the authorized input domain. |
 | ABI and resources | Explicit ctypes argument packing, exported symbols, 1024-thread blocks, and shared-memory launch arguments. | Match argument order, widths, offsets, and pointer lifetime to metadata. Reconcile descriptor static LDS with additional dynamic shared memory instead of copying resource numbers blindly. |
 | Candidate identity | `_load_fn` caches by `(co_path, kernel_name)` for the process lifetime. | Replacing bytes at the same path need not reload the module. Give each candidate a fresh object identity or isolated process; account for target and device/context as well as code content. |
+| Address arithmetic | The pinned combine source has nine low-half pointer adds without a high-half carry; a local correction passed valid tensors spanning a 4-GiB boundary. | Audit every complete address calculation, not only argument packing. Test valid boundary-spanning tensor views and multiple independent allocations. Keep pointer-faulting candidates rejected. |
+| Numerical conversion | The pinned combine source truncates FP32 to BF16; a nearest-rounding control substantially reduces error. | Compare against the driver's conversion contract and an independent oracle, not just a global SNR threshold. Record changes to numerical semantics separately from scheduling gains. |
 | Stream | `_launch` passes `None` for the HIP stream. | Propagate the driver's actual stream. Verify nondefault-stream execution and graph capture before accepting the wrapper. Load/build before timing or capture. |
 | Dispatch | Unsupported hardware or missing `.co` files cause the upstream suite to skip. | Record a skip as unevaluated. Verify the selected function is the assembly candidate, and use a disposable wrong-result edit to prove the unchanged oracle rejects it. |
 | Output contract | Score writes nine columns of a 16-column tensor; references initialize outputs. | Preserve required initialization and in-place behavior. Test reused, dirty outputs and changed input tensors to detect stale results or pointer binding. |
@@ -78,5 +80,9 @@ measurements separately; do not infer model throughput from a kernel ratio.
 
 Retain the source revision, candidate assembly digest, target/toolchain,
 specialization, launch contract, correctness outcome, and per-case timing in
-the campaign's normal artifacts. The published AttnRes numbers remain
-author-reported until this route is independently exercised on gfx950.
+the campaign's normal artifacts. Independent gfx950 results are now recorded
+in the [score](../cases/evolve_attnres_score_gfx950.md) and
+[combine](../cases/evolve_attnres_combine_gfx950.md) cards. They do not reproduce
+the published headline ratios: score regresses, while a locally corrected
+combine has workload-dependent gains. The validation harness preserves the
+upstream snapshots and lives outside the production adapter implementation.

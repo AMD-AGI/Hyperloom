@@ -2,8 +2,8 @@
 title: Evolve AttnRes score on gfx950 - interleaved reductions
 kind: case
 gens: [gfx950]
-status: source-inspected; performance author-reported
-updated: 2026-09-08
+status: GPU-reproduced; slower than the tested Triton baseline
+updated: 2026-09-09
 ---
 
 <!--
@@ -26,6 +26,31 @@ attributes the score and combine kernels to Evolve-Kernel island search and
 reports score latency of **34.78 us -> 5.53 us** on MI355X. This is the author's
 whole-kernel comparison with Triton, not a Forge reproduction or an ablation
 isolating the DPP schedule's contribution.
+
+## Independent reproduction: do not assume the reported baseline
+
+On MI355X/gfx950 with ROCm 7.2.3, PyTorch 2.11.0+gitd0c8b1f, and Triton
+3.6.0, the unmodified score source rebuilt through Forge's assembler passed
+an independent FP64 oracle. The reference was the unmodified Triton kernel
+in AITER's pinned test, with its original launch configuration. Both sides
+used the same stream and GPU graph timing, excluding compilation, output
+initialization, Python launch overhead, and the oracle.
+
+Warm medians were **2.892 us Triton versus 5.302 us assembly**; a fresh process
+with an empty compiler cache reproduced **2.890 versus 5.292 us**. With 64
+distinct input sets totaling about 589 MB, medians were **4.539 versus 10.234
+us**. These protocols do not reproduce the author's 34.78-us Triton baseline.
+The assembly replacement is slower in this environment; do not keep it merely
+because the source reports a large speedup. This does not establish which
+compiler, launch, or measurement difference explains the author's result.
+
+Checks covered multiple seeds, unit-scale and near-zero inputs, zero vectors,
+zero weights, padded outer strides with contiguous H, input preservation,
+changed pointers, determinism, and nondefault-stream graph replay. Score was
+compared against FP64 with fixed `rtol=3e-4, atol=3e-4`; zero-reference cases
+were checked elementwise. A separate assembly edit replacing the final score
+with zero was rejected, and restoring the original module restored correctness.
+These are fixed-shape kernel checks, not a model-quality certification.
 
 The source specializes Kimi-K3 decode: `T=64`, `NVB=8`, `H=7168`,
 `BLOCK_H=1024`, `MAX_ROWS=16`, wave64, gfx950. Inputs are BF16 prefix
