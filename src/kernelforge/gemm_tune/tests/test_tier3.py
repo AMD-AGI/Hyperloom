@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -657,3 +658,101 @@ class TestTheVocabularyIsOneObject:
             # raises inside its own try, and neither is the fallthrough.
             adapter._build((16, 16, 16), {"backend": backend, "config": ""})
         assert reached == [], f"advertised but not implemented: {reached}"
+
+
+class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
+    """The generate stage never reached a model on a real box.
+
+    A writable session runs under the workspace guard, and the guard starts by
+    resolving ``git rev-parse --show-toplevel`` from the session's cwd. That cwd
+    is ``<tuning output>/tier3/<table>/`` -- an output directory, never a
+    repository -- so every attempt died at ``WorkspaceSafetyError('not a git
+    repository')``. Measured on an MI355X with a working provider: the gate
+    opened, the adapter resolved, and the run stopped at ``stage='generate'``
+    with that message, having asked nothing.
+    """
+
+    def _work_dir(self, tmp_path):
+        d = tmp_path / "tier3" / "bf16_tuned_gemm_csv"
+        d.mkdir(parents=True)
+        return d
+
+    def test_an_output_directory_becomes_a_worktree_of_its_own(self, tmp_path):
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        assert _isolate(work) is None
+        assert (work / ".git").exists()
+
+    def test_the_guard_can_resolve_a_baseline_afterwards(self, tmp_path):
+        """Exactly what the guard asks for, asked the same way it asks."""
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=work, capture_output=True, text=True, check=True
+        )
+        assert top.stdout.strip(), "the guard refuses an empty toplevel"
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True, text=True, check=False)
+        assert head.returncode == 0, "rollback needs a commit to roll back to"
+
+    def test_the_sandbox_is_its_own_root_even_inside_a_checkout(self, tmp_path):
+        """Otherwise the guard judges the operator's real tree, not the sandbox."""
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=work, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert Path(top).resolve() == work.resolve()
+
+    def test_an_existing_worktree_is_left_alone(self, tmp_path):
+        """The retry loop calls this twice; the second must not wipe the first."""
+        from kernelforge.gemm_tune.tier3.generate import _isolate
+
+        work = self._work_dir(tmp_path)
+        _isolate(work)
+        (work / "tuner.py").write_text("# attempt 1", encoding="utf-8")
+        assert _isolate(work) is None
+        assert (work / "tuner.py").read_text(encoding="utf-8") == "# attempt 1"
+
+    def test_git_missing_is_a_reason_not_a_traceback(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from kernelforge.gemm_tune.tier3 import generate
+
+        def no_git(*_a, **_k):
+            raise OSError("No such file or directory: 'git'")
+
+        monkeypatch.setattr(subprocess, "run", no_git)
+        out = generate._isolate(self._work_dir(tmp_path))
+        assert out is not None and not out.ok
+        assert "sandbox worktree" in out.reason
+
+    def test_the_session_is_not_started_when_the_sandbox_cannot_be_made(self, tmp_path, monkeypatch):
+        """A failure here is reported, not walked past into a doomed session."""
+        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+
+        monkeypatch.setattr(
+            generate,
+            "_isolate",
+            lambda _w: generate.GeneratedTuner(False, None, "could not prepare a sandbox worktree"),
+        )
+
+        def must_not_run(*_a, **_k):
+            raise AssertionError("the authoring session was started without a sandbox")
+
+        monkeypatch.setattr(generate, "_run", must_not_run)
+        out = generate.generate_tuner(
+            TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
+            tmp_path / "w",
+        )
+        assert not out.ok and "sandbox worktree" in out.reason
