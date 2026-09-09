@@ -230,15 +230,26 @@ for the user-facing summary.
   variable carried it, rather than passing it through for the provider to
   reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
   keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
-  non-reasoning models and gateways that reject the field.
+  non-reasoning models and gateways that reject the field.<br/>
+  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
+  reaches the gateway.** Hyperloom's own chat.completions used to forward
+  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
+  drops it and the call runs at the gateway's default -- deeper and more
+  expensive, with no error to notice. Forge's side of the same variable is loud
+  (it refuses to start), but Hyperloom's cannot be without breaking
+  non-reasoning models, so **a deployment sitting on `minimal` has to move to
+  `low` by hand.**
 
 - **Forge reads Hyperloom's environment contract instead of its own.** Forge
   does not ship next to Hyperloom any more, it ships inside it, and an operator
   configuring one box was being asked to learn two vocabularies for the same
   decision. `Config.from_env` now walks the ladder
   `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
-  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it -- reimplemented rather
-  than imported, because this package does not depend on `hyperloom`. Reasoning effort falls back to
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
+  written out separately because they answer different questions -- Hyperloom's
+  picks the model for its own calls into a campaign, Forge's picks the model an
+  agent session runs -- and the part worth sharing is the variable names, which
+  this change makes identical. Reasoning effort falls back to
   the project-wide `HYPERLOOM_REASONING_EFFORT` when
   `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
   is not silently contradicted by the component doing most of the spending.<br/>
@@ -270,6 +281,21 @@ for the user-facing summary.
   relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
   through to the provider default rather than failing, so **check your
   deployment's env rather than waiting for an error.**
+
+- **`auto` resolves the model after the provider, not before.** The model
+  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
+  backend of `auto` answered before the question was settled: `auto` prefers
+  the Claude CLI but falls to codex when it is not installed, and the runtime
+  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
+  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
+  and `Config.agent_runtime` reads the pair once the provider is known. Two
+  further sites built their own runtime and so read neither switch:
+  `fusion/command.py` pinned every fusion session to the default depth
+  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
+  took the provider default model and the default effort. Both now read the
+  same pair and the same effort ladder as `forge-loop`, and a new test asserts
+  the set of modules that build a runtime is closed -- a fresh bypass fails the
+  suite rather than going unnoticed, which is how these two did.
 
 - **An agent session's reasoning effort is now the operator's decision, not the
   call site's.** `AgentRunSpec.resolved()` used to let a spec's own

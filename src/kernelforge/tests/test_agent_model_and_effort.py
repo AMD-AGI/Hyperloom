@@ -57,9 +57,45 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
     # ``config``/``cli`` carry the operator's value to the runtime, which is the
     # one direction that is allowed; they are matched by name, not by position,
     # so a new module cannot inherit the exemption by accident.
-    allowed = {"config.py", "cli.py", "orchestrator/agent.py", "orchestrator/supervisor.py"}
+    allowed = {
+        "config.py",
+        "cli.py",
+        "orchestrator/agent.py",
+        "orchestrator/supervisor.py",
+        "fusion/command.py",
+        "gemm_tune/tier3/generate.py",
+    }
     unexpected = [entry for entry in offenders if entry.rsplit(":", 1)[0] not in allowed]
     assert not unexpected, "call sites pinning a reasoning effort: " + ", ".join(unexpected)
+
+
+def test_every_runtime_is_built_where_the_switches_are_read() -> None:
+    """No module builds an agent runtime outside the list that reads the env.
+
+    Deleting a ``reasoning_effort="high"`` literal makes a call site *look*
+    like it defers to the runtime while it still builds its own, which is a
+    silently pinned session rather than a converged one. The property that
+    actually holds the convergence together is this one: the set of modules
+    that construct a runtime is closed, and every member has been checked to
+    read ``CLAUDE_MODEL``/``CODEX_MODEL`` and the effort variables. A new
+    construction site has to be added here, which is where that check happens.
+    """
+    builders = {"resolve_agent_runtime", "AgentRuntimeConfig"}
+    found: list[str] = []
+    for path in _python_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in builders:
+                found.append(str(path.relative_to(_SRC)))
+    allowed = {
+        "config.py",
+        "fusion/command.py",
+        "gemm_tune/tier3/generate.py",
+        "orchestrator/agent.py",
+        "orchestrator/supervisor.py",
+    }
+    unexpected = sorted(set(found) - allowed)
+    assert not unexpected, "runtimes built outside the switch-reading modules: " + ", ".join(unexpected)
 
 
 def test_runtime_effort_outranks_the_spec() -> None:
