@@ -45,6 +45,40 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "conftest.py",
 ]
 
+# Untracked paths written by the tooling rather than by the agent, declared so a
+# turn is not rejected for them. Deliberately per-path: an undeclared stray file
+# is still a violation, which is why this is not ``allow_untracked``.
+#
+# Exported as a constant so the guard's behaviour can be tested against the list
+# that actually ships rather than against a copy of it.
+TOOL_OWNED_UNTRACKED_GLOBS = [
+    # The profiler writes where it is run. Both forms must reach any depth: it
+    # runs in ``run_cwd``, the kernel file's parent, while the guard reports
+    # paths relative to the git toplevel. ``fnmatch`` crosses "/", so
+    # ``*_results.db`` already does; ``.rocprofv3/`` has to be spelled twice.
+    ".rocprofv3/*",
+    "*/.rocprofv3/*",
+    "*_results.db",
+    # The loop's own aiter cache, for the same reason and with the same remedy.
+    # ``allow_dirty_baseline`` forgives the shards present when a turn begins,
+    # but a candidate that triggers a JIT build creates new ones *during* the
+    # turn -- ``<experiments-dir>/aiter_cache/sources/<hash>/...``,
+    # ``.forge_cache_owner.json``, ``flydsl_cache/launch_*`` -- which land among
+    # the untracked and get the turn rejected for files the framework wrote.
+    #
+    # This is not hypothetical: a candidate measured at 1.027x, which the
+    # in-session gate had already ALLOWed as correct and faster, was reverted as
+    # a "Protected integrity violation" and -- never having been committed --
+    # could not be recovered afterwards.
+    #
+    # ``configure_aiter_cache_isolation`` roots the tree at
+    # ``experiments_dir / "aiter_cache"``, so the directory name is fixed even
+    # though ``--experiments-dir`` is not; matching on it covers every placement
+    # inside the workspace.
+    "aiter_cache/*",
+    "*/aiter_cache/*",
+]
+
 # task_type values that mean "a full source tree, not a self-contained snippet".
 _REPO_TASK_TYPES = {"repository", "image_kernel"}
 
@@ -671,16 +705,7 @@ Make your change(s) now.
             # rather than for anything it did. Named rather than forgiven
             # wholesale (``allow_untracked``), so every path nobody declared is
             # still refused.
-            ignored_untracked_globs=[
-                # Both entries must reach any depth: the profiler runs in
-                # ``run_cwd``, which is the kernel file's parent (see above),
-                # while the guard reports paths relative to the git toplevel.
-                # ``fnmatch`` crosses "/", so the ``*_results.db`` form already
-                # does; ``.rocprofv3/`` has to be spelled out twice.
-                ".rocprofv3/*",
-                "*/.rocprofv3/*",
-                "*_results.db",
-            ],
+            ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
             hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
             mcp_servers=pr_mcp_servers,
