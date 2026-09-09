@@ -313,7 +313,7 @@ def traces_complete(
     cache: dict[str, Any] | None = None,
     deadline: float | None = None,
 ) -> bool:
-    """Require fresh GPU traces; an unranked trace is unambiguous only at TP=1."""
+    """Require fresh GPU rank coverage, ignoring complete CPU-only companion traces."""
     if tp <= 0:
         return False
     ranks = set()
@@ -323,7 +323,7 @@ def traces_complete(
         files = current_traces(directories, snapshot)
         for obsolete in set(cache) - files.keys():
             del cache[obsolete]
-        if len(files) != tp:
+        if len(files) < tp:
             return False
         for name, before in files.items():
             _check_deadline(deadline)
@@ -346,6 +346,8 @@ def traces_complete(
             _check_deadline(deadline)
             if [stat.st_mtime_ns, stat.st_size] != before or not isinstance(metadata, dict):
                 return False
+            if metadata.get("has_kernel") is False:
+                continue
             rank = metadata.get("rank")
             if rank is None and tp == 1:
                 rank = 0

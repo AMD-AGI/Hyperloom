@@ -1376,14 +1376,25 @@ def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, kn
 
 
 @pytest.mark.parametrize("stop_rc", ["0", "22"])
-def test_tp1_unranked_vllm_gzip_flushes_after_manual_stop(tmp_path, stop_rc):
+@pytest.mark.parametrize("cpu_frontend", [False, True], ids=["unranked-gpu", "ranked-gpu-with-cpu-frontend"])
+def test_tp1_vllm_gzip_flushes_after_manual_stop(tmp_path, stop_rc, cpu_frontend):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
     trace = res / "torch_trace"
     source = tmp_path / "trace-source"
     trace.mkdir()
     source.mkdir()
-    with gzip.open(source / "worker-host_12345.1770000000000000000.trace.json.gz", "wt", encoding="utf-8") as handle:
+    gpu_name = (
+        "rank0.1770000000000000000.pt.trace.json.gz"
+        if cpu_frontend
+        else "worker-host_12345.1770000000000000000.trace.json.gz"
+    )
+    with gzip.open(source / gpu_name, "wt", encoding="utf-8") as handle:
         json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+    if cpu_frontend:
+        with gzip.open(
+            source / "host_84217.async_llm.1787731415290283310.pt.trace.json.gz", "wt", encoding="utf-8"
+        ) as handle:
+            json.dump({"traceEvents": [{"cat": "python_function", "ph": "X", "name": "step"}]}, handle)
     events = tmp_path / "profile-events.txt"
     env = _fast_trace_poll_env(bind, tmp_path)
 

@@ -183,6 +183,56 @@ def test_current_trace_proof_accepts_single_unranked_tp1(tmp_path, name):
     assert phase_gate.traces_complete(dirs, snapshot, 1)
 
 
+@pytest.mark.parametrize(
+    "gpu_names",
+    [("rank0.pt.trace.json.gz",), ("worker.pt.trace.json.gz",), ("rank0.pt.trace.json.gz", "rank1.pt.trace.json.gz")],
+)
+@pytest.mark.parametrize(
+    "frontend_name", ["host_84217.async_llm.1787731415290283310.pt.trace.json.gz", "frontend-rank0.pt.trace.json.gz"]
+)
+def test_current_trace_proof_accepts_gpu_ranks_with_cpu_frontend(tmp_path, gpu_names, frontend_name):
+    dirs = [str(tmp_path)]
+    snapshot = phase_gate.snapshot_traces(dirs)
+    _write_trace(tmp_path / frontend_name, gpu=False)
+    for name in gpu_names:
+        _write_trace(tmp_path / name)
+    assert len(phase_gate.current_traces(dirs, snapshot)) == len(gpu_names) + 1
+    assert phase_gate.traces_complete(dirs, snapshot, len(gpu_names))
+
+
+def test_cpu_frontend_cache_rechecks_file_when_gpu_events_appear(tmp_path, trace_metadata_reads):
+    dirs = [str(tmp_path)]
+    snapshot = phase_gate.snapshot_traces(dirs)
+    _write_trace(tmp_path / "rank0.pt.trace.json.gz")
+    frontend = _write_trace(tmp_path / "host.async_llm.pt.trace.json.gz", gpu=False)
+    cache = {}
+    assert phase_gate.traces_complete(dirs, snapshot, 1, cache=cache)
+    assert phase_gate.traces_complete(dirs, snapshot, 1, cache=cache)
+    assert len(trace_metadata_reads) == 2
+    _write_trace(frontend, gpu=True)
+    assert not phase_gate.traces_complete(dirs, snapshot, 1, cache=cache)
+    assert len(trace_metadata_reads) == 3
+
+
+@pytest.mark.parametrize(
+    "case", ["missing_gpu_rank", "duplicate_gpu_rank", "unranked_gpu_tp2", "truncated_frontend", "cpu_only"]
+)
+def test_cpu_frontend_does_not_mask_incomplete_or_ambiguous_gpu_traces(tmp_path, case):
+    dirs = [str(tmp_path)]
+    snapshot = phase_gate.snapshot_traces(dirs)
+    frontend = _write_trace(tmp_path / "host.async_llm.pt.trace.json.gz", gpu=False)
+    if case != "cpu_only":
+        _write_trace(tmp_path / "rank0.pt.trace.json.gz")
+    if case == "duplicate_gpu_rank":
+        _write_trace(tmp_path / "worker-rank0.pt.trace.json.gz")
+    elif case == "unranked_gpu_tp2":
+        _write_trace(tmp_path / "worker.pt.trace.json.gz")
+    elif case == "truncated_frontend":
+        frontend.write_bytes(frontend.read_bytes()[:-8])
+    tp = 2 if case in {"missing_gpu_rank", "unranked_gpu_tp2"} else 1
+    assert not phase_gate.traces_complete(dirs, snapshot, tp)
+
+
 @pytest.mark.parametrize("case", ["tp2", "explicit_rank", "rank_conflict", "multiple_unranked"])
 def test_current_trace_proof_rejects_ambiguous_unranked_fallback(tmp_path, case):
     dirs = [str(tmp_path)]
