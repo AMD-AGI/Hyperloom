@@ -841,3 +841,49 @@ class TestTheAuthoringSessionIsAllowedToDoTheJob:
         )
         assert not out.ok
         assert "write access" in out.reason, "the agent named its own blocker and we dropped it"
+
+
+class TestTheAuthorIsWarnedThatABadLaunchKillsTheProcess:
+    """A GPU memory fault is not an exception, and the brief never said so.
+
+    Measured on an MI355X: a tuner written from this mandate swept one backend's
+    kernel ids, took a fault four minutes in on shape 2 of 42, and the process
+    ended -- no traceback, nothing for ``except`` to see, forty-one shapes of
+    work never started. A single-process script has no upper bound on what one
+    bad candidate costs it, and no amount of care in the search protects it.
+    The author cannot infer this from anywhere else, so the mandate has to say
+    it, and has to say what to do about it.
+    """
+
+    def _brief(self):
+        gap = CoverageGap(
+            table="bf16_tuned_gemm.csv",
+            tuner="sglang_dense_bf16",
+            env_var="AITER_CONFIG_GEMM_BF16",
+            key_schema=["M", "N", "K"],
+            miss_count=40,
+            reason="sglang_dense_bf16 produced nothing landable",
+        )
+        return build_mandate(gap, [{"M": 16, "N": 1536, "K": 7168}]).render()
+
+    def test_the_failure_mode_is_named_not_hinted_at(self):
+        brief = self._brief().lower()
+        assert "memory access fault" in brief
+        assert "does not raise" in brief, "an author who thinks it raises will wrap it in try/except"
+
+    def test_it_says_the_fault_can_surface_late(self):
+        # Blacklisting the candidate the process died on is only correct if the
+        # author knows it may be the wrong one; without this they trust it.
+        assert "asynchronous" in self._brief()
+
+    def test_it_says_how_to_survive_one(self):
+        brief = self._brief()
+        assert "subprocess" in brief, "in-process recovery is impossible; the brief must say so"
+        assert "on disk" in brief, "state that dies with the process is state that is lost"
+
+    def test_the_default_is_recorded_before_anything_risky(self):
+        # The control row is what lets a shape that was never tuned still meet
+        # the contract's "one row per demanded shape", so a fault costs a
+        # candidate rather than the whole submission.
+        brief = self._brief()
+        assert "the default first, before anything risky" in brief

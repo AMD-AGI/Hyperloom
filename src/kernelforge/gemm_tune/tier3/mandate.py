@@ -16,18 +16,22 @@ author following it exactly proposed configurations in a vocabulary
 now comes from ``dispatch.describe_candidate_protocol``, so the words the author
 is given are generated from the code that reads them back.
 
-Three clauses are not style preferences. On the first real MI355X trial both an
-LLM-written tuner and aiter's own official tuner were confidently wrong the same
-two ways. Correctness must be re-checked on fresh inputs several times: four
-split-K winners were wrong on 1.25-3.98% of elements, and *which* elements
-changed between identical calls, so a single check passes them at random -- the
-generated tuner reported a worst-case relative error of 7.65e-3 for candidates a
-repeated audit measured at 17 to 50. A Python-loop timer cannot rank these
-kernels: one dispatch costs ~12us against kernels of 5-13us, so every candidate
-collapses to the same number and the honest conclusion from that data was "there
-is nothing to tune here"; capturing N calls into a graph removes the host cost.
-And its own timings decide nothing -- :mod:`.referee` re-times everything, which
-is what makes the rest survivable.
+Four clauses are not style preferences. On real MI355X trials both an LLM-written
+tuner and aiter's own official tuner were confidently wrong the same two ways,
+and a correct search was still destroyed by the hardware. Correctness must be
+re-checked on fresh inputs several times: four split-K winners were wrong on
+1.25-3.98% of elements, and *which* elements changed between identical calls, so
+a single check passes them at random -- the generated tuner reported a worst-case
+relative error of 7.65e-3 for candidates a repeated audit measured at 17 to 50.
+A Python-loop timer cannot rank these kernels: one dispatch costs ~12us against
+kernels of 5-13us, so every candidate collapses to the same number and the honest
+conclusion from that data was "there is nothing to tune here"; capturing N calls
+into a graph removes the host cost. The search must be crash-resumable, because
+sweeping one backend's kernel ids raised no exception and no error -- it ended
+the interpreter with a GPU memory fault, on shape 2 of 42, after four minutes of
+correct work, leaving one row, and nothing in Python can catch that. And its own
+timings decide nothing -- :mod:`.referee` re-times everything, which is what
+makes the rest survivable.
 
 The mandate is data. Rendering it as text is a convenience; the fields are what
 downstream code checks against.
@@ -188,6 +192,23 @@ Your timings are informational. The harness re-times your candidates with its
 own clock and only those numbers decide anything, so do not tune the benchmark
 -- propose genuinely fast configurations and describe them precisely enough to
 be re-dispatched.
+
+## Surviving the search
+A bad launch on this hardware does not raise. It ends the process:
+`Memory access fault by GPU node-N ... Write access to a read-only page`, no
+traceback, no `except` that can see it, and everything still in memory is gone.
+Measured:
+the first tuner written from this mandate died on shape 2 of 42 while sweeping
+one backend's kernel ids, four minutes in, and kept a single row. The fault is
+asynchronous too, so it can surface several launches after the one that caused
+it; the candidate the process died on is not reliably the guilty one.
+
+So keep the state on disk and do the GPU work in short-lived subprocesses.
+Record each candidate before you launch it, so a worker that dies names what it
+was running and the driver can skip that pair and carry on. Write each shape's
+result -- the default first, before anything risky -- as soon as it exists, and
+rebuild both output files from that state after every worker exits. A fault then
+costs one candidate instead of the whole run.
 
 ## Budget
 About {budget}s of wall time. Explore what is callable before committing to a
