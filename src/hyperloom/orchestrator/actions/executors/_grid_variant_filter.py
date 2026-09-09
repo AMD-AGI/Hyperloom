@@ -361,9 +361,8 @@ _HELP_PROBE_RETRY_SEC: float = 300.0
 # more on a cold pod). The result is cached per framework, so this is paid once.
 _HELP_PROBE_TIMEOUT_SEC: float = 30.0
 
-# Per-framework ``--help`` extraction commands. Each is a single-shot
-# ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
-# Argv tails; the interpreter is resolved per framework at call time.
+# Per-framework ``--help`` extraction commands, as argv tails: the interpreter is
+# resolved per framework at call time.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     # Both build a parser and hand it to the framework's own registrar, the shape
     # `atom` already used: neither exposes a ready-made parser at module scope.
