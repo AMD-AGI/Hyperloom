@@ -572,6 +572,49 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
     assert geak["product"]["cfg_hash"] == "deadbeef"
 
 
+def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
+    """A baseline degraded by a foreign co-tenant must be tellable from a real one.
+
+    GEAK writes its own visible-devices mask for every server it launches, so a
+    run whose pin never reached it lands on physical card 0 and reads as
+    ``no_gain`` (issue #1312). The pin is recorded next to the device list it
+    disagrees with, since the two are in different coordinate systems and only
+    the absolute one identifies the card.
+    """
+    recorder = _geak_recorder()
+    recorder.record_geak_handoff(
+        {
+            "schema_version": 3,
+            "gpu_ids": "0,1",
+            "gpu_ids_space": "logical",
+            "gpu_pin": {"ids": "6,7", "var": "ROCR_VISIBLE_DEVICES", "source": "recipe"},
+        }
+    )
+    recorder.finish(verdict="not_run", status="succeeded", tput_after=900.0)
+
+    handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
+    assert handoff["gpu_ids"] == "0,1"
+    assert handoff["gpu_ids_space"] == "logical"
+    assert handoff["gpu_pin"]["ids"] == "6,7"
+    assert handoff["gpu_pin"]["var"] == "ROCR_VISIBLE_DEVICES"
+
+
+def test_a_handoff_without_a_pin_is_not_read_as_a_pin_to_card_zero(tmp_path):
+    """An unpinned run means "whole machine visible", not "card 0".
+
+    ``schema_version`` is recorded on the same row, so a reader separates a
+    pre-v3 handoff that could not carry a pin from a v3 run that genuinely had
+    none -- which is why an empty pin here can be stated rather than omitted.
+    """
+    recorder = _geak_recorder()
+    recorder.record_geak_handoff({"schema_version": 3, "gpu_ids": "0,1"})
+    recorder.finish(verdict="not_run", status="succeeded", tput_after=900.0)
+
+    handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
+    assert handoff["schema_version"] == 3
+    assert handoff["gpu_pin"] == {}
+
+
 def test_geak_env_selections_are_recorded_as_their_own_source(tmp_path):
     """A library or env acceptance authors no kernel but still carries gain."""
     recorder = _geak_recorder()

@@ -1,0 +1,283 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
+from kernelforge.kernel_rewrite_controller.task_publisher import (
+    publish_complete_staged_tasks,
+    publish_staged_task,
+)
+
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "publisher-test",
+    "GIT_AUTHOR_EMAIL": "publisher-test@local",
+    "GIT_COMMITTER_NAME": "publisher-test",
+    "GIT_COMMITTER_EMAIL": "publisher-test@local",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, **_GIT_IDENTITY},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _staged(layout: ControllerLayout, repo: Path, name: str = "draft") -> Path:
+    staged = layout.agent_staging_root / name
+    staged.mkdir(parents=True)
+    (staged / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
+    (staged / "task.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "identity": {
+                    "producer": "forge-loop",
+                    "kernel_name": "kernel",
+                    "framework": "standalone",
+                    "framework_version": "unknown",
+                    "backend": "triton",
+                    "gpu": "mi355x",
+                },
+                "base_commit": "",
+                "repo_root": str(repo),
+                "kernel_path": "kernel.py",
+                "operator_name": "kernel",
+                "driver_path": "ignored.py",
+                "source_files": ["kernel.py"],
+                "target_functions": ["kernel"],
+                "shape_cases": [],
+                "priority": 0,
+                "reason": "offline replay",
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return staged
+
+
+def _newest_staged_mtime(staged: Path) -> float:
+    return max(path.stat().st_mtime for path in (staged, *staged.rglob("*")))
+
+
+def test_publish_pins_live_head_and_moves_complete_task_atomically(tmp_path: Path) -> None:
+    repo, head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is True
+    assert not staged.exists()
+    payload = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert payload["base_commit"] == head
+    assert payload["driver_path"] == "driver.py"
+
+
+def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    task_json = staged / "task.json"
+    payload = json.loads(task_json.read_text(encoding="utf-8"))
+    payload["identity"].update(
+        {
+            "producer": " FORGE-LOOP ",
+            "kernel_name": " Kernel ",
+            "framework": " SGLang ",
+            "framework_version": " 0.5.17+ROCM ",
+            "backend": " TRITON ",
+            "gpu": " MI355X ",
+        }
+    )
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is True
+    published = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert published["identity"] == {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "sglang",
+        "framework_version": "0.5.17+rocm",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+
+
+def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    nested = repo / "nested"
+    nested.mkdir()
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, nested)
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is False
+    assert "Git top-level" in result.reason
+    assert staged.is_dir()
+
+
+def test_publish_rejects_source_files_outside_the_pinned_repo(
+    tmp_path: Path,
+) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    task_json = staged / "task.json"
+    payload = json.loads(task_json.read_text(encoding="utf-8"))
+    payload["source_files"].append("python/other_repo/source.py")
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is False
+    assert "source path is not tracked" in result.reason
+    assert "python/other_repo/source.py" in result.reason
+
+
+def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    first = _staged(layout, repo, "first")
+    duplicate = _staged(layout, repo, "duplicate")
+    assert publish_staged_task(layout, first).published is True
+
+    result = publish_staged_task(layout, duplicate)
+
+    assert result.published is False
+    assert result.reason == "operator task is already published"
+    assert duplicate.is_dir()
+
+
+def test_a_staged_task_still_being_written_is_left_alone(tmp_path: Path) -> None:
+    # The scan runs on a timer beside the live agent, so a directory whose files
+    # were touched a moment ago may still be mid-write. Taking it would copy a
+    # truncated driver.py and delete the agent's working copy.
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+
+    # Default window against real time: the files were just written, which is
+    # what a scan landing in the same poll tick as the agent's write sees.
+    results = publish_complete_staged_tasks(layout)
+
+    assert results == ()
+    assert staged.is_dir()
+    assert (staged / "driver.py").is_file()
+
+
+def test_a_quiescent_staged_task_is_published(tmp_path: Path) -> None:
+    repo, head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    written_at = _newest_staged_mtime(staged)
+
+    results = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=5.0,
+        now=lambda: written_at + 5.0,
+    )
+
+    assert [result.published for result in results] == [True]
+    assert not staged.exists()
+    payload = json.loads((layout.task_dir(results[0].operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert payload["base_commit"] == head
+
+
+def test_a_refused_draft_is_not_revalidated_until_it_changes(tmp_path: Path) -> None:
+    """Refusal keeps the draft, and this scan runs on a half-second timer.
+
+    Without a memory of the refusal one bad draft is contract-checked thousands
+    of times across an analysis window, respawning Git probes on every pass.
+    """
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    (staged / "task.json").write_text("{ not json", encoding="utf-8")
+    written_at = _newest_staged_mtime(staged)
+    refused: dict[str, float] = {}
+
+    first = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: written_at + 5.0,
+        refused=refused,
+    )
+    second = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: written_at + 6.0,
+        refused=refused,
+    )
+
+    assert [result.published for result in first] == [False]
+    assert second == ()
+    assert staged.is_dir()
+
+
+def test_a_revised_draft_is_offered_again_after_a_refusal(tmp_path: Path) -> None:
+    repo, head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    broken = staged / "task.json"
+    payload = broken.read_text(encoding="utf-8")
+    broken.write_text("{ not json", encoding="utf-8")
+    refused: dict[str, float] = {}
+
+    publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: _newest_staged_mtime(staged) + 5.0,
+        refused=refused,
+    )
+    broken.write_text(payload, encoding="utf-8")
+    os.utime(broken, (_newest_staged_mtime(staged) + 10.0,) * 2)
+    retried = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: _newest_staged_mtime(staged) + 15.0,
+        refused=refused,
+    )
+
+    assert [result.published for result in retried] == [True]
+    published = json.loads((layout.task_dir(retried[0].operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert published["base_commit"] == head
+
+
+def test_publish_rejects_a_symlinked_staging_directory(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    real = _staged(layout, repo, "real")
+    link = layout.agent_staging_root / "linked"
+    link.symlink_to(real, target_is_directory=True)
+
+    result = publish_staged_task(layout, link)
+
+    assert result.published is False
+    assert result.reason == "staged task is not a safe directory"
+    assert real.is_dir()

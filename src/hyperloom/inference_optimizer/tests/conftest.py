@@ -25,14 +25,6 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _clear_kernel_request_handler_caches():
-    """Clear ``lru_cache`` state on env-bound helpers between tests."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
-
-    krh._default_kernel_batch_parallel.cache_clear()
-
-
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
@@ -100,6 +92,62 @@ def seed_target_analysis_marker(session_dir: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def seed_kernel_keep(
+    state,
+    kernel_id: str,
+    *,
+    decision: str = "KEEP",
+    micro: float = 1.5,
+    source_file: str = "",
+    artifact: str = "",
+    task_group_key: str = "",
+) -> str:
+    """Put one attempt row and, for a KEEP, its queued patch into ``state``.
+
+    The lane that used to write both is gone -- source-level rewrite belongs to
+    the KernelForge controller now -- so tests covering the integrate queue seed
+    it through the same helper its surviving producer
+    (``enqueue_nominated_patch``) uses, rather than through a handler result
+    envelope nothing produces.
+
+    Args:
+        state: The SharedState to seed.
+        kernel_id: Kernel the attempt belongs to.
+        decision: The attempt's verdict; only ``KEEP`` reaches the queue.
+        micro: Micro-benchmark speedup, which orders the queue.
+        source_file: Source the patch touches; same-file KEEPs collapse.
+        artifact: Patch artifact path.
+        task_group_key: Group identity, when the kernel belongs to one.
+
+    Returns:
+        The stable task key the row was filed under.
+    """
+    from hyperloom.orchestrator.kernel._kernel_decisions import (
+        _queue_kernel_keep,
+        _stable_kernel_task_key,
+    )
+
+    task_key = _stable_kernel_task_key(
+        task_group_key=task_group_key,
+        kernel_id=kernel_id,
+        source_file=source_file,
+    )
+    entry = {
+        "current_kernel_id": kernel_id,
+        "task_group_key": task_group_key,
+        "last_decision": decision,
+        "last_status": "ok",
+        "last_micro_speedup": micro,
+        "last_source_file": source_file,
+        "last_artifact_path": artifact,
+        "attempts": 1,
+        "last_ts": f"2026-01-01T00:00:{len(state.kernel_opt_task_attempts):02d}+00:00",
+    }
+    state.kernel_opt_task_attempts[task_key] = entry
+    _queue_kernel_keep(state, task_key=task_key, kernel_id=kernel_id, entry=entry)
+    return task_key
 
 
 @pytest.fixture

@@ -171,3 +171,13 @@ def test_empty_allowlist_still_uses_framework_root(tmp_path):
     )
     assert "ok.py" not in outside
     assert "/etc/passwd" in outside
+
+
+def test_localization_rejects_rocm_runtime_objects(tmp_path):
+    outside = ip._localization_paths_outside_allowlist(
+        ["/opt/rocm/lib/libhip_hcc.so", "/opt/rocm/include/hip/hip_runtime.h"],
+        None,
+        ["/opt/rocm/"],
+    )
+    assert "/opt/rocm/lib/libhip_hcc.so" in outside
+    assert "/opt/rocm/include/hip/hip_runtime.h" not in outside

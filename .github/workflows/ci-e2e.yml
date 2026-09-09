@@ -39,12 +39,17 @@ on:
 # comments get a group of their own (keyed by comment id) so they cancel nothing. The
 # `/retest` predicate is kept identical to the one in `resolve.if`, so exactly the
 # comments that can start a run are the comments that can cancel one.
+#
+# workflow_dispatch has no pull_request.number / issue.number, so the group used
+# to fall through to github.ref (refs/heads/main for every dispatch) and
+# cancel-in-progress killed the previous GPU smoke. Key on inputs.head_sha
+# (then head_ref) so two fork-PR dispatches can run without cancelling each other.
 concurrency:
   group: >-
     ci-e2e-${{
       (github.event_name == 'issue_comment' && !contains(github.event.comment.body, '/retest'))
       && format('noop-comment-{0}', github.event.comment.id)
-      || (github.event.pull_request.number || github.event.issue.number || github.ref)
+      || (github.event.pull_request.number || github.event.issue.number || inputs.head_sha || inputs.head_ref || github.ref)
     }}
   cancel-in-progress: true
 

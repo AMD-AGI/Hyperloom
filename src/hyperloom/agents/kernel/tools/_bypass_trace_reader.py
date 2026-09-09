@@ -62,6 +62,9 @@ _DECODER = json.JSONDecoder()
 # events a few KiB, so these retain generous headroom for embedded metadata.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
+_MAX_ANNOTATION_WINDOWS = 100_000
+_MAX_BUFFERED_GPU_EVENTS = 100_000
+_MAX_EVENT_NAME_CHARS = 256
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -918,7 +921,7 @@ def _finalize(
         rows = []
         for nm, a in agg.items():
             row: dict[str, Any] = {
-                "name": nm,
+                "name": nm[:_MAX_EVENT_NAME_CHARS],
                 "gpu_time_us": round(a.dur_us, 3),
                 "gpu_time_ms": round(a.dur_us / 1000.0, 4),
                 "count": a.count,
@@ -960,7 +963,7 @@ def _finalize(
             _meta = _meta or {}
             kernel_launches.append(
                 {
-                    "name": _name,
+                    "name": _name[:_MAX_EVENT_NAME_CHARS],
                     "op_name": _op or "",
                     "ts": _ts,
                     "dur": _dur,
@@ -1082,8 +1085,10 @@ def analyze_trace(
     graph_launch_corrs: set[int] = set()
     # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
     stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
+    stream_interval_count = 0
     event_total = 0
     stream_errors: list[str] = []
+    cap_exceeded = ""
 
     fobj = _open_trace_binary(tf)
     try:
@@ -1120,16 +1125,25 @@ def analyze_trace(
                             extid_to_opmeta[extid] = meta
                 continue
             if cat == "gpu_user_annotation" and ev.get("ph") == "X":
+                if len(annotation_windows) >= _MAX_ANNOTATION_WINDOWS:
+                    cap_exceeded = "annotation_windows"
+                    break
                 ts = ev.get("ts", 0) or 0
                 dur = ev.get("dur", 0) or 0
-                annotation_windows.append({"name": ev.get("name", "") or "", "ts": float(ts), "dur": float(dur)})
+                name = str(ev.get("name", "") or "")[:_MAX_EVENT_NAME_CHARS]
+                annotation_windows.append({"name": name, "ts": float(ts), "dur": float(dur)})
                 continue
             if cat in _GPU_CATS and ev.get("ph") == "X":
                 dur = float(ev.get("dur", 0) or 0)
                 ts = float(ev.get("ts", 0) or 0)
                 end = ts + dur
-                name = ev.get("name", "") or ""
-                stream_intervals.setdefault((ev.get("pid"), ev.get("tid")), []).append((ts, end, name))
+                name = str(ev.get("name", "") or "")
+                stream_key = (ev.get("pid"), ev.get("tid"))
+                if stream_interval_count >= _MAX_BUFFERED_GPU_EVENTS:
+                    cap_exceeded = "gpu_events"
+                    break
+                stream_intervals.setdefault(stream_key, []).append((ts, end, name[:_MAX_EVENT_NAME_CHARS]))
+                stream_interval_count += 1
                 if cat == _GPU_KERNEL_CAT:
                     kargs = ev.get("args") or {}
                     corr = kargs.get("correlation")
@@ -1182,6 +1196,7 @@ def analyze_trace(
         "status": "ok",
         "trace_file": str(tf),
         "event_total": event_total,
+        "truncated": bool(cap_exceeded),
         "stream_errors": stream_errors,
         "aggregation_scope": scope,
         "analyzed_rank": _rank_of(tf),
@@ -1194,4 +1209,6 @@ def analyze_trace(
         result["steady_window"] = steady_window
     elif steady_state:
         result["steady_window_status"] = "no_repeating_window_fell_back_to_full_trace"
+    if cap_exceeded:
+        result["truncation_reason"] = cap_exceeded
     return result

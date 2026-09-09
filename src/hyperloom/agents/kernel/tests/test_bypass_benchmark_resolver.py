@@ -72,3 +72,26 @@ def test_no_source_or_repo_returns_empty(tmp_path):
     lonely.parent.mkdir(parents=True)
     lonely.write_text("// x\n", encoding="utf-8")
     assert find_benchmark_files("aiter::rmsnorm", str(lonely)) == []
+
+
+def test_find_benchmark_files_inserts_double_dash(tmp_path, monkeypatch):
+    repo = _fake_repo(tmp_path)
+    captured: list[list[str]] = []
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return _Proc()
+
+    import _bypass_benchmark_resolver as bbr
+
+    monkeypatch.setattr(bbr.subprocess, "run", fake_run)
+    bbr.find_benchmark_files("aiter::rmsnorm", str(repo / "csrc" / "kernels" / "rmsnorm_quant_kernels.cu"))
+    assert captured
+    cmd = captured[0]
+    assert "--" in cmd
+    dash = cmd.index("--")
+    assert cmd[dash + 1] == "rmsnorm"

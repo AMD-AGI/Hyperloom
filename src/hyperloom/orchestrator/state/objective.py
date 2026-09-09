@@ -219,9 +219,9 @@ class TargetRooflineObjective(_RatioObjective):
 class AnyObjective(Objective):
     """Met when any member is met.
 
-    ``progress`` and ``gap_pct`` come from the closest member, the one about to
-    end the run. Not the smallest gap: members count percentage points of
-    different quantities, so ``progress`` is the only comparable one.
+    ``gap_pct`` is the first member's. Members count percentage points of
+    different quantities, so anything that picks between them per call changes
+    the axis of a value ``explore`` renders as one throughput gap.
     """
 
     objectives: list[Objective]
@@ -230,21 +230,17 @@ class AnyObjective(Objective):
         """Return the members' kinds joined by ``+``."""
         return "+".join(o.kind() for o in self.objectives)
 
-    def _closest(self, state: "SharedState") -> Objective:
-        """Return the member nearest to being met."""
-        return max(self.objectives, key=lambda o: o.progress(state))
-
     def progress(self, state: "SharedState") -> float:
-        """Return the closest member's progress."""
-        return self._closest(state).progress(state)
+        """Return the highest member progress."""
+        return max(o.progress(state) for o in self.objectives)
 
     def reached(self, state: "SharedState") -> bool:
         """Report whether any member is satisfied."""
         return any(o.reached(state) for o in self.objectives)
 
     def gap_pct(self, state: "SharedState") -> float:
-        """Return the closest member's remaining distance."""
-        return self._closest(state).gap_pct(state)
+        """Return the first member's remaining distance, so the axis is stable."""
+        return self.objectives[0].gap_pct(state)
 
     def describe(self) -> str:
         """Return the members' descriptions joined by ``or``."""

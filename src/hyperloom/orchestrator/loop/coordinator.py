@@ -863,11 +863,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: float | None = None
-        # Set while a met objective's transition is forced. Distinct from
-        # ``closing_phase``, which means the wall clock ran out and CLOSE should
-        # shed expensive work; a met target has to produce the full set of
-        # artifacts. ``True`` lifts the session bound for that one advance.
-        self._unbounded_advance: bool = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -982,11 +977,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
         "_kernel_timeline": "phase_kernel",
-        "_run_bf16_dense_gemm_fallback": "phase_kernel",
-        "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
-        "_bf16_dense_gemm_fallback_pending": "phase_kernel",
-        "_bf16_dense_gemm_fallback_attempted": "phase_kernel",
-        "_is_bf16_dense_gemm_fallback_attempt": "phase_kernel",
         "_resolve_bench_protocol": "phase_kernel",
         "_geak_timeouts": "phase_kernel",
         "_run_geak_kernel_phase": "phase_kernel",
@@ -1003,8 +993,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_replace_latest_gemm_tuning_attempt": "phase_kernel",
         "_gemm_e2e_candidates": "phase_kernel",
         "_validate_gemm_tuning_e2e": "phase_kernel",
-        "_kernel_opt_work_remains": "phase_kernel",
-        "_run_kernel_opt_entry_batch": "phase_kernel",
         "_current_tput_from_validated_gain": "phase_kernel",
         "_last_measured_roofline_tput": "phase_kernel",
         "_needs_roofline_for_watermark": "phase_kernel",
@@ -1153,7 +1141,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_emit_lifecycle": "writeback",
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
-        "_record_kernel_opt_partial": "writeback",
         "_record_integrate_keep": "writeback",
         "_is_promotable_result": "writeback",
         "_record_intervention_for_task": "writeback",
@@ -1639,16 +1626,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         During CLOSE the session deadline has already passed, so the bound
         switches to ``_closing_deadline`` and CLOSE work is not skipped.
 
-        A met target's forced advance is unbounded here: the phases' own
-        per-step timeouts (``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` is 600s on
-        its own) are the budget, and an outer bound short enough to matter would
-        cancel a step mid-flight.
-
         Returns:
             Remaining seconds, or ``None`` when no bound is armed.
         """
-        if self._unbounded_advance:
-            return None
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
         else:
@@ -1700,7 +1680,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (routed through SWEEP, then the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
@@ -1838,52 +1818,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
                     break
-                if objective.reached(self.shared_state):
-                    if not self.shared_state.target_reached_at:
-                        self.shared_state.target_reached_at = now_iso()
-                        # The marker is already set in memory and the phases
-                        # persist state themselves, so a failed write must not
-                        # cost the run its close sequence.
-                        try:
-                            self.shared_state.save(self.session_dir)
-                        except Exception:  # noqa: BLE001
-                            log.exception("Coordinator: persisting target_reached_at failed; routing anyway")
-                    # In this tick, not the next: every advance in the tick body
-                    # sits behind ``_await_within_session_bound``, so a target
-                    # met at or after the deadline would never get another one.
-                    # ``closing_phase`` stays unset -- CLOSE reads it to shed
-                    # expensive work, including the post-opt roofline this
-                    # routing exists to produce.
-                    routed_to_sweep = _phase_state.phase_index(
-                        str(self.shared_state.phase or "")
-                    ) < _phase_state.phase_index(_phase_state.PHASE_SWEEP)
-                    self._unbounded_advance = True
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase_target_reached",
-                        )
-                    except Exception:  # noqa: BLE001
-                        log.exception("Coordinator: target_reached transition failed")
-                    finally:
-                        self._unbounded_advance = False
-                    # The SWEEP hop leaves through the stop_reason check instead,
-                    # once SWEEP names the exit.
-                    if not routed_to_sweep:
-                        if not self.shared_state.stop_reason:
-                            self.shared_state.set_stop_reason("target_reached")
-                        stop_reason = self.shared_state.stop_reason
-                        break
-                # A met target outranks the wall clock for the hops it needs.
-                # conc_sweep clamps to the remaining session budget and declines
-                # when nothing is left, so SWEEP cannot run past --max-hours;
-                # max_ticks, emergency and signal still bound the loop.
-                if (
-                    deadline is not None
-                    and time.monotonic() >= deadline
-                    and not in_closing
-                    and not self.shared_state.target_reached_at
-                ):
+                if objective.reached(self.shared_state) and not self.shared_state.target_reached_at:
+                    # The phase machine reads the marker; the transition it makes
+                    # next persists it.
+                    self.shared_state.target_reached_at = now_iso()
+                if deadline is not None and time.monotonic() >= deadline and not in_closing:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break

@@ -629,11 +629,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
-    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
-    # only governs the entry's own dispatch: orchestration can still request
-    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
-    auto_kernel_opt_enabled: bool = True
+    # Terminal result of the phase-level KernelForge rewrite controller.
+    kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -977,7 +974,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
     # skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
-    # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
+    # Most recent per-kernel optimization record. No lane writes it now that
+    # source-level rewrite belongs to the KernelForge controller, but the
+    # integrate path still reads it to back-fill a patch identity from a payload
+    # carrying only a kernel_id, and a resumed session can still carry one.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
@@ -990,13 +990,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # silently reset the cap. Monotonic -- every outcome that would justify a reset
     # already stops the gate on its own.
     fusion_infra_aborts: int = 0
+    # How many times a fusion round left targets its lane ceiling never funded,
+    # counted here for the same reason as the aborts above.
+    fusion_withheld_retries: int = 0
     # Most recent collective campaign and capped integration audit.
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
     collective_only_mode: bool = False
-    # Most recent run_optimization dispatch skipped with no eligible kernels;
-    # recorded as a non-failure so the breakdown can surface it.
-    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
@@ -2076,7 +2076,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(latest, dict):
             return None
         value = latest.get("within_roofline_pct")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)):
             return None
         return float(value)
 
@@ -2637,12 +2637,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("integrate verdict capture failed", exc_info=True)
-
-    def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""

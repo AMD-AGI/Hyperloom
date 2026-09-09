@@ -15,7 +15,7 @@ from hyperloom.common.timeutil import now_iso
 _now_iso = now_iso
 
 # Default partial-attempt cap for run_optimization; override via env in
-# ``record_kernel_opt`` (1 disables second chance).
+# the integrate lane's retirement check (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 
 # Backend ladder infra failures can be transient; require two failed ladders

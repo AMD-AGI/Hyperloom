@@ -286,6 +286,12 @@ def test_redact_secrets_strips_bearer_and_env_shapes():
     assert "abcd1234efgh" not in out
 
 
+def test_redact_secrets_masks_custom_headers():
+    out = ct.redact_secrets("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
+
+
 def test_coerce_text_none_and_non_str():
     assert ct._coerce_text(None) == ""
     assert ct._coerce_text(123) == "123"

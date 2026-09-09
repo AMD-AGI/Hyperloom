@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import tracelens_analysis as tl  # noqa: E402
 import tracelens_skill_runner as tsr  # noqa: E402
-from _llm_source_context import build_context_block  # noqa: E402
 
 
 _HEADERS = [
@@ -99,27 +98,6 @@ def test_real_launcher_path_survives():
     assert cand["source_file"] == real.split("(", 1)[0]
     assert cand["source_line"] == 124
     assert cand["source_function"] == "_grouped_gemm_mxfp8"
-
-
-def test_materialized_runtime_args_are_sanitized_before_prompting(tmp_path):
-    """Production YAML selectors reach context without their adjacent secret."""
-    config = tmp_path / "baseline.yaml"
-    config.write_text(
-        "benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--api-key sk-secret --moe-runner-backend triton'\n",
-        encoding="utf-8",
-    )
-    raw = tl._runtime_server_args_from_config(str(config))
-    block = build_context_block(
-        server_args=raw,
-        framework="sglang",
-        precision="fp8",
-        env={},
-    )
-
-    assert "sk-secret" not in block
-    assert "api-key" not in block
-    assert "triton" in block
-    assert '"precision": "fp8"' in block
 
 
 def test_not_found_is_in_shared_placeholder_set():

@@ -36,6 +36,8 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _capture_shapes import is_capture_dir_name  # noqa: E402
 from _io_utils import safe_float  # noqa: E402
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS  # noqa: E402
+from _literal_utils import safe_literal_eval as _safe_literal_eval  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     build_operator_identity,
     build_task_group_shape_cases,
@@ -1326,8 +1328,8 @@ def _launcher_frame_from_dict(obj: dict) -> str | None:
     wrappers = obj.get("wrappers")
     if isinstance(wrappers, str):
         try:
-            wrappers = ast.literal_eval(wrappers)
-        except (ValueError, SyntaxError):
+            wrappers = _safe_literal_eval(wrappers)
+        except _LITERAL_EVAL_ERRORS:
             wrappers = []
     if isinstance(wrappers, (list, tuple)):
         for frame in wrappers:
@@ -1364,8 +1366,8 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
         stripped = kernel_path.strip()
         if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
             try:
-                parsed_obj = ast.literal_eval(stripped)
-            except (ValueError, SyntaxError):
+                parsed_obj = _safe_literal_eval(stripped)
+            except _LITERAL_EVAL_ERRORS:
                 parsed_obj = None
             frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
             if not frame:

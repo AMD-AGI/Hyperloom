@@ -1630,10 +1630,8 @@ class DispatcherCollaborator:
                 "dispatcher: could not record time-budget denial for task=%s",
                 task.task_id,
             )
-        # A cancelled conc_sweep never writes last_conc_sweep on its own, so
-        # SWEEP would idle until the LLM emits skip_to_close and CI would read
-        # that as robustness_escalated. Stamp the skip here so the phase
-        # machine can close on sweep_done.
+        # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
+        # would idle. Stamp the skip here so the phase machine closes on sweep_done.
         if str(task.kind or "") == "conc_sweep":
             try:
                 self._record_session_budget_conc_sweep_skip(denied=denied)
@@ -1726,8 +1724,9 @@ class DispatcherCollaborator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
-        if self._bf16_dense_gemm_fallback_pending():
-            return True
+        # The fp8 -> bf16 dense retry now runs inside a single gemm call (the
+        # tuner router selects the bf16 pass as a fallback), so a completed run's
+        # status is terminal -- there is no pending second attempt to re-trigger.
         return status not in {
             "ok",
             "succeeded",

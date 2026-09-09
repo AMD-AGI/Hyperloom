@@ -38,6 +38,10 @@ continue without asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`
   skill's docker mode). Do **not** start a new container and do **not** change its
   device/isolation flags. Otherwise (baremetal) run directly and do not run `docker`.
 - Do **not** modify `USER_DATA_PATH`.
+- **Do** start `robustness_monitor.sh` as the optimizer skill's monitoring section
+  describes. It resumes only a run that died with no `stop_reason`, no `phase=CLOSE` and
+  no `final.md`, so it cannot rewrite the terminal this gate reads. Skipping it makes
+  this leg less crash-tolerant than its siblings and the results stop being comparable.
 - Do **not** print or copy secret values into output, reports, or logs.
 
 ## Termination — do not end this turn until the run is launched

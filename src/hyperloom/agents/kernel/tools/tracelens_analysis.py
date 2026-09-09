@@ -9,7 +9,6 @@ capture directories, and has a dry-run path that works without TraceLens install
 """
 
 import argparse
-import ast
 import asyncio
 import contextlib
 import csv
@@ -86,7 +85,10 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
+from _bypass_report import partition_kernels
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
 from _nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
@@ -427,6 +429,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
         import _bypass_trace_reader as _reader
 
         analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        if analyze.get("truncated"):
+            return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
     except Exception:  # noqa: BLE001 - guard is advisory; never block on it
@@ -3304,6 +3308,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                         "--include=*.cuh",
                         "--include=*.hip",
                         "--include=*.sh",
+                        "--",
                         keyword,
                         str(sub_root),
                     ],
@@ -4017,9 +4022,9 @@ def _resolve_shapes_from_ops_unique_args_csv(
                 if not row_matches(name):
                     continue
                 try:
-                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
-                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
-                except (ValueError, SyntaxError):
+                    dims = _safe_literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = _safe_literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except _LITERAL_EVAL_ERRORS:
                     continue
                 if not isinstance(dims, (list, tuple)):
                     continue
@@ -4042,9 +4047,9 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
     raw_types = str(row.get("Input type") or "").strip()
     raw_concrete = str(row.get("Concrete Inputs") or "").strip()
     try:
-        dims = ast.literal_eval(raw_dims or "()")
-        dtypes = ast.literal_eval(raw_types or "()")
-    except (ValueError, SyntaxError):
+        dims = _safe_literal_eval(raw_dims or "()")
+        dtypes = _safe_literal_eval(raw_types or "()")
+    except _LITERAL_EVAL_ERRORS:
         return None
     if not isinstance(dims, (list, tuple)):
         return None
@@ -4343,12 +4348,12 @@ def _clean_category_label(raw: str) -> str:
     s = str(raw or "").strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            val = ast.literal_eval(s)
+            val = _safe_literal_eval(s)
             if isinstance(val, (list, tuple)) and val:
                 return str(val[0]).strip()
             if isinstance(val, (list, tuple)):
                 return ""
-        except (ValueError, SyntaxError):
+        except _LITERAL_EVAL_ERRORS:
             s = s.strip("[]")
     return s.strip().strip("'\"").strip()
 
@@ -4903,23 +4908,6 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     )
 
 
-def _source_context_block() -> str:
-    """Render the shared runtime context for a model tier, or "" when absent."""
-    try:
-        from _llm_source_context import build_context_block  # noqa: PLC0415
-
-        return build_context_block(
-            model_path=_RUNTIME_CONTEXT.get("model_path") or "",
-            server_args=_RUNTIME_CONTEXT.get("server_args") or "",
-            framework_roots=kernel_search_roots(),
-            framework=_RUNTIME_CONTEXT.get("framework") or "",
-            precision=_RUNTIME_CONTEXT.get("precision") or "",
-        )
-    except Exception as exc:  # noqa: BLE001 - context is an aid, never required
-        log.warning("could not build source-resolution context: %r", exc)
-        return ""
-
-
 def _forward_to_log(message: str) -> None:
     """Adapter so the resolution tiers' own diagnostics reach the logger.
 
@@ -5386,13 +5374,13 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             confidence=item.get("source_resolution_confidence"),
             reason=str(item.get("source_resolution_reason") or ""),
             rejected_value=str(item.get("source_file_rejected") or ""),
-            # The names ``apply_revisions`` actually writes. The
-            # ``source_resolution_previous_*`` spelling read here before has no
-            # producer anywhere in the tree, so the audit's previous-path
-            # columns were empty for every row the review rewrote -- the one
-            # case they exist to record.
-            previous_source_file=str(item.get("previous_source_file") or ""),
-            previous_method=str(item.get("previous_method") or ""),
+            # Classify from the routing gate's own verdict, so the artifact
+            # reports why a kernel is undispatchable rather than only how many.
+            reason_class=_KSC.classify_skip_reason(
+                reusable=item.get("reusable_native_kernel"),
+                skip_reason=item.get("skip_reason"),
+                source_file=item.get("source_file"),
+            ),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -5437,42 +5425,6 @@ _SOURCE_DERIVED_METADATA = (
 )
 
 
-def _is_curated_resolution(item: dict[str, Any]) -> bool:
-    """Whether this candidate's source came from a deterministic, authoritative tier.
-
-    The active finder demangles the device symbol and pins the actual editable
-    source in the installed tree; a model shown a path and forty lines cannot
-    outrank that, so finder resolutions (like the retired curated map before
-    them) are not open to LLM rewriting.
-
-    A vendor-playbook match qualifies on the same grounds and regardless of
-    which tier resolved the path it replaced: the registry states that the
-    operator is tuned through a task bundle, and ``source_file`` holds that
-    bundle's anchor. Leaving it unprotected would let a review proposal point
-    the field back at framework source and route the candidate to a backend
-    that has nothing to rewrite there.
-
-    Unconditional for a playbook match, because a matched playbook always has
-    an anchor: :func:`load_vendor_operator_playbooks` refuses an entry without
-    one. Scoping this on a per-row marker instead is what let a row with no
-    anchor and no path read as protected.
-    """
-    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook":
-        return True
-    status = str(item.get("op_to_source_status") or "").strip()
-    method = str(item.get("source_resolution_method") or "").strip()
-    authoritative = {
-        getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder"),
-        getattr(_KSC, "METHOD_SYMBOL_INDEX", "symbol_index"),
-        getattr(_KSC, "METHOD_CURATED", "op_to_source"),
-    }
-    return method in authoritative and status in {
-        _ROUTABLE_STATUS,
-        "non_rewritable",
-        "no_kernel",
-    }
-
-
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,
@@ -5506,14 +5458,25 @@ def write_source_resolution_artifact(
             return None
         path = Path(out_path)
         atomic_write_json(path, doc)
-        final_entries = doc.get("entries") or []
-        resolved = sum(1 for entry in final_entries if entry.get("source_file"))
-        summary = f"source resolution: {resolved}/{len(final_entries)} kernel(s) located -> {path.name}"
-        log.info("%s", summary)
+        summary = _KSC.summarize_resolution(doc.get("entries") or [])
+        line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
+        # A count alone cannot say whether the unlocated kernels were worth
+        # chasing, so report the GPU share behind each class next to it.
+        if summary["undispatchable_gpu_pct"] > 0.0:
+            line += (
+                f"; {summary['undispatchable_gpu_pct']:.1f}% GPU undispatchable"
+                f" ({summary['recoverable']} recoverable, {summary['unsalvageable']} unsalvageable)"
+            )
+        for reason_class, count in sorted(summary["by_class"].items()):
+            line += f"; {reason_class}={count}"
+        log.info("%s", line)
         if log_path:
-            append_log(log_path, summary)
+            append_log(log_path, line)
         return path
-    except Exception as exc:  # noqa: BLE001 - reporting aid, never fails the run
+    except (OSError, TypeError, ValueError, AttributeError, KeyError) as exc:
+        # Reporting aid: a write or projection failure must not fail the run,
+        # but it is logged with its type so a silent gap is not mistaken for
+        # "every kernel resolved".
         log.warning("could not write source-resolution artifact: %r", exc)
         return None
 
@@ -6578,362 +6541,6 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def run_candidate_review_stage(
-    run_dir: Path,
-    *,
-    candidates: list[dict[str, Any]],
-    args: argparse.Namespace,
-    log_path: Path | str | None = None,
-    trace_health_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, str]:
-    """Run the review stage, converting any unexpected fault into a warning.
-
-    The stage is advisory by construction, and it sits at the end of an
-    analysis that a multi-hour benchmark paid for. An unforeseen fault in it
-    must cost the audit, not the run, so nothing escapes this boundary.
-    """
-    try:
-        return _run_candidate_review_stage(
-            run_dir,
-            candidates=candidates,
-            args=args,
-            log_path=log_path,
-            trace_health_warnings=trace_health_warnings,
-        )
-    except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
-        log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
-        if trace_health_warnings is not None:
-            trace_health_warnings.append(
-                {
-                    "code": "candidate_review_failed",
-                    "severity": "error",
-                    "status": "internal_error",
-                    "detail": type(exc).__name__,
-                    "message": (
-                        "The candidate review stage raised "
-                        f"{type(exc).__name__}; kernel_candidates.json is the "
-                        "unreviewed deterministic result."
-                    ),
-                }
-            )
-        return {}
-
-
-#: Everything the review can stage without moving ``source_file``. The
-#: re-derivation is skipped for rows that did not change, and a path is only one
-#: of the things that can: operand dims are most often supplied for a kernel the
-#: deterministic tiers already located, so keying the check on the path alone
-#: drops exactly the proposals that were hardest to obtain.
-_REVIEW_STAGED_PROPOSALS = (
-    "review_shapes",
-    "review_input_dtypes",
-    "review_reusable_hint",
-    "review_benchmark_files",
-)
-
-#: Rebuilt from ``shapes``, so they must not outlive the dims they described.
-#: ``enrich_candidates_with_runtime_metadata`` runs after this stage and refills
-#: ``input_shapes`` from whatever ``shapes`` now holds, marking it synthetic
-#: again -- which is the whole reason clearing it is safe.
-#:
-#: ``invocation_cases`` and ``raw_arg_spec`` are deliberately NOT here. Nothing
-#: rebuilds them: both are produced only by ``_finalize_candidates``, from the
-#: perf CSV, long before the review runs, and no later pass can re-derive an
-#: ordered scalar argument list from a list of operand dims. They also do not
-#: describe the dims being replaced -- a CSV row can carry a raw arg spec while
-#: yielding no tensor operands at all, which is precisely a row whose ``shapes``
-#: is empty and therefore the row a review supplies dims for. Clearing them
-#: there dropped the scalar signature and collapsed multi-case task groups
-#: (``_expanded_group_rows`` expands ``invocation_cases`` into one workload case
-#: each), so a stage that exists to add operand evidence removed some.
-_REVIEW_STALE_SHAPE_FIELDS = (
-    "input_shapes",
-    "_input_shapes_synthetic",
-)
-
-
-def _adopt_reviewed_shapes(item: dict[str, Any]) -> None:
-    """Take the operand dims the review supplied, if it supplied any.
-
-    Only fires where the deterministic stage came up empty. A recorded shape
-    outranks a reviewed one even when the review is confident, because the
-    reviewed dims can be arithmetic over the serving configuration and nothing
-    downstream re-measures them; the integration benchmark hours later is the
-    first thing that would notice they were wrong.
-
-    The alternate representations are dropped rather than translated. They
-    describe the previous dims, and a harness built from a mix of the two would
-    be wrong in a way that still benchmarks cleanly.
-    """
-    proposed = item.get("review_shapes")
-    if not isinstance(proposed, list) or not proposed:
-        return
-    if item.get("shapes"):
-        return
-    item["shapes"] = list(proposed)
-    item["shape_provenance"] = str(item.get("review_shape_provenance") or _REVIEW_DERIVED_PROVENANCE)
-    reviewed_dtypes = item.get("review_input_dtypes")
-    if isinstance(reviewed_dtypes, list) and reviewed_dtypes:
-        item["input_dtypes"] = list(reviewed_dtypes)
-    for key in _REVIEW_STALE_SHAPE_FIELDS:
-        item.pop(key, None)
-
-
-def _accept_review_proposals(
-    item: dict[str, Any],
-    op_cat_map: dict[str, str] | None = None,
-) -> None:
-    """Take what the review supplied for a candidate whose source did not move.
-
-    Restamping is still required, because the alternate shape representations
-    are rebuilt from ``shapes`` and adopting reviewed dims invalidates the ones
-    describing the old set. What it must not do is disturb the source judgments:
-    they describe the same path they were computed from, so there is nothing to
-    recompute and nothing stale to clear.
-    """
-    _adopt_reviewed_shapes(item)
-    _stamp_candidate_metadata(item, op_cat_map)
-    # Stamping recomputes benchmark_files from the curated marker table, which
-    # is coarser than a session that went and looked. Its verified answer wins.
-    # Only a non-empty one: an empty list means the session named harnesses and
-    # none of them exist, which says its proposal was wrong, not that the
-    # curated table's answer is. Letting it through would strip a runnable
-    # harness from the invocation spec the backend is handed.
-    reviewed_harnesses = item.get("review_benchmark_files")
-    if isinstance(reviewed_harnesses, list) and reviewed_harnesses:
-        item["benchmark_files"] = list(reviewed_harnesses)
-    # A restrictive hint is honoured, a permissive one is not. The reviewer can
-    # veto a kernel it knows is not worth a tuning session, but it cannot talk
-    # the gate into dispatching something the deterministic rules rejected.
-    if item.get("review_reusable_hint") is False and item.get("reusable_native_kernel"):
-        item["reusable_native_kernel"] = False
-        item["skip_reason"] = (
-            str(item.get("review_skip_reason") or "").strip()
-            or f"review: {item.get('review_reason') or 'not worth a tuning session'}"
-        )
-
-
-def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
-    """Recompute everything that follows from ``source_file`` after it moved.
-
-    The review returns a location, not a verdict. Re-running the deterministic
-    stamping keeps :func:`classify_patchability` the only gate that decides
-    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
-    rejections still apply to a path the model supplied.
-
-    Only for a revision that moved the path. Clearing
-    :data:`_SOURCE_DERIVED_METADATA` is sound when the values describe a source
-    the candidate no longer names, and unsound otherwise: eighteen of those
-    nineteen keys have no producer in this pass -- the finder that filled them
-    read the demangled device symbol and the binary's exports, and stamping
-    cannot reconstruct that from a path -- so clearing them where the source
-    stood still would drop them for good. Whether any of them is populated today
-    is not the point; a field that cannot be rebuilt must not be cleared on a
-    revision that gave no reason to doubt it.
-    """
-    new_source = str(item.get("source_file") or "")
-    for key in _SOURCE_DERIVED_METADATA:
-        item.pop(key, None)
-    item["source_path"] = new_source
-    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
-    item["source_type"] = source_type_for(item.get("name", ""), new_source)
-    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
-        item["source_type"] = "vendor_binary"
-        item["vendor_dispatch_wrapper"] = True
-    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
-    _accept_review_proposals(item, op_cat_map)
-
-
-def _run_candidate_review_stage(
-    run_dir: Path,
-    *,
-    candidates: list[dict[str, Any]],
-    args: argparse.Namespace,
-    log_path: Path | str | None = None,
-    trace_health_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, str]:
-    """Audit the deterministic candidate table with one agent session.
-
-    The deterministic tiers resolve a kernel from its symbol alone; they cannot
-    tell a file that defines a kernel from one that merely launches it, and they
-    have no view of the model or how it is being served. This hands that table
-    to an agent together with the paths of everything the run already produced,
-    and folds back the revisions it can verify.
-
-    Mandatory on the agent route, but never fatal: a definitive failure records
-    an ``error``-severity trace-health warning and leaves the deterministic
-    table standing. Losing the audit costs some candidates; failing the run
-    would cost the hours of benchmarking that produced the trace.
-
-    Args:
-        run_dir: The per-run output directory.
-        candidates: The finalized candidate rows, revised in place.
-        args: Parsed CLI args (model name, framework, source root).
-        log_path: Optional log file for diagnostics.
-        trace_health_warnings: Warning sink surfaced to the Coordinator.
-
-    Returns:
-        dict[str, str]: Artifact paths produced by this stage.
-    """
-    artifacts: dict[str, str] = {}
-    warnings = trace_health_warnings if trace_health_warnings is not None else []
-
-    def _note(message: str) -> None:
-        log.info("%s", message)
-        if log_path:
-            append_log(log_path, message)
-
-    try:
-        from _candidate_review_agent import (  # noqa: PLC0415
-            RAW_CANDIDATES_FILENAME,
-            REVISIONS_FILENAME,
-            apply_revisions,
-            run_candidate_review,
-        )
-    except ImportError as exc:  # pragma: no cover - packaging fault
-        warnings.append(
-            {
-                "code": "candidate_review_unavailable",
-                "severity": "error",
-                "message": (
-                    "The candidate review agent could not be imported "
-                    f"({type(exc).__name__}); the candidate table is the "
-                    "unreviewed deterministic result."
-                ),
-            }
-        )
-        return artifacts
-
-    tracelens_dir = run_dir / "tracelens"
-    raw_path = run_dir / RAW_CANDIDATES_FILENAME
-    # Demangled here rather than in the session. Demangling a vendor symbol was
-    # the one job that wanted a shell, and a shell cannot be confined to the run
-    # directory -- so the host does it and the session keeps a read-only tool
-    # surface. Written onto copies: the demangled name is an aid for the reader
-    # of this table, not a candidate field, and the reviewed table downstream
-    # must stay diffable against the deterministic one.
-    payload_rows = [_with_demangled_symbol(c) for c in candidates if isinstance(c, dict)]
-    routable = [c for c in payload_rows if c.get("reusable_native_kernel") is True]
-    atomic_write_json(
-        raw_path,
-        {
-            "model_name": args.model_name,
-            "framework": args.framework,
-            "source": "tracelens_analysis:deterministic",
-            "hot_kernels": payload_rows,
-            "routable_kernels": routable,
-        },
-    )
-    artifacts["kernel_candidates_raw"] = str(raw_path)
-
-    # Only ``analysis.md`` is a supported TraceLens output; everything else in
-    # that directory is internal and may be removed without notice. The rest of
-    # the list is Hyperloom's own or the model's, so it is ours to offer.
-    #
-    # Little is lost by not pointing at the sidecars: for every operator they
-    # describe, ``analysis.md`` carries the same operand dims and launcher in
-    # its own table, and for a graph-launched operator neither has anything --
-    # the replay has no CPU-side parent op, so nothing recorded the arguments.
-    reference_paths = {
-        "source resolution audit": str(run_dir / _SOURCE_RESOLUTION_NAME),
-        "tracelens report": str(tracelens_dir / "analysis.md"),
-        "trace input manifest": str(run_dir / "trace_input_manifest.json"),
-        "model directory": str(_RUNTIME_CONTEXT.get("model_path") or ""),
-    }
-    outcome = run_candidate_review(
-        run_dir=run_dir,
-        raw_candidates_path=raw_path,
-        reference_paths={k: v for k, v in reference_paths.items() if v},
-        framework_roots=kernel_search_roots(),
-        context_block=_source_context_block(),
-        log=_forward_to_log,
-    )
-
-    if not outcome.ok:
-        warnings.append(
-            {
-                "code": "candidate_review_failed",
-                "severity": "error",
-                "status": outcome.status,
-                "detail": outcome.detail,
-                "message": (
-                    f"The mandatory candidate review did not complete "
-                    f"({outcome.status}: {outcome.detail}). kernel_candidates.json "
-                    "is the unreviewed deterministic result; a wrongly resolved "
-                    "kernel will not have been caught."
-                ),
-            }
-        )
-        _note(f"candidate review failed ({outcome.status}): {outcome.detail}")
-        return artifacts
-
-    op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")
-    before_state = {str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates}
-    protected_ids = {
-        str(c.get("kernel_id") or "") for c in candidates if isinstance(c, dict) and _is_curated_resolution(c)
-    }
-    notes = apply_revisions(
-        candidates,
-        outcome.revisions,
-        framework_roots=kernel_search_roots(),
-        protected_ids=protected_ids,
-    )
-    changed = 0
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        kernel_id = str(item.get("kernel_id") or "")
-        source_moved = str(item.get("source_file") or "") != before_state.get(kernel_id)
-        staged = any(item.get(key) is not None for key in _REVIEW_STAGED_PROPOSALS)
-        if not source_moved and not staged:
-            continue
-        # Two different revisions. A moved path invalidates everything derived
-        # from the old one, so those are cleared and recomputed. A path that
-        # stood still invalidates nothing about the source, and most of what the
-        # finder recorded about it has no producer here -- so the proposals are
-        # taken and the source judgments are left alone.
-        if source_moved:
-            _rederive_after_review(item, op_cat_map)
-        else:
-            _accept_review_proposals(item, op_cat_map)
-        changed += 1
-
-    revisions_path = run_dir / REVISIONS_FILENAME
-    atomic_write_json(
-        revisions_path,
-        {
-            "status": outcome.status,
-            "revisions": outcome.revisions,
-            "applied_notes": notes,
-            "candidates_changed": changed,
-            "raw_candidates": str(raw_path),
-        },
-    )
-    artifacts["kernel_candidates_revisions"] = str(revisions_path)
-
-    # Unconditionally, not only when ``changed`` is non-zero. The audit was
-    # written during finalize, before this stage ran, so a review that moved a
-    # ``source_file`` left the public artifact naming the old path while
-    # kernel_candidates.json named the new one -- two answers to "where does
-    # this kernel live", and the one a human reads was the stale one. Rebuilding
-    # on every completed review keeps the two derived from the same table, and
-    # costs one projection over rows already in memory.
-    source_resolution_path = run_dir / _SOURCE_RESOLUTION_NAME
-    if write_source_resolution_artifact(
-        candidates,
-        source_resolution_path,
-        framework=args.framework or "",
-        model_name=args.model_name or "",
-        log_path=log_path,
-    ):
-        artifacts["kernel_source_resolution"] = str(source_resolution_path)
-
-    _note(f"candidate review applied {changed} change(s) over {len(outcome.revisions)} revision(s)")
-    for line in notes:
-        _note(f"  review: {line}")
-    return artifacts
-
-
 def write_reports(
     run_dir: Path,
     *,
@@ -6995,8 +6602,12 @@ def write_reports(
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # ``hot_kernels`` is always the full ranked set; the reusable dispatch subset
     # is exposed as ``routable_kernels`` and non-routable dicts as ``skipped_kernels``.
-    routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
-    skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
+    # This site's routability is the coarse reusability predicate; the shared
+    # helper guarantees the two lists partition ``candidates`` by construction.
+    routable_candidates, skipped_kernels = partition_kernels(
+        candidates,
+        lambda c: c.get("reusable_native_kernel") is True,
+    )
     atomic_write_json(
         kernel_candidates_path,
         {
@@ -8394,21 +8005,6 @@ def main() -> int:
                 )
             if source_resolution_path.is_file():
                 artifacts["kernel_source_resolution"] = str(source_resolution_path)
-        if args.dry_run:
-            # A dry run plans; it must not spend an agent session, wait out the
-            # session timeout, or read the framework tree to audit a table
-            # nobody will dispatch from.
-            append_log(log_path, "candidate review skipped: --dry-run")
-        else:
-            artifacts.update(
-                run_candidate_review_stage(
-                    run_dir,
-                    candidates=candidates,
-                    args=args,
-                    log_path=log_path,
-                    trace_health_warnings=trace_health_warnings,
-                )
-            )
         artifacts.update(
             write_reports(
                 run_dir,

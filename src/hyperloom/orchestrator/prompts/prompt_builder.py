@@ -22,6 +22,7 @@ from pathlib import Path
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     FULL_ENABLED_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -217,17 +218,17 @@ def _section_phase_semantics(
             "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
             "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
-            "(no longer robustness-only) when you judge the current phase",
-            "exhausted; the Coordinator validates the hint vocab and routes",
-            "the transition on the next tick.",
-            "EXCEPTION — normal SWEEP convergence: do NOT emit `skip_to_close`",
-            "once the sweep has completed (sweep_done). The",
-            "Coordinator exits SWEEP → CLOSE on its own with an honest terminal",
-            "stop_reason (`sweep_done` / `global_converged`). `skip_to_close`",
-            "is reserved for genuine early abandonment (e.g. infra is dead and",
-            "the sweep cannot run at all) — it stamps `robustness_escalated`,",
-            "so emitting it on a normal finish mislabels the run.",
+            "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
+            "current phase exhausted; the Coordinator validates the hint vocab",
+            "and routes the transition on the next tick. `skip_to_close` is not",
+            "in that set — see the exception below for when it applies.",
+            "`skip_to_close` is reserved, in EVERY phase, for genuine early",
+            "abandonment (e.g. infra is dead and the sweep cannot run at all):",
+            "it stamps `robustness_escalated`, so emitting it on a normal finish",
+            "mislabels the run. Running low on budget is not abandonment — the",
+            "Coordinator prices the remaining budget itself and exits with an",
+            "honest terminal stop_reason (`sweep_done` / `global_converged` /",
+            "`time_exhausted`) once a further cycle cannot be funded.",
         ]
     )
     return lines
@@ -411,6 +412,12 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     """
     if meta.name in KERNEL_AGENT_OWNED_ACTIONS:
         kind_hint = KERNEL_ACTION_REQUEST_KINDS[meta.name]
+        if kind_hint in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+            # The lane still has a catalogue entry so the model can read what it
+            # does, but the Coordinator dispatches it at KERNEL entry from the
+            # nomination. A payload template here would invite a request the
+            # gate then denies.
+            return f"(no emit — Coordinator dispatches `{kind_hint}` at KERNEL entry)"
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
@@ -599,8 +606,8 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   next phase-compute, while one arm dry means work the other.",
             "   When you judge the current phase exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (see",
-            "   PHASE CONTRACT for the skip_to_close exception).",
+            "   'skip_to_kernel' | 'skip_to_sweep'}``. `skip_to_close` is not a",
+            "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
             "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
@@ -717,20 +724,22 @@ def _idea_generation_lines() -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The four kernel_agent-owned actions are picked per the DECISION FRAMEWORK
-(phase allowed-set + gaps + KB priors); there is no system-side
-priority ranking. Pick the next one by reading these facts in order:
-a `state.gaps[]` `layer='kernel_agent'` gap with attempts left →
-`last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
-skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
+The request kinds you may emit here are `trace_analyze`, `integrate`, and
+`integrate`'s `apply_patch` alias; they are picked per the DECISION FRAMEWORK
+(phase allowed-set + gaps + KB priors), with no system-side priority ranking.
+Read the optimization lane's outcome before you act: a `state.gaps[]`
+`layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
+verdict (KEEP→integrate next; PARTIAL→the lane retries at most
+`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+`rejected_kernel_ids` lists the ids already written off, and
+`last_action_failures` explains a request of your own that failed.
 A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
 recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
 driven by the phase budget, an `escalate_strategy_change` hint, or a
 terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
 you want to wind down sooner.
 
-### `trace_analyze` — must precede every `run_optimization`
+### `trace_analyze` — read-only candidate analysis
 
   request{target_agent: 'kernel_agent', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
@@ -738,48 +747,19 @@ you want to wind down sooner.
   Skip if `last_trace_analyze.trace_input` already equals
   `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
 
-### `gemm_tuning` — `run_gemm_tuning`
+### `gemm_tuning` — not yours to propose
 
-  request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
-
-  Current GEAK owns the KERNEL phase by default and decides GEMM applicability
-  internally. Only use this legacy request in explicit per-kernel forge mode
-  (`KERNEL_OPT_BACKEND_ORDER=forge`).
-
-### `kernel_opt` — payload for `run_optimization`
-
-Pick the next id from `last_trace_analyze.reusable_native_kernel_ids`
-(NEVER from raw `hot_kernels_top15` — vendor binaries reject as
-`non_reusable_kernel`); if that list is empty, don't propose kernel_opt.
-
-The `kernel_id` MUST be one of those ids copied verbatim (e.g. `k001`).
-NEVER invent an id and NEVER pass an operator name (e.g. `aten::mm`,
-`aiter.silu_and_mul`) or any token from `analysis_md` — operator names
-are non-unique (several kernels share `aten::mm`) and are rejected.
-`skipped_kernels_top` lists operators TraceLens detected but cannot
-rewrite (each with a `skip_reason`); they are off-limits, not targets.
-
-  request{target_agent: 'kernel_agent', kind: 'run_optimization',
-          params: {kernel_id: <picked kernel_id>,
-                   source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <trace_analyze_done.candidates_path>}}
-
-  Budget policy: DO NOT add a `budget_minutes` field. The Coordinator owns
-  the per-optimization wall clock and applies the same value it uses for its
-  own dispatch; naming one here pins the backend to this template's number
-  instead, which is how a raised operator budget got silently discarded.
-
-  Backend policy: DO NOT add a `backends` field. Current GEAK owns the
-  KERNEL phase by default. Forge per-kernel mode is available only when the
-  operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
-  Read `kernel_opt_task_attempts` +
-  `pending_keep_kernels` to
-  see what's still queueable; the batch handler filters
-  rejected/in-flight/exhausted candidates.
+The lane is dispatched by the Coordinator once at KERNEL entry, from a lane
+budget. Proposing it is refused: a per-tick re-issue would spend time the
+allocation never granted. Source-level kernel rewrite is not on this list at all
+-- it has no action and no request kind, because the KernelForge rewrite
+controller selects and dispatches its own operators. Read
+`kernel_rewrite_controller_result` and `pending_keep_kernels` to see what the
+lanes did; do not try to drive them.
 
 ### `integrate` — forced immediately after a KEEP
 
-On `run_optimization_done` with `decision='KEEP'`, integrate is the only
+On a lane response carrying `decision='KEEP'`, integrate is the only
 allowed action until the patch lands on `optimization_stack`:
 
   request{target_agent: 'kernel_agent', kind: 'integrate',
@@ -793,11 +773,8 @@ allowed action until the patch lands on `optimization_stack`:
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
-  while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with zero attempts and `gpu_pct >= 5%`, the
-  default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
-  drain them with `run_optimization{candidates_path: <from
-  last_trace_analyze>}` (the batch handler fans out automatically).
+  while it is non-empty. `untried_hot_reusable_kernels` may list kernels the
+  Coordinator's nomination pass declined; those are not yours to drain.
 
 ### KERNEL TARGETING
 
@@ -1070,7 +1047,7 @@ def build_orchestration_prompt(
     ]
     if (
         kernel_enabled
-        and any(a.name == "kernel_opt" for a in actions)
+        and any(a.name == "integrate" for a in actions)
         and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
     ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())

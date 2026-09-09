@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -16,7 +17,7 @@ from ..actions.executors._grid_server_args import merge_server_args
 from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..phases._enablement_artifacts import snapshot_round, write_setting_script
+from ..phases._enablement_artifacts import role_path, snapshot_round, write_setting_script
 
 import logging as _logging
 
@@ -422,8 +423,9 @@ class EnablementLane(CoordinatorCollaborator):
         if res_fw_root:
             state.enablement.framework_root = res_fw_root
         setting_script = ""
+        archived: list[dict[str, str]] = []
         try:
-            snapshot_round(self.session_dir, res)
+            archived = snapshot_round(self.session_dir, res)
             if status in ("kept", "advanced"):
                 setting_script = write_setting_script(
                     self.session_dir,
@@ -436,10 +438,17 @@ class EnablementLane(CoordinatorCollaborator):
                 )
         except Exception:  # noqa: BLE001 — archiving must not break the rearm
             log.warning("enablement: artifact write failed", exc_info=True)
-        # The round is recorded before the in-flight guard is cleared, while the
-        # id it was dispatched under is still readable. A round the lane
-        # synthesised carries no specialist id of its own, so it settles the row
-        # the guard names.
+        # Absolute and not the session-relative path the archive returned: the
+        # revalidation baseline opens this file directly. The breakdown records
+        # whatever lands here verbatim.
+        archived_config = role_path(archived, "launch_config")
+        if status == "kept" and archived_config:
+            state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
+        # Recorded after the accepted path is settled, because the row carries
+        # it, and before the in-flight guard is cleared, while the id the round
+        # was dispatched under is still readable. A round the lane synthesised
+        # carries no specialist id of its own, so it settles the row the guard
+        # names.
         _record_enablement_round(state, res, setting_script=setting_script, stop_reason=stop_set)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""

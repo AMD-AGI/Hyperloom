@@ -41,7 +41,7 @@ From the agent terminal in that workspace, install the published release wheel
 into the current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.0.0 --target .
+pip install hyperloom-inference-optimizer==1.1.0 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -70,19 +70,19 @@ It asks for these values with a fixed option order:
    - `Use default (https://api.anthropic.com)`
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
-2. Model:
-   - `Use default (claude-opus-5)`
-   - `Custom`
-3. Secrets:
+2. Secrets:
    - Setup writes placeholders in `.env`.
    - Edit secrets directly in `.env`; never paste API keys into chat.
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
+3. Model, asked alongside the non-secret values:
+   - `Use default (claude-opus-5)`
+   - `Custom`
 4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
    - Custom path
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
-   - `docker`
+   - `docker (Recommended)`
    - `baremetal`
 
 ```note
@@ -176,6 +176,8 @@ run:
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
 - [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
+- [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run on the
+  KernelForge kernel backend.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.

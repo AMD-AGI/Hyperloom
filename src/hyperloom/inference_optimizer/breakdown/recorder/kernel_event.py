@@ -1555,6 +1555,15 @@ class KernelEventRecorder:
                     "e2e_metric": _text(payload.get("e2e_metric")),
                     "bench_protocol_present": bool(payload.get("bench_protocol")),
                     "gpu_ids": _text(payload.get("gpu_ids")),
+                    # The cards GEAK was told to use. A baseline that reads
+                    # ``no_gain`` because its servers landed on a foreign
+                    # tenant's card is otherwise indistinguishable from a real
+                    # result (issue #1312). Both are stated even when the
+                    # handoff omits them: ``schema_version`` in this same row
+                    # separates a pre-v3 handoff from a genuinely unpinned run,
+                    # so an empty value here is not ambiguous.
+                    "gpu_ids_space": _text(payload.get("gpu_ids_space")),
+                    "gpu_pin": _as_dict(payload.get("gpu_pin")),
                     "exp_root": _text(payload.get("exp_root")),
                     "eval_dir": _text(payload.get("eval_dir")),
                 }
