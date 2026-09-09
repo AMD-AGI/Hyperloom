@@ -376,6 +376,30 @@ def _segments(row: dict[str, Any]) -> list[str]:
     return [phase] + (parts or [UNPATHED])
 
 
+def call_identity(row: dict[str, Any]) -> str:
+    """Return the key that joins a turn row to its per-API-call detail rows.
+
+    ``call_id`` is the join key whenever the producer wrote one. Some backends
+    -- the specialist and critic runners, on sessions recorded before they
+    learned to emit one -- write no ``call_id`` on *either* side. Falling back
+    to the empty string there silently breaks the join in the worst possible
+    way: the detail row looks orphaned, its turn row looks undetailed, and the
+    same API call is counted twice. The session, task path and turn number
+    identify a turn uniquely and are present on both sides, so they are the
+    fallback.
+
+    Args:
+        row: A turn or detail row.
+
+    Returns:
+        An opaque key; equal keys mean the same turn.
+    """
+    call_id = row.get("call_id")
+    if call_id:
+        return f"id:{call_id}"
+    return "key:{}|{}|{}".format(row.get("session_id"), row.get("task_path"), row.get("turn"))
+
+
 def build_tree(turns: Iterable[dict[str, Any]], details: Iterable[dict[str, Any]]) -> tuple[Node, dict[str, Any]]:
     """Place every call in the phase -> task tree and roll the totals up.
 
@@ -393,7 +417,7 @@ def build_tree(turns: Iterable[dict[str, Any]], details: Iterable[dict[str, Any]
     """
     turns = list(turns)
     details = list(details)
-    detailed_ids = {str(r.get("call_id")) for r in details if r.get("call_id")}
+    detailed_ids = {call_identity(r) for r in details}
 
     root = Node(name="session")
     coverage: dict[str, Any] = {
@@ -410,15 +434,15 @@ def build_tree(turns: Iterable[dict[str, Any]], details: Iterable[dict[str, Any]
             node = node.child(seg)
         return node
 
-    turn_ids = {str(r.get("call_id")) for r in turns if r.get("call_id")}
+    turn_ids = {call_identity(r) for r in turns}
     for row in details:
         place(row).own.add_call(row)
-        if str(row.get("call_id") or "") not in turn_ids:
+        if call_identity(row) not in turn_ids:
             coverage["detail_rows_orphaned"] += 1
     for row in turns:
         node = place(row)
         node.own.turns += 1
-        if str(row.get("call_id") or "") in detailed_ids:
+        if call_identity(row) in detailed_ids:
             coverage["turns_with_detail"] += 1
         else:
             coverage["turns_without_detail"] += 1

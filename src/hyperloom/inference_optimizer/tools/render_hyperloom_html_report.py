@@ -60,7 +60,7 @@ from hyperloom.inference_optimizer.tools._report_html import (
     num,
     sparkline,
 )
-from hyperloom.inference_optimizer.tools.dump_llm_call_report import Node, build_tree, load_ledgers
+from hyperloom.inference_optimizer.tools.dump_llm_call_report import Node, build_tree, call_identity, load_ledgers
 
 BREAKDOWN_FILENAME = "session_breakdown.json"
 DEFAULT_OUTPUT = "hyperloom_report.html"
@@ -125,9 +125,9 @@ def call_rows(turns: list[dict[str, Any]], details: list[dict[str, Any]]) -> lis
     Returns:
         The rows that carry spend.
     """
-    detailed = {str(r.get("call_id")) for r in details if r.get("call_id")}
+    detailed = {call_identity(r) for r in details}
     rows = list(details)
-    rows += [r for r in turns if str(r.get("call_id") or "") not in detailed]
+    rows += [r for r in turns if call_identity(r) not in detailed]
     return rows
 
 
@@ -354,8 +354,8 @@ def _coverage_section(cov: dict[str, Any], breakdown_seen: bool) -> str:
     if cov.get("turns_without_detail"):
         caveats.append(
             f"{fmt_int(cov['turns_without_detail'])} of {fmt_int(cov['turns_total'])} turns wrote no per-call "
-            "detail rows and are counted once from the turn row, so their internal API calls are not "
-            "separable here."
+            f"detail rows and {'is' if cov['turns_without_detail'] == 1 else 'are'} counted once from the turn "
+            "row, so their internal API calls are not separable here."
         )
     if cov.get("calls_unpriced"):
         caveats.append(
@@ -371,8 +371,9 @@ def _coverage_section(cov: dict[str, Any], breakdown_seen: bool) -> str:
         )
     if cov.get("detail_rows_orphaned"):
         caveats.append(
-            f"{fmt_int(cov['detail_rows_orphaned'])} detail rows have no matching turn row (typically "
-            "out-of-process children writing through the ext shards); they are counted, once."
+            f"{fmt_int(cov['detail_rows_orphaned'])} detail rows match no turn row -- an out-of-process "
+            "child writing through an <code>ext</code> shard, or a producer that recorded neither a "
+            "call id nor a task path. They are counted once, and their turn-level context is unknown."
         )
     if not breakdown_seen:
         caveats.append(

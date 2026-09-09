@@ -17,6 +17,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.tools import render_hyperloom_html_report as H
+from hyperloom.inference_optimizer.tools.dump_llm_call_report import build_tree
+from hyperloom.inference_optimizer.tools.render_hyperloom_html_report import call_rows
 
 
 def _write(path: Path, rows: list[dict]) -> None:
@@ -186,3 +188,47 @@ def test_main_writes_the_page(session: Path, tmp_path: Path):
     out = tmp_path / "out" / "report.html"
     assert H.main(["--session-dir", str(session), "-o", str(out)]) == 0
     assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_turn_and_detail_without_call_ids_are_one_call_not_two() -> None:
+    """A producer that wrote no call id must not have its calls counted twice.
+
+    The specialist and critic backends recorded neither the turn row's
+    ``call_id`` nor the detail row's. Joining on the raw field made the detail
+    row look orphaned and its turn look undetailed, so the same API call landed
+    in the totals twice -- observed on a real session as 11,898,833 input
+    tokens counted a second time.
+    """
+    turn = {
+        "session_id": "s1",
+        "task_path": "specialist/abc/turn-1",
+        "turn": 1,
+        "phase": "PRELUDE",
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cost_usd": None,
+    }
+    detail = dict(turn)
+    detail["api_call_index"] = None
+
+    root, cov = build_tree([turn], [detail])
+    totals = root.roll_up()
+
+    assert totals.calls == 1, "the turn and its detail row are one API call"
+    assert totals.isl == 100
+    assert totals.osl == 10
+    assert cov["detail_rows_orphaned"] == 0
+    assert cov["turns_with_detail"] == 1
+    assert cov["turns_without_detail"] == 0
+
+    assert len(call_rows([turn], [detail])) == 1, "the flat row list must agree with the tree"
+
+
+def test_unrelated_rows_without_call_ids_still_count_separately() -> None:
+    """The fallback join must key on the turn, not lump every id-less row together."""
+    a = {"session_id": "s1", "task_path": "specialist/abc/turn-1", "turn": 1, "input_tokens": 100}
+    b = {"session_id": "s1", "task_path": "specialist/xyz/turn-1", "turn": 1, "input_tokens": 7}
+
+    root, _ = build_tree([a, b], [])
+    assert root.roll_up().calls == 2
+    assert root.roll_up().isl == 107
