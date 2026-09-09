@@ -3,52 +3,27 @@
 
 """How wide, how cheap and how long a KB warm start is allowed to search.
 
-Two independent warm starts read these: the forge loop's
-(:mod:`kernelforge.knowledge.experience_integration`) and the FlyDSL rewrite
-path's (:mod:`kernelforge.rewrite_by_flydsl.kb`). They address different
-identities -- the ``producer`` dimension is ``forge-loop`` for one and ``flydsl``
-for the other, so their records never mix -- but the search they perform is the
-same shape, and two copies of these numbers would drift.
-
-Each value is a module default an environment variable may override, which is
-how the rest of the knowledge package is configured.
+Two independent warm starts read these: the forge loop's and the FlyDSL rewrite path's. They address different
+identities, so their records never mix, but the search is the same shape and two copies of these numbers would drift.
 """
 
 from __future__ import annotations
 
 import os
 
-#: How many best-ranked prior solutions a warm start reads. The store caps a
-#: ranked page at 100.
-#:
-#: More than one, so a champion that fails to apply -- a signature mismatch, a
-#: patch that no longer lands -- still leaves something to fall back to, and so
-#: a record whose claim does not survive measurement can lose to one that does.
-#: This also bounds how many trials a search can pay for, since every candidate
-#: read is a candidate that may be measured; :data:`DEFAULT_BUDGET_SEC` is what
-#: bounds the wall time those trials take.
+#: How many best-ranked prior solutions a warm start reads. More than one, so a champion that fails to apply still
+#: leaves something to fall back to, and so a claim that does not survive measurement can lose to one that does. Every
+#: candidate read may be measured, so this also bounds the trials; :data:`DEFAULT_BUDGET_SEC` bounds their wall time.
 DEFAULT_TOP_K = 10
 
-#: The lowest claimed speedup worth spending a trial on. A record claiming less
-#: than this is a port that lost badly to the source baseline; measuring it costs
-#: a compile, a correctness suite and a benchmark, and adopting it would start
-#: the run from a kernel several times slower than the implementation it is
-#: supposed to replace. Filtered candidates are not offered as prompt reference
-#: material either: a catastrophic port teaches the author nothing that pays for
-#: the tokens.
-#:
-#: The claim is what is filtered on, and a claim is not comparable across tasks:
-#: it was computed over whatever cases the producing task scored. So this is a
-#: coarse screen for catastrophe, not a ranking. Choosing between the survivors
-#: is what measurement is for.
+#: The lowest claimed speedup worth spending a trial on. Below it a record is a port that lost badly, and it is not
+#: offered as prompt reference material either. The claim is not comparable across tasks -- it was computed over
+#: whatever cases the producing task scored -- so this screens for catastrophe; measurement ranks the survivors.
 DEFAULT_MIN_CLAIMED_SPEEDUP = 0.3
 
-#: Wall-clock ceiling on the whole candidate search, in seconds. Each candidate
-#: costs a compile plus a correctness suite plus a benchmark, which on the
-#: heaviest kernels measured here is around 15 minutes on a cold cache, so an
-#: unbounded search over a well-populated identity can spend hours before the
-#: agent has made its first edit. On expiry the search stops and adopts the best
-#: candidate it has already measured.
+#: Wall-clock ceiling on the whole candidate search, in seconds. One candidate is a compile plus a correctness suite
+#: plus a benchmark, around 15 minutes on the heaviest kernel measured here, so an unbounded search over a
+#: well-populated identity spends hours before the agent's first edit. On expiry the best already measured is adopted.
 DEFAULT_BUDGET_SEC = 1800
 
 
@@ -86,8 +61,7 @@ def budget_sec() -> float:
 def below_floor(claimed_speedup: float | None) -> bool:
     """Whether a candidate's claim puts it under the floor.
 
-    An unrecorded claim is not under the floor: nothing was claimed, so nothing
-    is contradicted, and the candidate is worth a measurement on its own terms.
+    An unrecorded claim is not under it: nothing was claimed, so nothing is contradicted.
     """
     if claimed_speedup is None:
         return False

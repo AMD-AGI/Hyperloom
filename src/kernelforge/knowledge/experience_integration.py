@@ -1093,12 +1093,9 @@ def kb_warmstart(
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
-        # Drop the catastrophic ports here, at the boundary, so the floor governs
-        # what gets measured, what the author is shown and what the index records
-        # alike. These records exist because a correct port is banked whatever it
-        # measured -- that is what carries a losing operator's progress forward
-        # -- but starting a run from one, or asking the author to read one, buys
-        # nothing.
+        # Dropped at the boundary so the floor governs what gets measured, what the author is shown and what the index
+        # records alike. These records exist because a correct port is banked whatever it measured, but starting a run
+        # from one, or asking the author to read one, buys nothing.
         admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
         if len(admissible) != len(sols):
             print(
@@ -1179,11 +1176,9 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
-            # The field is already capped at ``top_k()`` candidates, but a count
-            # does not bound wall time: one candidate is a compile plus a
-            # correctness suite plus a benchmark, minutes on the heaviest
-            # kernels. On expiry the field closes and the best already measured
-            # is adopted below.
+            # ``top_k()`` caps the field, but a count does not bound wall time: one candidate is a compile plus a
+            # correctness suite plus a benchmark, minutes on the heaviest kernels. On expiry the field closes and the
+            # best already measured is adopted below.
             search_deadline = time.monotonic() + warmstart_policy.budget_sec()
             for idx, sol in enumerate(sols):
                 if time.monotonic() >= search_deadline:

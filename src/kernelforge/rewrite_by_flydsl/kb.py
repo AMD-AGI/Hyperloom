@@ -207,19 +207,9 @@ async def try_flydsl_kb_warmstart(
 ) -> RewriteKbReadResult:
     """Measure the admissible candidates and skip PORT with the fastest.
 
-    Correctness is what admits a candidate; performance is what chooses between
-    the admitted ones. Taking the first that merely passed was wrong once
-    candidates could come from tasks that scored different cases: a claim is
-    computed over whatever cases its producing task scored, so it does not order
-    candidates for *this* task. Only a measurement on this task's own driver
-    does, which is why every survivor is timed before one is adopted.
-
-    Two bounds keep that affordable. A candidate claiming less than
-    ``warmstart_policy.min_claimed_speedup()`` is skipped whole -- not
-    downloaded, not admitted, not offered as reference material -- because it is
-    a port that lost badly and one trial costs a compile, a correctness suite
-    and a benchmark. And the field closes after
-    ``warmstart_policy.budget_sec()``, adopting the best measured so far.
+    Correctness admits a candidate; a measurement on this task's own driver chooses between the admitted ones, since a
+    claim was computed over whatever cases its producing task scored and so cannot order candidates for *this* task.
+    ``warmstart_policy`` bounds the search on both the claim floor and wall time.
     """
     del source_ms  # The claim is not the gate; this task's own timing is.
     plan = _read_top_candidates(
@@ -247,10 +237,8 @@ async def try_flydsl_kb_warmstart(
         if remaining is not None and remaining <= 0:
             result.read_reason = "deadline"
             break
-        # Skipped whole: not downloaded, not admitted, and not added to
-        # ``references``. A port this far behind the source baseline is not
-        # instructive, and one trial costs a compile, a correctness suite and a
-        # benchmark.
+        # Skipped whole: not downloaded, not admitted, and not added to ``references``. A port this far behind the
+        # source baseline is not instructive, and one trial costs a compile, a correctness suite and a benchmark.
         if warmstart_policy.below_floor(candidate["speedup"]):
             result.attempts.append(
                 {
@@ -260,9 +248,8 @@ async def try_flydsl_kb_warmstart(
                 }
             )
             continue
-        # The candidate count does not bound wall time: one trial is minutes on
-        # the heaviest kernels. Whatever has been measured already still wins
-        # below.
+        # The candidate count does not bound wall time: one trial is minutes on the heaviest kernels. Whatever has been
+        # measured already still wins below.
         if time.monotonic() >= search_deadline:
             result.attempts.append(
                 {
@@ -352,9 +339,8 @@ async def try_flydsl_kb_warmstart(
         )
 
     if measured:
-        # Fastest on this task's own driver. A survivor whose benchmark failed
-        # is still adoptable -- it passed correctness -- but it ranks behind
-        # every timed one, because nothing is known about its speed.
+        # Fastest on this task's own driver. A survivor whose benchmark failed is still adoptable -- it passed
+        # correctness -- but it ranks behind every timed one, because nothing is known about its speed.
         winner = min(
             measured,
             key=lambda item: (

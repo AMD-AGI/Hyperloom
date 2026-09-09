@@ -30,9 +30,8 @@ _RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 # present in the captured output even when the loop is later hard-killed.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 
-# How often the supervising loop wakes to check on forge-loop. It also floors
-# how often the result file is read for new bests: asking more often than the
-# loop itself ticks cannot observe anything sooner.
+# How often the supervising loop wakes to check on forge-loop. It also floors how often the result file is read for
+# new bests: asking more often than the loop itself ticks cannot observe anything sooner.
 _TICK_SEC = 0.1
 
 
@@ -45,12 +44,8 @@ def _announced_experiment_id(stdout_text: str) -> str | None:
 def _result_for_this_run(result_json: str, stdout_text: str) -> dict | None:
     """Parse ``--result-json`` when it belongs to the run producing this output.
 
-    forge-loop refreshes this file on every KEEP, not only at the end, which is
-    what lets a caller observe the KEEP stream without the loop knowing anything
-    about the caller's own store. A file left behind by an earlier run is
-    rejected on the experiment id, the same key the post-run parse uses; before
-    the loop has announced one there is nothing to compare against and the file
-    is not trusted yet.
+    forge-loop refreshes this file on every KEEP, which is what lets a caller observe the KEEP stream. A file left by
+    an earlier run is rejected on the experiment id; before the loop announces one, the file is not trusted yet.
     """
     announced = _announced_experiment_id(stdout_text)
     if not announced:

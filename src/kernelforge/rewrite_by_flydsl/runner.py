@@ -450,24 +450,17 @@ def run_rewrite(
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
     #
-    # Publish every KEEP forge-loop records, not just the run's final best. An
-    # OPTIMIZE session can be terminated at its cutoff or killed outright, and
-    # only banking at the end meant losing every improvement the session had
-    # already verified. forge-loop cannot do this itself: it runs here under
-    # --no-experience-kb because the rewrite identity is not its own, so the
-    # rewrite layer watches its result file and publishes to its own store.
-    #
-    # Each publication replaces the previous one instead of accumulating a
-    # record per KEEP, by naming the candidate after the forge-loop run rather
-    # than after the artifact.
+    # Every KEEP is published, not just the run's final best, because an OPTIMIZE session can be terminated at its
+    # cutoff or killed outright. forge-loop cannot do this itself -- it runs here under --no-experience-kb because the
+    # rewrite identity is not its own -- so the rewrite layer watches its result file and publishes to its own store.
+    # Naming the candidate after the forge-loop run rather than the artifact makes each publication replace the last.
     optimize_session_digest = ""
 
     def _publish_keep(payload: dict) -> None:
         nonlocal optimize_session_digest
         commit = str(payload.get("best_commit") or "")
-        # Read the kernel out of the commit, never off disk: the workspace still
-        # belongs to the running agent, and the best is only restored there once
-        # OPTIMIZE is over.
+        # Read the kernel out of the commit, never off disk: the workspace still belongs to the running agent, and the
+        # best is only restored there once OPTIMIZE is over.
         shown = _git(workspace, "show", f"{commit}:{spec.flydsl_kernel_relpath}")
         if shown.returncode != 0 or not shown.stdout.strip():
             print(
@@ -484,10 +477,8 @@ def run_rewrite(
             flydsl_best_ms=payload.get("best_ms"),
             best_commit=commit,
             framework=framework,
-            # PORT's SNR belongs to the ported kernel, not to the KEEP that has
-            # since been optimized out of it, and forge-loop's result file does
-            # not carry the accuracy it measured for this one. Unmeasured here,
-            # so unclaimed.
+            # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
+            # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
             snr_db=None,
             session_digest=optimize_session_digest,
             content_override=shown.stdout.encode(),
@@ -536,15 +527,11 @@ def run_rewrite(
             flydsl_best_ms=opt.get("best_ms"),
             best_commit=final_commit,
             framework=framework,
-            # Only when the run's best is still the ported kernel is PORT's
-            # reading a measurement of the artifact being recorded. Once
-            # OPTIMIZE has moved the best off that commit it describes a kernel
-            # this record is not about, and nothing here has measured the one it
-            # is -- see the per-KEEP publication above.
+            # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
+            # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
             snr_db=port.snr_db if final_commit == port_commit else None,
-            # Replace this run's KEEP record rather than adding a sibling to it.
-            # Empty when OPTIMIZE published nothing, which falls back to naming
-            # the candidate after the artifact.
+            # Replace this run's KEEP record rather than adding a sibling. Empty when OPTIMIZE published nothing, which
+            # falls back to naming the candidate after the artifact.
             session_digest=optimize_session_digest,
         )
     else:

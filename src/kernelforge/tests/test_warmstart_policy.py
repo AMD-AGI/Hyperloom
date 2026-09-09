@@ -60,7 +60,6 @@ def test_a_claim_at_or_over_the_floor_stands():
 def test_a_candidate_that_claims_nothing_is_not_under_the_floor():
     """Nothing was claimed, so nothing is contradicted.
 
-    Such a record still has to earn its place by measurement like any other; it
-    just is not thrown out before being measured.
+    Such a record still has to earn its place by measurement; it just is not thrown out before being measured.
     """
     assert policy.below_floor(None) is False

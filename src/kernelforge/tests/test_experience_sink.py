@@ -134,9 +134,8 @@ def test_write_skips_empty_diff(config, workspace):
 def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
     """Losing to the source baseline must not cost the run its evidence.
 
-    An operator whose best attempt is still slower than what ships is the one
-    that most needs its progress carried to the next run. Withholding it made
-    every later run read the same losing seed and repeat the same climb.
+    An operator whose best attempt is still slower than what ships is the one that most needs its progress carried to
+    the next run. Withholding it made every later run read the same losing seed and repeat the same climb.
     """
     losing = _write(config, workspace, mean_case_speedup=0.9)
 

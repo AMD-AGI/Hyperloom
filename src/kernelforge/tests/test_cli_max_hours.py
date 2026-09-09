@@ -270,11 +270,9 @@ def test_failed_later_keep_preserves_warm_publication_and_marks_pending():
 def test_a_keep_the_store_declined_on_merit_stops_being_pending():
     """A decision is not a failure, so it must not be retried forever.
 
-    A warm-started run that ends no faster than the solution it started from is
-    declined because re-recording it would only add a second copy. That is the
-    common way a publication is refused now that losing to the source baseline
-    no longer refuses one, and holding it pending would leave the campaign
-    waiting on an attempt that can never succeed.
+    A warm-started run that ends no faster than the solution it started from is declined because re-recording it would
+    only add a second copy. That is the common refusal now that losing to the source baseline no longer causes one, and
+    holding it pending would leave the campaign waiting on an attempt that can never succeed.
     """
     state = _initial_remote_publication_state(
         {

@@ -192,8 +192,8 @@ def test_optimize_falls_back_to_stdout_sentinel(tmp_path, monkeypatch, capsys):
 class _KeepingProc:
     """A forge-loop double that records a new best on each supervisor tick.
 
-    forge-loop refreshes ``--result-json`` on every KEEP, so a run that improves
-    several times rewrites that file several times before it exits.
+    forge-loop refreshes ``--result-json`` on every KEEP, so a run that improves several times rewrites that file
+    several times before it exits.
     """
 
     def __init__(self, result_json, commits, announced="EXP-KEEP"):
@@ -228,9 +228,8 @@ class _KeepingProc:
 def test_optimize_hands_over_every_new_best_exactly_once(tmp_path, monkeypatch):
     """A KEEP the loop has already verified must not wait for the loop to end.
 
-    An OPTIMIZE session can be cut off at its deadline or killed outright, so a
-    caller that only banks the final result loses every improvement the session
-    had already proven.
+    An OPTIMIZE session can be cut off at its deadline or killed outright, so a caller that only banks the final
+    result loses every improvement the session had already proven.
     """
     rj = tmp_path / "res.json"
     # Two ticks report the same commit: a KEEP is handed over once, not per poll.
@@ -1111,9 +1110,8 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
 
     assert out["port_ok"] is True
     assert len(writes) == 2
-    # The port is slower than the source it replaces (1.5 ms against 1.0 ms) and
-    # is published anyway: correctness is what makes it reusable, and banking it
-    # is what lets the next run skip PORT.
+    # The port is slower than the source it replaces (1.5 ms against 1.0 ms) and is published anyway: correctness is
+    # what makes it reusable, and banking it is what lets the next run skip PORT.
     assert writes[0]["flydsl_best_ms"] == 1.5
     assert writes[0]["source_ms"] == 1.0
 
@@ -1121,10 +1119,9 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
 def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypatch):
     """Each KEEP is banked, from the commit, under one name for the run.
 
-    The workspace still belongs to the running agent while OPTIMIZE is going,
-    so the kernel has to come out of the commit that was kept. And the run's
-    publications have to share a name, or an identity's history would be buried
-    under one run's worth of KEEPs.
+    The workspace still belongs to the running agent while OPTIMIZE is going, so the kernel has to come out of the
+    commit that was kept. The run's publications share a name, or an identity's history would be buried under one
+    run's worth of KEEPs.
     """
     src = tmp_path / "softmax.py"
     src.write_text("def softmax(x):\n    return x\n")
@@ -1195,11 +1192,9 @@ def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
 ):
     """A record's SNR has to be a reading of the kernel the record is about.
 
-    PORT measures the ported kernel. Every KEEP after it is a different artifact,
-    validated by forge-loop under its own suite and with a reading the rewrite
-    layer never sees. Reusing PORT's number would file accuracy evidence about
-    one kernel against another, and the record does not say which kernel it came
-    from, so a later warm start reads it as belonging to the one it adopts.
+    PORT measures the ported kernel; every KEEP after it is a different artifact, with a reading the rewrite layer
+    never sees. Reusing PORT's number would file accuracy evidence about one kernel against another, and the record
+    does not say which kernel it came from, so a later warm start reads it as belonging to the one it adopts.
     """
     src = tmp_path / "softmax.py"
     src.write_text("def softmax(x):\n    return x\n")
@@ -1250,9 +1245,8 @@ def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
 ):
     """A fallback to the ported commit still describes the artifact PORT measured.
 
-    With no best of its own the run's final record names the port commit and,
-    sharing that name, replaces the record PORT wrote. Dropping the reading here
-    would erase a measurement that was genuinely taken.
+    With no best of its own the run's final record names the port commit and, sharing that name, replaces the record
+    PORT wrote. Dropping the reading here would erase a measurement that was genuinely taken.
     """
     src = tmp_path / "softmax.py"
     src.write_text("def softmax(x):\n    return x\n")

@@ -732,10 +732,8 @@ def _time_candidates_by_rank(monkeypatch, spec, timings):
 def test_the_fastest_measured_candidate_wins_not_the_first_to_pass(tmp_path, monkeypatch):
     """Correctness admits a candidate; this task's own clock picks between them.
 
-    A claim is computed over whatever cases produced it, so it does not order
-    candidates for a task that scores different ones. Taking the first that
-    merely passed let the best-claiming record win on a number nothing here
-    reproduced.
+    A claim is computed over whatever cases produced it, so it does not order candidates for a task that scores
+    different ones. Taking the first that merely passed let the best-claiming record win on an unreproduced number.
     """
     _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
