@@ -402,7 +402,6 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     )
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_collective_before_kernel_opt", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
 
     await coord.phase_kernel._finish_kernel_entry()

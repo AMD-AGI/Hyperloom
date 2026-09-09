@@ -92,6 +92,7 @@ class KernelRewriteTask:
     shape_cases: Any = ()
     reason: str = ""
     evidence: tuple[Any, ...] = ()
+    world_size: int = 1
 
 
 @dataclass(frozen=True)

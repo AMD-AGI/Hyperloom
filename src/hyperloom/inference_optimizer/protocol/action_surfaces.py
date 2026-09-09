@@ -52,7 +52,6 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 # Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and once their own gate passes.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
-        "run_collective",
         "run_fusion",
         # Dispatched once at phase entry from a lane budget.
         "run_gemm_tuning",

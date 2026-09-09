@@ -1145,60 +1145,6 @@ class GemmTuning(TypedDict, total=False):
     total_gain_pct: float
 
 
-# Collective — multi-rank communication campaigns run at KERNEL entry.
-class CollectiveAttempt(TypedDict, total=False):
-    """One collective campaign, from candidate selection through the E2E gate."""
-
-    collective_attempt_id: str
-    experiment_id: str
-    kernel_id: str
-    kernel_name: str
-    collective_op: str
-    world_size: int | None
-    engine: str
-    status: str
-    decision: str
-    kept: bool
-    salvaged: bool
-    requires_e2e_validation: bool
-    iterations: int | None
-    kernel_speedup: float | None
-    gpu_pct: float | None
-    duration_sec: float | None
-    ts: str
-    source_file: str
-    kernel_repo: str
-    workspace: str
-    patch_path: str
-    error_class: str
-    error: str
-    integration_id: str
-    integration_decision: str
-    patch_cleanup_status: str
-    integration_result_status: str
-    integration_revert_status: str
-    integration_finalize_status: str
-    integration_recovery_action: str
-    integration_error_class: str
-    integration_error: str
-    integration_report_path: str
-    integration_workspace: str
-    integration_ts: str
-    integration_gain_pct: float | None
-    integration_base_tput: float | None
-    integration_new_tput: float | None
-    bandwidth: dict[str, Any]
-    artifact_files: list[str]
-
-
-class Collective(TypedDict, total=False):
-    """Top-level collective-lane section envelope."""
-
-    only_mode: bool
-    attempts: list[CollectiveAttempt]
-    last: CollectiveAttempt
-
-
 # Kernel Roofline — hot-kernel table mirroring reports/kernel_roofline.json.
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim)."""
@@ -2138,25 +2084,12 @@ class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
     tuner: str | None
 
 
-class V6KernelCollectiveRun(V6KernelLaneRun, total=False):
-    """One collective-tuning run."""
-
-    op: str | None
-    algo: str | None
-    size_bytes: int | None
-    world_size: int | None
-    gain_pct: float | None
-    withheld: bool
-    withhold_reason: str | None
-
-
 class V6KernelForgeLanes(TypedDict, total=False):
-    """The four forge candidate lanes, split back out at assembly."""
+    """The forge candidate lanes, split back out at assembly."""
 
     kernel_rewrites: list[V6KernelRewriteRun]
     fusion_runs: list[V6KernelFusionRun]
     gemm_tuning_runs: list[V6KernelGemmTuningRun]
-    collective_runs: list[V6KernelCollectiveRun]
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2492,7 +2425,6 @@ class SessionBreakdown(TypedDict, total=False):
     capability_summary: CapabilitySummary
     geak: Geak
     kernel_lifecycle: KernelLifecycle
-    collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
@@ -2635,7 +2567,6 @@ __all__ = [
     "V6KernelAdoptedRow",
     "V6KernelAnalysisArtifacts",
     "V6KernelAnalysisDetail",
-    "V6KernelCollectiveRun",
     "V6KernelEntry",
     "V6KernelEvent",
     "V6KernelExt",

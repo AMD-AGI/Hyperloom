@@ -66,13 +66,11 @@ ROW_GEAK_ACCEPTANCE = "geak_acceptance"
 
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
-ROUTE_COLLECTIVE_ONLY = "collective_only"
 
-# The six candidate producers a KERNEL entry can adopt from.
+# The five candidate producers a KERNEL entry can adopt from.
 SOURCE_KERNEL_REWRITE = "kernel_rewrite"
 SOURCE_FUSION = "fusion"
 SOURCE_GEMM_TUNING = "gemm_tuning"
-SOURCE_COLLECTIVE = "collective"
 SOURCE_GEAK_AUTHORED_KERNEL = "geak_authored_kernel"
 SOURCE_GEAK_ENV_SELECTION = "geak_env_selection"
 
@@ -80,7 +78,6 @@ _SOURCE_KINDS = (
     SOURCE_KERNEL_REWRITE,
     SOURCE_FUSION,
     SOURCE_GEMM_TUNING,
-    SOURCE_COLLECTIVE,
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEAK_ENV_SELECTION,
 )
@@ -93,7 +90,6 @@ LANE_BY_SOURCE = {
     SOURCE_KERNEL_REWRITE: "kernel_rewrites",
     SOURCE_FUSION: "fusion_runs",
     SOURCE_GEMM_TUNING: "gemm_tuning_runs",
-    SOURCE_COLLECTIVE: "collective_runs",
 }
 
 #: The two rebench ledgers. They are separate wire arrays because they answer
@@ -143,7 +139,6 @@ __all__ = [
     "REBENCH_NO_MATERIAL",
     "REBENCH_NO_PROMOTE",
     "REBENCH_VALIDATED",
-    "ROUTE_COLLECTIVE_ONLY",
     "ROUTE_FORGE",
     "ROUTE_GEAK",
     "SECTION_EVENT",
@@ -153,7 +148,6 @@ __all__ = [
     "SECTION_LANE_RUN",
     "SECTION_REBENCH",
     "SECTION_TRACE_ANALYZE",
-    "SOURCE_COLLECTIVE",
     "SOURCE_FUSION",
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEAK_ENV_SELECTION",
@@ -626,49 +620,6 @@ class KernelEventRecorder:
                 "config_path": _text(config_path),
                 "gain_pct": _float_or_none(gain_pct),
                 "tuner": _text(tuner),
-            }
-        )
-
-    def record_collective_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        op: str = "",
-        algo: str = "",
-        size_bytes: Any = None,
-        world_size: Any = None,
-        gain_pct: Any = None,
-        withheld: bool = False,
-        withhold_reason: str = "",
-        micro_decision: str = "",
-        rebench_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-    ) -> None:
-        """Record one collective-tuning run."""
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_COLLECTIVE,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    rebench_ref=rebench_ref,
-                    failure_reason=failure_reason,
-                ),
-                "op": _text(op),
-                "algo": _text(algo),
-                "size_bytes": _int_or_none(size_bytes),
-                "world_size": _int_or_none(world_size),
-                "gain_pct": _float_or_none(gain_pct),
-                "withheld": bool(withheld),
-                "withhold_reason": _text(withhold_reason),
             }
         )
 

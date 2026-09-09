@@ -37,6 +37,11 @@ log = logging.getLogger(__name__)
 
 CAMPAIGN_BRANCH_PREFIX = "forge/controller/"
 
+#: Prefix of the directory a task's driver runs from inside the workspace. It
+#: carries its own ``.gitignore``, so the untracked inventory never lists it and
+#: the restore has to name it the way it names the experiments directory.
+DRIVER_STAGE_PREFIX = ".forge_driver_"
+
 #: Tells a recorded object id apart from a recorded branch name, so HEAD is
 #: put back the way it was found rather than always as one or the other.
 _COMMIT_LIKE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
@@ -341,6 +346,12 @@ def remove_foreign_untracked(repo_root: Path, baseline_untracked: frozenset[str]
     output_root = repo_root / FORGE_LOOP_OUTPUT_DIRNAME
     if output_root.is_dir():
         shutil.rmtree(output_root, ignore_errors=True)
+    # Same, and every match rather than this campaign's: a run the host killed
+    # never restored, so its driver would otherwise be inherited by the next
+    # borrower as a tree it did not stage.
+    for stage in repo_root.glob(f"{DRIVER_STAGE_PREFIX}*"):
+        if stage.is_dir():
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def _archive_campaign_output(worktree: OperatorWorktree) -> None:
@@ -428,6 +439,40 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
     except Exception:
         release_repo_lock(lock)
         raise
+
+
+def _operator_digest(operator_id: str) -> str:
+    return hashlib.sha256(operator_id.encode("utf-8")).hexdigest()[:12]
+
+
+def stage_operator_driver(
+    task: KernelRewriteTask,
+    task_dir: Path,
+    worktree: OperatorWorktree,
+) -> Path:
+    """Copy a task's driver into the workspace it measures, and return the copy.
+
+    The published task directory is not inside the repository, and a driver run
+    from there is external to the workspace. That costs two things at once. The
+    preparation agent is handed a staging directory instead of the workspace,
+    and its safety guard refuses to start anywhere that is not a Git checkout,
+    so a driver that needs repair can never be repaired. And a driver cannot
+    find the tree it measures from its own path, which an operator whose kernel
+    is compiled has to do to rebuild it.
+
+    Both go away by running the driver from inside the workspace. The copy sits
+    under a name the restore knows to remove, so it never reaches the exported
+    patch and is gone when the tree is handed back.
+    """
+    stage = worktree.workspace / f"{DRIVER_STAGE_PREFIX}{_operator_digest(task.operator_id)}"
+    stage.mkdir(parents=True, exist_ok=True)
+    # Also hides the helper modules the preparation agent may write beside the
+    # driver: forge-loop's workspace guard rejects untracked paths the caller
+    # never declared, and every one of these belongs to the producer.
+    (stage / ".gitignore").write_text("*\n", encoding="utf-8")
+    staged = stage / Path(task.driver_path).name
+    shutil.copy2(Path(task_dir).resolve() / task.driver_path, staged)
+    return staged
 
 
 def _validate_declared_sources(workspace: Path, task: KernelRewriteTask) -> tuple[Path, tuple[Path, ...]]:
@@ -572,6 +617,7 @@ def export_patch_from_base(
 
 __all__ = [
     "CAMPAIGN_BRANCH_PREFIX",
+    "DRIVER_STAGE_PREFIX",
     "CampaignBaselineRecord",
     "FORGE_LOOP_OUTPUT_DIRNAME",
     "OperatorWorktree",
@@ -587,5 +633,6 @@ __all__ = [
     "reclaim_campaign_branch",
     "release_operator_worktree",
     "remove_foreign_untracked",
+    "stage_operator_driver",
     "untracked_paths",
 ]

@@ -12,6 +12,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller._collective_names import (
+    carries_parallelism_suffix,
+    looks_like_multi_rank_operator,
+)
 from kernelforge.kernel_rewrite_controller.contracts import (
     KernelRewriteTask,
     TaskContractError,
@@ -52,6 +56,7 @@ _OPTIONAL_TASK_FIELDS = frozenset(
         "shape_cases",
         "reason",
         "evidence",
+        "world_size",
         "gpu_pct",
     }
 )
@@ -196,6 +201,34 @@ def parse_task_payload(
     if not isinstance(reason, str):
         raise TaskContractError("reason must be a string")
 
+    world_size_raw = payload.get("world_size", 1)
+    if isinstance(world_size_raw, bool) or not isinstance(world_size_raw, int) or world_size_raw < 1:
+        raise TaskContractError("world_size must be an integer >= 1")
+    if world_size_raw > 1 and not carries_parallelism_suffix(operator_name, identity.kernel_name):
+        # world_size is deliberately outside the identity six-tuple, which is
+        # the experience KB's primary key, so the suffix is the only thing
+        # telling one rank count's recipe from another's. Left as prose, two
+        # rank counts of the same collective land on one operator_id: the
+        # scheduler keeps one task per id and silently drops the other, and
+        # both write the same KB entry.
+        raise TaskContractError(
+            f"world_size {world_size_raw} needs the rank count in the operator name, because world_size is "
+            f"not part of the identity that keys the experience store. Neither operator_name "
+            f"{operator_name!r} nor identity.kernel_name {identity.kernel_name!r} carries a parallelism "
+            f"suffix; name it something like '{identity.kernel_name}_tp{world_size_raw}'."
+        )
+    if world_size_raw > 1 and not looks_like_multi_rank_operator(operator_name, identity.kernel_name):
+        # A rank count on an operator that reads as ordinary single-GPU work is
+        # almost always a mistake, and an expensive one: the campaign runs to
+        # its budget before the measurement is found to describe nothing.
+        raise TaskContractError(
+            f"world_size {world_size_raw} declares a multi-rank operator, but neither "
+            f"operator_name {operator_name!r} nor identity.kernel_name {identity.kernel_name!r} "
+            "names one. Name the collective it performs (all_reduce, all_gather, "
+            "reduce_scatter, all_to_all, broadcast, send/recv, an EP dispatch/combine, or a "
+            "vendor comms symbol), or carry the parallelism as a suffix such as '_tp8'."
+        )
+
     return KernelRewriteTask(
         identity=identity,
         operator_id=operator_id,
@@ -210,6 +243,7 @@ def parse_task_payload(
         shape_cases=copy.deepcopy(shape_cases),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
+        world_size=world_size_raw,
         # Unchecked by contract: it is read by people, not by the run, and a
         # refusal here would trade an operator for a number's formatting.
         gpu_pct=copy.deepcopy(payload.get("gpu_pct")),

@@ -272,7 +272,12 @@ Apply these non-negotiable opportunity rules:
 2. Publish only operators with editable implementation source in one supplied
    Git repository. If the active implementation is available only as a binary,
    shared library, HSACO, or other generated artifact without a tracked editable
-   generator source, skip it.
+   generator source, skip it. Read this rule carefully before applying it to a
+   collective: its kernel usually does ship inside a vendor comms library, and
+   that alone does not disqualify it. What drives the collective is editable
+   here -- which algorithm is chosen, the size thresholds that choose it, buffer
+   and IPC registration, the quantized path, how it is captured into a graph --
+   and rewriting that layer is a real optimization, not a workaround.
 3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
    priority values to higher-share operators. When exact percentages are
    unavailable, rank only from clearly labeled corroborated evidence and never
@@ -284,6 +289,36 @@ Apply these non-negotiable opportunity rules:
    with the same shapes, dtypes, layouts, and semantic inputs. Performance must
    time CUDA/HIP graph replays over preallocated inputs; do not use eager timing
    or silently fall back to eager execution.
+6. Set world_size to the current serving TP width only when the operator is a
+   true collective that needs multiple ranks to compute the correct result.
+   Otherwise keep world_size at 1.
+7. When world_size > 1, operator_name must end in the rank count (for example
+   custom_all_reduce_tp8). This is validated, not advisory: world_size is not
+   part of the identity that keys the experience store, so without the suffix
+   two rank counts of one collective become the same operator and only one
+   task survives. Choose backend aiter for editable all_reduce /
+   reduce_scatter / all_gather sources in aiter.
+8. A communication operator is a first-class target, not a special case to be
+   avoided. Publish it when its own source is editable, or when the dispatch
+   layer that selects and configures it is. A candidate row whose
+   candidate_source is nccl_summary has already resolved a mangled comms symbol
+   to the editable device source that launched it. Skip a collective only after
+   establishing that neither its kernel nor anything that chooses, configures or
+   registers it can be edited in a supplied repository.
+9. Rank a collective on the communication total, not on one kernel row. One
+   logical collective is split across several rows whose durations are prorated
+   from a sample, so every row understates it and comparing those rows against a
+   single fused GEMM is not a like-for-like comparison. Use
+   nccl_summary_total_ms, which those rows carry, as the share to rank on.
+10. Expect a communication candidate to arrive with no shapes. A comms summary
+    row carries no tensor metadata, so an empty shapes list is normal and is not
+    a reason to skip the candidate or to call its evidence weak. Derive the cases
+    from the serving state instead: the TP width, the hidden size, the dtype and
+    the batch and sequence extents this workload actually runs.
+11. Do not author distributed launch or cross-rank measurement logic in driver.py.
+    Write the same single-process driver contract; forge-loop task preparer adds
+    torchrun launch, process-group setup, and cross-rank reductions when
+    world_size > 1.
 
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
@@ -317,6 +352,7 @@ task.json must use this exact top-level structure:
     "dtype": "<runtime dtype>"
   }],
   "priority": 0,
+  "world_size": 1,
   "gpu_pct": 15.3,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
@@ -353,9 +389,16 @@ the forge-loop contract: `python3 driver.py` prints a correctness line such as
 --iters 20 --bench-mode` measures CUDA/HIP graph replays and prints
 `case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`;
 `python3 driver.py --profile-run` selects one representative case, runs only
-the target kernel for 1-3 synchronized iterations without reference work or
-timing output, and exits zero. Do not search other Hyperloom or KernelForge
-trees for task or driver examples; this prompt is the authoritative contract.
+   the target kernel for 1-3 synchronized iterations without reference work or
+   timing output, and exits zero. Do not search other Hyperloom or KernelForge
+   trees for task or driver examples; this prompt is the authoritative contract.
+
+The host copies driver.py into the repository under optimization before running
+it, one directory below the repository root. Resolve anything you need from the
+tree — a source file to hash, a config to read — as
+`Path(__file__).resolve().parents[1] / "<repo-relative path>"`. Do not derive
+that root from the current working directory, which is not the repository, nor
+from an environment variable, which the loop repoints at its build cache.
 
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
