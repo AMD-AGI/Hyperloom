@@ -76,8 +76,9 @@ def test_qwen3_abi_graph_rebinding_and_wrong_candidate_rejection(tmp_path, monke
 
     changed = tmp_path / "wrong.s"
     text = original.decode()
-    assert text.count("v_mul_f32 v2, v2, v8") == 1
-    changed.write_text(text.replace("v_mul_f32 v2, v2, v8", "v_mov_b32 v2, 0"))
+    entry = "forge_qk_norm_rope_h128:\n"
+    assert text.count(entry) == 1
+    changed.write_text(text.replace(entry, entry + "s_endpgm\n"))
     wrong = QkNormRope(tmp_path / "wrong", changed)
     actual = wrong(*args)
     torch.cuda.synchronize()
@@ -91,3 +92,24 @@ def test_qwen3_abi_graph_rebinding_and_wrong_candidate_rejection(tmp_path, monke
     del graph
     kernel.kernel.close()
     assert source.read_bytes() == original
+
+
+def test_qwen3_normalization_rounding_boundary(tmp_path, monkeypatch):
+    example = Path(__file__).resolve().parents[3] / "examples/qwen3-qk-assembly"
+    monkeypatch.syspath_prepend(str(example))
+    from forge_qwen3_assembly.kernel import QkNormRope
+
+    torch.manual_seed(910)
+    qkv = torch.randn(2048, 6144, device="cuda", dtype=torch.bfloat16) * 0.5
+    positions = torch.randint(0, 2048, (2048,), device="cuda", dtype=torch.int64)
+    angles = torch.randn(2048, 64, device="cuda")
+    cache = torch.cat((angles.cos(), angles.sin()), -1).bfloat16()
+    qw = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+    kw = torch.randn_like(qw)
+    kernel = QkNormRope(tmp_path)
+    actual = kernel(qkv, positions, cache, qw, kw, 32, 8, 1e-6)
+    expected = _reference(qkv, positions, cache, qw, kw)
+    for value, reference in zip(actual, expected):
+        torch.testing.assert_close(value, reference, rtol=1e-2, atol=1e-2)
+    torch.cuda.synchronize()
+    kernel.kernel.close()
