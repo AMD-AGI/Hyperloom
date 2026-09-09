@@ -18,6 +18,10 @@ all become the same object id.
 Only tracked changes are sealed. Untracked files -- tuned GEMM tables, JIT
 caches, an operator's own notes -- are not part of any patch and have no business
 in a commit this session created.
+
+Because it commits, sealing is also where a campaign a previous session never
+handed back has to be returned. Nothing else can: both reclaims run after the
+campaign, in the process that died holding it.
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.kernel_rewrite_controller.worktree import (
+    CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,
     untracked_paths,
 )
+from kernelforge.loop.editable_repo import acquire_repo_lock, release_repo_lock
 
 
 @dataclass(frozen=True)
@@ -177,12 +183,72 @@ def _seal_one(repo: Path, branch: str) -> RepoBaseline:
     return RepoBaseline(commit=sealed, untracked=untracked_paths(repo))
 
 
+def _abandoned_campaign_branch(repo: Path) -> str:
+    """Name the campaign branch this repository is still sitting on, if any."""
+    current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD", check=False).stdout.strip()
+    return current if current.startswith(CAMPAIGN_BRANCH_PREFIX) else ""
+
+
+def _seal_repository(repo: Path, branch: str) -> RepoBaseline | None:
+    """Seal one repository, first putting back a campaign nothing else will.
+
+    Sealing commits whatever the tree holds, so a repository left on a campaign
+    branch has to be returned before this runs or the commit is that campaign's
+    rewrite -- unvalidated, unattributed, and from then on the baseline every
+    measurement in this session and every session after it is taken against.
+    The reclaim that runs when the controller exits cannot cover this: it is in
+    the process the host killed. This is the other end of that window, and the
+    last moment before the tree stops being answerable.
+
+    ``None`` when the repository must not be sealed at all. Its operators are
+    skipped, which is what a missing baseline already means, and the alternative
+    is committing a rewrite nobody measured.
+    """
+    abandoned = _abandoned_campaign_branch(repo)
+    if not abandoned:
+        return _seal_one(repo, branch)
+    # Only now, and only for this: an ordinary tree seals without the lock, and
+    # a tree on a campaign branch may be one a live campaign is still writing.
+    lock = acquire_repo_lock(str(repo))
+    if lock is None:
+        log.warning(
+            "not sealing %s: it is on campaign branch %s and its lock could not be taken, "
+            "so either a live campaign is writing this tree or the lock file is unreachable; "
+            "in-place operators here will be skipped rather than measured against a rewrite "
+            "that may still be in progress",
+            repo,
+            abandoned,
+        )
+        return None
+    try:
+        reclaimed = reclaim_campaign_branch(repo)
+        if not reclaimed:
+            log.warning(
+                "not sealing %s: it is on campaign branch %s and no record of what it held "
+                "beforehand survived, so nothing can say which commit to return it to. "
+                "Recover what that branch is worth by hand; sealing it would make its "
+                "rewrite this session's baseline",
+                repo,
+                abandoned,
+            )
+            return None
+        log.warning(
+            "reclaimed %s from campaign branch %s before sealing it: a previous session was "
+            "killed outright and never gave the repository back",
+            repo,
+            reclaimed,
+        )
+        return _seal_one(repo, branch)
+    finally:
+        release_repo_lock(lock)
+
+
 def seal_campaign_baseline(
     state: object,
     *,
     session_id: str,
     macro_cycle: int,
-) -> dict[str, str]:
+) -> dict[str, RepoBaseline]:
     """Seal every configured source repository and return what each was pinned to.
 
     Best-effort per repository. One tree that cannot be sealed -- no Git, no
@@ -193,7 +259,7 @@ def seal_campaign_baseline(
     baselines: dict[str, RepoBaseline] = {}
     for repo in campaign_repositories(state):
         try:
-            baselines[str(repo)] = _seal_one(repo, branch)
+            baseline = _seal_repository(repo, branch)
         except (OSError, subprocess.SubprocessError) as error:
             log.warning(
                 "could not seal the serving tree in %s: %s; in-place operators in this "
@@ -201,6 +267,9 @@ def seal_campaign_baseline(
                 repo,
                 error,
             )
+            continue
+        if baseline is not None:
+            baselines[str(repo)] = baseline
     return baselines
 
 

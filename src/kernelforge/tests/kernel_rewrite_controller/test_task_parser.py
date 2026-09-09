@@ -284,7 +284,16 @@ def test_shape_cases_are_carried_verbatim(task_dir: Path, task_payload: dict) ->
 
     task = parse_task_payload(task_payload, task_dir=task_dir)
 
-    assert task.shape_cases == (1, {"name": "decode"})
+    assert task.shape_cases == [1, {"name": "decode"}]
+
+
+def test_shape_cases_that_are_not_a_list_are_not_reshaped(task_dir: Path, task_payload: dict) -> None:
+    """Wrapping a value nothing reads decides as little as refusing it would."""
+    task_payload["shape_cases"] = {"name": "decode"}
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.shape_cases == {"name": "decode"}
 
 
 def test_a_producer_other_than_forge_loop_is_refused(task_dir: Path, task_payload: dict) -> None:

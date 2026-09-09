@@ -132,6 +132,21 @@ def _baseline_path(repo_root: Path) -> Path:
     return repo_root / ".git" / BASELINE_FILENAME
 
 
+@dataclass(frozen=True)
+class CampaignBaselineRecord:
+    """What a borrow wrote down about the repository it was about to change.
+
+    Every field is needed to hand the repository back, and the borrowing process
+    is the only one that knows them: the commit it was at, the ref HEAD pointed
+    to, and which paths were already untracked. Whoever finds the repository
+    afterwards has this file and nothing else.
+    """
+
+    base_commit: str
+    origin_ref: str = ""
+    untracked: frozenset[str] = frozenset()
+
+
 def _restore_tree_to_base(
     repo_root: Path,
     base_commit: str,
@@ -190,8 +205,8 @@ def record_campaign_baseline(
         )
 
 
-def read_campaign_baseline(repo_root: Path) -> tuple[str, frozenset[str]] | None:
-    """What a previous borrow recorded: where HEAD was, and what was untracked.
+def read_campaign_baseline(repo_root: Path) -> CampaignBaselineRecord | None:
+    """What a previous borrow recorded, or ``None`` when nothing did.
 
     ``None`` means unknown, which is not the same claim as "nothing was
     untracked" -- the difference decides whether anything may be deleted.
@@ -205,7 +220,11 @@ def read_campaign_baseline(repo_root: Path) -> tuple[str, frozenset[str]] | None
     listed = payload.get("untracked")
     if not isinstance(listed, list):
         return None
-    return str(payload.get("origin_ref") or ""), frozenset(str(item) for item in listed)
+    return CampaignBaselineRecord(
+        base_commit=str(payload.get("base_commit") or ""),
+        origin_ref=str(payload.get("origin_ref") or ""),
+        untracked=frozenset(str(item) for item in listed),
+    )
 
 
 def forget_campaign_baseline(repo_root: Path) -> None:
@@ -216,32 +235,48 @@ def forget_campaign_baseline(repo_root: Path) -> None:
 
 def reclaim_campaign_branch(
     repo_root: Path,
-    base_commit: str,
+    base_commit: str = "",
     *,
     baseline_untracked: frozenset[str] | None = None,
 ) -> str:
     """Return a repository a campaign never handed back, and name the branch.
 
-    Reached from two directions -- the next borrow finding the repository still
-    on a campaign branch, and Hyperloom finding it there after the host killed
-    the controller -- so it lives here rather than once per caller. Returns the
-    branch it reclaimed, or ``""`` when there was nothing to reclaim.
+    Reached from three directions -- the next borrow, Hyperloom after the host
+    killed the controller, and the next session before it seals -- so it lives
+    here rather than once per caller. Returns the branch it reclaimed, or ``""``
+    when there was nothing to reclaim or no state to reclaim it to.
+
+    The record a borrow left is the authority on all three answers, because the
+    borrowing process is the only one that saw the repository before it changed.
+    The arguments are what stands in when no record survived, and a caller that
+    has neither gets ``""`` rather than a guess: restoring to the wrong commit
+    is how a campaign's own rewrite becomes what everything after it is measured
+    against.
 
     ``checkout --force`` restores tracked content but leaves whatever the
     campaign committed and the switch untracked, so an inventory is what finally
-    removes it. ``None`` -- the caller has none and none was recorded -- leaves
-    every untracked path alone: a real serving tree holds files no campaign owns
-    and no lane tracked, and with nothing to compare against there is no way to
-    tell one from the other.
+    removes it. Without one, every untracked path is left alone: a real serving
+    tree holds files no campaign owns and no lane tracked, and with nothing to
+    compare against there is no way to tell one from the other.
     """
     branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo_root, check=False).stdout.strip()
     if not branch.startswith(CAMPAIGN_BRANCH_PREFIX):
         return ""
     origin_ref = ""
-    if baseline_untracked is None:
-        recorded = read_campaign_baseline(repo_root)
-        if recorded is not None:
-            origin_ref, baseline_untracked = recorded
+    recorded = read_campaign_baseline(repo_root)
+    if recorded is not None:
+        base_commit = recorded.base_commit or base_commit
+        origin_ref = recorded.origin_ref
+        baseline_untracked = recorded.untracked
+    if not base_commit:
+        log.warning(
+            "%s is on campaign branch %s and nothing recorded the commit it was taken at, "
+            "so there is no state to put it back to; leaving it as it stands rather than "
+            "restoring it to a commit nothing vouches for",
+            repo_root,
+            branch,
+        )
+        return ""
     if baseline_untracked is None:
         log.warning(
             "reclaiming %s from %s without an inventory of what it held before that campaign; "
@@ -537,6 +572,7 @@ def export_patch_from_base(
 
 __all__ = [
     "CAMPAIGN_BRANCH_PREFIX",
+    "CampaignBaselineRecord",
     "FORGE_LOOP_OUTPUT_DIRNAME",
     "OperatorWorktree",
     "WorktreeError",

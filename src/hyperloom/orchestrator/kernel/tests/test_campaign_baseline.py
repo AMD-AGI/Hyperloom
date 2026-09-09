@@ -22,7 +22,10 @@ from hyperloom.orchestrator.kernel.campaign_baseline import (
 from kernelforge.kernel_rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
     FORGE_LOOP_OUTPUT_DIRNAME,
+    record_campaign_baseline,
+    untracked_paths,
 )
+from kernelforge.loop.editable_repo import acquire_repo_lock, release_repo_lock
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "baseline-test",
@@ -227,6 +230,93 @@ def test_a_repository_the_controller_returned_cleanly_is_left_alone(tmp_path: Pa
 
     assert reclaim_campaign_repositories({str(repo): RepoBaseline(commit=base)}) == {}
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch_before
+
+
+def _abandon_campaign(repo: Path, base: str, *, record: bool) -> str:
+    """Leave the repository as a session the host killed outright leaves it.
+
+    The controller's own restore is in the process that died, and so is
+    Hyperloom's reclaim -- both run after the campaign, and neither ran. What is
+    left is a campaign branch, its commit, and whatever the borrow wrote down
+    before any of it started.
+    """
+    origin_ref = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    if record:
+        record_campaign_baseline(repo, base, untracked_paths(repo), origin_ref=origin_ref)
+    branch = f"{CAMPAIGN_BRANCH_PREFIX}dead"
+    _git(repo, "checkout", "-b", branch)
+    (repo / "kernel.py").write_text("REWRITTEN_BY_A_DEAD_CAMPAIGN = 1\n", encoding="utf-8")
+    _git(repo, "add", "--update")
+    _git(repo, "commit", "-m", "campaign rewrite")
+    return branch
+
+
+def test_a_dead_campaigns_rewrite_is_not_what_the_next_session_seals(tmp_path: Path) -> None:
+    """Sealing commits whatever the tree holds, and nothing afterwards undoes it.
+
+    A whole-process death -- OOM, preemption, a container restart -- leaves the
+    repository on a campaign branch with no reclaim having run. Sealing that
+    tree would make an unvalidated rewrite the commit every measurement in this
+    session and every session after it is taken against.
+    """
+    repo = _repo(tmp_path)
+    theirs = repo / "fusion_generated_module.py"
+    theirs.write_text("another lane wrote this\n", encoding="utf-8")
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    branch = _abandon_campaign(repo, base, record=True)
+
+    pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+
+    assert pins[str(repo)].commit == base
+    assert (repo / "kernel.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert branch not in _git(repo, "branch", "--list")
+    # The reclaim is scoped: what the campaign wrote goes, what it found stays.
+    assert theirs.read_text(encoding="utf-8") == "another lane wrote this\n"
+
+
+def test_a_campaign_branch_nothing_recorded_is_refused_rather_than_sealed(tmp_path: Path) -> None:
+    """With no pre-campaign commit to name, no answer is better than a guess."""
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    branch = _abandon_campaign(repo, base, record=False)
+
+    pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+
+    assert str(repo) not in pins
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch
+    assert (repo / "kernel.py").read_text(encoding="utf-8") == "REWRITTEN_BY_A_DEAD_CAMPAIGN = 1\n"
+
+
+def test_a_repository_a_live_campaign_is_still_writing_is_not_sealed(tmp_path: Path) -> None:
+    """Another session's controller may hold this tree mid-rewrite."""
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    _abandon_campaign(repo, base, record=True)
+    held = acquire_repo_lock(str(repo))
+    assert held is not None
+
+    try:
+        pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+    finally:
+        release_repo_lock(held)
+
+    assert str(repo) not in pins
+    assert (repo / "kernel.py").read_text(encoding="utf-8") == "REWRITTEN_BY_A_DEAD_CAMPAIGN = 1\n"
+
+
+def test_an_ordinary_tree_is_sealed_without_the_repository_lock(tmp_path: Path) -> None:
+    """Only a tree on a campaign branch is one somebody may be borrowing."""
+    repo = _repo(tmp_path)
+    (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
+    held = acquire_repo_lock(str(repo))
+    assert held is not None
+
+    try:
+        pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+    finally:
+        release_repo_lock(held)
+
+    assert _git(repo, "show", f"{pins[str(repo)].commit}:kernel.py") == "VALUE = 2"
 
 
 def test_a_configured_file_resolves_to_the_repository_holding_it(tmp_path: Path) -> None:

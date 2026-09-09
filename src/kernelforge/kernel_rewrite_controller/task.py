@@ -207,9 +207,7 @@ def parse_task_payload(
         priority=priority,
         source_files=_string_list(payload, "source_files", paths=True),
         target_functions=_string_list(payload, "target_functions"),
-        shape_cases=tuple(copy.deepcopy(shape_cases))
-        if isinstance(shape_cases, list)
-        else (copy.deepcopy(shape_cases),),
+        shape_cases=copy.deepcopy(shape_cases),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
         # Unchecked by contract: it is read by people, not by the run, and a

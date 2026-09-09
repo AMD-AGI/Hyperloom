@@ -476,6 +476,48 @@ def test_reclaiming_without_an_inventory_deletes_nothing(tmp_path: Path) -> None
     assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
+def test_reclaiming_with_neither_a_record_nor_a_base_commit_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Restoring to a commit nothing vouches for is worse than not restoring.
+
+    The caller that seals has no base commit of its own -- the whole point of
+    sealing is to establish one -- so when no record survived either, there is
+    no answer, and inventing one would make some arbitrary commit the baseline
+    every measurement afterwards is taken against.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    _abandon_campaign(repo, base_commit, stage="--all")
+    campaign_head = _git(repo, "rev-parse", "HEAD")
+
+    assert reclaim_campaign_branch(repo) == ""
+
+    assert _git(repo, "rev-parse", "HEAD") == campaign_head
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == f"{CAMPAIGN_BRANCH_PREFIX}killed"
+    assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "CAMPAIGN\n"
+
+
+def test_a_recorded_base_commit_outranks_the_one_the_caller_offers(tmp_path: Path) -> None:
+    """The borrowing process is the only one that saw the repository before.
+
+    A caller reaching this after a kill knows the commit it sealed at, which is
+    the same answer while one session is running. Across sessions it is not: the
+    next seal has only what the dead campaign wrote down.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    (repo / "sglang" / "kernels" / "fused_moe.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(repo, "add", "--update")
+    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "later")
+    recorded_base = _git(repo, "rev-parse", "HEAD")
+    worktree_module.record_campaign_baseline(repo, recorded_base, frozenset(), origin_ref="master")
+    _abandon_campaign(repo, recorded_base, stage="--all")
+
+    assert reclaim_campaign_branch(repo, base_commit) == f"{CAMPAIGN_BRANCH_PREFIX}killed"
+
+    assert _git(repo, "rev-parse", "HEAD") == recorded_base
+    assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
 def test_a_borrow_records_the_inventory_for_whoever_has_to_hand_it_back(
     tmp_path: Path,
     editable,
@@ -492,9 +534,9 @@ def test_a_borrow_records_the_inventory_for_whoever_has_to_hand_it_back(
     recorded = read_campaign_baseline(repo)
 
     assert recorded is not None
-    origin_ref, untracked = recorded
-    assert origin_ref == "master"
-    assert "glm4_moe_fused_llm_allreduce.py" in untracked
+    assert recorded.base_commit == base_commit
+    assert recorded.origin_ref == "master"
+    assert "glm4_moe_fused_llm_allreduce.py" in recorded.untracked
 
     release_operator_worktree(borrowed)
     # Dropped once the repository is actually back, or a later borrow would read

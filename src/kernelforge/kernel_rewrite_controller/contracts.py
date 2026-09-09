@@ -84,9 +84,12 @@ class KernelRewriteTask:
     #: Observational: it is never read to decide anything, and no shape is
     #: required of it, so a task is never refused over what the agent wrote.
     gpu_pct: Any = None
-    #: Untyped on purpose: nothing reads these, they exist so the driver author
-    #: and a later reader can see which shapes the operator was chosen for.
-    shape_cases: tuple[Any, ...] = ()
+    #: Untyped on purpose, and carried in whatever shape it arrived in: nothing
+    #: reads these, they exist so the driver author and a later reader can see
+    #: which shapes the operator was chosen for. Reshaping a value no code reads
+    #: decides as little as refusing it would, and costs the reader the answer
+    #: the agent actually wrote.
+    shape_cases: Any = ()
     reason: str = ""
     evidence: tuple[Any, ...] = ()
 
