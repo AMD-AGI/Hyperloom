@@ -240,65 +240,6 @@ def parse_prometheus_text(text: str) -> ParsedFamilies:
     return families
 
 
-def _scalar(families: ParsedFamilies, name: str) -> float | None:
-    """Read a gauge, taking the largest reading when several series exist.
-
-    **Never sums.** A sharded engine exposes one series per rank
-    (``tp_rank`` / ``pp_rank`` / ``dp_rank``), and every one of them describes
-    the same pool from its own side: the ranks hold different head slices of
-    the same tokens, so their capacities and occupancies are views, not parts.
-    Adding them turns an 85%-full pool on TP=8 into an occupancy of 6.8 and
-    multiplies capacity eightfold -- the same mistake the log path guards
-    against by de-duplicating capacity lines per rank.
-
-    Max rather than first-rank so an imbalanced deployment reports its most
-    pressured rank, which is the one that will retract.
-
-    Args:
-        families (ParsedFamilies): Parsed exposition.
-        name (str): Metric name.
-
-    Returns:
-        float | None: The value, or ``None`` when the metric is absent. Absent
-        is never 0.0: several of these gauges legitimately read zero.
-    """
-    series = families.get(name)
-    if not series:
-        return None
-    return max(value for _, value in series)
-
-
-def _max_scalar(families: ParsedFamilies, names: tuple[str, ...]) -> float | None:
-    """Largest reading across several gauges, ignoring the ones not present.
-
-    Args:
-        families (ParsedFamilies): Parsed exposition.
-        names (tuple[str, ...]): Metric names to consider.
-
-    Returns:
-        float | None: The max, or ``None`` when none of the names appeared.
-    """
-    values = [v for name in names if (v := _scalar(families, name)) is not None]
-    return max(values) if values else None
-
-
-def _series_count(families: ParsedFamilies, names: tuple[str, ...]) -> int:
-    """How many label series the largest of these metrics carried.
-
-    Surfaced in the artifact so a consumer can tell a single-rank reading from
-    a collapsed multi-rank one, and judge for itself whether the aggregation
-    rule above was the right one for its deployment.
-
-    Args:
-        families (ParsedFamilies): Parsed exposition.
-        names (tuple[str, ...]): Metric names to inspect.
-
-    Returns:
-        int: The largest series count among the named metrics; 0 when absent.
-    """
-    return max((len(families.get(name) or ()) for name in names), default=0)
-
-
 #: Labels that identify a shard of one engine rather than an independent one.
 #: Shards schedule in lockstep, so each reports the same event; anything else
 #: (``dp_rank``, ``engine``, ``model_name``, ``pid``) marks a unit that
@@ -424,15 +365,18 @@ class KvSample:
             collapsed to their maximum; see :func:`_scalar`.
         capacity_gb (float | None): Pool size in GiB as the engine reports it.
             The engine's "GB" is 1024-based; do not rescale it.
-        retract_total (dict[str, float]): SGLang cumulative retracts, per label
-            series. Kept per series so an engine restart shows up as a series
-            resetting rather than as a total going backwards.
-        preempt_total (dict[str, float]): vLLM cumulative preemptions, likewise.
-        prefix_cache_queries (float | None): vLLM cumulative prefix lookups.
-        prefix_cache_hits (float | None): vLLM cumulative prefix hits.
-        cached_tokens_total (float | None): SGLang cumulative prefix-cached
-            tokens. Absent entirely when prefix caching is off -- the metric is
-            not emitted at all, rather than emitted as zero.
+        retract_total (dict[str, dict[str, float]]): SGLang cumulative retracts,
+            grouped by independent unit then by shard. Kept per series so an
+            engine restart shows as a series resetting rather than as a total
+            going backwards, and so shards can be collapsed while separate
+            engines are added. Combine with :func:`aggregate_series`.
+        preempt_total (dict[str, dict[str, float]]): vLLM preemptions, likewise.
+        prefix_cache_queries (dict[str, dict[str, float]]): vLLM cumulative
+            prefix lookups, same grouping.
+        prefix_cache_hits (dict[str, dict[str, float]]): vLLM prefix hits.
+        cached_tokens_total (dict[str, dict[str, float]]): SGLang cumulative
+            prefix-cached tokens. Empty when prefix caching is off -- the metric
+            is not emitted at all, rather than emitted as zero.
     """
 
     ts: float
@@ -447,11 +391,11 @@ class KvSample:
     capacity_derived: bool = False
     series_count: int = 0
     capacity_gb: float | None = None
-    retract_total: dict[str, float] = field(default_factory=dict)
-    preempt_total: dict[str, float] = field(default_factory=dict)
-    prefix_cache_queries: float | None = None
-    prefix_cache_hits: float | None = None
-    cached_tokens_total: float | None = None
+    retract_total: dict[str, dict[str, float]] = field(default_factory=dict)
+    preempt_total: dict[str, dict[str, float]] = field(default_factory=dict)
+    prefix_cache_queries: dict[str, dict[str, float]] = field(default_factory=dict)
+    prefix_cache_hits: dict[str, dict[str, float]] = field(default_factory=dict)
+    cached_tokens_total: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def has_readings(self) -> bool:
         """Whether this scrape carried any KV signal at all.
@@ -595,12 +539,14 @@ def sample_from_families(
         capacity_tokens=capacity,
         capacity_derived=capacity_derived,
         series_count=len(keys) if keys != [""] else 0,
-        capacity_gb=_scalar(families, _SGL_CAPACITY_GB),
+        # From the rank that was assembled, not re-read: a fresh lookup would
+        # be free to land on a different rank than every field above it.
+        capacity_gb=assembled.get("capacity_gb"),
         retract_total=_series(families, _SGL_RETRACT_TOTAL),
         preempt_total=_series(families, _VLLM_PREEMPT_TOTAL),
-        prefix_cache_queries=_scalar(families, _VLLM_PREFIX_QUERIES),
-        prefix_cache_hits=_scalar(families, _VLLM_PREFIX_HITS),
-        cached_tokens_total=_scalar(families, _SGL_CACHED_TOKENS),
+        prefix_cache_queries=_series(families, _VLLM_PREFIX_QUERIES),
+        prefix_cache_hits=_series(families, _VLLM_PREFIX_HITS),
+        cached_tokens_total=_series(families, _SGL_CACHED_TOKENS),
     )
 
 
@@ -755,7 +701,7 @@ _MAX_STORED_ROWS = 5000
 _MIN_SCRAPE_INTERVAL_SEC = 0.5
 
 
-def counter_delta(first: dict[str, float], last: dict[str, float]) -> float | None:
+def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, float]]) -> float | None:
     """Increment of a labelled counter between two observations.
 
     Diffed per label series rather than on a flat total, because an engine
@@ -832,8 +778,8 @@ class KvMetricsRecorder:
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
         self._phase_marks: list[dict[str, Any]] = []
-        self._first_counters: dict[str, dict[str, float]] = {}
-        self._last_counters: dict[str, dict[str, float]] = {}
+        self._first_counters: dict[str, dict[str, dict[str, float]]] = {}
+        self._last_counters: dict[str, dict[str, dict[str, float]]] = {}
         self._capacity_tokens: float | None = None
         self._capacity_derived = False
         self._capacity_gb: float | None = None
@@ -895,21 +841,21 @@ class KvMetricsRecorder:
         if self._capacity_gb is None and sample.capacity_gb is not None:
             self._capacity_gb = sample.capacity_gb
         self._series_count = max(self._series_count, sample.series_count)
-        # Prefix-cache counters are cumulative and the engine outlives the
-        # round under warm reuse, so the latest absolute value carries the
-        # previous round's hits too. Bracket the window instead: first reading
-        # in, last reading out, difference attributable to this round.
-        for attr in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total"):
-            value = getattr(sample, attr)
-            if value is None:
-                continue
-            self._prefix_first.setdefault(attr, value)
-            self._prefix_last[attr] = value
-        for name, series in (("retract", sample.retract_total), ("preempt", sample.preempt_total)):
+        # Every cumulative counter gets the same treatment: bracket the round
+        # and diff. The prefix-cache ones need it as much as the pressure ones,
+        # because under warm reuse the engine outlives the round and its
+        # absolute totals carry the previous round's cache warming.
+        for name, series in (
+            ("retract", sample.retract_total),
+            ("preempt", sample.preempt_total),
+            ("prefix_cache_queries", sample.prefix_cache_queries),
+            ("prefix_cache_hits", sample.prefix_cache_hits),
+            ("cached_tokens_total", sample.cached_tokens_total),
+        ):
             if not series:
                 continue
-            self._first_counters.setdefault(name, dict(series))
-            self._last_counters[name] = dict(series)
+            self._first_counters.setdefault(name, {g: dict(s) for g, s in series.items()})
+            self._last_counters[name] = {g: dict(s) for g, s in series.items()}
         self._rows.append(
             {
                 "phase": self._phase,
@@ -928,25 +874,26 @@ class KvMetricsRecorder:
         )
 
     def _prefix_cache_window(self) -> dict[str, Any]:
-        """Prefix-cache counters attributable to this round.
+        """Prefix-cache increments attributable to this round.
 
-        Reports the increment across the round, plus the raw endpoints so a
-        consumer can audit it. Absolute values alone are unusable under warm
-        reuse: the engine survives the round boundary, so they carry whatever
-        the previous round warmed the cache with.
+        Each counter is diffed per label series and combined by the shared
+        grouping rule, so two data-parallel engines that served 200 lookups
+        each report 400 rather than 200. Reporting the round's delta rather
+        than the running total is what makes a hit rate belong to the round
+        that earned it.
 
         Returns:
-            dict[str, Any]: ``<name>_delta`` per counter plus ``first`` /
-            ``last`` maps. Empty when no counter was ever read.
+            dict[str, Any]: ``<name>_delta`` per counter, plus its per-series
+            endpoints for audit. Empty when no counter was ever read.
         """
-        if not self._prefix_last:
-            return {}
-        window: dict[str, Any] = {"first": dict(self._prefix_first), "last": dict(self._prefix_last)}
-        for name, end in self._prefix_last.items():
-            start = self._prefix_first.get(name)
-            # A counter that went backwards means the engine restarted; credit
-            # only what has accumulated since, as the retract counters do.
-            window[f"{name}_delta"] = end if start is None or end < start else end - start
+        window: dict[str, Any] = {}
+        for name in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total"):
+            last = self._last_counters.get(name)
+            if not last:
+                continue
+            window[f"{name}_delta"] = counter_delta(self._first_counters.get(name, {}), last)
+            window[f"{name}_first"] = self._first_counters.get(name, {})
+            window[f"{name}_last"] = last
         return window
 
     def rows(self) -> list[dict[str, Any]]:

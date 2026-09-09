@@ -132,8 +132,8 @@ def test_vllm_shape_and_legacy_usage_alias():
     s = sample_from_families(parse_prometheus_text(VLLM_METRICS))
     assert s.engine == "vllm"
     assert s.active_pool_usage == pytest.approx(0.969)
-    assert s.prefix_cache_queries == 1000.0
-    assert s.prefix_cache_hits == 529.0
+    assert aggregate_series(s.prefix_cache_queries) == 1000.0
+    assert aggregate_series(s.prefix_cache_hits) == 529.0
 
     legacy = sample_from_families(parse_prometheus_text("vllm:gpu_cache_usage_perc 0.5\n"))
     assert legacy.active_pool_usage == pytest.approx(0.5)
@@ -154,7 +154,7 @@ def test_prefix_cache_off_omits_cached_tokens_entirely():
     without = SGLANG_METRICS.replace("sglang:cached_tokens_total 4600439.0\n", "")
     s = sample_from_families(parse_prometheus_text(without))
 
-    assert s.cached_tokens_total is None
+    assert s.cached_tokens_total == {}
 
 
 def test_idle_zero_is_a_reading_not_an_absence():
@@ -273,10 +273,10 @@ def test_other_pools_evictable_does_not_leak_into_the_main_pool_ratio():
 
 def test_prefix_cache_counters_are_read():
     s = sample_from_families(parse_prometheus_text(VLLM_METRICS))
-    assert (s.prefix_cache_queries, s.prefix_cache_hits) == (1000.0, 529.0)
+    assert (aggregate_series(s.prefix_cache_queries), aggregate_series(s.prefix_cache_hits)) == (1000.0, 529.0)
 
     sg = sample_from_families(parse_prometheus_text(SGLANG_METRICS))
-    assert sg.cached_tokens_total == 4600439.0
+    assert aggregate_series(sg.cached_tokens_total) == 4600439.0
 
 
 def test_canonical_label_key_is_order_independent():

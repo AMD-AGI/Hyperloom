@@ -189,8 +189,8 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted():
     """
     poller = _StubPoller(
         [
-            _sample(prefix_cache_queries=1000.0, prefix_cache_hits=800.0),
-            _sample(prefix_cache_queries=1400.0, prefix_cache_hits=1100.0),
+            _sample(prefix_cache_queries=_grouped(a=1000.0), prefix_cache_hits=_grouped(a=800.0)),
+            _sample(prefix_cache_queries=_grouped(a=1400.0), prefix_cache_hits=_grouped(a=1100.0)),
         ]
     )
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
@@ -200,12 +200,28 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted():
     window = rec.summary()["prefix_cache"]
     assert window["prefix_cache_queries_delta"] == 400.0
     assert window["prefix_cache_hits_delta"] == 300.0
-    assert window["first"]["prefix_cache_queries"] == 1000.0
-    assert window["last"]["prefix_cache_queries"] == 1400.0
+    assert window["prefix_cache_queries_first"] == _grouped(a=1000.0)
+    assert window["prefix_cache_queries_last"] == _grouped(a=1400.0)
+
+
+def test_prefix_cache_counters_add_across_independent_engines():
+    """Two vLLM engines serving 200 lookups each did 400, not 200. Taking the
+    max across series before diffing halved every cache figure on a DP
+    deployment."""
+    first = {'engine="0"': {'engine="0"': 0.0}, 'engine="1"': {'engine="1"': 0.0}}
+    last = {'engine="0"': {'engine="0"': 200.0}, 'engine="1"': {'engine="1"': 200.0}}
+    poller = _StubPoller([_sample(prefix_cache_queries=first), _sample(prefix_cache_queries=last)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+    rec.tick(1.0)
+
+    assert rec.summary()["prefix_cache"]["prefix_cache_queries_delta"] == 400.0
 
 
 def test_prefix_cache_restart_credits_only_the_post_restart_count():
-    poller = _StubPoller([_sample(cached_tokens_total=900.0), _sample(cached_tokens_total=12.0)])
+    poller = _StubPoller(
+        [_sample(cached_tokens_total=_grouped(a=900.0)), _sample(cached_tokens_total=_grouped(a=12.0))]
+    )
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
     rec.tick(1.0)

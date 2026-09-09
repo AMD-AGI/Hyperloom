@@ -36,7 +36,7 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
 def _count_scans(monkeypatch) -> dict[str, int]:
     calls = {"scan": 0, "death": 0}
 
-    def _scan(server_log_path, offsets):
+    def _scan(server_log_path, offsets, residuals=None):
         calls["scan"] += 1
         return sk._LogScan(
             saw_ready=False,
