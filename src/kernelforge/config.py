@@ -47,9 +47,12 @@ def resolve_agent_model(agent_backend: str) -> str:
     operator configuring a box should not have to learn a second vocabulary for
     the same decision. There is exactly one rung, and it is the platform's:
     ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
-    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. It is
-    reimplemented rather than imported because this package does not depend on
-    ``hyperloom``.
+    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. The two
+    are written out separately rather than sharing one helper because they
+    answer different questions -- that one picks the model for Hyperloom's own
+    calls into a Forge campaign, this one picks the model an agent session
+    runs -- and the shared piece worth deduplicating is the variable names,
+    which is exactly what this change makes identical.
 
     Forge used to consult private variables above that pair -- first
     ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``, then a provider-neutral
