@@ -201,7 +201,7 @@ class VariantResult:
             "tpot_mean_ms": self.tpot_mean_ms,
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,
-            "intvty_p90": self.intvty_p90,
+            "e2e_norm_intvty_p90": self.intvty_p90,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,
