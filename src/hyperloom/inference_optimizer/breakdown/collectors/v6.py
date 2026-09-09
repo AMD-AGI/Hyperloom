@@ -1,13 +1,17 @@
-"""Additive V6 projections built from the existing V5 evidence."""
+"""The V6 sections projected from the recorder's own record of the session.
+
+``metadata`` and ``outcome`` are assembled from the durable timeline events,
+the close-out's fragment, and the launch inputs that predate the recorder.
+Nothing here re-derives a fact the run could have stated: where a figure was
+once recovered by walking the session directory, it is now read off the event
+that measured it.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-
-from ..kb_timeline import collect_kb_events
 from ...session.sbd_v6 import read_timeline_events
 from ._common import (
     _dict_rows,
@@ -18,7 +22,6 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
-from .v6_stages import project_conc_sweep_event
 
 
 _SUCCESS_STOP_REASONS = frozenset(
@@ -242,42 +245,6 @@ def _recorded_leaf(value: Any) -> bool:
     return not (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
 
 
-def _projected(
-    stage: str,
-    project: Callable[[], Any],
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    """Run one stage projector so its failure costs only its own events.
-
-    The exporter already wraps this whole collector, but that granularity is
-    too coarse to honor what V6 promises. A single ``_safe_collect`` around the
-    lot means one projector raising on a malformed field discards the durable
-    ``install`` / ``model_gate`` events read moments earlier and every other
-    stage that projected cleanly — so a session that failed at the model gate,
-    whose gate event is the only thing worth reporting, can lose it to a
-    kernel-stage bug it never reached.
-
-    Args:
-        stage (str): Stage name, used to name the projector in the warning.
-        project (Callable[[], Any]): Returns one event, a list of events, or
-            ``None``.
-        warnings (list[str]): V6 warning sink (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: The projected events, or ``[]`` on failure.
-    """
-    try:
-        result = project()
-    except Exception as exc:  # noqa: BLE001 — one stage must not cost the timeline
-        warnings.append(f"v6.timeline.{stage}: projection failed ({type(exc).__name__}: {exc}); stage omitted")
-        return []
-    if result is None:
-        return []
-    if isinstance(result, dict):
-        return [result]
-    return [event for event in result if isinstance(event, dict)]
-
-
 def _recorded_types(timeline: list[dict[str, Any]], event_type: str) -> bool:
     """Whether the durable events already hold one of a type.
 
@@ -295,49 +262,24 @@ def _recorded_types(timeline: list[dict[str, Any]], event_type: str) -> bool:
 def collect_v6_timeline(
     session_dir: Path,
     warnings: list[str],
-    *,
-    state: dict[str, Any] | None = None,
-    conc_sweep_summary: Any = None,
-    phase_timeline: Any = None,
 ) -> list[dict[str, Any]]:
-    """Load durable events and project what is not yet recorded.
+    """Read the session's durable events back, in the order they happened.
 
-    ``install``, ``model_gate``, ``baseline``, ``roofline``, ``kernel``,
-    ``conc_sweep`` and ``framework_agent`` are read back from the durable
-    event directory: the first two run before the Coordinator exists, and the
-    rest are recorded by the phase or the action that produces them, which
-    knows things no projection over ``state.json`` can recover -- when the
-    work started, and the thresholds a decision actually ruled on, most
-    plainly. ``conc_sweep`` and ``warm_replay`` are also recorded now, so what
-    remains here is the fallback for a session recorded before those events
-    existed: each is projected only when the durable read found none, from
-    V5 sections the exporter has already built -- so both keyword arguments
-    are optional: a caller that passes none still gets every durable event.
+    Every event type is recorded by the phase or the action that produces it:
+    ``install`` and ``model_gate`` run before the Coordinator exists, and the
+    rest know things no projection over ``state.json`` could recover -- when
+    the work started, and the thresholds a decision actually ruled on, most
+    plainly.
 
-    Every projection is isolated (see :func:`_projected`). The durable events
-    are read first and are never discarded by a later stage's failure.
+    Args:
+        session_dir (Path): The session directory holding the event files.
+        warnings (list[str]): V6 warning sink (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The events, oldest first, with the ones carrying
+            no timestamp kept in read order behind those that do.
     """
     timeline = read_timeline_events(session_dir, warnings=warnings)
-    state = state if isinstance(state, dict) else {}
-    if not _recorded_types(timeline, "conc_sweep"):
-        # A sweep the executor recorded already carries everything the
-        # projection could rebuild and the decisions it could not, so
-        # projecting alongside it would publish the same sweep twice -- the
-        # second time worse. The projection is what a session recorded before
-        # this event existed still gets.
-        timeline.extend(
-            _projected(
-                "conc_sweep",
-                lambda: project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
-                warnings,
-            )
-        )
-    if not _recorded_types(timeline, "warm_replay"):
-        # Same reason as the sweep above: PRELUDE records the replay with the
-        # skip code or the gate that decided it, which a projection over
-        # ``state.json`` cannot recover. Projecting alongside it would publish
-        # the same replay twice.
-        timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
@@ -379,21 +321,6 @@ def _stage_reached(
         if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
             return "warm_replay"
         if _recorded_types(timeline, "enablement"):
-            return "enablement"
-        # A session recorded before the enablement event existed still has to
-        # be read off state, by probing the six fields any of which means the
-        # lane did something. The event replaces the probe with the fact.
-        enablement = state.get("enablement")
-        if isinstance(enablement, dict) and any(
-            (
-                int(enablement.get("attempts") or 0) > 0,
-                bool(enablement.get("pending")),
-                bool(enablement.get("validation_pending")),
-                bool(enablement.get("succeeded")),
-                bool(enablement.get("launch_log")),
-                bool(enablement.get("inflight_task_id")),
-            )
-        ):
             return "enablement"
         baseline_tput = state.get("baseline_tput")
         if (
@@ -516,9 +443,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         rows = [_mapping(buckets.get(name)) for name in names]
         return {
             "total_gain_pct": (
-                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6)
-                if available
-                else None
+                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
             ),
             "keep_count": sum(_optional_int(row.get("count")) or 0 for row in rows),
             # Adoptions in this bucket whose contribution could not be measured
@@ -528,12 +453,33 @@ def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     kernel_backends = _mapping(_mapping(buckets.get("kernel")).get("by_backend"))
+    validations = _mapping(ledger.get("validations"))
+    settled = _mapping(validations.get("settled"))
     return {
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),
         "chain_total_gain_pct": _optional_float(ledger.get("chain_total_gain_pct")),
+        "adoption_count": _optional_int(_mapping(ledger.get("adoptions")).get("count")) or 0,
+        # Which stack the settled figure was measured on, and when. Both are
+        # read off the validation row that produced the figure rather than
+        # inferred from the stack's length at export.
+        "validated_at_stack_len": _optional_int(settled.get("stack_len")),
+        "validated_ts": str(settled.get("ts") or "") or None,
+        "measurement_basis": str(settled.get("measurement_basis") or "") or None,
+        # The latency the settled measurement reported, carried on the same row
+        # as the throughput it was measured beside.
+        "ttft_mean_ms": _optional_float(settled.get("ttft_mean_ms")),
+        "e2el_mean_ms": _optional_float(settled.get("e2el_mean_ms")),
+        "ttft_e2el_source": str(settled.get("ttft_e2el_source") or "") or None,
+        "server_launch_flags": str(settled.get("server_launch_flags") or "") or None,
+        "workspace": str(settled.get("workspace") or "") or None,
+        # The settled figure does not cover the stack that shipped: adoptions
+        # landed after it was measured. ``at_head`` is absent on a session with
+        # no ledger, which is not the same as a stack that outran its
+        # validation, so the negation is only taken when the ledger exists.
+        "stack_changed_after_validation": (not bool(validations.get("at_head")) if available else False),
         "attribution": {
             "available": available,
             "by_source": {
@@ -574,6 +520,11 @@ def _bucket_of(backends: dict[str, Any], name: str, available: bool) -> dict[str
     }
 
 
+#: Below this a reconciliation gap is float noise from re-serialized
+#: throughputs, well under any measurement's own repeatability.
+_RECONCILIATION_NOISE_PP = 0.01
+
+
 def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     """Name what the ledger's own figures say is wrong with it.
 
@@ -600,6 +551,15 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
             f"the anchor moved outside an adoption {breaks} time(s); "
             "that movement is the unattributed gain, not a rounding error"
         )
+    gap = _optional_float(ledger.get("reconciliation_gap_pct"))
+    if gap is not None and abs(gap) > _RECONCILIATION_NOISE_PP:
+        # The one finding worth alerting on: the whole and the parts were both
+        # measured, and they disagree, so one of the two figures is wrong.
+        notes.append(
+            f"the whole-stack measurement and the sum of the adoptions differ by {gap:+.2f} pp; "
+            "either an adoption is missing from the ledger or its recorded throughputs disagree "
+            "with the end-to-end measurement"
+        )
     validations = _mapping(ledger.get("validations"))
     if not _optional_int(validations.get("count")):
         notes.append("no whole-stack validation was measured, so the ledger has nothing to reconcile against")
@@ -611,11 +571,27 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
 def collect_v6_outcome(
     *,
     session: dict[str, Any],
-    final: dict[str, Any],
+    close: dict[str, Any],
     state: dict[str, Any],
     timeline: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Project V5 result sections into the V6 ``outcome`` shape."""
+    """Assemble the V6 ``outcome`` block off the timeline and the close-out.
+
+    Args:
+        session (dict[str, Any]): The session section, read for the stop
+            reason.
+        close (dict[str, Any]): The ``close`` section, whose ``final_recipe``
+            states the configuration the session ended on. The close-out is
+            the only author of that fact: the stack ledger keeps an adoption
+            row a later revert does not retract, and a session that adopted
+            nothing has no ledger event while still ending on its baseline.
+        state (dict[str, Any]): Parsed ``state.json``, read for the stage the
+            run reached.
+        timeline (list[dict[str, Any]]): The assembled V6 timeline.
+
+    Returns:
+        dict[str, Any]: The ``outcome`` block.
+    """
     stop_reason = str(session.get("stop_reason") or "").strip()
     outcome_status = _outcome_status(stop_reason)
     for event in reversed(timeline):
@@ -624,19 +600,58 @@ def collect_v6_outcome(
         if str(event.get("status") or "").strip().lower() == "failed":
             outcome_status = "failed"
         break
+    validation = _validation_from_timeline(timeline)
+    recipe = _mapping(close.get("final_recipe"))
     return {
         "stop_reason": stop_reason,
         "status": outcome_status,
         "stage_reached": _stage_reached(state, stop_reason, timeline),
         "baseline": _baseline_from_timeline(timeline),
         "final": {
-            "throughput_tok_s_per_gpu": final.get("throughput_tok_s_per_gpu"),
-            "gain_pct": final.get("cumulative_gain_pct_validated", 0.0),
-            "action_path": list(final.get("action_path") or []),
-            "extra_envs": dict(final.get("extra_envs") or {}),
-            "extra_server_args": str(final.get("extra_server_args") or ""),
+            "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
+            # The ledger's own settled figure rather than a second tally of it:
+            # the validation row that measured the whole stack is what the
+            # session's total means, and asking two sources the same question
+            # is how the export came to publish an answer nothing measured.
+            "gain_pct": validation.get("validated_total_gain_pct") or 0.0,
+            "action_path": [str(step) for step in recipe.get("action_path") or []],
+            "extra_envs": dict(_mapping(recipe.get("extra_envs"))),
+            "extra_server_args": str(recipe.get("extra_server_args") or ""),
+            # Read off the validation row that measured the final stack: the
+            # settled figure and the latency and launch beside it come from one
+            # benchmark, so pairing them here cannot mismatch.
+            **_measured_final(validation, recipe),
         },
-        "validation": _validation_from_timeline(timeline),
+        "validation": validation,
+    }
+
+
+def _measured_final(validation: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
+    """Take the final stack's latency and launch off the settled validation.
+
+    Args:
+        validation (dict[str, Any]): The ``outcome.validation`` block.
+        recipe (dict[str, Any]): The close-out's ``final_recipe``, read for the
+            latency pair when the session has no settled validation -- a run
+            that never validated its stack still ends on a configuration, and
+            the close-out's reading of it is the only one there is.
+
+    Returns:
+        dict[str, Any]: The latency pair and the ``invocation`` block, whose
+            ``framework_args_source`` names where the flags came from rather
+            than how far a disk walk had to go to find them.
+    """
+    settled = bool(validation.get("validated_ts"))
+    latency = validation if settled else recipe
+    flags = str(validation.get("server_launch_flags") or "")
+    return {
+        "ttft_mean_ms": _optional_float(latency.get("ttft_mean_ms")),
+        "e2el_mean_ms": _optional_float(latency.get("e2el_mean_ms")),
+        "invocation": {
+            "framework_args": flags,
+            "framework_args_source": "settled_validation" if flags else "unrecorded",
+            "workspace": validation.get("workspace"),
+        },
     }
 
 

@@ -474,3 +474,109 @@ def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
         "settled_unix",
         "duration_sec",
     }
+
+
+def _propose(msg_id: str, *, phase: str = "KERNEL_AGENT", action: str = "kernel_opt", cycle: int = 0, **kw) -> None:
+    phase_event.record_proposal(
+        proposal_msg_id=msg_id,
+        action=action,
+        phase=phase,
+        macro_cycle=cycle,
+        from_agent="orchestration",
+        **kw,
+    )
+
+
+def test_a_proposal_is_on_record_before_anything_acts_on_it(tmp_path):
+    """Most proposals are never dispatched, so no other row would ever hold them."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1", predicted_gain_pct=4.5)
+
+    proposals = _ext("KERNEL_AGENT")["proposals"]
+    assert proposals["count"] == 1
+    row = proposals["rows"][0]
+    assert row["proposal_msg_id"] == "m-1"
+    assert row["action"] == "kernel_opt"
+    assert row["from_agent"] == "orchestration"
+    assert row["predicted_gain_pct"] == 4.5
+
+
+def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
+    """No framework event exists here, which is why this ruling used to vanish."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1")
+    phase_event.record_proposal_review(
+        proposal_msg_id="m-1",
+        verdict="reject",
+        reasoning="the kernel is already fused",
+        confidence=0.8,
+        failure_reason_code="no_headroom",
+    )
+
+    review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
+    assert review["verdict"] == "reject"
+    assert review["effective_verdict"] == "reject"
+    assert review["held_to_rule"] is False
+    assert review["confidence"] == 0.8
+    assert review["failure_reason_code"] == "no_headroom"
+
+
+def test_a_ruling_the_envelope_overrode_says_it_was_held_to_a_rule(tmp_path):
+    """Two verdicts say they differ; only a third says the difference was imposed."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1")
+    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve", effective_verdict="needs_review")
+
+    review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
+    assert review["verdict"] == "approve"
+    assert review["effective_verdict"] == "needs_review"
+    assert review["held_to_rule"] is True
+
+
+def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(tmp_path):
+    """The Critic runs on its own tick, so the phase in scope is not the one that asked."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1")
+    _exit("KERNEL_AGENT", at=20.0, to_phase="FRAMEWORK_AGENT")
+    _enter("FRAMEWORK_AGENT", sequence=2, at=20.0)
+    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve")
+
+    assert _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]["verdict"] == "approve"
+    assert _ext("FRAMEWORK_AGENT")["proposals"]["count"] == 0
+
+
+def test_a_ruling_for_a_proposal_that_was_never_recorded_mints_nothing(tmp_path):
+    """A ruling cannot bring into existence the thing it claims to be about."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    phase_event.record_proposal_review(proposal_msg_id="ghost", verdict="approve")
+
+    assert _ext("KERNEL_AGENT")["proposals"]["count"] == 0
+
+
+def test_the_task_a_proposal_became_joins_it_to_its_dispatch(tmp_path):
+    """Otherwise what was asked for and what was run sit on one event unconnected."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1")
+    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve")
+    phase_event.record_proposal_outcome(proposal_msg_id="m-1", materialized=True, task_id="t-9")
+    phase_event.record_dispatch(action="kernel_opt", task_id="t-9", phase="KERNEL_AGENT", macro_cycle=0)
+
+    ext = _ext("KERNEL_AGENT")
+    outcome = ext["proposals"]["rows"][0]["outcome"]
+    assert outcome["materialized"] is True
+    assert outcome["task_id"] == "t-9"
+    assert [row["task_id"] for row in ext["actions"]["rows"]] == ["t-9"]
+
+
+def test_a_proposal_the_critic_never_reached_is_not_a_refused_one(tmp_path):
+    """The gap between count and reviewed is the difference, and it is reportable."""
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
+    _propose("m-1")
+    _propose("m-2")
+    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="reject")
+
+    proposals = _ext("KERNEL_AGENT")["proposals"]
+    assert proposals["count"] == 2
+    assert proposals["reviewed"] == 1
+    assert proposals["materialized"] == 0
+    assert "critic_review" not in proposals["rows"][1]

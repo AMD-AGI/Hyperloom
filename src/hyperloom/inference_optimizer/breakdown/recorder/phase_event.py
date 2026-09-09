@@ -73,6 +73,7 @@ from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
+    as_list as _as_list,
     clip as _clip,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
@@ -113,6 +114,19 @@ SECTION_ACTION = "phase_action"
 
 #: One row per non-transition ``phase_history`` marker, keyed by its position.
 SECTION_MARKER = "phase_marker"
+
+#: One row per proposal the phase raised, keyed by the bus message that carries
+#: it. The proposal is recorded here because this is the one event that exists
+#: for every phase: an action becomes a ``phase_action`` row only once it is
+#: dispatched, and a proposal that the Critic rejected is never dispatched at
+#: all -- so without this row the refusal had nothing to be recorded against.
+#:
+#: This is also the only place a Critic ruling can be filed with the thing it
+#: ruled on. ``framework_agent`` carries ``proposals[].critic_review``, but its
+#: rows exist for two creation paths inside one phase; a ruling on a KERNEL
+#: ``kernel_opt``, on a PRELUDE ``baseline``, or on an action no framework arm
+#: maps to had no subject row anywhere, and was dropped without trace.
+SECTION_PROPOSAL = "phase_proposal"
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
@@ -355,6 +369,84 @@ def record_marker(
         log.debug("phase event: marker record failed", exc_info=True)
 
 
+#: What a specialist round contributes to the action row that dispatched it.
+#: The dispatch and settle already say when it ran and how it ended; these say
+#: what it came back with. ``proposal_set`` is deliberately absent -- for the
+#: FRAMEWORK arm each proposal owns a row on the framework event, and for the
+#: phase-independent scouts the product is the findings, not a variant list.
+_ROUND_TEXT_FIELDS = ("domain", "gap_canonical_id", "summary", "reason", "source")
+_ROUND_LIST_FIELDS = ("tags", "new_findings", "residual_questions", "notes")
+
+
+def record_specialist_round(
+    *,
+    task_id: str,
+    phase: str,
+    macro_cycle: int,
+    round_id: str = "",
+    proposals_total: Any = None,
+    empty: Any = None,
+    confidence: Any = None,
+    ensemble_scores: Mapping[str, Any] | None = None,
+    **fields: Any,
+) -> None:
+    """Merge what a specialist round produced onto the action row that ordered it.
+
+    The dispatcher already opened an action row for this task, keyed by
+    ``task_id``, on the phase that ordered it. This merges onto that row rather
+    than adding a second one, so the round's product sits with the dispatch it
+    came from instead of in a flat ledger that had to be re-attributed to a
+    phase at export.
+
+    Args:
+        task_id (str): The specialist task's id, which keys the row.
+        phase (str): The phase in scope, used only when no dispatch row exists.
+        macro_cycle (int): The macro cycle, same fallback.
+        round_id (str): The round's own id, when it differs from the task id.
+        proposals_total (Any): How many proposals came back.
+        empty (Any): Whether the round produced nothing.
+        confidence (Any): The round's self-reported confidence.
+        ensemble_scores (Mapping[str, Any] | None): Advisory multi-model
+            scoring of the proposals, when it ran.
+        **fields: Any of ``domain``, ``gap_canonical_id``, ``summary``,
+            ``reason``, ``source``, ``tags``, ``new_findings``,
+            ``residual_questions``, ``notes``.
+    """
+    try:
+        key = str(task_id or "")
+        if not key:
+            return
+        event = _action_event(key)
+        if event is None:
+            if not str(phase or ""):
+                return
+            event = phase_event_id(phase, macro_cycle)
+            record_dispatch(action="specialist", task_id=key, phase=phase, macro_cycle=macro_cycle)
+        sink = _sink(event)
+        if sink is None:
+            return
+        row: dict[str, Any] = {"task_id": key}
+        if str(round_id or "") and str(round_id) != key:
+            row["round_id"] = str(round_id)
+        for name in _ROUND_TEXT_FIELDS:
+            if name in fields:
+                row[name] = _clip(str(fields.get(name) or ""), MAX_REASON_CHARS)
+        for name in _ROUND_LIST_FIELDS:
+            if name in fields:
+                row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
+        if proposals_total is not None:
+            row["proposals_total"] = _int_or_none(proposals_total)
+        if empty is not None:
+            row["empty"] = bool(empty)
+        if confidence is not None:
+            row["confidence"] = _float_or_none(confidence)
+        if ensemble_scores:
+            row["ensemble_scores"] = _as_dict(ensemble_scores)
+        sink.record(SECTION_ACTION, row, row_type="action", natural_ids=key)
+    except Exception:  # noqa: BLE001 — a round outranks its own record
+        log.debug("phase event: specialist round record failed", exc_info=True)
+
+
 def record_dispatch(
     *,
     action: str,
@@ -407,6 +499,213 @@ def record_dispatch(
         )
     except Exception:  # noqa: BLE001 — an action outranks its own record
         log.debug("phase event: dispatch record failed", exc_info=True)
+
+
+def record_proposal(
+    *,
+    proposal_msg_id: str,
+    action: str,
+    phase: str,
+    macro_cycle: int,
+    from_agent: str = "",
+    tick: int = 0,
+    predicted_gain_pct: Any = None,
+    candidate_id: Any = None,
+    variant_name: Any = None,
+    proposed_at: str = "",
+) -> None:
+    """Record a proposal against the phase that raised it. Never raises.
+
+    Written when the proposal is minted, not when it is acted on, because most
+    proposals are never acted on: one refused by the Critic, or left pending
+    when the phase exits, has no dispatch and therefore no other row. The
+    proposal is the unit the Critic rules on, so it has to exist before the
+    ruling can be filed against it.
+
+    Args:
+        proposal_msg_id (str): The bus message carrying it, which keys the row.
+        action (str): The action proposed, in the proposer's own words --
+            including the ones no framework arm maps to.
+        phase (str): The phase in scope when it was raised.
+        macro_cycle (int): The macro cycle it was raised in.
+        from_agent (str): The role that raised it.
+        tick (int): The coordinator tick, for ordering within a phase.
+        predicted_gain_pct (Any): The gain the proposer claimed, when it did.
+        candidate_id (Any): The upstream candidate, when the proposal names one.
+        variant_name (Any): The variant, when the proposal names one.
+        proposed_at (str): The ISO timestamp; defaults to now.
+    """
+    try:
+        if not str(proposal_msg_id or ""):
+            return
+        event = phase_event_id(phase, macro_cycle)
+        sink = _sink(event)
+        if sink is None:
+            return
+        _open(event, phase=phase, macro_cycle=macro_cycle)
+        sink.record(
+            SECTION_PROPOSAL,
+            {
+                "proposal_msg_id": str(proposal_msg_id),
+                "action": str(action or ""),
+                "from_agent": str(from_agent or ""),
+                "phase": str(phase or "").strip().upper(),
+                "macro_cycle": int(macro_cycle or 0),
+                "tick": int(tick or 0),
+                "predicted_gain_pct": _float_or_none(predicted_gain_pct),
+                "candidate_id": _text_or_none(candidate_id),
+                "variant_name": _text_or_none(variant_name),
+                "proposed_at": str(proposed_at or "") or _now(),
+            },
+            row_type="proposal",
+            natural_ids=str(proposal_msg_id),
+        )
+    except Exception:  # noqa: BLE001 — a proposal outranks its own record
+        log.debug("phase event: proposal record failed", exc_info=True)
+
+
+def record_proposal_review(
+    *,
+    proposal_msg_id: str,
+    verdict: str,
+    effective_verdict: str = "",
+    source: str = "",
+    reasoning: Any = None,
+    confidence: Any = None,
+    failure_reason_code: Any = None,
+    required_evidence: Any = None,
+    risks: Any = None,
+    advice_text: Any = None,
+    alternative_action: Any = None,
+    variants: Any = None,
+    reviewed_at: str = "",
+) -> None:
+    """File the Critic's ruling on the proposal it ruled on. Never raises.
+
+    The row is located by reading back which phase event holds the proposal,
+    rather than by using the phase in scope: the Critic runs on its own tick
+    and a proposal raised in one phase is routinely ruled on after the phase
+    has exited. Charging the ruling to whichever phase happened to be current
+    would file it against a phase that never saw the proposal.
+
+    A ruling for a proposal with no row is dropped rather than minting one. A
+    ruling cannot bring into existence the thing it claims to be about, and a
+    minted row would carry a verdict with no proposal behind it.
+
+    Args:
+        proposal_msg_id (str): The proposal ruled on.
+        verdict (str): What the Critic authored.
+        effective_verdict (str): What was committed, which the envelope
+            validator can change; defaults to the authored one.
+        source (str): ``critic`` or ``critic_unavailable``.
+        reasoning (Any): The Critic's own account.
+        confidence (Any): How sure it was.
+        failure_reason_code (Any): The code behind a refusal.
+        required_evidence (Any): What it asked to see first.
+        risks (Any): The risks it named.
+        advice_text (Any): The advisory attached to the ruling.
+        alternative_action (Any): What it proposed instead.
+        variants (Any): Per-variant rulings, when the proposal is a grid.
+        reviewed_at (str): The ISO timestamp; defaults to now.
+    """
+    try:
+        if not str(proposal_msg_id or ""):
+            return
+        event = _proposal_event(str(proposal_msg_id))
+        if event is None:
+            log.debug("phase event: no proposal row for %s to file a ruling on", proposal_msg_id)
+            return
+        sink = _sink(event)
+        if sink is None:
+            return
+        authored = str(verdict or "")
+        effective = str(effective_verdict or "") or authored
+        sink.record(
+            SECTION_PROPOSAL,
+            {
+                "proposal_msg_id": str(proposal_msg_id),
+                "critic_review": {
+                    "verdict": authored,
+                    "effective_verdict": effective,
+                    # Recorded as its own field because the two verdicts alone
+                    # say that they differ without saying that the difference
+                    # was imposed by the envelope validator.
+                    "held_to_rule": effective != authored,
+                    "source": str(source or ""),
+                    "reasoning": _clip(reasoning, MAX_REASON_CHARS),
+                    "confidence": _float_or_none(confidence),
+                    "failure_reason_code": _text_or_none(failure_reason_code),
+                    "required_evidence": [str(item) for item in _as_list(required_evidence)],
+                    "risks": [dict(risk) for risk in _as_list(risks) if isinstance(risk, Mapping)],
+                    "advice_text": _text_or_none(advice_text),
+                    "alternative_action": _text_or_none(alternative_action),
+                    "variants": [dict(row) for row in _as_list(variants) if isinstance(row, Mapping)],
+                    "reviewed_at": str(reviewed_at or "") or _now(),
+                },
+            },
+            row_type="proposal",
+            natural_ids=str(proposal_msg_id),
+        )
+    except Exception:  # noqa: BLE001 — a ruling outranks its own record
+        log.debug("phase event: proposal review record failed", exc_info=True)
+
+
+def record_proposal_outcome(
+    *,
+    proposal_msg_id: str,
+    materialized: bool = False,
+    denied: bool = False,
+    reauthored: bool = False,
+    task_id: Any = None,
+    patch_verdict_key: Any = None,
+    settled_at: str = "",
+) -> None:
+    """Record what the loop did with a proposal. Never raises.
+
+    ``task_id`` is what joins the proposal to the action it became: the
+    dispatch row beside it on this same event. Without it the two halves of one
+    decision -- what was asked for, and what was run -- sit on the same event
+    with nothing connecting them.
+
+    Located the same way as the ruling, and dropped the same way when the
+    proposal has no row.
+
+    Args:
+        proposal_msg_id (str): The proposal acted on.
+        materialized (bool): Whether it went ahead.
+        denied (bool): Whether the framework refused it.
+        reauthored (bool): Whether it was sent back to be authored again.
+        task_id (Any): The task it materialized into, when it did.
+        patch_verdict_key (Any): The patch the ruling was recorded against.
+        settled_at (str): The ISO timestamp; defaults to now.
+    """
+    try:
+        if not str(proposal_msg_id or ""):
+            return
+        event = _proposal_event(str(proposal_msg_id))
+        if event is None:
+            return
+        sink = _sink(event)
+        if sink is None:
+            return
+        sink.record(
+            SECTION_PROPOSAL,
+            {
+                "proposal_msg_id": str(proposal_msg_id),
+                "outcome": {
+                    "materialized": bool(materialized),
+                    "denied": bool(denied),
+                    "reauthored": bool(reauthored),
+                    "task_id": _text_or_none(task_id),
+                    "patch_verdict_key": _text_or_none(patch_verdict_key),
+                    "settled_at": str(settled_at or "") or _now(),
+                },
+            },
+            row_type="proposal",
+            natural_ids=str(proposal_msg_id),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("phase event: proposal outcome record failed", exc_info=True)
 
 
 def record_settle(
@@ -588,6 +887,30 @@ def _action_event(task_id: str) -> str | None:
         return None
 
 
+def _proposal_event(proposal_msg_id: str) -> str | None:
+    """Find which phase event holds ``proposal_msg_id``'s row.
+
+    Args:
+        proposal_msg_id (str): The proposal to look up.
+
+    Returns:
+        str | None: The owning event id, or ``None`` when the proposal was
+        never recorded.
+    """
+    try:
+        from .assembler import event_parts
+
+        for row in event_parts((SECTION_PROPOSAL,)).get(SECTION_PROPOSAL) or []:
+            if isinstance(row, Mapping) and str(row.get("proposal_msg_id") or "") == str(proposal_msg_id):
+                event = str(row.get("event_id") or "")
+                if event:
+                    return event
+        return None
+    except Exception:  # noqa: BLE001
+        log.debug("phase event: cannot resolve the proposal's event", exc_info=True)
+        return None
+
+
 #: Every section a phase event assembles from. Declared here as well as in the
 #: assembler so :func:`_finish` can read its own parts without importing the
 #: assembler's tuple, which would close an import cycle.
@@ -596,6 +919,7 @@ PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     SECTION_SEGMENT,
     SECTION_ACTION,
     SECTION_MARKER,
+    SECTION_PROPOSAL,
 )
 
 
@@ -636,6 +960,13 @@ def assemble_phase_ext(
         sort_rows(rows_for_event(parts.get(SECTION_MARKER) or [], event), keys=("sequence", "ts")),
         drop=("event_id",),
     )
+    proposals = wire_rows(
+        sort_rows(
+            rows_for_event(parts.get(SECTION_PROPOSAL) or [], event),
+            keys=("proposed_at", "proposal_msg_id"),
+        ),
+        drop=("event_id",),
+    )
     # Summed over the entries, not measured from the first to the last: a phase
     # re-entered inside one cycle did not own the time the run spent elsewhere
     # in between, and charging it that time is how a budget guard comes to
@@ -666,6 +997,16 @@ def assemble_phase_ext(
             "rows": actions,
         },
         "markers": {"count": len(markers), "rows": markers},
+        "proposals": {
+            "count": len(proposals),
+            # Proposals the Critic ruled on. The gap between this and ``count``
+            # is the ones it never reached -- left pending when the phase
+            # exited, or filtered as already reviewed -- which is a different
+            # thing from having been refused.
+            "reviewed": sum(1 for row in proposals if row.get("critic_review")),
+            "materialized": sum(1 for row in proposals if _as_dict(row.get("outcome")).get("materialized")),
+            "rows": proposals,
+        },
     }
     return ext, _status_for(segments, actions)
 
@@ -744,5 +1085,6 @@ __all__ = [
     "record_entry",
     "record_exit",
     "record_marker",
+    "record_specialist_round",
     "record_settle",
 ]

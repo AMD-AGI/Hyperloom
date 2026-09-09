@@ -19,6 +19,13 @@ __all__ = ["render_invocation_block"]
 _FRAMEWORK_ARGS_MAX = 200
 _ENVS_MAX_DISPLAY = 12
 
+#: What a source label means for a reader who wants the flags and did not get
+#: them. Only the labels that report an absence need one.
+_SOURCE_HINTS = {
+    "unknown": "  (extraction failed; try server.log or config yaml)",
+    "unrecorded": "  (the measurement recorded no launch flags)",
+}
+
 
 def _truncate(text: str, limit: int) -> str:
     """Truncate ``text`` to ``limit`` characters with an ellipsis.
@@ -78,8 +85,14 @@ def render_invocation_block(
     extra_envs = invocation.get("extra_envs")
     config_path = invocation.get("config_path")
     server_log_path = invocation.get("server_log_path")
+    # The run directory the measurement was taken in, which is where its
+    # config and server log live. Recorded in place of the two paths by
+    # producers that name the directory rather than walking it for them.
+    workspace = invocation.get("workspace")
 
-    has_anything = framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path
+    has_anything = (
+        framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path or workspace
+    )
     if not has_anything:
         return ""
 
@@ -93,11 +106,13 @@ def render_invocation_block(
     if framework_args:
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
     if framework_args_source:
-        suffix = "  (extraction failed; try server.log or config yaml)" if framework_args_source == "unknown" else ""
+        suffix = _SOURCE_HINTS.get(framework_args_source, "")
         lines.append(f"- **source**: {framework_args_source}{suffix}")
     envs_str = _format_envs(extra_envs if isinstance(extra_envs, dict) else None)
     if envs_str:
         lines.append(f"- **envs**: `{envs_str}`")
     if server_log_path:
         lines.append(f"- **server log**: `{server_log_path}`")
+    if workspace:
+        lines.append(f"- **workspace**: `{workspace}`")
     return "\n".join(lines)

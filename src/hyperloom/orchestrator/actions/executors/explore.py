@@ -124,8 +124,6 @@ def _initial_explore_search_state() -> dict[str, Any]:
         "accepted": [],
         "rejected": [],
         "winners_history": [],
-        "discovered_flags": [],
-        "synergy_attempted": [],
         "domains_round_summary": [],
         "name_index": {},
         "cursor": 0,
@@ -967,8 +965,7 @@ class ExploreExecutor:
                 "error": (
                     "explore: params.grid must be a non-empty list of variant "
                     "dicts. The Orchestration prompt "
-                    "should fill this from specialist proposals / "
-                    "SharedState.discovered_flags / default_grid."
+                    "should fill this from specialist proposals / default_grid."
                 ),
                 "workspace": output_root.as_posix(),
             }
@@ -997,8 +994,6 @@ class ExploreExecutor:
             ("name_index", {}),
             ("cursor", 0),
             ("winners_history", []),
-            ("synergy_attempted", []),
-            ("discovered_flags", []),
             ("domains_round_summary", []),
         ):
             search.setdefault(key, default)
@@ -1121,6 +1116,7 @@ class ExploreExecutor:
                 "unset_envs": list(stack_unset_envs),
                 "args_mode": stack_base_args_mode,
             }
+
         grade_on_total = total_tput_serving_grading_enabled(
             scriptable=framework_is_scriptable(framework),
             benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
@@ -2063,8 +2059,6 @@ class ExploreExecutor:
             "name_index": name_index,
             "cursor": len(tested_update),
             "winners_history": winners_history_update,
-            "synergy_attempted": list(search.get("synergy_attempted") or []),
-            "discovered_flags": list(search.get("discovered_flags") or []),
             "domains_round_summary": list(search.get("domains_round_summary") or []),
             "last_round": last_round_summary,
         }
@@ -2123,7 +2117,6 @@ class ExploreExecutor:
             "per_variant_outcomes": per_variant_outcomes,
             "framework_lever_attributions": lever_attributions,
             "explore_search_update": search_update,
-            "discovered_flags_update": None,
             "round_id": round_id,
             "workspace": output_root.as_posix(),
             "framework": framework,

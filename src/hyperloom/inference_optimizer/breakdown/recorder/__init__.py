@@ -19,7 +19,6 @@ Write side::
 
     rec = get_recorder(producer="sweep")
     rec.record_singleton("sweep", sweep_payload)          # one final blob
-    rec.record_item("phase_timeline", event, key=task_id)  # event stream
 
 Read side::
 
@@ -100,30 +99,12 @@ from .event_timeline import (
 )
 from .trace import TRACE, TRACE_ENV, enable_trace, trace_enabled
 from .instrument import (
-    record_action_operation,
-    record_adoption,
-    record_artifact,
-    record_kernel_backend_result,
-    record_kernel_discovery,
-    record_kernel_dispatch,
-    record_kernel_e2e,
-    record_kernel_invocations,
-    record_kernel_strategy_selection,
-    record_native_kernel_run_start,
-    record_native_kernel_run_result,
-    record_geak_e2e_attempt,
-    record_geak_operation,
-    record_gemm_tuning_operation,
-    record_measurement,
-    record_operation,
-    record_phase_event,
+    record_backend_versions_and_timeline,
     record_singleton_section,
-    record_specialist_round,
     snapshot_state_sections,
 )
 from .tool_versions import record_tool_version
 from .recorder import (
-    DERIVED_SECTIONS,
     SECTION_SHAPES,
     Recorder,
     SectionShape,
@@ -141,7 +122,6 @@ __all__ = [
     "BASELINE_EVENT_SECTIONS",
     "CONC_SWEEP_EVENT_SECTIONS",
     "ENABLEMENT_EVENT_SECTIONS",
-    "DERIVED_SECTIONS",
     "EVENT_ID_FIELD",
     "EVENT_ID_SEPARATOR",
     "EVENT_STATUS_INTERRUPTED",
@@ -189,32 +169,15 @@ __all__ = [
     "parts_dir",
     "phase_event_parts",
     "stack_event_parts",
-    "record_action_operation",
-    "record_adoption",
-    "record_artifact",
     "record_close_artifacts",
     "record_close_opened",
     "record_close_settled",
     "record_close_step",
     "record_roofline_progress",
-    "record_kernel_backend_result",
-    "record_kernel_discovery",
-    "record_kernel_dispatch",
-    "record_kernel_e2e",
-    "record_kernel_invocations",
-    "record_kernel_strategy_selection",
-    "record_native_kernel_run_start",
-    "record_native_kernel_run_result",
-    "record_geak_e2e_attempt",
-    "record_geak_operation",
-    "record_gemm_tuning_operation",
-    "record_measurement",
     "record_metadata_identity",
     "record_metadata_langfuse",
-    "record_operation",
-    "record_phase_event",
+    "record_backend_versions_and_timeline",
     "record_singleton_section",
-    "record_specialist_round",
     "record_tool_version",
     "recorder_for",
     "residual_events",

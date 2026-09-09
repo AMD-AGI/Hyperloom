@@ -253,7 +253,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
 # 4. _build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
-    """The entry carries the full field set the breakdown ``specialist_runs[]`` consumer expects."""
+    """The entry carries the full field set the timeline round product expects."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord_obj = Coordinator.__new__(Coordinator)

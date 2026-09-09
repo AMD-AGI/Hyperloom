@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     assemble_baseline_action,
     baseline_event_id,
     make_baseline_recorder,
+    record_action_decision,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import baseline_event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
@@ -105,6 +106,54 @@ def _failed(**overrides: Any) -> dict[str, Any]:
     }
     result.update(overrides)
     return result
+
+
+def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) -> None:
+    """The throughput field name is the serving case; the unit is the fact."""
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    measurement = _actions(tmp_path)[0]["measurement"]
+    assert measurement["throughput_tok_s_per_gpu"] == 15630.28
+    assert measurement["throughput_unit"] == "tok/s"
+
+
+def test_an_image_framework_reports_its_own_throughput_unit(tmp_path: Path) -> None:
+    """Reading the unit off the field name would call img/s tokens."""
+    recorder = make_baseline_recorder(
+        make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
+        task_id="t-1",
+        framework="xdit",
+    )
+    assert recorder is not None
+    recorder.finish(_measured())
+
+    assert _actions(tmp_path)[0]["measurement"]["throughput_unit"] == "img/s"
+
+
+def test_the_write_backs_verdict_reaches_the_action_it_ruled_on(tmp_path: Path) -> None:
+    """The decision is settled after the event closed, and still lands on it."""
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    assert _actions(tmp_path)[0]["decision"] == ""
+
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-1", decision="promoted")
+
+    assert _actions(tmp_path)[0]["decision"] == "promoted"
+    assert _actions(tmp_path)[0]["status"] == "succeeded"
+
+
+def test_a_verdict_for_an_action_this_event_never_had_is_dropped(tmp_path: Path) -> None:
+    """A rebuilt event id that names the wrong event must not mint an action."""
+    recorder = _recorder()
+    recorder.finish(_measured())
+
+    record_action_decision(phase="sweep", macro_cycle=4, task_id="t-1", decision="promoted")
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-99", decision="promoted")
+
+    assert [event["id"] for event in _events(tmp_path)] == ["prelude:0:baseline"]
+    assert [action["task_id"] for action in _actions(tmp_path)] == ["t-1"]
 
 
 def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: Path) -> None:

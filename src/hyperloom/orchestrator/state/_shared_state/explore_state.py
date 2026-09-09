@@ -47,17 +47,6 @@ class _ExploreStateMixin:
             if not matched:
                 existing.append(entry)
         self._trim_specialist_rounds()
-        # Author-time breakdown capture: one specialist_runs item per round.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_specialist_round(
-                getattr(self, "_session_dir", None),
-                entry,
-                phase=str(getattr(self, "phase", "") or ""),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("record_specialist_round capture failed", exc_info=True)
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
@@ -521,19 +510,6 @@ class _ExploreStateMixin:
             known.add(key)
             wh.append(row)
         merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP :]
-        sa: set[tuple[str, ...]] = set()
-        for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
-            for c in src or []:
-                if isinstance(c, list):
-                    items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
-                    if items:
-                        sa.add(items)
-                elif isinstance(c, str) and c:
-                    items = tuple(sorted(c.split("+")))
-                    if items:
-                        sa.add(items)
-        merged["synergy_attempted"] = [list(c) for c in sorted(sa)]
-        merged["discovered_flags"] = list(update.get("discovered_flags") or prior.get("discovered_flags") or [])
         merged["domains_round_summary"] = list(
             update.get("domains_round_summary") or prior.get("domains_round_summary") or []
         )
@@ -755,33 +731,3 @@ class _ExploreStateMixin:
                 return True
             return False
         return False
-
-    def record_discovered_flags(
-        self,
-        *,
-        framework: str,
-        backend_flags: list[str] | None = None,
-        param_flags: list[str] | None = None,
-        source_path: str = "",
-    ) -> None:
-        """Persist the AST-discovered flag list for a framework so the prompt can surface the union. Idempotent per-framework.
-
-        Args:
-            framework (str): The framework key; blank normalizes to
-                ``"unknown"``.
-            backend_flags (list[str] | None): Discovered backend flags;
-                ``None`` leaves the existing list untouched.
-            param_flags (list[str] | None): Discovered parameter flags;
-                ``None`` leaves the existing list untouched.
-            source_path (str): Optional path to the scanned source file.
-        """
-        fw = (framework or "").strip().lower() or "unknown"
-        entry = dict(self.discovered_flags.get(fw) or {})
-        if backend_flags is not None:
-            entry["backend_flags"] = sorted(set(str(f) for f in backend_flags))
-        if param_flags is not None:
-            entry["param_flags"] = sorted(set(str(f) for f in param_flags))
-        if source_path:
-            entry["source_path"] = str(source_path)
-        entry["ts"] = _shared_state_module()._now_iso()
-        self.discovered_flags[fw] = entry

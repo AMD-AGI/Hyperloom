@@ -1528,26 +1528,20 @@ async def test_promote_roofline_skipped_clears_pending(coord: Coordinator) -> No
 
 
 @pytest.mark.asyncio
-async def test_promote_explore_discovered_flags_and_bad_winner(
+async def test_promote_explore_survives_a_non_dict_winner(
     coord: Coordinator,
 ) -> None:
+    """A malformed winner row is skipped rather than failing the writeback."""
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state(
         "explore",
         {
             "explore_search_update": {"round_id": "r1"},
-            "discovered_flags_update": {
-                "framework": "sglang",
-                "backend_flags": ["--x"],
-                "param_flags": [],
-                "source_path": "/tmp/p",
-                "discovery_error": "parse glitch",
-            },
             "winners": ["not-a-dict"],
             "round_id": "r1",
         },
     )
-    assert coord.shared_state.discovered_flags_error == "parse glitch"
+    assert coord.shared_state.explore_search.get("last_round", {}).get("round_id") in (None, "r1")
 
 
 @pytest.mark.asyncio

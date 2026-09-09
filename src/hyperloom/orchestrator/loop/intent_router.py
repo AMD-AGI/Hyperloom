@@ -237,6 +237,117 @@ def _review_subject(pending: Any) -> str:
     return candidate or str(getattr(pending, "proposal_msg_id", "") or "")
 
 
+def _phase_scope(router: Any) -> tuple[str, int]:
+    """The phase and macro cycle a proposal is being raised in.
+
+    Args:
+        router: The intent router, or a stand-in.
+
+    Returns:
+        tuple[str, int]: The phase name and macro cycle, ``("", 0)`` when the
+            stand-in carries no state.
+    """
+    state = getattr(router, "shared_state", None) or getattr(router, "state", None)
+    phase = str(getattr(state, "phase", "") or "")
+    try:
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        cycle = 0
+    return phase, cycle
+
+
+def _record_phase_proposal(router: Any, pending: Any) -> None:
+    """Record one proposal against the phase that raised it.
+
+    Every proposal, not only the ones a framework arm claims: this is the row
+    the Critic's ruling is filed on, and a ruling on a KERNEL ``kernel_opt`` or
+    on an action no arm maps to had no subject row anywhere before this.
+
+    Module-level and self-defending like the phase's other recording helpers:
+    this seam is driven by lightweight stand-ins in tests, and a proposal must
+    never fail to route because its observability did.
+
+    Args:
+        router: The intent router, or a stand-in.
+        pending: The pending proposal just minted.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    phase, macro_cycle = _phase_scope(router)
+    if not phase:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = getattr(pending, "payload", None) or {}
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        phase_event.record_proposal(
+            proposal_msg_id=proposal_id,
+            action=str(getattr(pending, "action_name", "") or ""),
+            phase=phase,
+            macro_cycle=macro_cycle,
+            from_agent=str(getattr(pending, "from_agent", "") or ""),
+            tick=int(getattr(getattr(router, "shared_state", None), "tick", 0) or 0),
+            predicted_gain_pct=getattr(pending, "predicted_gain_pct", None),
+            candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
+            variant_name=payload.get("variant_name") or params.get("variant_name"),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_phase_proposal_review(
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """File the Critic's ruling on the proposal row the phase event holds.
+
+    Keyed on the bus message id the verdict named, rather than on the subject
+    the framework row is resolved under: the two differ for a proposal
+    carrying a candidate id, and this row is about the proposal itself.
+
+    Args:
+        pending: The proposal reviewed.
+        authored: The verdict the Critic wrote.
+        effective: The verdict the loop acted on.
+        reason: The Critic's reasoning.
+        payload: The ``review_verdict`` payload.
+        advisory: The advisory block serialised for the rebroadcast.
+        variants: Per-variant rulings, when a ``verdict_map`` named any.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        fields = payload or {}
+        advice = advisory or {}
+        phase_event.record_proposal_review(
+            proposal_msg_id=proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            source=str(fields.get("source") or ""),
+            reasoning=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            required_evidence=advice.get("required_evidence"),
+            risks=advice.get("risks"),
+            advice_text=advice.get("advice_text"),
+            alternative_action=advice.get("alternative_action"),
+            variants=variants,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
+
+
 def _record_critic_review(
     router: Any,
     pending: Any,
@@ -276,6 +387,20 @@ def _record_critic_review(
         advisory: The advisory block already serialised for the rebroadcast.
         variants: Per-variant rulings, when a ``verdict_map`` named any.
     """
+    # Onto the proposal's own row first. The framework row below exists only
+    # while a framework event is open for this cycle, so a ruling reached in
+    # any other phase -- or after this one exited -- would otherwise be acted
+    # on with nothing recording what the Critic said.
+    _record_phase_proposal_review(
+        pending,
+        authored=authored,
+        effective=effective,
+        reason=reason,
+        payload=payload,
+        advisory=advisory,
+        variants=variants,
+    )
+
     proposal_id = _review_subject(pending)
     if not proposal_id:
         return
@@ -325,6 +450,31 @@ def _record_critic_review(
         )
 
 
+def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
+    """Record on the proposal row what the loop did with its ruling.
+
+    Args:
+        pending: The proposal ruled on.
+        **outcome: ``materialized`` / ``denied`` / ``reauthored`` /
+            ``patch_verdict_key``, as the framework row names them.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_proposal_outcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
+
+
 def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     """Record what the loop did with a ruling, onto the ruling.
 
@@ -333,6 +483,8 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
         pending: The proposal ruled on.
         **outcome: The fields ``record_proposal_review_outcome`` accepts.
     """
+    _record_phase_proposal_outcome(pending, **outcome)
+
     proposal_id = _review_subject(pending)
     if not proposal_id:
         return
@@ -554,6 +706,7 @@ class IntentRouter:
             payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
+        _record_phase_proposal(self, pending)
         _record_config_proposal(self, pending)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
@@ -1107,6 +1260,42 @@ class IntentRouter:
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
+    def _record_trace_analyze_on_timeline(
+        self,
+        *,
+        request_msg: Any,
+        source: str,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+        cache_hit: bool,
+    ) -> None:
+        """Mirror a bus-requested analysis onto the visit that was running.
+
+        An analysis dispatched this way opens no roofline event of its own, so
+        without this the snapshot counter it advanced has nothing on the
+        timeline to account for it, and the kernel table it produced reaches a
+        reader only through the state projection.
+
+        Best-effort: a failed record never breaks the request.
+        """
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
+
+            record_trace_analyze_request(
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                run_id=str(getattr(request_msg, "msg_id", "") or ""),
+                status=str(result.get("status") or ""),
+                result=result,
+                requested_by=source,
+                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+                top_k=payload.get("top_k"),
+                snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+                cache_hit=cache_hit,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change routing
+            log.debug("kernel timeline: trace_analyze request capture failed", exc_info=True)
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler.
 
@@ -1323,6 +1512,14 @@ class IntentRouter:
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
                 self.shared_state.save(self.session_dir)
+            if kind == "trace_analyze":
+                self._record_trace_analyze_on_timeline(
+                    request_msg=request_msg,
+                    source=source,
+                    payload=merged_payload,
+                    result=result,
+                    cache_hit=cache_hit_source is not None,
+                )
             # Mirror kernel-opt outcomes into SharedState.
             if kind == "run_optimization":
                 # Batch mode already streamed each sub-result; re-recording would double-count.

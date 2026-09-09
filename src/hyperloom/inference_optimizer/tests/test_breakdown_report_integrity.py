@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 
-from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 from hyperloom.inference_optimizer.breakdown.reporters import cross_section, llm_prompt
 from hyperloom.inference_optimizer.breakdown.reporters.base import RenderedSection
@@ -63,211 +62,30 @@ def _integrate_state(kernel_id: str, decision: str, gain: float | None = None) -
 # Capability counting
 
 
-def test_micro_only_keep_is_not_an_integrate_adoption() -> None:
-    """A KEEP with no integrate record is micro-only and must not count as adopted."""
-    invs = [{"kernel_id": "k1", "decision": "KEEP", "micro_speedup": 1.4}]
-
-    cap = collectors.collect_capability_summary({}, [], [], forge_invocations=invs)
-
-    assert cap["forge"]["attempts"] == 1
-    assert cap["forge"]["keeps"] == 0, "micro-only KEEP must not be reported as an integrate adoption"
-    assert cap["forge"]["micro_only_keeps"] == 1
-    # Not "kept": nothing was adopted end-to-end, so the executive summary must
-    # not advertise this lane as a capability that paid off.
-    assert cap["forge"]["status"] == "attempted"
 
 
-def test_integrate_adoption_is_counted_as_keep() -> None:
-    """A KEEP confirmed by an integrate verdict is a real adoption."""
-    invs = [{"kernel_id": "k1", "decision": "KEEP"}]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", "KEEP", 7.5), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 1
-    assert cap["forge"]["status"] == "kept"
-    assert cap["forge"]["e2e_gain_pct"] == 7.5
-    assert cap["forge"].get("micro_only_keeps", 0) == 0
 
 
-def test_same_kernel_retried_across_runs_counts_once() -> None:
-    """One kernel stamped KEEP in several runs is one adoption, not several."""
-    invs = [
-        {"kernel_id": "k1", "decision": "KEEP", "run_id": "run-a"},
-        {"kernel_id": "k1", "decision": "KEEP", "run_id": "run-b"},
-    ]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", "KEEP", 3.0), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 1, "distinct kernels, not invocation rows"
 
 
-def test_reverted_kernel_counted_once_across_runs() -> None:
-    """A kernel reverted at integrate stays a single revert across retries."""
-    invs = [
-        {"kernel_id": "k1", "decision": "KEEP", "run_id": "run-a"},
-        {"kernel_id": "k1", "decision": "KEEP", "run_id": "run-b"},
-    ]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", "REVERT"), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 0
-    assert cap["forge"]["reverts"] == 1
-    assert cap["forge"]["status"] == "reverted"
 
 
-def test_micro_only_and_adopted_kernels_are_tallied_separately() -> None:
-    """Mixed lane: one adopted kernel, one micro-only, counted in their own buckets."""
-    invs = [
-        {"kernel_id": "k1", "decision": "KEEP"},
-        {"kernel_id": "k2", "decision": "KEEP"},
-    ]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", "KEEP", 4.0), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 1
-    assert cap["forge"]["micro_only_keeps"] == 1
-    assert cap["forge"]["status"] == "kept"
 
 
-def test_needs_review_is_not_an_adoption() -> None:
-    """``NEEDS_REVIEW`` means the verdict is not in, not that it was a win."""
-    invs = [{"kernel_id": "k1", "decision": "KEEP"}]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", "NEEDS_REVIEW"), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 0
-    assert cap["forge"]["status"] != "kept"
-    assert cap["forge"]["pending_integrate"] == 1
 
 
-def test_missing_integrate_decision_is_not_an_adoption() -> None:
-    """An empty decision is an undecided verdict, reachable on the fault path."""
-    invs = [{"kernel_id": "k1", "decision": "KEEP"}]
-
-    cap = collectors.collect_capability_summary(_integrate_state("k1", ""), [], [], forge_invocations=invs)
-
-    assert cap["forge"]["keeps"] == 0
-    assert cap["forge"]["pending_integrate"] == 1
 
 
-def test_adopted_patch_is_not_undone_by_a_reverted_sibling() -> None:
-    """``kernel_integrate_attempts`` is keyed by kernel|patch|args, so one
-    kernel holds several rows. Folding them by kernel id must not let whichever
-    row happens to be iterated last decide the outcome.
-    """
-    state = {
-        "kernel_integrate_attempts": {
-            # Ordered so the REVERT is visited last: overwriting loses the KEEP.
-            "k1|patchA|": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 9.0},
-            "k1|patchB|": {"kernel_id": "k1", "last_decision": "REVERT", "best_gain_pct": -5.0},
-        }
-    }
-
-    cap = collectors.collect_capability_summary(
-        state, [], [], forge_invocations=[{"kernel_id": "k1", "decision": "KEEP"}]
-    )
-
-    assert cap["forge"]["keeps"] == 1, "an adopted patch survives a reverted sibling"
-    assert cap["forge"]["status"] == "kept"
-    assert cap["forge"]["e2e_gain_pct"] == 9.0
 
 
-def test_kernel_with_only_reverted_patches_is_not_adopted() -> None:
-    """Folding must not manufacture an adoption out of two reverts."""
-    state = {
-        "kernel_integrate_attempts": {
-            "k1|patchA|": {"kernel_id": "k1", "last_decision": "REVERT", "best_gain_pct": -5.0},
-            "k1|patchB|": {"kernel_id": "k1", "last_decision": "REVERT", "best_gain_pct": -2.0},
-        }
-    }
-
-    cap = collectors.collect_capability_summary(
-        state, [], [], forge_invocations=[{"kernel_id": "k1", "decision": "KEEP"}]
-    )
-
-    assert cap["forge"]["keeps"] == 0
-    assert cap["forge"]["status"] == "reverted"
 
 
-def test_pending_verdict_loses_to_a_decided_one() -> None:
-    """A decided sibling outranks an undecided one."""
-    state = {
-        "kernel_integrate_attempts": {
-            "k1|patchA|": {"kernel_id": "k1", "last_decision": "NEEDS_REVIEW", "best_gain_pct": 1.0},
-            "k1|patchB|": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 4.0},
-        }
-    }
-
-    cap = collectors.collect_capability_summary(
-        state, [], [], forge_invocations=[{"kernel_id": "k1", "decision": "KEEP"}]
-    )
-
-    assert cap["forge"]["keeps"] == 1
-    assert cap["forge"].get("pending_integrate", 0) == 0
 
 
-def test_geak_result_marks_capability_attempted_without_native_run_dir() -> None:
-    """GEAK e2e does not use the native kernel-agent invocation layout."""
-    geak = {
-        "engaged": True,
-        "status": "ok",
-        "kernels_attempted": [{"kernel_id": "k1"}],
-        "accepted_kernels": [],
-    }
-
-    cap = collectors.collect_capability_summary({}, [], [], geak=geak)
-
-    assert cap["geak"]["attempts"] == 1
-    assert cap["geak"]["keeps"] == 0
-    assert cap["geak"]["status"] == "attempted"
 
 
-def test_geak_configured_without_result_remains_not_attempted() -> None:
-    """Selecting the backend is not evidence that its route actually ran."""
-    geak = {
-        "engaged": True,
-        "status": "missing",
-        "error_class": "no_result",
-        "accepted_kernels": [],
-        "accepted_heads": [],
-    }
-
-    cap = collectors.collect_capability_summary(
-        {"kernel_optimizer": "geak"},
-        [],
-        [],
-        geak=geak,
-    )
-
-    assert cap["geak"]["attempts"] == 0
-    assert cap["geak"]["keeps"] == 0
-    assert cap["geak"]["status"] == "not_attempted"
 
 
-def test_promoted_geak_route_marks_capability_kept() -> None:
-    """A promoted GEAK route must not still report ``not_attempted``."""
-    state = {
-        "optimization_stack": [
-            {
-                "action": "geak_e2e",
-                "variant_name": "geak_e2e",
-                "source": "geak_e2e",
-            }
-        ]
-    }
-    geak = {
-        "engaged": True,
-        "status": "ok",
-        "accepted_kernels": [{"kernel_id": "k1"}, {"kernel_id": "k2"}],
-    }
-
-    cap = collectors.collect_capability_summary(state, [], [], geak=geak)
-
-    assert cap["geak"]["attempts"] == 2
-    # ONE promotion is ONE keep. The canonical ledger books a single adoption
-    # for the route-level win, and the two counters must not disagree.
-    assert cap["geak"]["keeps"] == 1
-    assert cap["geak"]["status"] == "kept"
 
 
 # Fragment identity
@@ -364,84 +182,14 @@ def test_fragment_written_under_the_old_name_keeps_that_name(tmp_path: Path) -> 
 # Timeline de-duplication
 
 
-def test_distinct_tasks_in_the_same_second_are_not_folded() -> None:
-    """Two tasks sharing an action and a second are two events, not one."""
-    state = {
-        "explore_attempts": [
-            {"ts": "2026-08-24T10:00:00Z", "task_id": "task-1", "status": "succeeded"},
-            {"ts": "2026-08-24T10:00:00Z", "task_id": "task-2", "status": "succeeded"},
-        ]
-    }
-
-    events = collectors.collect_phase_timeline(None, state, [])
-
-    assert len(events) == 2, "task_id must participate in the de-dup key"
-    assert {e["task_id"] for e in events} == {"task-1", "task-2"}
 
 
-def test_exporter_keeps_distinct_tasks_from_recorder_fragments() -> None:
-    """The exporter merges recorder fragments and must fold them as the collector does.
-
-    Recorder-only rows never pass through the collector, so an exporter with its
-    own weaker identity silently drops events the collector would have kept.
-    """
-    from hyperloom.inference_optimizer.breakdown.exporter import _merge_phase_timeline
-
-    fragment = [
-        {"ts": "2026-08-24T10:00:00Z", "action": "explore", "task_id": "task-1", "status": "succeeded"},
-        {"ts": "2026-08-24T10:00:00Z", "action": "explore", "task_id": "task-2", "status": "succeeded"},
-    ]
-
-    merged = _merge_phase_timeline(fragment, [])
-
-    assert len(merged) == 2, "exporter must not fold two tasks into one event"
-    assert {e.get("task_id") for e in merged} == {"task-1", "task-2"}
 
 
-def test_collector_and_exporter_agree_on_event_identity() -> None:
-    """The two paths must not disagree about what counts as the same event."""
-    from hyperloom.inference_optimizer.breakdown.exporter import _merge_phase_timeline
-
-    rows = [
-        {"ts": "2026-08-24T10:00:00Z", "task_id": "task-1", "status": "succeeded"},
-        {"ts": "2026-08-24T10:00:00Z", "task_id": "task-2", "status": "succeeded"},
-        {"ts": "2026-08-24T10:00:00Z", "task_id": "task-1", "status": "succeeded"},
-    ]
-    via_collector = collectors.collect_phase_timeline(None, {"explore_attempts": rows}, [])
-    via_exporter = _merge_phase_timeline([dict(r, action="explore") for r in rows], [])
-
-    assert len(via_collector) == len(via_exporter)
 
 
-def test_exporter_still_folds_a_fragment_echo_of_a_collector_row() -> None:
-    """The fold that exists for a reason must survive the fix."""
-    from hyperloom.inference_optimizer.breakdown.exporter import _merge_phase_timeline
-
-    row = {
-        "ts": "2026-08-24T10:00:00Z",
-        "action": "explore",
-        "task_id": "task-1",
-        "change": "explore",
-        "status": "succeeded",
-    }
-
-    merged = _merge_phase_timeline([dict(row)], [dict(row)])
-
-    assert len(merged) == 1
 
 
-def test_true_duplicate_rows_are_still_folded() -> None:
-    """De-dup still collapses rows that are genuinely the same event."""
-    state = {
-        "explore_attempts": [
-            {"ts": "2026-08-24T10:00:00Z", "task_id": "task-1", "status": "succeeded"},
-            {"ts": "2026-08-24T10:00:00Z", "task_id": "task-1", "status": "succeeded"},
-        ]
-    }
-
-    events = collectors.collect_phase_timeline(None, state, [])
-
-    assert len(events) == 1
 
 
 # Skipped-section evidence
@@ -579,22 +327,30 @@ def test_capability_table_shows_unadopted_outcomes() -> None:
 
     rendered = cap_renderer.render(
         {
-            "capability_summary": {
-                "forge": {
-                    "status": "attempted",
-                    "attempts": 3,
-                    "keeps": 0,
-                    "micro_only_keeps": 2,
-                    "pending_integrate": 1,
-                    "reverts": 1,
-                    "e2e_gain_pct": 4.5,
+            "timeline": [
+                {
+                    "type": "kernel",
+                    "ext": {
+                        "outcome": {
+                            "by_source": {
+                                "kernel_rewrite": {
+                                    "attempted": 3,
+                                    "keeps": 0,
+                                    "micro_only_keeps": 2,
+                                    "needs_review": 1,
+                                    "reverts": 1,
+                                    "e2e_gain_pct": 4.5,
+                                }
+                            }
+                        }
+                    },
                 }
-            }
+            ]
         }
     )
 
     assert "micro_only=2" in rendered.markdown_block
-    assert "pending_integrate=1" in rendered.markdown_block
+    assert "pending_review=1" in rendered.markdown_block
     assert "reverts=1" in rendered.markdown_block
     assert "e2e_gain" in rendered.markdown_block
 

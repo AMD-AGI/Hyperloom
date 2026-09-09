@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
+"""The session's decision trace: one row per decision, with its token cost.
 
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
+Written after the breakdown, from the same session directory, but not part of
+it. The trace's readers are the Langfuse emitter and the backfill tool, which
+score a session by joining each decision against the LLM calls that produced
+it; the breakdown never read the file it wrote. It lives here, beside those
+readers, so a breakdown reader is not left looking for the key it feeds.
 """
 
 from __future__ import annotations
@@ -16,18 +17,18 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.timeutil import iso_z
-from hyperloom.orchestrator.phases.machine_state import is_phase_transition_row
-from hyperloom.orchestrator.state.optimization_journal import (
-    operation_kind_for,
-    proposer_for,
-)
-
-from ._common import (
+from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _load_jsonl_safe,
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
     phase_at,
+)
+from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
+from hyperloom.orchestrator.phases.machine_state import is_phase_transition_row
+from hyperloom.orchestrator.state.optimization_journal import (
+    operation_kind_for,
+    proposer_for,
 )
 
 
@@ -314,18 +315,6 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     return phase_at(unix, windows)
 
 
-# Components whose unjoined LLM spend is legitimately not tied to a single
-# decision (planning / review / monitoring), bucketed as ``overhead`` rather
-# than ``unattributed``.
-_OVERHEAD_COMPONENTS: frozenset[str] = frozenset(
-    {
-        "orchestration",
-        "critic",
-        "robustness",
-    }
-)
-
-
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
     """Canonical join key for a decision / call: ``dyn_id`` wins over
     ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
@@ -387,194 +376,6 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
     return b
 
 
-def collect_token_usage(
-    decision_trace: dict[str, Any],
-    action_timeline: list[dict[str, Any]],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Promote the token rollup to a discoverable top-level ``token_usage``.
-
-    Pure / derived: reuses the rollup already computed by
-    :func:`collect_decision_trace` (no second ledger read), so the totals here
-    always reconcile with ``decision_trace``. Adds:
-
-    * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
-      ``total_in_out`` + ``grand_total`` convenience figures.
-    * ``attribution`` — three-way split: ``attributed_to_decisions`` /
-      ``overhead`` (orchestration / critic / robustness turns, inherently
-      cross-decision) / ``unattributed`` (turns such as kernel /
-      proposal_scorer that carry no decision key), plus
-      ``attributed_calls_pct`` and ``overhead_calls_pct``.
-    * ``timeline`` — each ``action_timeline`` row annotated with the tokens
-      that join to it on ``task_id`` (``None`` when an action has no LLM spend).
-
-    Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
-    (e.g. a pre-trace session), so downstream readers never KeyError.
-
-    Args:
-        decision_trace (dict[str, Any]): The output of
-            :func:`collect_decision_trace` (supplies the token rollup).
-        action_timeline (list[dict[str, Any]]): The visible action timeline to
-            annotate with joined token figures.
-        warnings (list[str]): Shared warnings list (kept for a uniform
-            collector signature; not mutated here).
-
-    Returns:
-        dict[str, Any]: The ``token_usage`` section (session total, per
-        component / phase, decision-attribution split, and the annotated
-        timeline).
-    """
-    dt = decision_trace if isinstance(decision_trace, dict) else {}
-    rollup = dt.get("token_rollup") or {}
-    session_total = rollup.get("session_total") or _empty_token_bucket()
-    by_component = rollup.get("by_component") or {}
-    by_phase = rollup.get("by_phase") or {}
-    unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
-    overhead = dt.get("overhead_tokens") or _empty_token_bucket()
-
-    # attributed = session_total - unattributed - overhead, field by field.
-    attributed = _empty_token_bucket()
-    for k in attributed:
-        attributed[k] = (
-            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0) - int(overhead.get(k, 0) or 0)
-        )
-    total_calls = int(session_total.get("calls", 0) or 0)
-    attr_calls = int(attributed.get("calls", 0) or 0)
-    overhead_calls = int(overhead.get("calls", 0) or 0)
-    attributed_calls_pct = round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
-    overhead_calls_pct = round(100.0 * overhead_calls / total_calls, 2) if total_calls else 0.0
-
-    # Per-task token map from the per-decision view (only decision-bearing
-    # task_ids carry tokens — i.e. the attributed subset).
-    tokens_by_task: dict[str, dict[str, Any]] = {}
-    for entry in dt.get("decision_trace") or []:
-        if not isinstance(entry, dict):
-            continue
-        dec = entry.get("decision") or {}
-        tid = str(dec.get("task_id") or dec.get("dyn_id") or "").strip()
-        tok = entry.get("tokens") or {}
-        if tid and int(tok.get("calls", 0) or 0) > 0:
-            tokens_by_task[tid] = tok
-
-    # Annotate the visible action timeline with tokens joined on task_id.
-    timeline: list[dict[str, Any]] = []
-    for act in action_timeline or []:
-        if not isinstance(act, dict):
-            continue
-        tid = str(act.get("task_id") or "").strip()
-        tok = tokens_by_task.get(tid) if tid else None
-        timeline.append(
-            {
-                "task_id": tid or None,
-                "action": str(act.get("action") or act.get("change") or ""),
-                "phase": str(act.get("phase") or ""),
-                "decision": str(act.get("decision") or ""),
-                "ts": str(act.get("ts") or ""),
-                "tokens": _token_convenience(tok) if tok else None,
-            }
-        )
-
-    return {
-        "session_total": _token_convenience(session_total),
-        "by_component": {c: _token_convenience(b) for c, b in by_component.items()},
-        "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
-        "attribution": {
-            "attributed_to_decisions": _token_convenience(attributed),
-            "overhead": _token_convenience(overhead),
-            "unattributed": _token_convenience(unattributed),
-            "attributed_calls_pct": attributed_calls_pct,
-            "overhead_calls_pct": overhead_calls_pct,
-        },
-        "timeline": timeline,
-        "source": "reports/trace/llm_calls.jsonl",
-        "correlation": (
-            "timeline[].task_id joins action_timeline[].task_id; components "
-            "without a per-decision task_id (orchestration / kernel / critic / "
-            "proposal_scorer) are counted in session_total/by_component/by_phase "
-            "but appear as tokens=null in timeline (orchestration / critic / "
-            "robustness land in attribution.overhead, the rest in "
-            "attribution.unattributed)."
-        ),
-    }
-
-
-def collect_langfuse(
-    session_dir: Path,
-    manifest: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Assemble the ``langfuse`` section: was the trace pushed live, and how much.
-
-    Two-tier source (the breakdown is normally written *before* the
-    session-end ``flush_session``, so the on-disk receipt may not exist yet):
-
-    1. ``reports/trace/langfuse_receipt.json`` if present -- the post-flush
-       receipt with final counts (``receipt_source="receipt_file"``).
-    2. Otherwise a live read of the per-session emitter singleton -- reports
-       the gating + redacted config + in-process running counts
-       (``receipt_source="live_emitter"``, ``counts_final=False``).
-
-    Either way credentials are redacted to host + presence booleans. Never
-    raises: any failure degrades to a minimal ``config_only`` view so the
-    breakdown still records whether the feature was even on.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (mutated in place on receipt
-            / emitter read failures).
-
-    Returns:
-        dict[str, Any]: The ``langfuse`` section, tagged with a
-        ``receipt_source`` of ``receipt_file`` / ``live_emitter`` /
-        ``config_only`` depending on which tier resolved.
-    """
-    from hyperloom.orchestrator.trace import langfuse_emitter as lfe
-
-    # Tier 1: the persisted post-flush receipt (final counts).
-    try:
-        receipt = lfe.read_receipt(session_dir)
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
-        receipt = None
-    if receipt is not None:
-        receipt["receipt_source"] = "receipt_file"
-        return receipt
-
-    # Tier 2: live read of the emitter singleton (pre-flush / in-process).
-    try:
-        section = lfe.get_emitter(session_dir).receipt()
-        section["receipt_source"] = "live_emitter"
-        return section
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
-
-    # Tier 3 fallback: config-only view straight from env + manifest, so the
-    # breakdown still records whether the feature was configured at all.
-    from hyperloom.orchestrator.trace import trace_env as tenv
-
-    creds = tenv.langfuse_credentials()
-    return {
-        "enabled": False,
-        "disabled_reason": "unknown",
-        "config": {
-            "enable_flag": tenv.langfuse_live_enabled(),
-            "host": creds.get(tenv.ENV_LANGFUSE_HOST),
-            "public_key_set": tenv.ENV_LANGFUSE_PUBLIC_KEY in creds,
-            "secret_key_set": tenv.ENV_LANGFUSE_SECRET_KEY in creds,
-            "sdk_available": None,
-        },
-        "trace_id": None,
-        "session_id": str(manifest.get("claw_session_id") or manifest.get("session_id") or ""),
-        "correlated_on": (
-            "claw_session_id" if str(manifest.get("claw_session_id") or "").strip() else "internal_session_id"
-        ),
-        "counts": {},
-        "counts_final": False,
-        "receipt_source": "config_only",
-    }
-
-
 def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Index ``specialist_rounds[].ensemble_scores`` by variant name.
 
@@ -616,12 +417,12 @@ def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[st
     return out
 
 
-def collect_decision_trace(
+def write_decision_trace(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
-) -> dict[str, Any]:
-    """Join the token ledger to the decision streams into one timeline.
+) -> None:
+    """Join the token ledger to the decision streams and write the timeline.
 
     Reads the per-call token rows (``reports/trace/llm_calls.jsonl``) and the
     decision rows (``optimization_journal.json`` KEEP/REVERT entries + every
@@ -629,28 +430,18 @@ def collect_decision_trace(
     LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a ``ts``-window
     phase fallback for calls that carry neither.
 
-    Side effect (best-effort): writes the joined timeline to
-    ``reports/trace/decision_trace.jsonl``. A write failure is swallowed —
-    the in-breakdown section is the authoritative product and must not be
-    lost to a disk error.
+    The joined timeline is the product, and ``reports/trace/decision_trace.jsonl``
+    is where it lives: the Langfuse emitter turns each row into a Score, and
+    the backfill tool replays the same file. Writing is best-effort — an OSError
+    lands in ``warnings`` rather than failing the session's close-out.
 
-    Returns ``{"decision_trace": [...], "token_rollup": {...},
-    "unattributed_tokens": {...}, "overhead_tokens": {...}}``.
-    ``unattributed_tokens`` holds calls that could not be joined to a
-    decision; ``overhead_tokens`` holds ``_OVERHEAD_COMPONENTS`` calls that
-    are legitimately cross-decision spend. All-empty (zeroed rollup) when no
-    trace files exist, so a session that ran before the trace subsystem
-    landed degrades cleanly.
+    Writes an empty file when no trace files exist, so a session that ran
+    before the trace subsystem landed degrades cleanly.
 
     Args:
         session_dir (Path): Absolute session root.
         state (dict[str, Any]): Parsed ``state.json``.
         warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: ``{"decision_trace", "token_rollup",
-        "unattributed_tokens", "overhead_tokens"}`` — the joined timeline plus
-        token rollups.
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
@@ -659,17 +450,15 @@ def collect_decision_trace(
     # Attribute Critic review calls to the decision their reviewed proposal became.
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
-    # Index calls by decision key; orphans (no key) go to a ts list.
+    # Index calls by decision key. A call carrying neither key anchors to no
+    # decision row, so it has nothing to contribute to the timeline.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
-    orphan_calls: list[dict[str, Any]] = []
     for call in calls:
         key = _decision_key(
             str(call.get("task_id") or ""),
             str(call.get("dyn_id") or ""),
         )
-        if key is None:
-            orphan_calls.append(call)
-        else:
+        if key is not None:
             calls_by_key.setdefault(key, []).append(call)
 
     # Gather decisions from the journal + dispatch_history.
@@ -786,52 +575,7 @@ def collect_decision_trace(
             }
         )
 
-    # Unjoined calls: keyed calls with no matching decision + orphans. These
-    # still count toward the session/phase/component rollup but anchor to no
-    # decision row. Split into ``overhead`` (legitimately cross-decision spend)
-    # and ``unattributed`` (should have carried a key but didn't).
-    unattributed = _empty_token_bucket()
-    overhead = _empty_token_bucket()
-
-    def _route_unjoined(call: dict[str, Any]) -> dict[str, int]:
-        comp = str(call.get("component") or "")
-        return overhead if comp in _OVERHEAD_COMPONENTS else unattributed
-
-    for key, key_calls in calls_by_key.items():
-        if key in consumed_keys:
-            continue
-        for call in key_calls:
-            _fold_call_into_bucket(_route_unjoined(call), call)
-    for call in orphan_calls:
-        _fold_call_into_bucket(_route_unjoined(call), call)
-
-    # Rollups: by_phase + by_component + session_total (ALL calls).
-    by_phase: dict[str, dict[str, int]] = {}
-    by_component_roll: dict[str, dict[str, int]] = {}
-    session_total = _empty_token_bucket()
-    for call in calls:
-        comp = str(call.get("component") or "unknown")
-        # Phase: prefer the call's own phase, else ts-window backfill.
-        phase = str(call.get("phase") or "").strip() or _phase_at(call.get("ts"), phase_windows) or "unattributed"
-        _fold_call_into_bucket(by_phase.setdefault(phase, _empty_token_bucket()), call)
-        _fold_call_into_bucket(by_component_roll.setdefault(comp, _empty_token_bucket()), call)
-        _fold_call_into_bucket(session_total, call)
-
-    token_rollup = {
-        "by_phase": by_phase,
-        "by_component": by_component_roll,
-        "session_total": session_total,
-    }
-
-    # Best-effort side write of the joined timeline.
     _write_decision_trace_jsonl(session_dir, decision_trace, warnings)
-
-    return {
-        "decision_trace": decision_trace,
-        "token_rollup": token_rollup,
-        "unattributed_tokens": unattributed,
-        "overhead_tokens": overhead,
-    }
 
 
 def _write_decision_trace_jsonl(
@@ -853,7 +597,7 @@ def _write_decision_trace_jsonl(
         warnings (list[str]): Shared warnings list (mutated in place on write
             failure).
     """
-    target = session_dir / "reports" / "trace" / "decision_trace.jsonl"
+    target = decision_trace_path(session_dir)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         lines = [json.dumps(row, sort_keys=True) for row in decision_trace]
@@ -863,3 +607,41 @@ def _write_decision_trace_jsonl(
         )
     except OSError as exc:
         warnings.append(f"decision_trace: failed to write {target}: {exc!r}")
+
+
+def write_session_decision_trace(session_dir: Path | str) -> list[str]:
+    """Write the session's decision trace, loading ``state.json`` itself.
+
+    The single entry point for callers that only know the session directory.
+    It exists so the trace can be produced from wherever the session's
+    artifacts are written without that caller having to know the trace needs
+    ``state.json``, or that the file must land before any Langfuse flush reads
+    it.
+
+    Never raises: the trace describes a session that has already finished, and
+    losing it must not take the close-out with it.
+
+    Args:
+        session_dir (Path | str): Absolute session root.
+
+    Returns:
+        list[str]: Warnings raised while reading the inputs, for the caller to
+            log. Empty on a clean write.
+    """
+    warnings: list[str] = []
+    try:
+        sd = Path(session_dir).resolve()
+        state: dict[str, Any] = {}
+        path = sd / "state.json"
+        if path.exists():
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"decision_trace: failed to parse state.json: {type(exc).__name__}: {exc}")
+                state = {}
+        if not isinstance(state, dict):
+            state = {}
+        write_decision_trace(sd, state, warnings)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"decision_trace: write failed: {type(exc).__name__}: {exc}")
+    return warnings

@@ -56,31 +56,12 @@ SectionShape = Literal["item", "singleton"]
 #
 # * ``singleton`` — one final dict; the owner rewrites its own file on update
 #   (last write by ``ts`` wins at assembly time).
-# * ``item`` — an event stream assembled into a list. The v4 entity streams
-#   (phase_transitions, subjects, operations, measurements, adoptions,
-#   artifacts, trace_events) are ordered by ``ts`` then ``seq`` and deep-merged
-#   by stable entity id, so repeated partial updates for one id collapse into a
-#   single record; every other item section stays append-only and is
-#   concatenated in ``seq`` then ``ts`` order.
-#
-# Derived sections (see ``DERIVED_SECTIONS``) are NOT written by producers
-# during the run; they are computed at finalize from in-memory ``SharedState``
-# (the Coordinator owns every input), so they never appear as fragments.
+# * ``item`` — an append-only event stream assembled into a list, concatenated
+#   in ``seq`` then ``ts`` order.
 #
 # Producer-written sections and their fragment shape. Payloads match the
 # corresponding ``schema.py`` TypedDict so assembly is structure-preserving.
 SECTION_SHAPES: dict[str, SectionShape] = {
-    # Session Breakdown v4 canonical author-time streams. These names are
-    # intentionally separate from the legacy v2/v3 sections so the live v4
-    # builder can consume a closed set of SDK-authored facts.
-    "run_snapshot": "singleton",
-    "phase_transitions": "item",
-    "subjects": "item",
-    "operations": "item",
-    "measurements": "item",
-    "adoptions": "item",
-    "artifacts": "item",
-    "trace_events": "item",
     "session": "singleton",
     # SBD v6 task identity. Written at the moment each fact is decided --
     # identity and image when the manifest is stamped, the model architecture
@@ -89,10 +70,14 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # exporter never has to re-derive any of it. ``versions.tools`` is folded
     # in from the ``versions`` item stream at assembly.
     "metadata": "singleton",
-    "phase_timeline": "item",
-    "geak_invocations": "item",
-    "forge_invocations": "item",
-    "explore_search": "singleton",
+    # One row per external tool whose provenance was resolved, keyed by the
+    # tool name so re-recording a tool overwrites its own row. A section of its
+    # own rather than a second producer on the ``metadata`` singleton: a
+    # singleton is one file per producer and assembly keeps only the newest, so
+    # the Coordinator's own write -- reissued on every state save, hence always
+    # the newest -- would drop the tool provenance whole. Folded into
+    # ``metadata.versions.tools`` at assembly.
+    "versions": "item",
     # One row per critic iteration, recorded when its review comes back and
     # folded into the ``critic`` view at assembly. Keyed by content rather than
     # by iteration number, which a resume reuses after workdir pruning.
@@ -100,26 +85,10 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # One row per robustness-agent turn, recorded when its envelope settles and
     # folded into the ``robustness`` view at assembly.
     "robustness_turn": "item",
-    "specialist_runs": "item",
-    "optimization_stack": "item",
-    "kernel_optimization_summary": "singleton",
-    "conc_sweep_summary": "singleton",
-    "roofline": "item",
-    "roofline_progress": "singleton",
-    # Kernel-major lifecycle substreams. Recorded by their respective owners at
-    # author time and folded into the ``kernel_journey`` view at assembly (same
-    # compose-on-read pattern as ``critic``); none of these leak into the
-    # breakdown envelope on their own.
-    "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
-    "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
-    "kernel_backend_result": "item",  # one per backend attempt
-    "kernel_e2e": "item",  # one per kernel: e2e integrate gain
     # SBD v6 KERNEL substreams. One ``kernel_event`` fragment per event holds
     # its mapping-shaped blocks; every row-shaped fact owns a section of its
-    # own, one fragment per row keyed by its real id, because ``_merge_lists``
-    # only merges nested rows in place by ``_ENTITY_ID_FIELDS`` and appends
-    # anything else -- a partial update to a row nested in the event-level
-    # fragment would silently duplicate it. Assembled into one ``kernel``
+    # own, one fragment per row keyed by its real id, so that a partial update
+    # to a row cannot silently duplicate it. Assembled into one ``kernel``
     # timeline event when the phase is left.
     "kernel_event": "item",  # one per KERNEL phase entry, keyed by event id
     "kernel_lane_run": "item",  # one per forge candidate, ``lane`` discriminates
@@ -129,6 +98,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_geak_discovery": "item",  # one per geak hot-kernel discovery run
     "kernel_geak_acceptance": "item",  # one per kernel or env selection geak accepted
     "kernel_discovered": "item",  # one per kernel in the visit's profiling table
+    "kernel_integrate": "item",  # one per E2E integrate gate verdict, keyed by integration id
     # SBD v6 roofline substreams. Written by the same executor whether it was
     # dispatched on its own or called inline by a phase that owns an event, and
     # the only difference between the two is the event id on the rows: the
@@ -173,6 +143,11 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "phase_segment": "item",  # one per entry, keyed by the entering transition's position
     "phase_action": "item",  # one per dispatched action, keyed by its task id
     "phase_marker": "item",  # one per non-transition phase_history marker
+    # One row per proposal raised, keyed by its bus message. Here and not on
+    # the framework event because a proposal exists in every phase, and the
+    # Critic's ruling on one has nowhere else to be filed: an action only gets
+    # a row once it is dispatched, and a refused proposal never is.
+    "phase_proposal": "item",
     # SBD v6 stack ledger. One event per session because there is one stack: its
     # adoptions arrive from four phases and form a single ordered chain, and the
     # reconciliation is only meaningful over the whole of it.
@@ -222,17 +197,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "close_write_back": "singleton",
     "close_write_back_attempt": "item",
 }
-
-# Sections computed at finalize from in-memory state, never written as
-# fragments.
-DERIVED_SECTIONS: frozenset[str] = frozenset(
-    {
-        "capability_summary",
-        "attribution",
-        "phase_segments",
-        "source_files",
-    }
-)
 
 
 def section_shape(section: str) -> SectionShape | None:
@@ -538,6 +502,28 @@ class Recorder:
                 previous=previous,
             )
 
+    def item_fragment_exists(self, section: str, *, key: str) -> bool:
+        """Whether an item fragment under ``key`` has already been written.
+
+        For a late verdict that merges onto a row an earlier stage recorded.
+        The merge is keyed by the row's identity *and* its event, so a caller
+        that reconstructs the event id from live session state binds to the
+        wrong event whenever that state has moved on -- and an upsert onto an
+        absent key does not fail, it mints a row holding the verdict and
+        nothing else. Asking first turns that into recording nothing, which is
+        what a fact with no row to belong to should do.
+
+        Args:
+            section (str): The section the row belongs to.
+            key (str): The row's fragment key.
+
+        Returns:
+            bool: Whether the fragment is already on disk.
+        """
+        if not key:
+            return False
+        return (self._dir / self._stable_item_filename(section, key)).exists()
+
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:
         """Validate that ``section`` is used with its declared shape.
@@ -706,7 +692,6 @@ def recorder_for(session_dir: Path | str, *, producer: str) -> Recorder:
 
 
 __all__ = [
-    "DERIVED_SECTIONS",
     "SECTION_SHAPES",
     "Recorder",
     "SectionShape",

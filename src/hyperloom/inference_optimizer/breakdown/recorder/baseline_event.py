@@ -50,6 +50,7 @@ from .event_fields import (
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
 )
+from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
@@ -156,6 +157,102 @@ def baseline_event_id(phase: str, macro_cycle: Any) -> str:
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
+def record_action_decision(
+    *,
+    phase: str,
+    macro_cycle: Any,
+    task_id: str,
+    decision: str,
+) -> None:
+    """Record the write-back's verdict on a measurement that already settled.
+
+    The verdict is not the action's own to state. The executor returns a
+    measurement and the write-back decides what the session does with it,
+    which happens after this event has closed -- so the action row is written
+    without it and the verdict merges on afterwards. A closed event still
+    accepts row fragments: nothing is assembled until the export reads the
+    whole spool.
+
+    The row is only touched when it is already there. The event id is rebuilt
+    from live session state, which is the phase and cycle the write-back is
+    running in rather than the ones the measurement was dispatched in; the two
+    agree on the settle-in-the-same-tick path and can diverge on a resume, and
+    an upsert onto an event with no such action would mint a row carrying a
+    verdict and no measurement.
+
+    Args:
+        phase (str): The coordinator phase the write-back is running in.
+        macro_cycle (Any): The macro cycle it is running in.
+        task_id (str): The settled action's task id.
+        decision (str): The promotion decision the write-back reached.
+    """
+    if not str(task_id or "") or not str(decision or ""):
+        return
+    try:
+        from .event_sink import make_sink
+
+        sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
+        if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
+            log.debug(
+                "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
+                sink.event_id,
+                task_id,
+            )
+            return
+        sink.record(
+            SECTION_ACTION,
+            {"task_id": str(task_id), "decision": str(decision)},
+            row_type=ROW_ACTION,
+            natural_ids=str(task_id),
+        )
+        _republish_closed_event(sink.event_id)
+    except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+        log.warning(
+            "baseline timeline: could not record the promotion decision for action %s",
+            task_id,
+            exc_info=True,
+        )
+
+
+def _republish_closed_event(event: str) -> None:
+    """Re-assemble a closed event so a fragment written after it is published.
+
+    The export reads the durable timeline rather than re-assembling it, so a
+    closed event's published ``ext`` is whatever the close assembled. A row
+    that lands afterwards is in the spool but not in the event, and would stay
+    that way. Re-assembling and updating the same storage sequence is what
+    puts it there -- the same write the close makes, made again.
+
+    An event with an action still running is left alone: that action's own
+    close will assemble the row along with everything else, and publishing
+    here would show a running measurement as finished.
+
+    Args:
+        event (str): The event id to re-publish.
+    """
+    from ...session.sbd_v6 import timeline_sequence
+    from .assembler import baseline_event_parts
+
+    parts = baseline_event_parts()
+    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+    header = rows[0] if rows else {}
+    action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
+    ends = [str(row.get("end_time") or "") for row in action_rows]
+    if not ends or not all(ends):
+        return
+    ext, derived = assemble_baseline_ext(parts, event=event)
+    finish_event(
+        event_type=EVENT_TYPE,
+        event=event,
+        sequence=timeline_sequence(header),
+        status=derived,
+        ext=ext,
+        kind=EVENT_KIND,
+        start_time=str(header.get("start_time") or ""),
+        end_time=max(ends),
+    )
+
+
 def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:
     """Project a result's non-fatal warnings into a bounded block.
 
@@ -169,7 +266,7 @@ def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:
     return {"count": len(rows), "messages": rows[:_MAX_ROUND_WARNINGS]}
 
 
-def _measurement(result: Mapping[str, Any]) -> dict[str, Any]:
+def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
     """Project the numbers a benchmark round produced.
 
     Recorded on the round as well as on the action because the two answer
@@ -180,6 +277,8 @@ def _measurement(result: Mapping[str, Any]) -> dict[str, Any]:
 
     Args:
         result (Mapping[str, Any]): The executor result to read.
+        framework (str): The serving framework, which decides the throughput
+            unit.
 
     Returns:
         dict[str, Any]: The measurement block, with absent numbers as ``None``.
@@ -189,6 +288,10 @@ def _measurement(result: Mapping[str, Any]) -> dict[str, Any]:
         # published and what a consumer already selects on. The executor's own
         # key for it is ``output_throughput``.
         "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
+        # The field name above is the serving case; an image framework measures
+        # img/s through the same key, so the unit has to be stated rather than
+        # read off the name.
+        "throughput_unit": framework_registry.throughput_unit(framework),
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
         "tpot_mean_ms": _float_or_none(result.get("tpot_mean_ms")),
@@ -351,6 +454,7 @@ class BaselineEventRecorder:
         params = _as_dict(params)
         self._task_id = str(task_id or "")
         self._action_id = self._task_id or "unnamed"
+        self._framework = str(framework or "")
         self._sink.record(
             SECTION_ACTION,
             {
@@ -560,7 +664,7 @@ class BaselineEventRecorder:
                 "duration_sec": duration_sec,
                 "timeout_sec": _int_or_none(timeout_sec),
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
-                "measurement": _measurement(payload),
+                "measurement": _measurement(payload, self._framework),
                 "timing": _timing(payload),
                 # A round is one server launch, so the observed half of the
                 # invocation belongs to it. Only the observed fields: the
@@ -582,7 +686,7 @@ class BaselineEventRecorder:
         payload = _as_dict(result)
         dropped = _as_dict(payload.get("measure_round_dropped"))
         action: dict[str, Any] = {
-            "measurement": _measurement(payload),
+            "measurement": _measurement(payload, self._framework),
             "timing": _timing(payload),
         }
         # Merged onto whatever the launch already declared, which is why it is
@@ -761,6 +865,10 @@ def assemble_baseline_actions(
             {
                 "task_id": task,
                 "status": str(row.get("status") or "running"),
+                # Absent until the write-back rules on the measurement, which
+                # is after this event closed -- so a running action has no
+                # verdict rather than an empty one.
+                "decision": str(row.get("decision") or ""),
                 "start_time": str(row.get("start_time") or ""),
                 "end_time": str(row.get("end_time") or ""),
                 "duration_sec": row.get("duration_sec"),

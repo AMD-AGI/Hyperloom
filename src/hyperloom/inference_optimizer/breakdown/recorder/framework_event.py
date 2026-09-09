@@ -497,7 +497,10 @@ class FrameworkEventRecorder:
             **fields: Any of ``role``, ``arm``, ``status``, ``domain``,
                 ``scope``, ``tags``, ``gap_canonical_id``, ``reason``,
                 ``dispatched_at``, ``completed_at``, ``parallelism``,
-                ``confidence_avg``, ``transcripts``, ``worktree``.
+                ``confidence_avg``, ``transcripts``, ``worktree``, plus what
+                the round came back with: ``summary``, ``proposals_total``,
+                ``empty``, ``confidence``, ``new_findings``,
+                ``residual_questions``, ``notes``, ``ensemble_scores``.
         """
         key = str(run_id or "")
         if not key:
@@ -514,17 +517,24 @@ class FrameworkEventRecorder:
             "dispatched_at",
             "completed_at",
             "worktree",
+            "summary",
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
-        if "tags" in fields:
-            row["tags"] = [str(tag) for tag in (fields.get("tags") or []) if str(tag or "")]
-        if "transcripts" in fields:
-            row["transcripts"] = [str(ref) for ref in (fields.get("transcripts") or []) if str(ref or "")]
+        for name in ("tags", "transcripts", "new_findings", "residual_questions", "notes"):
+            if name in fields:
+                row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
         if "parallelism" in fields:
             row["parallelism"] = _int_or_none(fields.get("parallelism"))
-        if "confidence_avg" in fields:
-            row["confidence_avg"] = _float_or_none(fields.get("confidence_avg"))
+        if "proposals_total" in fields:
+            row["proposals_total"] = _int_or_none(fields.get("proposals_total"))
+        if "empty" in fields:
+            row["empty"] = bool(fields.get("empty"))
+        for name in ("confidence_avg", "confidence"):
+            if name in fields:
+                row[name] = _float_or_none(fields.get(name))
+        if fields.get("ensemble_scores"):
+            row["ensemble_scores"] = dict(fields.get("ensemble_scores") or {})
         self._sink.record(SECTION_RUN, row, row_type=ROW_RUN, natural_ids=_key(key))
 
     # ---- proposals -------------------------------------------------------

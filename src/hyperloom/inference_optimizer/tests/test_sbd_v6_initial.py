@@ -574,7 +574,7 @@ def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch)
     ] == expected
     assert [
         (event["type"], event["status"], event["ext"]["run_kind"])
-        for event in collect_v6_timeline(tmp_path, [], state={})
+        for event in collect_v6_timeline(tmp_path, [])
     ] == expected
     latest_gate = read_timeline_event(tmp_path, "model_gate")
     assert latest_gate is not None
@@ -1059,36 +1059,3 @@ def test_framework_review_does_not_parse_macro_cycle_from_prompt():
     )
 
     assert reviews[0]["macro_cycle"] is None
-
-
-def test_specialist_recorder_preserves_runtime_phase_when_entry_has_no_source_phase(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-    captured: dict[str, dict] = {}
-
-    class Recorder:
-        def record_item(self, stream, item, *, key=None):
-            captured["ledger"] = {"stream": stream, "item": item, "key": key}
-
-    monkeypatch.setattr(instrument, "_recorder", lambda *_args, **_kwargs: Recorder())
-    monkeypatch.setattr(
-        instrument,
-        "record_operation",
-        lambda *_args, **kwargs: captured.setdefault("operation", kwargs),
-    )
-
-    instrument.record_specialist_round(
-        tmp_path,
-        {
-            "round_id": "kernel-specialist",
-            "task_id": "kernel-task",
-            "completed_at": "2026-08-28T01:00:00+00:00",
-        },
-        phase="KERNEL_AGENT",
-    )
-
-    assert captured["ledger"]["item"]["source_phase"] == "KERNEL_AGENT"
-    assert captured["operation"]["phase"] == "KERNEL_AGENT"
-    assert captured["operation"]["outputs"]["source_phase"] == "KERNEL_AGENT"
-
-

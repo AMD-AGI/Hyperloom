@@ -18,7 +18,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     ARM_BASELINE,
     ARM_OPTIMIZED,
@@ -506,42 +505,5 @@ def test_a_dispatch_with_no_session_records_nothing_and_still_runs(session_dir: 
 # ---------------------------------------------------------------------------
 # The collector
 # ---------------------------------------------------------------------------
-def test_the_recorded_event_supersedes_the_projection(session_dir: Path, baseline_yaml: Path):
-    """Projecting alongside a recorded sweep would publish it twice, the second
-    time out of a document that knows less."""
-    state = _state(baseline_yaml)
-    with session_scope(session_dir):
-        payload = _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
-
-    warnings: list[str] = []
-    timeline = collect_v6_timeline(
-        session_dir,
-        warnings,
-        state={"last_conc_sweep": {"status": "succeeded", "ts": "2026-01-01T00:00:00+00:00"}},
-        conc_sweep_summary=payload,
-        phase_timeline=[],
-    )
-    sweeps = [event for event in timeline if event.get("type") == "conc_sweep"]
-    assert len(sweeps) == 1
-    # The recorded one, which the projection has no way to produce.
-    assert "plan" in sweeps[0]["ext"]
-    assert sweeps[0]["ext"]["plan"]["grid_source"] == GRID_REQUESTED
 
 
-def test_a_session_with_no_recorded_sweep_still_gets_the_projection(session_dir: Path, baseline_yaml: Path):
-    """Sessions recorded before this event existed keep their timeline entry."""
-    state = _state(baseline_yaml)
-    payload = _run(state, session_dir, recorder=None, run_grid=_all_succeed)
-
-    warnings: list[str] = []
-    timeline = collect_v6_timeline(
-        session_dir,
-        warnings,
-        state={"last_conc_sweep": {"status": "succeeded", "ts": "2026-01-01T00:00:00+00:00"}},
-        conc_sweep_summary=payload,
-        phase_timeline=[],
-    )
-    sweeps = [event for event in timeline if event.get("type") == "conc_sweep"]
-    assert len(sweeps) == 1
-    # The projected shape, which has a trigger block the recorder does not.
-    assert "trigger" in sweeps[0]["ext"]

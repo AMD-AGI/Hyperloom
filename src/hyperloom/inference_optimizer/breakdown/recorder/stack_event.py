@@ -325,6 +325,11 @@ def record_validation(
     source: str = "",
     measurement_basis: str = "",
     ts: str = "",
+    ttft_mean_ms: Any = None,
+    e2el_mean_ms: Any = None,
+    ttft_e2el_source: str = "",
+    server_launch_flags: str = "",
+    workspace: Any = None,
 ) -> None:
     """Record one session validation of the stack as a whole. Never raises.
 
@@ -344,6 +349,21 @@ def record_validation(
             ``e2e_rebench`` for a full-stack revalidation,
             ``e2e_decision_round`` for the round a variant was graded on.
         ts (str): The author-time stamp of the validation.
+        ttft_mean_ms (Any): The latency the same measurement reported, carried
+            here because it is measured by the run that produced
+            ``validated_tput`` and cannot be recovered afterwards: the export
+            used to walk the run directories for it and label how far it had
+            to go to find one.
+        e2el_mean_ms (Any): As ``ttft_mean_ms``, for end-to-end latency.
+        ttft_e2el_source (str): Which field of the benchmark report the pair
+            came from, as the measurement itself labelled it.
+        server_launch_flags (str): The flags the measured server was actually
+            launched with, as resolved against the observed launch. The export
+            used to recover these by parsing a ``server.log`` it found by
+            trying three candidate paths, and labelled the result ``unknown``
+            when none of them worked.
+        workspace (Any): The run directory the measurement was taken in, which
+            is where its config and server log live.
     """
     try:
         sink = _sink()
@@ -360,6 +380,11 @@ def record_validation(
                 "validated_gain_pct": _float_or_none(validated_gain_pct),
                 "source": str(source or ""),
                 "measurement_basis": str(measurement_basis or ""),
+                "ttft_mean_ms": _float_or_none(ttft_mean_ms),
+                "e2el_mean_ms": _float_or_none(e2el_mean_ms),
+                "ttft_e2el_source": str(ttft_e2el_source or ""),
+                "server_launch_flags": str(server_launch_flags or ""),
+                "workspace": _text_or_none(workspace),
             },
             row_type="validation",
             natural_ids=str(int(stack_len or 0)),
@@ -492,9 +517,7 @@ def assemble_stack_ext(
         # Throughput the chain gained that no adoption claims: the anchor moved
         # between one adoption's measurement and the next one's. An identity,
         # not an estimate -- it is the sum of the chain breaks below.
-        "unattributed_gain_pct": (
-            round(chain_total - attributed, 6) if chain_total is not None and measured else None
-        ),
+        "unattributed_gain_pct": (round(chain_total - attributed, 6) if chain_total is not None and measured else None),
         "validated_total_gain_pct": recorded_total,
         # The ledger against the one figure measured on the whole stack. This is
         # the number worth alerting on: the parts and the whole disagreeing
@@ -523,9 +546,7 @@ def _by_source(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         a reader can tell "this subsystem earned nothing" from "this subsystem
         is not reported".
     """
-    buckets: dict[str, Any] = {
-        name: {"count": 0, "total_gain_pct": 0.0, "unmeasured": 0} for name in SOURCES
-    }
+    buckets: dict[str, Any] = {name: {"count": 0, "total_gain_pct": 0.0, "unmeasured": 0} for name in SOURCES}
     backends: dict[str, Any] = {
         name: {"count": 0, "total_gain_pct": 0.0, "unmeasured": 0} for name in (*BACKENDS, SOURCE_UNATTRIBUTED)
     }

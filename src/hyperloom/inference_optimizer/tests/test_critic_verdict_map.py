@@ -1782,7 +1782,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1821,7 +1820,6 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1872,7 +1870,6 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         baseline_tput: float = 1000.0
         recipe_kb_session_id: str = "sid-test"
         save_count: int = 0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)

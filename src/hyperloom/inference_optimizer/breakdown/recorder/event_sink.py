@@ -166,6 +166,47 @@ class EventSink:
             )
             return None
 
+    def has_row(
+        self,
+        section: str,
+        *,
+        row_type: str = "",
+        natural_ids: str | Sequence[str] = (),
+    ) -> bool:
+        """Whether a row with this identity is already recorded on this event.
+
+        For a caller holding a fact that belongs to a row some earlier stage
+        recorded, and that reconstructed this sink's event id rather than being
+        handed it. :meth:`record` would mint the row if the reconstruction were
+        wrong, so asking first is what keeps a late verdict from inventing the
+        thing it was meant to rule on.
+
+        Args:
+            section (str): The section the row belongs to.
+            row_type (str): The kind of row, as passed to :meth:`record`.
+            natural_ids (str | Sequence[str]): The row's own identity.
+
+        Returns:
+            bool: Whether the row exists. ``False`` when the question itself
+                could not be answered, which keeps the caller's guard closed.
+        """
+        from .recorder import get_recorder  # local: avoid an import cycle at module load
+
+        try:
+            ids = (natural_ids,) if isinstance(natural_ids, str) else tuple(natural_ids)
+            return get_recorder(producer=self._producer).item_fragment_exists(
+                section,
+                key=fragment_key(self._event_id, row_type, *ids),
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+            log.warning(
+                "recorder: could not tell whether event %s holds a %s row; treating it as absent",
+                self._event_id,
+                section,
+                exc_info=True,
+            )
+            return False
+
     def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
         """Append one row to ``section``, tagged for this sink's event.
 

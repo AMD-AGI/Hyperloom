@@ -25,11 +25,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.collectors.geak import (
-    _collapse_journey_aliases,
-    _kind_source_counts,
-    _stamp_journey_kind,
-)
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_accepted_kernel_specs,
     geak_is_cand_tag,
@@ -43,87 +38,17 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
     return {"short_name": name, "e2e_delta_pct": delta, **extra}
 
 
-
-
 # --------------------------------------------------------------------------
 # B2 — the alias twin collapses onto the resolved symbol
 # --------------------------------------------------------------------------
 
 
-def test_collapse_keeps_the_symbol_from_the_unmeasured_twin() -> None:
-    # GLM-5.2-MXFP4/20260814T163244Z. The measured row is the slot tag; the
-    # symbol rides the twin that carries no gpu_pct.
-    # Both rows repeat the same e2e_gain_pct: that is what pairs the twin.
-    rows = [
-        {
-            "kernel_id": "c0_triton",
-            "name": "c0_triton",
-            "gpu_pct": 47.3,
-            "e2e_gain_pct": 29.994,
-        },
-        {
-            "kernel_id": "dsa_sparse_attn_prefill_main_kernel",
-            "name": "dsa_sparse_attn_prefill_main_kernel",
-            "gpu_pct": None,
-            "e2e_gain_pct": 29.994,
-        },
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert len(out) == 1
-    assert out[0]["name"] == "dsa_sparse_attn_prefill_main_kernel"
-    assert out[0]["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
-    # The measurement survives the rename.
-    assert out[0]["gpu_pct"] == 47.3
-    # The slot tag is kept as an alias so a later join can still use it.
-    assert "c0_triton" in out[0]["aliases"]
 
 
-def test_collapse_prefers_name_over_the_slugged_kernel_id() -> None:
-    # MiniMax-M3-MXFP8/20260731T182731Z. GEAK strips the leading underscore
-    # when it builds kernel_id, so only `name` holds the true symbol.
-    rows = [
-        {
-            "kernel_id": "c0_flydsl",
-            "name": "c0_flydsl",
-            "gpu_pct": 12.0,
-            "e2e_gain_pct": 40.626,
-        },
-        {
-            "kernel_id": "mxfp8_linear_kernel",
-            "name": "_mxfp8_linear_kernel",
-            "gpu_pct": None,
-            "e2e_gain_pct": 40.626,
-        },
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert out[0]["name"] == "_mxfp8_linear_kernel"
-    assert "mxfp8_linear_kernel" in out[0]["aliases"]
 
 
-def test_collapse_leaves_a_lone_measured_row_alone() -> None:
-    rows = [
-        {
-            "kernel_id": "solo_kernel",
-            "name": "solo_kernel",
-            "gpu_pct": 3.0,
-            "e2e_gain_pct": 1.5,
-        }
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert len(out) == 1
-    assert out[0]["name"] == "solo_kernel"
 
 
-def test_collapse_keeps_two_real_kernels_that_share_a_gain() -> None:
-    # Rows are grouped by gain, so two distinct kernels that happen to land on
-    # the same number must not fold into one. Both are measured, so neither is
-    # a twin: the twin is defined by the missing measurement, not by the gain.
-    rows = [
-        {"kernel_id": "kernel_a", "name": "kernel_a", "gpu_pct": 10.0, "e2e_gain_pct": 2.0},
-        {"kernel_id": "kernel_b", "name": "kernel_b", "gpu_pct": 20.0, "e2e_gain_pct": 2.0},
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
 def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
@@ -139,62 +64,10 @@ def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
     ]
 
 
-def test_collapse_skips_unrelated_measured_unmeasured_pair_at_same_gain() -> None:
-    rows = [
-        {
-            "kernel_id": "kernel_a",
-            "name": "kernel_a",
-            "gpu_pct": 10.0,
-            "e2e_gain_pct": 5.0,
-            "op_kind": "prefill_attn",
-        },
-        {
-            "kernel_id": "kernel_b",
-            "name": "kernel_b",
-            "gpu_pct": None,
-            "e2e_gain_pct": 5.0,
-            "op_kind": "prefill_attn",
-        },
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
-def test_collapse_skips_three_kernel_mixed_group_at_same_gain() -> None:
-    rows = [
-        {
-            "kernel_id": "c0_triton",
-            "name": "c0_triton",
-            "gpu_pct": 10.0,
-            "e2e_gain_pct": 5.0,
-            "op_kind": "prefill_attn",
-        },
-        {
-            "kernel_id": "sym_a",
-            "name": "sym_a",
-            "gpu_pct": None,
-            "e2e_gain_pct": 5.0,
-            "op_kind": "prefill_attn",
-        },
-        {
-            "kernel_id": "kernel_c",
-            "name": "kernel_c",
-            "gpu_pct": 8.0,
-            "e2e_gain_pct": 5.0,
-            "op_kind": "prefill_attn",
-        },
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert len(out) == 3
 
 
-def test_collapse_keeps_two_unmeasured_rows_that_share_a_gain() -> None:
-    rows = [
-        {"kernel_id": "kernel_a", "name": "kernel_a", "gpu_pct": None, "e2e_gain_pct": 2.0},
-        {"kernel_id": "kernel_b", "name": "kernel_b", "gpu_pct": None, "e2e_gain_pct": 2.0},
-    ]
-    out = _collapse_journey_aliases(rows)
-    assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
 def _acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -211,6 +84,27 @@ def test_acceptance_specs_collapse_the_alias_twin_onto_the_kernel_symbol() -> No
     out = _acceptance_specs(result)
     assert [geak_spec_name(row) for row in out] == ["_dsa_prefill_kernel"]
     assert out[0]["alias_collapsed"] is True
+
+
+def test_acceptance_specs_keep_the_collapsed_twins_name_as_an_alias() -> None:
+    """The collapsed name is the one a reader may hold, so it is carried over."""
+    result = {
+        "accepted_kernels": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
+        "accepted_heads": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
+    }
+    out = _acceptance_specs(result)
+    assert out[0]["aliases"] == ["c0_triton"]
+
+
+def test_acceptance_specs_do_not_alias_a_row_to_its_own_name() -> None:
+    """A survivor listing itself would make the alias set useless for joining."""
+    result = {
+        "accepted_kernels": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
+        "accepted_heads": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
+    }
+    out = _acceptance_specs(result)
+    assert geak_spec_name(out[0]) == "_dsa_prefill_kernel"
+    assert out[0]["aliases"] == ["c0_triton"]
 
 
 def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
@@ -261,83 +155,18 @@ def test_cand_tag_recognises_slot_tags_only() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_stamp_recovers_kind_by_joining_the_ledger() -> None:
-    rows = [{"name": "_mxfp8_linear_kernel", "kernel_id": "mxfp8_linear_kernel"}]
-    result = {
-        "accepted_kernels": [],
-        "accepted_heads": [{"short_name": "_mxfp8_linear_kernel", "kind": "authored"}],
-    }
-    out = _stamp_journey_kind(rows, result)
-    assert out[0]["kind"] == "authored"
-    assert out[0]["kind_source"] == "result_json"
 
 
-def test_stamp_joins_through_an_alias() -> None:
-    rows = [
-        {
-            "name": "_fwd_grouped_kernel_stage1",
-            "kernel_id": "fwd_grouped_kernel_stage1",
-            "aliases": ["c0_triton"],
-        }
-    ]
-    result = {"accepted_kernels": [{"short_name": "c0_triton", "kind": "authored"}]}
-    out = _stamp_journey_kind(rows, result)
-    assert out[0]["kind_source"] == "result_json"
 
 
-def test_stamp_drops_only_known_env_rows() -> None:
-    rows = [
-        {"name": "ck_gemm_a8w8_blockscale_bpreshuffle"},
-        {"name": "real_kernel"},
-    ]
-    result = {
-        "accepted_heads": [
-            {"short_name": "ck_gemm_a8w8_blockscale_bpreshuffle", "kind": "env"},
-            {"short_name": "real_kernel", "kind": "authored"},
-        ]
-    }
-    out = _stamp_journey_kind(rows, result)
-    assert [r["name"] for r in out] == ["real_kernel"]
 
 
-def test_stamp_marks_an_unjoinable_row_absent_and_keeps_it() -> None:
-    # Guessing either way is wrong: "authored" inflates the kernel bucket with
-    # library picks, "env" deletes real kernels recovered from dead runs.
-    rows = [{"name": "orphan_kernel"}]
-    out = _stamp_journey_kind(rows, {"accepted_kernels": [], "accepted_heads": []})
-    assert len(out) == 1
-    assert out[0]["kind"] is None
-    assert out[0]["kind_source"] == "absent"
 
 
-def test_stamp_distinguishes_undeclared_from_absent() -> None:
-    rows = [{"name": "listed_kernel"}]
-    result = {"accepted_kernels": [{"short_name": "listed_kernel"}]}
-    out = _stamp_journey_kind(rows, result)
-    assert out[0]["kind"] is None
-    assert out[0]["kind_source"] == "result_json_undeclared"
 
 
-def test_kind_source_counts_cover_every_admitted_row() -> None:
-    # The counter must sum to the row count on every path, including the
-    # ``result`` path, whose rows carry no kind_source. Measured on the
-    # campaign: 3 of 4 rows on that path declare no kind at all, so treating
-    # the path as "always declared" empties the counter where it is needed.
-    rows: list[Any] = [
-        {"name": "a", "kind_source": "result_json"},
-        {"name": "b", "kind_source": "absent"},
-        {"short_name": "c", "kind": "authored"},  # result path, declared
-        {"short_name": "d"},  # result path, undeclared
-    ]
-    counts = _kind_source_counts(rows)
-    assert sum(counts.values()) == len(rows)
-    assert counts["result_json"] == 2
-    assert counts["absent"] == 1
-    assert counts["result_json_undeclared"] == 1
 
 
-def test_kind_source_counts_empty_for_no_rows() -> None:
-    assert _kind_source_counts([]) == {}
 
 
 # --------------------------------------------------------------------------

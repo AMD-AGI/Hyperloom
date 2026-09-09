@@ -37,6 +37,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
@@ -83,6 +84,19 @@ SESSION_BREAKDOWN_PATH = "session_breakdown.json"
 #: its close. Compared once here, at the point the reason is known, instead of
 #: being re-matched against the state file by every reader.
 ESCALATED_STOP_REASON = "robustness_escalated"
+
+#: Where the robustness ladder persists what it found, relative to the session
+#: directory. Read here rather than mirrored through a recorder because the
+#: ladder already writes a durable, complete record: a second copy taken as the
+#: findings were raised could only be the same rows or fewer.
+ROBUSTNESS_FINDINGS_SUBDIR = "agents/robustness/findings"
+
+#: How many findings the close-out carries. A session that degrades badly can
+#: fire the ladder on most of its ticks, and the close-out is a summary of the
+#: session rather than a second copy of the ladder's log; the newest are kept
+#: because they are the ones the stop reason was drawn from, and the total is
+#: reported alongside so a truncated list never reads as the whole of it.
+_FINDINGS_LIMIT = 50
 
 #: The share of the theoretical ceiling the session aims at. A roofline ceiling
 #: is not reachable in practice, so progress is reported against both the
@@ -262,6 +276,105 @@ def record_baseline_progress(
                 "failure_streak": _to_int(failure_streak),
                 "total_failures": _to_int(total_failures),
                 "arg_error_streak": _to_int(arg_error_streak),
+            }
+        },
+    )
+
+
+def record_final_recipe(
+    session_dir: Path | str | None,
+    *,
+    throughput: Any = None,
+    ttft_mean_ms: Any = None,
+    e2el_mean_ms: Any = None,
+    action_path: Any = None,
+    extra_server_args: str = "",
+    extra_envs: Mapping[str, Any] | None = None,
+) -> None:
+    """Record the configuration the session ended on. Never raises.
+
+    The terminal recipe is a session-level fact for the same reason
+    :func:`record_baseline_progress` is: no event holds it. The stack ledger
+    records every adoption, but a revert takes a layer back off the stack
+    without retracting the row that adopted it, so the ledger cannot say what
+    was still standing at the end. And a session that adopted nothing has no
+    ledger event at all while still ending on a configuration -- its baseline.
+
+    The export used to reconstruct this by re-reading ``current_best`` and
+    ``optimization_stack`` after the fact, and recovered the latency pair by
+    trying three candidate run directories and labelling how far it had to go.
+
+    Args:
+        session_dir: The session directory; a falsy value is a no-op.
+        throughput: The throughput of the configuration that shipped.
+        ttft_mean_ms: The latency the same configuration was measured at,
+            carried here because a session with no whole-stack validation has
+            no other author-time record of it.
+        e2el_mean_ms: As ``ttft_mean_ms``, for end-to-end latency.
+        action_path: The layers still on the stack, in promotion order, each
+            ``action`` or ``action:variant``.
+        extra_server_args: The cumulative server args of the final launch.
+        extra_envs: The cumulative env overrides of the final launch. Recorded
+            beside the args because the two are one recipe: applying either
+            without the other reproduces neither.
+    """
+    _write(
+        session_dir,
+        {
+            "final_recipe": {
+                "throughput": _to_float(throughput),
+                "ttft_mean_ms": _to_float(ttft_mean_ms),
+                "e2el_mean_ms": _to_float(e2el_mean_ms),
+                "action_path": [str(step) for step in (action_path or []) if str(step)],
+                "extra_server_args": str(extra_server_args or ""),
+                "extra_envs": {str(key): str(value) for key, value in dict(extra_envs or {}).items()},
+            }
+        },
+    )
+
+
+def record_geak_candidate(
+    session_dir: Path | str | None,
+    *,
+    pending: Mapping[str, Any] | None = None,
+    revalidation_pending: Any = None,
+) -> None:
+    """Record where the GEAK candidate stood when the session wound down.
+
+    A candidate's own attempts belong to the kernel event that ran them, and
+    that event closes when the phase is left. What it cannot hold is the
+    candidate's standing afterwards: a slot still awaiting a rebench, or one
+    the close drain cancelled, is settled after every kernel event of the
+    session has closed. Recorded here for the same reason
+    :func:`record_baseline_progress` is -- no event can hold it.
+
+    The candidate's self-reported numbers are carried alongside the verdict so
+    a reader can say what was dropped, not merely that something was.
+
+    Args:
+        session_dir: The session directory; a falsy value is a no-op.
+        pending: The candidate slot as it stands at the close. Empty when the
+            session had no GEAK candidate, or when one was adjudicated and the
+            slot released -- the two are told apart by ``status``.
+        revalidation_pending: Whether the accepted stack still needs a recheck
+            against the current tree. Set by a resume that inherited a stack it
+            did not measure itself.
+    """
+    if not session_dir:
+        trace_skip(reason="no session_dir", section=SECTION)
+        return
+    slot = dict(pending or {})
+    _write(
+        session_dir,
+        {
+            "geak_candidate": {
+                "revalidation_pending": bool(revalidation_pending),
+                "status": str(slot.get("status") or ""),
+                "revalidation_error": str(slot.get("revalidation_error") or "") or None,
+                "revalidation_error_class": str(slot.get("revalidation_error_class") or "") or None,
+                "self_reported_gain_pct": _to_float(slot.get("self_reported_gain_pct")),
+                "self_reported_tput": _to_float(slot.get("self_reported_tput")),
+                "self_reported_basis": str(slot.get("self_reported_basis") or ""),
             }
         },
     )
@@ -470,9 +583,71 @@ def record_close_settled(
             "end_time": _stamp(ts),
             "close_sequence_done": True,
             "stop_reason": reason,
-            "robustness": {"escalated": reason.lower() == ESCALATED_STOP_REASON},
+            "robustness": {
+                "escalated": reason.lower() == ESCALATED_STOP_REASON,
+                **_robustness_findings(session_dir),
+            },
         },
     )
+
+
+def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
+    """Read what the robustness ladder found over the session.
+
+    The escalation verdict beside this is drawn from the stop reason alone, so
+    on its own it says a session was escalated without saying what for -- and
+    an un-escalated session's findings, which are the ones that fired and were
+    judged survivable, had nowhere to be read at all.
+
+    Args:
+        session_dir (Path | str): The session directory.
+
+    Returns:
+        dict[str, Any]: ``findings`` and ``findings_total``, or an empty
+            mapping when the ladder never wrote anything. An absent key is the
+            honest answer for a session whose ladder never ran; an empty list
+            would claim it ran and found nothing.
+    """
+    directory = Path(session_dir) / ROBUSTNESS_FINDINGS_SUBDIR
+    rows: list[dict[str, Any]] = []
+    try:
+        for path in sorted(directory.glob("*.jsonl")):
+            rows.extend(read_jsonl(path) or [])
+    except Exception:  # noqa: BLE001 — a findings log we cannot read is not a close-out failure
+        log.debug("close: cannot read robustness findings under %s", directory, exc_info=True)
+        return {}
+    if not rows:
+        return {}
+    # A row whose clock is unreadable sorts to the front rather than raising,
+    # so one malformed line cannot cost the close-out every finding beside it.
+    rows.sort(key=lambda row: (_to_float(row.get("timestamp_unix")) or 0.0, _to_int(row.get("tick_index"))))
+    return {
+        "findings": [_finding_row(row) for row in rows[-_FINDINGS_LIMIT:]],
+        "findings_total": len(rows),
+    }
+
+
+def _finding_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one persisted finding onto what the close-out reports.
+
+    ``intents`` is reduced to the intent types: the payloads are the ladder's
+    own working detail, and carrying them would make one badly-degraded
+    session's close-out larger than the rest of the breakdown.
+    """
+    return {
+        "tick_index": _to_int(row.get("tick_index")),
+        "timestamp_unix": _to_float(row.get("timestamp_unix")),
+        "symptom_name": str(row.get("symptom_name") or ""),
+        "severity": str(row.get("severity") or ""),
+        "summary": str(row.get("summary") or ""),
+        "rca_text": str(row.get("rca_text") or ""),
+        "intents": [
+            str(intent.get("intent_type") or intent.get("type") or "")
+            for intent in row.get("intents") or []
+            if isinstance(intent, dict)
+        ],
+        "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
+    }
 
 
 def record_write_back_opened(
@@ -708,6 +883,7 @@ __all__ = [
     "record_close_opened",
     "record_close_settled",
     "record_close_step",
+    "record_geak_candidate",
     "record_roofline_progress",
     "record_write_back_opened",
     "record_write_back_settled",

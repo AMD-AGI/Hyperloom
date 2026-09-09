@@ -18,6 +18,7 @@ actually failed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_close_settled,
     record_baseline_progress,
     record_close_step,
+    record_final_recipe,
+    record_geak_candidate,
     record_roofline_progress,
     record_write_back_opened,
     record_write_back_settled,
@@ -48,13 +51,34 @@ def sd(tmp_path: Path) -> Path:
 
 def _close(session_dir: Path, *, warnings: list[str] | None = None) -> dict[str, Any]:
     """Build the ``close`` key the way the exporter does, from fragments only."""
-    recorded = assemble_parts(session_dir, warnings=[]).get("close")
+    assembled = assemble_parts(session_dir, warnings=[])
     return collect_v6_close(
-        session_dir,
-        {},
         warnings if warnings is not None else [],
-        recorded=recorded,
+        recorded=assembled.get("close"),
+        robustness=assembled.get("robustness"),
     )
+
+
+def _write_findings(session_dir: Path, rows: list[dict[str, Any]], *, name: str = "s1") -> None:
+    """Write findings the way the robustness ladder's sink does."""
+    directory = session_dir / "agents" / "robustness" / "findings"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _finding(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "tick_index": 4,
+        "timestamp_unix": 1000.0,
+        "symptom_name": "server_crash_loop",
+        "severity": "high",
+        "summary": "three boots failed in a row",
+        "intents": [{"intent_type": "alert", "payload": {"detail": "noisy"}}],
+        "evidence": {"crashes": 3},
+        "rca_text": "the flag is unsupported on this build",
+    }
+    row.update(overrides)
+    return row
 
 
 def _run_sequence(session_dir: Path, *, fail: str = "") -> None:
@@ -179,6 +203,81 @@ def test_ordinary_stop_reason_is_not_an_escalation(sd: Path) -> None:
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="target_reached")
     assert _close(sd)["robustness"]["escalated"] is False
+
+
+def test_the_close_out_says_what_the_ladder_found_not_just_that_it_escalated(sd: Path) -> None:
+    """The verdict alone says a session was escalated without saying what for."""
+    _write_findings(sd, [_finding()])
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="robustness_escalated")
+
+    robustness = _close(sd)["robustness"]
+    assert robustness["findings_total"] == 1
+    (finding,) = robustness["findings"]
+    assert finding["symptom_name"] == "server_crash_loop"
+    assert finding["severity"] == "high"
+    assert finding["tick_index"] == 4
+    assert finding["rca_text"] == "the flag is unsupported on this build"
+    assert finding["evidence"] == {"crashes": 3}
+    # The payloads are the ladder's own working detail; the types are what the
+    # close-out is reporting.
+    assert finding["intents"] == ["alert"]
+
+
+def test_an_unescalated_session_still_reports_what_fired(sd: Path) -> None:
+    """These are the findings that were judged survivable, which had nowhere to be read."""
+    _write_findings(sd, [_finding(severity="low")])
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="target_reached")
+
+    robustness = _close(sd)["robustness"]
+    assert robustness["escalated"] is False
+    assert [row["severity"] for row in robustness["findings"]] == ["low"]
+
+
+def test_a_session_whose_ladder_never_wrote_reports_no_findings_key(sd: Path) -> None:
+    """An empty list would claim a ladder that ran and found nothing."""
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="target_reached")
+
+    assert "findings" not in _close(sd)["robustness"]
+
+
+def test_findings_are_ordered_and_the_total_survives_the_cap(sd: Path) -> None:
+    """A truncated list must never read as the whole of it."""
+    _write_findings(sd, [_finding(tick_index=n, timestamp_unix=float(2000 - n)) for n in range(60)])
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="target_reached")
+
+    robustness = _close(sd)["robustness"]
+    assert robustness["findings_total"] == 60
+    assert len(robustness["findings"]) == 50
+    ticks = [row["tick_index"] for row in robustness["findings"]]
+    assert ticks == sorted(ticks, reverse=True)
+
+
+def test_findings_from_several_sink_files_are_read_together(sd: Path) -> None:
+    """The sink names its file after the session id, and a resume starts another."""
+    _write_findings(sd, [_finding(symptom_name="first", timestamp_unix=1.0)], name="s1")
+    _write_findings(sd, [_finding(symptom_name="second", timestamp_unix=2.0)], name="s2")
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="target_reached")
+
+    robustness = _close(sd)["robustness"]
+    assert [row["symptom_name"] for row in robustness["findings"]] == ["first", "second"]
+
+
+def test_the_agents_turns_sit_with_the_verdict_drawn_from_them(sd: Path) -> None:
+    """Reading the agent's account used to require knowing to look in two keys."""
+    from hyperloom.inference_optimizer.breakdown.recorder.robustness_out import record_robustness_turn
+
+    record_robustness_turn(sd, turn_idx=0, outcome="intents", intents=[{"type": "alert"}])
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="target_reached")
+
+    turns = _close(sd)["robustness"]["turns"]
+    assert [row["turn_idx"] for row in turns] == [0]
+    assert turns[0]["outcome"] == "intents"
 
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
@@ -540,8 +639,101 @@ def test_a_session_whose_baselines_all_landed_reports_zeroes(sd: Path) -> None:
     }
 
 
+def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
+    """The terminal configuration is a close-out fact for the same reason.
+
+    The stack ledger records every adoption and a revert does not retract the
+    row that adopted it, so what was still standing at the end is stated here.
+    """
+    record_close_opened(sd)
+    record_final_recipe(
+        sd,
+        throughput=142.5,
+        ttft_mean_ms=31.2,
+        e2el_mean_ms=980.0,
+        action_path=["baseline", "explore:cuda_graph"],
+        extra_server_args="--enable-torch-compile",
+        extra_envs={"HSA_ENABLE": 1},
+    )
+
+    recipe = _close(sd)["final_recipe"]
+    assert recipe["throughput"] == 142.5
+    assert recipe["action_path"] == ["baseline", "explore:cuda_graph"]
+    assert recipe["extra_server_args"] == "--enable-torch-compile"
+    # Stringified on the way in: the launch applies envs as strings, and a
+    # recipe that reproduces the run must say what was actually exported.
+    assert recipe["extra_envs"] == {"HSA_ENABLE": "1"}
+    # Carried beside the throughput because a session with no whole-stack
+    # validation has no validation row to read the pair off.
+    assert (recipe["ttft_mean_ms"], recipe["e2el_mean_ms"]) == (31.2, 980.0)
+
+
+def test_a_close_that_never_settled_a_recipe_omits_the_key(sd: Path) -> None:
+    """An empty recipe would claim a session that shipped a bare config."""
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="time_exhausted")
+
+    assert "final_recipe" not in _close(sd)
+
+
 def test_a_close_that_never_snapshotted_the_tally_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
     record_close_settled(sd, stop_reason="time_exhausted")
 
     assert "baseline_progress" not in _close(sd)
+
+
+def test_a_candidate_dropped_at_the_close_says_what_was_dropped(sd: Path) -> None:
+    """The drop narrative outlives the slot the report used to read it from.
+
+    The close drain empties ``geak_pending`` by the same write that settles it,
+    and every kernel event of the session has closed by then, so the verdict
+    has nowhere else to be read from.
+    """
+    record_close_opened(sd)
+    record_geak_candidate(
+        sd,
+        pending={
+            "status": "rebench_cancelled",
+            "revalidation_error": "close_sequence",
+            "self_reported_gain_pct": 12.5,
+            "self_reported_tput": 16800.0,
+            "self_reported_basis": "geak_internal_bench",
+        },
+        revalidation_pending=False,
+    )
+
+    candidate = _close(sd)["geak_candidate"]
+    assert candidate["status"] == "rebench_cancelled"
+    assert candidate["revalidation_error"] == "close_sequence"
+    assert candidate["self_reported_gain_pct"] == pytest.approx(12.5)
+    assert candidate["self_reported_tput"] == pytest.approx(16800.0)
+    assert candidate["self_reported_basis"] == "geak_internal_bench"
+
+
+def test_a_candidate_still_waiting_is_not_a_candidate_that_was_judged(sd: Path) -> None:
+    record_close_opened(sd)
+    record_geak_candidate(sd, pending={"status": "awaiting_rebench"}, revalidation_pending=True)
+
+    candidate = _close(sd)["geak_candidate"]
+    assert candidate["status"] == "awaiting_rebench"
+    assert candidate["revalidation_pending"] is True
+    assert candidate["revalidation_error"] is None
+
+
+def test_a_session_with_no_candidate_records_an_empty_verdict(sd: Path) -> None:
+    """Recorded rather than omitted: "no candidate" and "never looked" differ."""
+    record_close_opened(sd)
+    record_geak_candidate(sd)
+
+    candidate = _close(sd)["geak_candidate"]
+    assert candidate["status"] == ""
+    assert candidate["revalidation_pending"] is False
+    assert candidate["self_reported_gain_pct"] is None
+
+
+def test_a_close_that_never_drained_omits_the_candidate(sd: Path) -> None:
+    _run_sequence(sd)
+    record_close_settled(sd, stop_reason="time_exhausted")
+
+    assert "geak_candidate" not in _close(sd)

@@ -393,7 +393,7 @@ def _outcome(session_dir) -> dict[str, Any]:
     stack_event.finish()
     return collect_v6_outcome(
         session={"stop_reason": "target_reached"},
-        final={},
+        close={},
         state={},
         timeline=read_timeline_events(session_dir),
     )["validation"]
@@ -461,7 +461,7 @@ def test_outcome_marks_attribution_unavailable_without_a_ledger_event():
     """A session with no ``stack`` event never closed one, and cannot claim zero."""
     validation = collect_v6_outcome(
         session={"stop_reason": "signal"},
-        final={},
+        close={},
         state={},
         timeline=[],
     )["validation"]

@@ -102,7 +102,14 @@ async def test_a_validated_envelope_records_what_it_raised(agent_root, tmp_path)
     emit = {
         "tick_index": 7,
         "parse_warnings": ["clipped"],
-        "intent_envelope": {"intents": [{"intent_type": "alert", "payload": {"severity": "high", "topic": "crash_rate", "summary": "crash rate spiked"}}]},
+        "intent_envelope": {
+            "intents": [
+                {
+                    "intent_type": "alert",
+                    "payload": {"severity": "high", "topic": "crash_rate", "summary": "crash rate spiked"},
+                }
+            ]
+        },
     }
     await _backend(agent_root, tmp_path, emit).run("prompt")
 

@@ -7,8 +7,9 @@
   serialized into a bare ``--backends forge`` token, never ``str(["forge"])`` →
   ``"['forge']"`` (which the kernel-agent validator rightly rejects).
 * A non-GEAK attempt (e.g. a Claude subprocess that times out) must not
-  be silently bucketed under the GEAK invocation lane; the backend that ran is
-  stamped on the result and an unattributable failure never defaults to GEAK.
+  be silently bucketed under the GEAK lane the collectors project; the backend
+  that ran is stamped on the row and an unattributable failure never defaults
+  to GEAK.
 """
 
 from __future__ import annotations
@@ -18,8 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
-from hyperloom.inference_optimizer.breakdown.recorder import instrument
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
@@ -91,51 +90,12 @@ async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path
     assert result["backend"] == "claude"
 
 
-def test_record_kernel_invocations_claude_timeout_is_not_recorded_as_kernel_lane(tmp_path: Path):
-    # A backend-stamped (claude) no-attempts failure must not contaminate
-    # kernel backend lanes.
-    result = {
-        "kernel_id": "k008",
-        "status": "failed",
-        "error_class": "subprocess_timeout",
-        "error": "TimeoutExpired ... --backends claude",
-        "backend": "claude",
-        "attempts": [],
-    }
-    instrument.record_kernel_invocations(tmp_path, result)
-    sections = assemble_parts(tmp_path)
-    assert not sections.get("geak_invocations"), "must NOT contaminate the geak lane"
-    assert not sections.get("forge_invocations"), "must NOT contaminate the forge lane"
 
 
-def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
-    # A pre-dispatch failure with no resolvable backend must NOT be fabricated as GEAK.
-    result = {
-        "kernel_id": "k001",
-        "status": "failed",
-        "error_class": "kernel_agent_root_missing",
-        "error": "kernel-agent root missing",
-        "attempts": [],
-    }
-    instrument.record_kernel_invocations(tmp_path, result)
-    sections = assemble_parts(tmp_path)
-    assert not sections.get("geak_invocations"), "unknown backend must not default to geak"
-    assert not sections.get("forge_invocations")
 
 
-def test_record_kernel_invocations_geak_still_records(tmp_path: Path):
-    # A real GEAK pre-dispatch failure still records on the geak lane.
-    result = {
-        "kernel_id": "k001",
-        "status": "failed",
-        "error_class": "non_reusable_kernel",
-        "error": "non reusable",
-        "backend": "geak",
-        "attempts": [],
-    }
-    instrument.record_kernel_invocations(tmp_path, result)
-    sections = assemble_parts(tmp_path)
-    assert sections.get("geak_invocations"), "geak failure must record on the geak lane"
+
+
 
 
 # --------------------------------------------------------------------------- #

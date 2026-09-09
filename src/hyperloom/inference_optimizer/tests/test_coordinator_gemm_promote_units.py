@@ -23,6 +23,7 @@ import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -735,6 +736,51 @@ class TestCollectiveIntegratePromotion:
         assert coord.shared_state.last_collective["collective_attempt_id"] == first_attempt_id
         assert len(coord.shared_state.collective_attempts) == 1
         assert coord.bus.messages[0].payload["kind"] == "run_collective_done"
+
+    @pytest.mark.asyncio
+    async def test_handle_collective_records_the_run_on_the_kernel_timeline(self, tmp_path, monkeypatch):
+        """A campaign the E2E gate may still reject has to leave a timeline row.
+
+        The stack ledger only learns about a collective that survives integrate,
+        so the settle point is the only place a withheld KEEP gets recorded.
+        """
+        from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        async def _fake_integrate(result):
+            """Stop before integrate: the run row must already exist."""
+
+        monkeypatch.setattr(phase, "_integrate_collective", _fake_integrate)
+
+        with session_scope(tmp_path):
+            phase._open_kernel_timeline(route="collective_only", route_reason="test", from_phase="")
+            await phase._handle_collective_result(
+                {
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "kept": True,
+                    "requires_e2e_validation": True,
+                    "engine": "forge_collective",
+                    "collective_op": "all_reduce",
+                    "world_size": 8,
+                    "kernel_speedup": 1.25,
+                }
+            )
+            phase._close_kernel_timeline(verdict="kept")
+            events = [e for e in read_timeline_events(tmp_path) if e.get("type") == "kernel"]
+
+        runs = events[0]["ext"]["forge"]["lanes"]["collective_runs"]
+        assert len(runs) == 1
+        assert runs[0]["op"] == "all_reduce"
+        assert runs[0]["world_size"] == 8
+        assert runs[0]["gain_pct"] == pytest.approx(25.0)
+        # Withheld until the gate rules, which is the whole reason this row exists.
+        assert runs[0]["withheld"] is True
+        assert runs[0]["withhold_reason"] == "pending_e2e_validation"
+        assert runs[0]["micro_decision"] == "KEEP"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("finalize_status", ["ok", "partial"])

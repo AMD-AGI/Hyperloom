@@ -14,7 +14,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_float
 
-from .base import RenderedSection, as_dict, session_of, stop_reason_of, task_config_of
+from .base import RenderedSection, as_dict, outcome_of, session_of, stop_reason_of, task_config_of, validation_of
 
 __all__ = ["GlobalFacts", "build_global_facts"]
 
@@ -33,7 +33,9 @@ class GlobalFacts:
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
     data_quality_flags: list[str]
-    attribution_method: str  # "validated" | "unattributed" | "unattributed (stack listed for reference, not verified as KEEP)" | "missing"
+    # "stack_ledger" | "unattributed" | "unattributed (stack listed for
+    # reference, not verified as KEEP)" | "missing"
+    attribution_method: str
 
     def as_prompt_dict(self) -> dict[str, Any]:
         """Serialize the fact pack to a plain dict for the LLM prompt.
@@ -72,9 +74,9 @@ def _gain_attribution_lines(
 ) -> tuple[list[str], str]:
     """Compute per-source gain attribution + the method used.
 
-    Priority: canonical ``optimizations.summary_by_source``. Legacy
-    ``attribution.source_breakdown`` remains a read-only fallback for archived
-    breakdowns supplied directly to the reporter.
+    Read off ``outcome.validation``, the stack ledger's own account of itself.
+    A run whose ledger holds no measurable contribution falls back to naming
+    the total as unattributed and listing the final stack for reference.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
@@ -83,9 +85,8 @@ def _gain_attribution_lines(
         A tuple of the human-readable attribution lines and a label
         describing the method used to derive them.
     """
-    optimizations = as_dict(breakdown.get("optimizations"))
-    summary = as_dict(optimizations.get("summary_by_source"))
-    validation = as_dict(optimizations.get("validation"))
+    validation = validation_of(breakdown)
+    summary = as_dict(as_dict(validation.get("attribution")).get("by_source"))
     canonical_sources = {
         source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
@@ -99,31 +100,14 @@ def _gain_attribution_lines(
                 key=lambda item: -item[1],
             )
         ]
-        method = validation.get("method")
-        return lines, str(method) if isinstance(method, str) and method else "missing"
+        # Every contribution is measured against the session baseline, so the
+        # split is the ledger's own arithmetic rather than one of several
+        # attribution methods the section used to have to name.
+        return lines, "stack_ledger"
 
-    attribution = as_dict(breakdown.get("attribution"))
-    sb = as_dict(attribution.get("source_breakdown"))
-    total = to_float(sb.get("validated_total_pct"))
-    sources = {
-        "backends": to_float(sb.get("backends_pct_of_total")),
-        "params": to_float(sb.get("params_pct_of_total")),
-        "explore": to_float(sb.get("explore_pct_of_total")),
-        "replay_warm_recipe": to_float(sb.get("replay_warm_recipe_pct_of_total")),
-        "geak": to_float(sb.get("geak_pct_of_total")),
-        "sweep": to_float(sb.get("sweep_pct_of_total")),
-    }
-    nonzero = {k: v for k, v in sources.items() if v and v != 0}
-    if nonzero and total:
-        lines = [
-            f"{k}: {v:.2f}% of total (={(v / total * 100):.0f}% share of {total:.2f}%)"
-            for k, v in sorted(nonzero.items(), key=lambda kv: -kv[1])
-        ]
-        return lines, "validated"
-
-    final = as_dict(breakdown.get("final"))
+    final = as_dict(outcome_of(breakdown).get("final"))
     path = final.get("action_path") or []
-    gain_v = to_float(final.get("cumulative_gain_pct_validated"))
+    gain_v = to_float(final.get("gain_pct"))
     # No validated per-source split. We must NOT claim a KEEP or "100% via"
     # from optimization_stack alone: action_path is built from the final stack,
     # which can include seeded / warm-replayed entries that were never a real
@@ -151,6 +135,9 @@ def _gain_attribution_lines(
 def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     """Count kernels at each stage of the optimization lifecycle.
 
+    Counted off the same per-kernel rollup the lifecycle section renders, so
+    the funnel in the summary and the table below it cannot disagree.
+
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
 
@@ -159,15 +146,20 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
             ``recommended``, ``optimized``, ``adopted``, ``partial``,
             ``reverted`` and ``rejected``).
     """
-    kl = as_dict(breakdown.get("kernel_lifecycle"))
+    from ._renderers._kernels import kernel_rows
+
+    rows = kernel_rows(breakdown)
+    decisions = [str(row.get("final_decision") or "") for row in rows]
     return {
-        "detected": len(kl.get("detected") or []),
-        "recommended": len(kl.get("recommended") or []),
-        "optimized": len(kl.get("optimized") or []),
-        "adopted": len(kl.get("adopted") or []),
-        "partial": len(kl.get("partial") or []),
-        "reverted": len(kl.get("reverted") or []),
-        "rejected": len(kl.get("rejected") or []),
+        "detected": len(rows),
+        "recommended": sum(1 for row in rows if row.get("selected_for_optimization")),
+        "optimized": sum(1 for row in rows if row.get("geak") or row.get("forge")),
+        "adopted": decisions.count("kept"),
+        # A candidate a route measured and nothing gated: the win is real at
+        # the micro level and was never ruled on end to end.
+        "partial": decisions.count("attempted"),
+        "reverted": decisions.count("reverted"),
+        "rejected": decisions.count("rejected"),
     }
 
 
@@ -215,13 +207,8 @@ def _data_quality_flags(
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    optimizations = as_dict(breakdown.get("optimizations"))
-    validation = as_dict(optimizations.get("validation"))
-    attribution = as_dict(breakdown.get("attribution"))
-    notes = validation.get("notes") or attribution.get("notes") or []
-    if notes:
-        for n in notes:
-            _push(f"[attribution] {n}")
+    for note in validation_of(breakdown).get("notes") or []:
+        _push(f"[attribution] {note}")
     return flags
 
 
@@ -237,11 +224,12 @@ def _capabilities_split(
         tuple[list[str], list[str]]: A sorted list of capability names with
             status ``"kept"`` and a sorted list with status ``"not_attempted"``.
     """
-    cap = as_dict(breakdown.get("capability_summary"))
+    from ._renderers.capability_summary import capability_rows
+
     kept = []
     not_attempted = []
-    for name, v in cap.items():
-        status = as_dict(v).get("status") or "not_attempted"
+    for name, row in capability_rows(breakdown).items():
+        status = str(row.get("status") or "not_attempted")
         if status == "kept":
             kept.append(name)
         elif status == "not_attempted":
@@ -262,9 +250,10 @@ def _headline(breakdown: dict[str, Any]) -> str:
     from ... import framework_registry
 
     fw = task_config_of(breakdown).get("framework_name")
-    b = to_float(as_dict(breakdown.get("baseline")).get("throughput_tok_s_per_gpu"))
-    f = to_float(as_dict(breakdown.get("final")).get("throughput_tok_s_per_gpu"))
-    g = to_float(as_dict(breakdown.get("final")).get("cumulative_gain_pct_validated"))
+    outcome = outcome_of(breakdown)
+    b = to_float(as_dict(outcome.get("baseline")).get("throughput_tok_s_per_gpu"))
+    f = to_float(as_dict(outcome.get("final")).get("throughput_tok_s_per_gpu"))
+    g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
         return (

@@ -97,39 +97,6 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
-def test_build_exports_geak_diagnostics_and_capability_engagement(tmp_path):
-    (tmp_path / "state.json").write_text(
-        json.dumps(
-            {
-                "session_id": "geak-session",
-                "kernel_optimizer": "geak",
-                "geak_result": {
-                    "status": "ok",
-                    "baseline_throughput_tok_s": 1000.0,
-                    "final_throughput_tok_s": 1032.0,
-                    "accepted_kernels": [{"kernel_id": "k1"}],
-                },
-                "optimization_stack": [{"action": "geak_e2e", "variant_name": "geak_e2e", "source": "geak_e2e"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    out = ex.build(tmp_path)
-
-    assert out["geak"]["engaged"] is True
-    assert out["geak"]["gain_pct"] == pytest.approx(3.2)
-    assert out["capability_summary"]["geak"]["status"] == "kept"
-    assert out["capability_summary"]["geak"]["attempts"] == 1
-
-
-def test_build_include_transcripts_process_default(tmp_path):
-    ex.set_default_include_transcripts(True)
-    try:
-        out = ex.build(tmp_path)
-        assert out["schema_version"] is not None
-    finally:
-        ex.set_default_include_transcripts(False)
 
 
 # ---- write_breakdown_json ----
@@ -285,23 +252,21 @@ def test_patch_breakdown_langfuse_success(tmp_path):
     assert ex.patch_breakdown_langfuse(tmp_path) is False
 
 
-# ---- recorder fragment / collector final merge ----
+# ---- outcome.final over the close-out's recipe ----
 
 
-def test_final_fragment_keeps_collector_invocation(tmp_path):
-    """When a recorder fragment exists for final, collector invocation must be preserved."""
+def test_final_is_projected_from_the_recipe_the_close_out_settled(tmp_path):
+    """``outcome.final`` reports the recipe the close recorded, not a state re-read.
+
+    The export used to rebuild the headline from ``current_best`` and recover
+    the launch by trying candidate run directories. The close-out states the
+    terminal configuration instead, and this is the only source of it.
+    """
     import json
 
     sd = tmp_path
     (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "current_best": {"tput": 123.0, "extra_server_args": "", "extra_envs": {}},
-                "optimization_stack": [],
-                "cumulative_gain_validated": 0.0,
-                "framework": "sglang",
-            }
-        ),
+        json.dumps({"optimization_stack": [], "framework": "sglang"}),
         encoding="utf-8",
     )
     (sd / "manifest.json").write_text(
@@ -310,79 +275,37 @@ def test_final_fragment_keeps_collector_invocation(tmp_path):
     )
     parts = sd / "runtime" / "breakdown" / "parts"
     parts.mkdir(parents=True)
-    # Partial fragment with live scalar but no invocation.
-    (parts / "final__coordinator.json").write_text(
+    (parts / "close__coordinator.json").write_text(
         json.dumps(
             {
                 "kind": "singleton",
-                "section": "final",
+                "section": "close",
                 "producer": "coordinator",
                 "seq": 1,
                 "ts": "2026-01-01T00:00:00Z",
-                "payload": {"throughput_tok_s_per_gpu": 123.0, "extra_server_args": "", "extra_envs": {}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    bd = ex.build(sd)
-    final_sec = bd.get("final", {})
-    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "fragment scalar lost"
-    invocation = final_sec.get("invocation")
-    assert invocation is not None, "collector invocation must not be silenced by fragment"
-
-
-def test_final_source_layers_populated_from_stack(tmp_path):
-    """source_layers in final.invocation reflects source_patch entries."""
-    import json
-
-    sd = tmp_path
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "current_best": {
-                    "tput": 200.0,
-                    "extra_server_args": "",
-                    "extra_envs": {},
-                    "optimization_stack": [
-                        {
-                            "action": "integrate_patch",
-                            "scope": "source_patch",
-                            "variant_name": "patch-abc",
-                            "source_snapshot": "/session/opt/src/abc",
-                            "framework_root": "/opt/sglang",
-                            "base_sha": "cafebabe",
-                        }
-                    ],
+                "payload": {
+                    "status": "succeeded",
+                    "final_recipe": {
+                        "throughput": 123.0,
+                        "action_path": ["baseline"],
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    },
                 },
-                "optimization_stack": [
-                    {
-                        "action": "integrate_patch",
-                        "scope": "source_patch",
-                        "variant_name": "patch-abc",
-                        "source_snapshot": "/session/opt/src/abc",
-                        "source_snapshot_complete": True,
-                        "framework_root": "/opt/sglang",
-                        "base_sha": "cafebabe",
-                    }
-                ],
-                "cumulative_gain_validated": 0.0,
-                "framework": "sglang",
             }
         ),
         encoding="utf-8",
     )
-    (sd / "manifest.json").write_text(
-        json.dumps({"schema_version": 3, "session_id": "s", "model_name": "m", "framework": "sglang"}),
-        encoding="utf-8",
-    )
 
     bd = ex.build(sd)
-    invocation = bd.get("final", {}).get("invocation", {})
-    layers = invocation.get("source_layers", [])
-    assert len(layers) == 1, f"expected 1 source_layer, got {layers}"
-    assert layers[0]["snapshot_dir"] == "/session/opt/src/abc"
-    assert layers[0]["reproducible"] is True
+    final_sec = bd.get("outcome", {}).get("final", {})
+    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "recorded recipe lost"
+    assert final_sec.get("action_path") == ["baseline"]
+    invocation = final_sec.get("invocation")
+    assert invocation is not None, "the final block must always carry an invocation"
+    # A session that never settled a validation has no recorded launch, and the
+    # block says so rather than leaving the reader to guess at an empty string.
+    assert invocation["framework_args_source"] == "unrecorded"
 
 
 # ---- telemetry.orchestration_context ----
@@ -418,30 +341,8 @@ def _write_checkpoint_events(session_dir: Path, levels: list[int], *, degenerate
         conn.close()
 
 
-def test_orchestration_context_exposes_a_compaction_storm(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
-
-    _write_checkpoint_events(tmp_path, [145_556 + i for i in range(32)], degenerate=1)
-    state = {"tick": 32, "orchestration_prompt_modes": {"seed": 32, "delta": 0}}
-    section = collect_telemetry(tmp_path, state, [])["orchestration_context"]
-
-    assert section["compactions"] == 32
-    assert section["compactions_per_tick"] == 1.0
-    assert section["degenerate_compactions"] == 1
-    assert section["seed_prompts"] == 32
-    assert section["delta_ratio"] == 0.0
-    assert section["context_tokens_at_compaction"]["min"] == 145_556
 
 
-def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
-
-    warnings: list[str] = []
-    section = collect_telemetry(tmp_path, {}, warnings)["orchestration_context"]
-    assert section["compactions"] == 0
-    assert section["compactions_per_tick"] == 0.0
-    assert section["context_tokens_at_compaction"] == {}
-    assert warnings == []
 
 
 def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
@@ -795,27 +696,19 @@ def test_the_merged_section_measures_its_own_elapsed_time():
 # ---- every collector is isolated ----
 
 
-def test_a_failing_collector_does_not_abort_the_build(tmp_path, monkeypatch):
-    """source_files was the one collector called outside the isolation wrapper."""
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-
-    def _boom(*_a, **_kw):
-        raise OSError("filesystem gone")
-
-    monkeypatch.setattr(ex.collectors, "collect_source_files", _boom)
-
-    out = ex.build(tmp_path)
-
-    assert out["source_files"] == {}
-    assert any("collector:source_files failed" in w for w in out["warnings"])
 
 
-def test_collector_arguments_are_evaluated_inside_the_isolation(tmp_path, monkeypatch):
-    """A drifted section must not raise while building a collector's arguments."""
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(ex.collectors, "collect_baseline", lambda *_a, **_kw: "not-a-mapping")
+def test_collector_arguments_are_evaluated_inside_the_isolation():
+    """A collector whose arguments raise is caught like one whose body does.
 
-    out = ex.build(tmp_path)
+    The arguments are built by the zero-argument closure the wrapper calls, so
+    a section that drifted to an unexpected shape cannot abort the build while
+    another collector's call is being assembled.
+    """
+    warnings: list[str] = []
+    drifted = "not-a-mapping"
 
-    assert out["source_files"] == {}
-    assert any("collector:source_files failed" in w for w in out["warnings"])
+    out = ex._safe_collect("probe", lambda: {"seen": drifted.get("key")}, warnings, default={})
+
+    assert out == {}
+    assert any("collector:probe failed: AttributeError" in w for w in warnings)

@@ -920,9 +920,7 @@ def extract_benchmark_measurement(
     # that is the question a reader asks of it: the two are read from the same
     # place in every path that supplies either, and TTFT is the one a latency
     # reference is anchored on.
-    measurement["ttft_e2el_source"] = (
-        origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
-    )
+    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
     # Separate from the pair: TPOT is the one latency figure that can be
     # computed rather than measured, and a derived value must not be read as
     # one the benchmark reported.

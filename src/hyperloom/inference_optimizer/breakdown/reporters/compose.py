@@ -30,7 +30,6 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     param_search as _r_param_search,
     attribution as _r_attribution,
     optimizations as _r_optimizations,
-    source_files as _r_source_files,
 )
 
 
@@ -44,7 +43,6 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
     ("Run Trace", ["phase_timeline"]),
-    ("Source Artifacts", ["source_files"]),
 ]
 
 __all__ = [
@@ -63,7 +61,6 @@ __all__ = [
     "_r_param_search",
     "_r_attribution",
     "_r_optimizations",
-    "_r_source_files",
 ]
 
 

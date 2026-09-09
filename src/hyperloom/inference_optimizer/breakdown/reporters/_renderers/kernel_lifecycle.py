@@ -3,6 +3,10 @@
 
 """Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle.
 
+Built from the per-kernel rollup over the ``kernel`` timeline events, so a
+kernel discovered in one visit and gated in a later one reads as one kernel
+rather than as two half-populated rows.
+
 Columns are built locally in ``render`` and are dynamic: ``bw%`` /
 ``compute%`` are omitted when no detected kernel reports them. Skipped when no
 kernels were detected (implies the profile phase never ran).
@@ -18,6 +22,7 @@ from ..base import (
     md_table,
     register_renderer,
 )
+from ._kernels import kernel_rows
 
 _MAX_NAME_LEN = 70
 
@@ -100,16 +105,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         RenderedSection: The rendered section with key facts, decisions and
             the markdown table.
     """
-    kl = breakdown.get("kernel_lifecycle") or {}
-    raw_detected = kl.get("detected") or []
-    detected: list[dict[str, Any]] = []
-    for d in raw_detected:
-        if not isinstance(d, dict):
-            detected.append({"kernel_id": str(d)})
-            continue
-        if not d.get("kernel_id"):
-            continue
-        detected.append(d)
+    detected = kernel_rows(breakdown)
 
     if not detected:
         return RenderedSection(

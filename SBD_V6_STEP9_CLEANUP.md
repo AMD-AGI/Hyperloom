@@ -518,8 +518,8 @@ exporter.py:394-400  → collect_recorded_optimizations(..., geak_invocations, f
 |---|---|
 | **S1** | **已完成**（2026-09-07）。`v6.py:358` 加 `warm_replay` guard + 修 docstring；新增 `test_a_recorded_replay_is_not_projected_a_second_time` 并验证其在无 guard 时确实失败（`['warm_replay','warm_replay']`）。批次 0 的 0b 经查为误判，已更正（见 §3 批次 0）。SBD 相关 1235 测试通过。 |
 | **S2** | **已完成**（2026-09-07）。净删 3147 行：5 个死 v4 section + 写入面、7 个无写入方的 `SECTION_SHAPES` 注册、6 个空报告小节 + `critic_robustness` renderer、`_SECTIONS_WITHOUT_PRODUCER` 抑制表、`attribution.py` 与两个测试专用 collector、7 个零 reader 顶层键。报告完整性测试改为断言"无 renderer 读不可产出的键"。 |
-| **S3** | **部分完成**（2026-09-07）。已做 3 项：#1 versions 进 `metadata`（探测机器搬到 `tool_versions.py`，v4 流 + assembler fold 一并删）、#9 robustness 新顶层字段（实时录 intents，含两条失败路径，修掉 §1.5.1 的空壳）、#3 critic 新顶层字段（对等门通过）。**#2 与 #10 卡在决策上，见 §6.5.1**。#4–#8 未开始。 |
-| **S4** | **部分完成**（2026-09-07）。versions / robustness / critic 三个 v4 写入面已退役，`critic_robustness` 合成字段 + collector + `kb_writes_summary` 一并删（净删 414 行）。**specialist_runs 那一面等 §6.5.1 的决策**。 |
+| **S3** | **已完成**（2026-09-07）。10 项里 9 项落地，#10 `capability_summary` 转 S6（不是零 reader，见 §6.5.1）。新录制 4 项：#1 versions 进 `metadata`（探测机器搬到 `tool_versions.py`，v4 流 + assembler fold 一并删）、#9 robustness 新顶层字段（实时录 intents，含两条失败路径，修掉 §1.5.1 的空壳）、#3 critic 新顶层字段（对等门通过）、#2 specialist runs 按 §6.5.1 的分流方案落地。#6 geak 终局判决补齐：`record_geak_rebench_conclusion` 原本无调用方，已接到 writeback 的四个终局盖章点；`revalidation_pending` / 收尾时的 `geak_pending` 落 `close.geak_candidate` 而非 `timeline[kernel]`——理由与 `baseline_progress` 同：drain 发生在全部 kernel 事件关闭之后，没有事件能持有它。#4 #5 #7 #8 经核查早已由 `baseline_event` / `roofline_event` / `kernel_event` 覆盖并有测试，无需新录。 |
+| **S4** | **已完成**（2026-09-07）。四个 v4-only 事实的写入面全退役：versions / robustness / critic 三面 + `critic_robustness` 合成字段 + collector + `kb_writes_summary`（净删 414 行）；`instrument.record_specialist_round` + `specialist_runs` section + `collect_specialist_runs` + 三个 schema TypedDict + `explore_state` 里的录制钩子一并删。遗留：`--breakdown-include-transcripts` 与 dump 工具的 `--include-transcripts` 随 `collect_specialist_runs` 一起失效，成了空开关，但删 CLI 面属用户可见改动，见 §6.5.2。 |
 | S5–S7 | 未开始 |
 
 **提交边界的现实约束**：工作树当前有 90 个文件未提交（第 1–8 项的累积成果），所以 §6.2 "每步 1 个提交"要先把历史工作分离出去才成立。S1 的改动本身只涉及 2 个文件（`collectors/v6.py`、`test_sbd_v6_kb_timeline.py`）。
@@ -628,3 +628,18 @@ reporters/_renderers/capability_summary.py   活的 renderer（S2 没删）
 ```
 
 "停建字段"会同时打掉一个活的一致性检查和一个活的 renderer，而"由 renderer 从各事件聚合"就是 §2.3 那类 repoint 工作，属于 S6。**建议并入 S6，不作为 S3 的独立一项。**
+
+### 6.5.2 S4 留下的一个空 CLI 开关（2026-09-07）
+
+`collect_specialist_runs` 是 `--breakdown-include-transcripts` 唯一的消费方。该 collector 随 S4 退役后，
+这个开关和 `dump_session_breakdown` 的 `--include-transcripts` 都还在被解析、还在一路传到
+`exporter.build(include_transcripts=...)`，但已经不影响任何输出。
+
+没有随手删，因为删 CLI 参数是用户可见的接口改动，不该混在写入面退役里。两个选项：
+
+| 选项 | 代价 |
+|---|---|
+| 删掉两个开关和 `exporter` 的整条 `include_transcripts` 管道 | 用户可见接口收窄；脚本里带这个 flag 的会报未知参数 |
+| 保留开关但让它重新有意义——specialist transcript 现在挂在 timeline 的 run / action 行上，可以由它控制是否内联 | 属新功能，不在 S1–S7 范围内 |
+
+倾向前者，放到 S7 与 `discovered_flags` 一起做，那一步本来就是删用户可见的东西。

@@ -2792,15 +2792,13 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     # The bypass route dispatches its own tool, never TraceLens.
     assert any("bypass_trace_analysis.py" in c for c in captured["cmd"])
 
-    out = assemble_parts(session_dir)
-    runs = out["kernel_journey"]["discovery_runs"]
-    assert len(runs) == 1
-    run = runs[0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "ok"
-    assert run["hot_kernel_count"] == 2
-    assert {k["name"] for k in run["hot_kernels"]} == {"fused_moe", "rms_norm"}
-    assert run["scan"]["analysis_route"] == "bypass"
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert {k["name"] for k in res["hot_kernels"]} == {"fused_moe", "rms_norm"}
+    # The build of the reader that produced these kernels is in scope only
+    # here, so the handler records it rather than leaving it to a caller.
+    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2896,12 +2894,13 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     )
     assert res["status"] == "failed"
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "failed"
-    assert run["hot_kernel_count"] == 0
-    assert run["error"]
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert not res.get("hot_kernels")
+    assert res["error"]
+    # A failed read still identifies the build that failed.
+    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2911,7 +2910,6 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
 ):
     """High-idle gate suppresses hot kernels but the run still succeeds -> a
     bypass discovery run with status=ok and hot_kernel_count=0."""
-    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2938,11 +2936,10 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     )
     assert res["status"] == "ok"
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "ok"
-    assert run["hot_kernel_count"] == 0
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert not res.get("hot_kernels")
 
 
 @pytest.mark.asyncio
@@ -2975,7 +2972,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    await krh.trace_analyze_handler(
+    res = await krh.trace_analyze_handler(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
@@ -2984,10 +2981,10 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
         session_dir=session_dir,
     )
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "tracelens"
-    assert run["scan"]["analysis_route"] == "agent"
+    meta = res["analysis_meta"]
+    assert meta["tool"] == "tracelens"
+    assert meta["route"] == "agent"
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio

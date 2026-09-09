@@ -217,6 +217,49 @@ class ClosePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — the record must not outrank the close-out
             log.debug("CLOSE: baseline progress record failed", exc_info=True)
 
+    def _record_close_final_recipe(self) -> None:
+        """Snapshot the configuration the session ended on into the close section.
+
+        Best-effort: this describes the wind-down and must never obstruct it.
+        """
+        try:
+            state = self.shared_state
+            best = state.current_best if isinstance(state.current_best, dict) else {}
+            config = self._current_best_launch_config()
+            action_path: list[str] = []
+            for entry in state.optimization_stack or []:
+                if not isinstance(entry, dict):
+                    continue
+                action = str(entry.get("action") or "")
+                variant = str(entry.get("variant_name") or "")
+                action_path.append(f"{action}:{variant}" if variant else action)
+            _close_out.record_final_recipe(
+                self.session_dir,
+                throughput=best.get("tput"),
+                ttft_mean_ms=best.get("ttft_mean_ms"),
+                e2el_mean_ms=best.get("e2el_mean_ms"),
+                action_path=action_path,
+                extra_server_args=config.get("extra_server_args") or "",
+                extra_envs=config.get("extra_envs") or {},
+            )
+        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+            log.debug("CLOSE: final recipe record failed", exc_info=True)
+
+    def _record_close_geak_candidate(self) -> None:
+        """Snapshot where the GEAK candidate stood into the close section.
+
+        Best-effort: this describes the wind-down and must never obstruct it.
+        """
+        try:
+            state = self.shared_state
+            _close_out.record_geak_candidate(
+                self.session_dir,
+                pending=state.geak_pending if isinstance(getattr(state, "geak_pending", None), dict) else {},
+                revalidation_pending=getattr(state, "resume_pending_revalidation", False),
+            )
+        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+            log.debug("CLOSE: geak candidate record failed", exc_info=True)
+
     async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
         """Stop any GEAK 2b rebench and close its pending slot as the run winds down.
 
@@ -245,6 +288,7 @@ class ClosePhase(PhaseHandler):
                 self.shared_state,
                 reason=reason,
             )
+            self._record_close_geak_candidate()
             if not (dropped or settled):
                 return
             if settled:
@@ -317,6 +361,10 @@ class ClosePhase(PhaseHandler):
         # can be reconciled: the adoptions and the whole-stack validations are
         # both complete, and the two can be asked the same question.
         self._close_stack_ledger()
+        # And the first moment the recipe that shipped is settled: the ledger
+        # above records every adoption, but a revert leaves its adoption row
+        # standing, so what the stack ended as is stated here or nowhere.
+        self._record_close_final_recipe()
 
         # ---------------- Fact finalize (Recipe KB commit) -------------------
         # Publish before report/breakdown/Langfuse so the terminal outcome and

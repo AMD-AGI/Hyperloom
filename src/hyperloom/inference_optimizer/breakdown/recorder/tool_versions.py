@@ -2,10 +2,16 @@
 
 Which build of tracelens, GEAK, forge or a CLI agent produced a session's
 results is a static property of the run: probed once when the tool is first
-used and unchanged thereafter. It is recorded straight into the ``metadata``
-singleton rather than accumulated in a stream and folded together at export,
-so the exported provenance is what the run actually resolved rather than a
-re-derivation from whatever the environment looks like at export time.
+used and unchanged thereafter. Recording it at author time keeps the exported
+provenance to what the run actually resolved rather than a re-derivation from
+whatever the environment looks like at export time.
+
+Each tool owns one row in the ``versions`` item stream, keyed by its name, and
+the assembler folds the stream into ``metadata.versions.tools``. The rows
+cannot be written into the ``metadata`` singleton directly: a singleton is one
+file per producer and assembly keeps only the newest, so these writes would be
+dropped whole by the Coordinator's own metadata write, which is reissued on
+every state save and is therefore always the newer of the two.
 
 Probing is best-effort and cached per (tool, root): a tool that cannot be
 resolved contributes an empty version rather than blocking the caller.
@@ -22,7 +28,7 @@ from .trace import trace_skip
 
 log = logging.getLogger(__name__)
 
-SECTION = "metadata"
+SECTION = "versions"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
 _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
@@ -233,9 +239,8 @@ def record_tool_version(
 ) -> None:
     """Record one external tool's resolved provenance under ``metadata.versions.tools``.
 
-    Idempotent per tool: re-recording the same tool overwrites its own entry
-    and leaves the other tools alone, because the ``metadata`` singleton is
-    deep-merged.
+    Idempotent per tool: the row is keyed by the tool name, so re-recording the
+    same tool overwrites its own row and leaves the other tools alone.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value
@@ -253,10 +258,7 @@ def record_tool_version(
         return
     try:
         meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
-        recorder_for(session_dir, producer=producer).record_upsert_singleton(
-            SECTION,
-            {"versions": {"tools": {name: meta}}},
-        )
+        recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
     except Exception as exc:  # noqa: BLE001
         log.debug("record_tool_version failed for %s", name, exc_info=True)
         trace_skip(reason="writer raised", section=SECTION, entity=name, error=exc)

@@ -90,6 +90,33 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
     return getter() if callable(getter) else None
 
 
+def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
+    """Name the task a proposal became, on the proposal's own row.
+
+    This is what joins the two halves of one decision: the proposal row says
+    what was asked for and what the Critic said about it, the dispatch row
+    beside it on the same phase event says what was run. Without the task id
+    they sit on one event with nothing connecting them, and the join has to be
+    rebuilt from a sidecar map at export.
+
+    Args:
+        proposal_msg_id (str): The proposal that materialized.
+        task_id (str): The task it became.
+    """
+    if not proposal_msg_id or not task_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_proposal_outcome(
+            proposal_msg_id=str(proposal_msg_id),
+            materialized=True,
+            task_id=str(task_id),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot break the loop
+        log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
+
+
 def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
     """Record that one config-arm grid reached a bench.
 
@@ -675,6 +702,7 @@ class ProposalsCollaborator:
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:

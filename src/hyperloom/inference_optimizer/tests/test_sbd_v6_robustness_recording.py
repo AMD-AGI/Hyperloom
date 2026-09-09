@@ -53,7 +53,12 @@ def test_a_raised_intent_carries_its_type_and_severity(tmp_path: Path) -> None:
     assert turn["outcome"] == OUTCOME_INTENTS
     assert turn["tick_index"] == 41
     assert turn["intents"] == [
-        {"type": "alert", "severity": "high", "topic": "crash_rate", "payload": {"severity": "high", "topic": "crash_rate"}}
+        {
+            "type": "alert",
+            "severity": "high",
+            "topic": "crash_rate",
+            "payload": {"severity": "high", "topic": "crash_rate"},
+        }
     ]
     assert turn["parse_warnings"] == ["truncated tail"]
     assert turn["workdir"].endswith("003")

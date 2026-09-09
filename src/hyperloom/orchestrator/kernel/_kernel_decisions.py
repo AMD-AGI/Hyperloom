@@ -606,50 +606,6 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # Record the integrate outcome into the breakdown recorder (idempotent per
-    # kernel_id, best-effort).
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        sdir = getattr(state, "_session_dir", None)
-        if not sdir or not kernel_id:
-            # Checked before the recorder is reached, so the recorder's own
-            # guard never rules on it. On a KEEP this is the adoption that
-            # credits the integrate, and nothing downstream can tell its
-            # absence from a step that earned nothing.
-            trace_recording_skipped(
-                "kernel_e2e",
-                reason="no session_dir" if not sdir else "no kernel_id",
-                entity=kernel_id,
-            )
-        else:
-            _dec = str(result.get("decision") or "").upper()
-            instrument.record_kernel_e2e(
-                sdir,
-                kernel_id=kernel_id,
-                integrated=(_dec == "KEEP"),
-                e2e_gain_pct=result.get("gain_pct"),
-                validated=True if _dec == "KEEP" else None,
-                decision=_dec,
-                patch_path=patch_path,
-                target_file=target_file,
-                extra_server_args=extra_args,
-                result=result,
-                # The id recovered above, not the one on the result: a result
-                # that reached us without one still belongs to the pending
-                # integrate we matched it to, and that is the integrate whose
-                # readings must not be written over by a later one.
-                occurrence=integration_id or None,
-                validation_tier=(str(result.get("validation_tier") or "integrate_e2e") if _dec == "KEEP" else ""),
-            )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "kernel_e2e",
-            reason="caller raised before the recorder",
-            entity=kernel_id,
-            error=exc,
-        )
-
     if result.get("decision") == "KEEP":
         validation_tier = str(result.get("validation_tier") or "")
         integration_status = str(result.get("integration_validation_status") or "")
@@ -760,71 +716,16 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         }
     elif str(result.get("kernel_id") or ""):
         state.last_kernel_opt_dispatch_skip = {}
-    # Author-time breakdown capture: record geak/forge invocations before the
-    # metadata-less early return so no failed attempt becomes invisible.
+    # Author-time breakdown capture: record the backend attempts and their
+    # builds before the metadata-less early return, so no failed attempt
+    # becomes invisible.
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-        sdir = getattr(state, "_session_dir", None)
-        instrument.record_kernel_invocations(sdir, result)
-        # Record dispatch and per-backend attempts.
-        _kid = str(result.get("kernel_id") or "")
-        if not sdir or not _kid:
-            trace_recording_skipped(
-                "kernel_dispatch",
-                reason="no session_dir" if not sdir else "no kernel_id",
-                entity=_kid,
-            )
-        else:
-            _attempts = result.get("attempts")
-            _attempts = _attempts if isinstance(_attempts, list) else []
-            _backends = []
-            for _a in _attempts:
-                if isinstance(_a, dict):
-                    _b = str(_a.get("backend") or "").lower()
-                    if _b and _b not in _backends:
-                        _backends.append(_b)
-            if not _backends:
-                _sel = result.get("selected_backends") or result.get("backends")
-                if isinstance(_sel, list):
-                    _backends = [str(b).lower() for b in _sel if b]
-            # A backend that failed before dispatching attempts still counts as
-            # dispatched. Mirror record_kernel_backend_result's failure-detect
-            # so the synthetic FAILED attempt and the dispatch flag stay
-            # consistent.
-            _status = str(result.get("status") or "").lower()
-            _err_class = str(result.get("error_class") or "")
-            _decision = str((result.get("proposal") or {}).get("decision") or "").upper()
-            _failed_predispatch = (not _attempts) and (
-                _status in {"failed", "error", "crashed", "timeout"} or (_decision == "REVERT" and bool(_err_class))
-            )
-            if _failed_predispatch and not _backends:
-                # Never default an unattributable failure to GEAK; "unknown"
-                # reflects a pre-dispatch gating failure with no backend launched.
-                _b = str(result.get("backend") or "").lower() or "unknown"
-                _backends = [_b]
-            _dispatched = bool(_attempts) or _failed_predispatch
-            instrument.record_kernel_dispatch(
-                sdir,
-                kernel_id=_kid,
-                dispatched=_dispatched,
-                backends=_backends,
-                # ``reason`` first: for an undispatched row it is the only field
-                # that names *which* gate declined -- below the GPU-share floor,
-                # merged into an op-fanout representative, a group already in
-                # flight. ``status`` is "skipped" for all of them, so reading it
-                # first collapses the distinction this lane exists to draw.
-                skip_reason=(
-                    ""
-                    if _dispatched
-                    else str(result.get("reason") or result.get("error_class") or result.get("status") or "")
-                ),
-                orchestration_commit=str(getattr(state, "code_revision", "") or ""),
-            )
-            instrument.record_kernel_backend_result(sdir, result)
+        instrument.record_backend_versions_and_timeline(getattr(state, "_session_dir", None), result)
     except Exception as exc:  # noqa: BLE001
         trace_recording_skipped(
-            "kernel_dispatch",
+            "versions",
             reason="caller raised before the recorder",
             entity=str(result.get("kernel_id") or ""),
             error=exc,
@@ -1151,21 +1052,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     attempts = list(state.gemm_tuning_attempts or [])
     attempts.append(entry)
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            getattr(state, "_session_dir", None),
-            payload={"task_id": str(entry.get("task_id") or "kernel_entry_gemm_tuning")},
-            result=entry,
-        )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "gemm_tuning",
-            reason="caller raised before the recorder",
-            entity=str(entry.get("task_id") or ""),
-            error=exc,
-        )
 
 
 def is_collective_candidate(candidate: dict[str, Any]) -> bool:

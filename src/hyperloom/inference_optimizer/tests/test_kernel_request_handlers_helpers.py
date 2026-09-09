@@ -473,19 +473,30 @@ def test_the_breakdown_records_which_gate_declined(tmp_path: Path) -> None:
     a skip from an attempt and could not tell a sub-floor kernel from one merged
     into an op-fanout representative or a group already in flight.
     """
-    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+        ROUTE_FORGE,
+        make_kernel_recorder,
+    )
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
 
     for reason in ("below_min_gpu_pct=5.0", "opfanout_merged_into=k002", "group_in_flight"):
         session = tmp_path / reason.replace("=", "_").replace(".", "_")
         session.mkdir()
         state = _state_owing_one_attempt()
         state._session_dir = session
-        krh.record_kernel_opt(state, {"status": "skipped", "reason": reason, "kernel_id": "k001"})
+        with session_scope(session):
+            recorder = make_kernel_recorder(macro_cycle=1, route=ROUTE_FORGE, route_reason="test")
+            recorder.begin(stack_depth_in=0, tput_before=1000.0, session_baseline_tput=1000.0)
+            krh.record_kernel_opt(state, {"status": "skipped", "reason": reason, "kernel_id": "k001"})
+            recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
 
-        kernels = assemble_parts(session)["kernel_journey"]["kernels"]
-        entry = next(k for k in kernels if k["kernel_id"] == "k001")
-        assert entry["dispatch"]["dispatched"] is False, reason
-        assert entry["dispatch"]["skip_reason"] == reason, reason
+            events = [e for e in read_timeline_events(session) if e.get("type") == "kernel"]
+
+        rewrites = events[0]["ext"]["forge"]["lanes"]["kernel_rewrites"]
+        entry = next(row for row in rewrites if row["kernel_id"] == "k001")
+        assert entry["dispatched"] is False, reason
+        assert entry["skip_reason"] == reason, reason
 
 
 def test_an_in_flight_hold_is_unattempted_but_a_spent_one_is_not() -> None:
