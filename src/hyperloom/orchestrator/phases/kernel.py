@@ -589,7 +589,7 @@ class KernelPhase(PhaseHandler):
         deadline = self._run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
-        remaining = deadline - time.monotonic()
+        remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
@@ -2144,6 +2144,7 @@ class KernelPhase(PhaseHandler):
                         # would be noise promoted to a decision.
                         "keep_threshold_pct": 100.0,
                         "budget_minutes": budget_minutes,
+                        "mode": "env_only",
                     },
                     session_dir=self.session_dir,
                 )
@@ -3028,6 +3029,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": test_envs,
                 "keep_threshold_pct": 3.0,
                 "budget_minutes": per_tuner_budget_minutes,
+                "mode": "env_only",
             }
             for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
                 await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)

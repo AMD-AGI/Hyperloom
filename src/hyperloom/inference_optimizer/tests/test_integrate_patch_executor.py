@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_roots
+from .conftest import init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -28,7 +28,9 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _run_setup_commands,
     _with_skipped_setup_reason,
 )
+from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -95,7 +97,6 @@ def _write_specialist_workspace(
         "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": patch_paths,
-        "empty": False,
         "summary": "PR-A4 test",
         "confidence": 0.5,
     }
@@ -628,7 +629,6 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": True,
                 "summary": "no proposals or patches",
             }
         )
@@ -777,7 +777,6 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": False,
                 "summary": "config-only specialist",
             }
         )
@@ -793,7 +792,7 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     )
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench"
-    assert result["config_changes_applied"] == {"VLLM_USE_AITER": "1"}
+    assert result["extra_envs_applied"] == {"VLLM_USE_AITER": "1"}
     assert result["patches_applied"] == []
 
 
@@ -828,6 +827,16 @@ async def test_executor_accepts_explicit_server_args_and_envs(tmp_path: Path):
 # Enablement runnable gate: the bench is the launch probe; positive throughput
 # means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
 # bypassed for enablement-tagged integrations.
+def _persist_observation(session_dir: Path, slot: str, log_text: str) -> str:
+    """Observe ``log_text`` as a server log and persist it the way a round does."""
+    from hyperloom.orchestrator.bringup import observe_bringup, write_boot_observation
+
+    out = session_dir / slot
+    out.mkdir(parents=True, exist_ok=True)
+    verdict = observe_bringup(server_log=log_text, server_elapsed_sec=5.0, session_dir=session_dir)
+    return write_boot_observation(verdict.observation, session_dir=session_dir, output_dir=out, attempt=0)
+
+
 async def _run_enablement_integrate(
     tmp_path: Path,
     monkeypatch,
@@ -835,7 +844,8 @@ async def _run_enablement_integrate(
     booted: bool,
     enablement_accuracy=None,
     bench_error: str = "",
-    before_signature=None,
+    before_log: str = "",
+    after_log: str = "",
     enablement_origin: str = "",
     accuracy_floor=None,
     accuracy_task: str = "gsm8k",
@@ -851,12 +861,23 @@ async def _run_enablement_integrate(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
+    # Every bench records what its boot did; the gate's verdict on whether the
+    # combo runs is that observation's, not the throughput's. A round that did
+    # not boot and names no earlier wall re-hits the same one, which is what a
+    # round with nothing to compare against actually looks like.
+    wall = boot_log_for(LadderStage.ENGINE_INIT)
+    after_text = after_log or (boot_log_for(None) if booted else wall)
+    before_text = before_log or ("" if booted else wall)
+
     async def _fake_bench(**_kwargs):
         bench_result = {
             "output_throughput": 137.0 if booted else 0.0,
             "error": bench_error,
             "effective_config": dict(bench_effective_config or {}),
         }
+        # Every bench records what its boot did; the gate's verdict on whether
+        # the combo runs is that observation's, not the throughput's.
+        bench_result["boot_observation_path"] = _persist_observation(session_dir, "after", after_text)
         return bench_result, {
             "accuracy_pass": None,
             "enablement_accuracy": enablement_accuracy,
@@ -876,8 +897,8 @@ async def _run_enablement_integrate(
         "framework_source_root": str(repo),
         "enablement": True,
     }
-    if before_signature is not None:
-        params["enablement_before_signature"] = before_signature
+    if before_text:
+        params["enablement_before_observation_path"] = _persist_observation(session_dir, "before", before_text)
     if enablement_origin:
         params["enablement_origin"] = enablement_origin
     if accuracy_floor is not None:
@@ -1016,27 +1037,20 @@ async def test_enablement_reverts_when_accuracy_nan(tmp_path: Path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, monkeypatch):
-    """Booted, but the same actionable failure re-appears post-patch -> REVERT."""
-    before = {
-        "kind": "hip_kernel_missing",
-        "offending_file": "",
-        "offending_symbol": "",
-        "raw_excerpt": "",
-        "confidence": 0.85,
-        "bridge_layer": "rocm_hip",
-    }
+async def test_enablement_reverts_when_the_same_wall_is_still_there(tmp_path: Path, monkeypatch):
+    """The patch changed nothing the boot could get past -> REVERT, no advance."""
+    same_wall = "hipErrorNoBinaryForGpu: no kernel image is available\n"
     result, repo = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
-        booted=True,
+        booted=False,
         enablement_accuracy=0.5,
-        bench_error="hipErrorNoBinaryForGpu: no kernel image is available",
-        before_signature=before,
+        before_log=same_wall,
+        after_log=same_wall,
     )
     assert result["status"] == "reverted"
     assert result["runnable"] is False
-    assert "persists" in result["reason"]
+    assert not result.get("advanced")
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -1046,80 +1060,126 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
 
     The server still does not fully boot (output_throughput=0), but the failure
     moved to a new, deeper actionable signature -> status='advanced': the patch
-    is recorded for stacking, the new failure log is surfaced, and the working
-    tree is reverted to clean for deterministic re-application next round.
+    stays permanently in the tree so the next round builds on it.
     """
-    before = {
-        "kind": "shape_mismatch",
-        "offending_file": "vllm/model_executor/parameter.py",
-        "offending_symbol": "",
-        "raw_excerpt": "",
-        "confidence": 0.7,
-        "bridge_layer": "framework",
-    }
     new_gap = (
         "ValueError: Following weights were not initialized from checkpoint: "
-        "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
+        "{'model.layers.19.self_attn.indexer.k_norm.weight'}\n"
     )
     result, repo = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
         booted=False,
         bench_error=new_gap,
-        before_signature=before,
+        before_log="RuntimeError: shape mismatch loading vllm/model_executor/parameter.py\n",
+        after_log=new_gap,
     )
     assert result["status"] == "advanced"
     assert result["advanced"] is True
     assert result["enablement"] is True
     assert result["runnable"] is False
     assert len(result["patches_applied"]) == 1
+    assert result["patches_reverted"] == []
     assert "not initialized from checkpoint" in result["enablement_launch_log"]
     assert result["after_signature"]["kind"] == "missing_weight"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
+    # Patch stays in the tree permanently; the next round builds on it.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
-async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeypatch):
-    """enablement_base_patches are applied before this round's patch (serial gaps)."""
+async def test_enablement_advanced_commits_to_git_root(tmp_path: Path, monkeypatch):
+    """An accepted 'advanced' round commits to the git root for cross-round durability."""
+    new_gap = "ValueError: weight not found\n"
+    result, repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=False,
+        bench_error=new_gap,
+        before_log="RuntimeError: shape mismatch\n",
+        after_log=new_gap,
+    )
+    assert result["status"] == "advanced"
+    assert result["patches_reverted"] == []
+    # The patch must be committed so a later ``git checkout --force HEAD`` does not erase it.
+    log = subprocess.check_output(
+        ["git", "-C", str(repo), "log", "--oneline", "-2"],
+        text=True,
+    )
+    assert "hyperloom enablement advanced" in log
+
+
+@pytest.mark.asyncio
+async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tmp_path: Path, monkeypatch):
+    """An env-only round that reverts must not touch files from a prior accepted round.
+
+    On a non-git tree the per-round backup root must be isolated so _revert_patches
+    for a zero-patch round cannot merge the previous round's ledger and undo
+    accumulated work.
+    """
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    # A base patch touching a different file, plus this round's patch on src.py.
-    (repo / "other.py").write_text("def g():\n    return 10\n", encoding="utf-8")
-    git_commit_all(repo, "add other")
-    base_patch = tmp_path / "base_000.patch"
-    base_patch.write_text(
-        "--- a/other.py\n+++ b/other.py\n@@ -1,2 +1,2 @@\n def g():\n-    return 10\n+    return 20\n",
-        encoding="utf-8",
-    )
-    _write_specialist_workspace(session_dir, "t-spec-stack", patch_contents=[_VALID_PATCH])
-    executor = IntegratePatchExecutor(session_dir=session_dir)
+    # Use a plain directory (not a git repo) to exercise the nogit path.
+    # Named "framework" so the autouse allowlist fixture picks it up.
+    framework_root = tmp_path / "framework"
+    framework_root.mkdir()
+    (framework_root / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
 
-    async def _fake_bench(**_kwargs):
-        return {"output_throughput": 200.0, "error": ""}, {
-            "accuracy_pass": None,
-            "enablement_accuracy": 0.5,
-            "timed_out": False,
-        }
+    _write_specialist_workspace(session_dir, "t-spec-patch", patch_contents=[_VALID_PATCH])
+    _write_specialist_workspace(session_dir, "t-spec-env", patch_contents=[])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
 
     async def _noop_kb(**_kwargs):
         return None
 
-    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
-    params = {
-        "specialist_task_id": "t-spec-stack",
-        "framework_source_root": str(repo),
+    # Round 1: apply the patch and accept as advanced (not yet runnable).
+    new_gap = "MissingKernelError: kernel not found\n"
+
+    async def _fake_bench_round1(**_kwargs):
+        return {
+            "output_throughput": 0.0,
+            "error": new_gap,
+            "boot_observation_path": _persist_observation(session_dir, "after1", new_gap),
+        }, {"accuracy_pass": None, "enablement_accuracy": None, "timed_out": False}
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench_round1)
+    params1 = {
+        "specialist_task_id": "t-spec-patch",
+        "framework_source_root": str(framework_root),
         "enablement": True,
-        "enablement_base_patches": [str(base_patch)],
+        "enablement_before_observation_path": _persist_observation(
+            session_dir, "before1", "RuntimeError: shape mismatch\n"
+        ),
     }
-    result = await executor(_make_ctx("t-int-stack", params))
-    assert result["status"] == "kept"
-    assert len(result["patches_applied"]) == 2
-    assert (repo / "other.py").read_text().endswith("return 20\n")
-    assert (repo / "src.py").read_text().endswith("return 2\n")
+    result1 = await executor(_make_ctx("t-int-patch", params1))
+    assert result1["status"] == "advanced", result1.get("reason")
+    # The patch landed.
+    assert (framework_root / "src.py").read_text().endswith("return 2\n")
+
+    # Round 2: env-only round that ends up reverting (no gain, still not runnable).
+    async def _fake_bench_round2(**_kwargs):
+        return {
+            "output_throughput": 0.0,
+            "error": new_gap,
+            "boot_observation_path": _persist_observation(session_dir, "after2", new_gap),
+        }, {"accuracy_pass": None, "enablement_accuracy": None, "timed_out": False}
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench_round2)
+    params2 = {
+        "specialist_task_id": "t-spec-env",
+        "framework_source_root": str(framework_root),
+        "enablement": True,
+        "extra_envs": {"MY_FLAG": "1"},
+        "enablement_before_observation_path": _persist_observation(session_dir, "before2", new_gap),
+    }
+    result2 = await executor(_make_ctx("t-int-env", params2))
+    assert result2["status"] == "reverted"
+    # Round 1's patch must still be in the tree after round 2's revert.
+    assert (framework_root / "src.py").read_text().endswith("return 2\n"), (
+        "prior accepted patch was erased by a later zero-patch round's revert"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1266,7 +1326,7 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     down verbatim -- redacting where the list is built would hand pip a masked
     URL. It is redacted at the artifact writer instead.
     """
-    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
 
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
     monkeypatch.setattr(
@@ -1277,36 +1337,8 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     # Replay must still work: the stored command is the one that ran.
     assert out["applied"] == [cmd]
 
-    written = [art._sanitize_setup_command(c) for c in out["applied"]]
+    written = [_sanitize_setup_command(c) for c in out["applied"]]
     assert "ghp_notarealtoken" not in " ".join(written), "the artifact would carry the token"
-
-
-def test_round_artifact_on_disk_carries_no_credential(tmp_path):
-    """Assert on the file, not on the helper.
-
-    The test above checks ``_sanitize_setup_command`` in isolation, which stays
-    green if the call is dropped from the writer -- and the writer is the thing
-    that produces the durable artifact. ``round.json`` is copied into the
-    archive and read back by later sessions, so a token in it outlives the run.
-    """
-    import json
-
-    from hyperloom.orchestrator.phases import _enablement_artifacts as art
-
-    token = "ghp_notarealtoken"
-    art.snapshot_round(
-        tmp_path,
-        {
-            "status": "ok",
-            "specialist_task_id": "t1",
-            "setup_commands_applied": [f"pip install --index-url https://u:{token}@pkgs.internal/simple aiperf"],
-        },
-    )
-
-    written = (art.enablement_round_dir(tmp_path, "t1") / "round.json").read_text(encoding="utf-8")
-    assert token not in written, "the durable round artifact carried a credential"
-    # Still a usable record of what ran, not an empty field.
-    assert "pip install" in json.loads(written)["setup_commands_applied"][0]
 
 
 def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
@@ -1375,7 +1407,11 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
 
     async def _fake_bench(**_kwargs):
-        return {"output_throughput": 150.0, "error": ""}, {
+        return {
+            "output_throughput": 150.0,
+            "error": "",
+            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
+        }, {
             "accuracy_pass": None,
             "enablement_accuracy": 0.5,
             "timed_out": False,
@@ -1599,11 +1635,10 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
     variant = captured["grid"][0]
     assert captured["base_extra_args"] == "--base-flag value"
+    assert captured["base_extra_envs"] == {"BASE_ENV": "1"}
     assert variant.extra_server_args == extra_args
-    assert variant.extra_envs == {
-        "BASE_ENV": "1",
-        "VLLM_ROCM_USE_AITER": "1",
-    }
+    # Variant carries only the proposal envs; base envs go to run_grid.
+    assert variant.extra_envs == {"VLLM_ROCM_USE_AITER": "1"}
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.deadline import Deadline
+
 from .conftest import init_git_repo
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
@@ -110,7 +112,6 @@ def _make_fake_claude(
                 }
             ],
             "patches_written": [],
-            "empty": False,
             "summary": "fake claude subprocess output",
             "confidence": 0.5,
         }
@@ -153,7 +154,6 @@ exit 0
                     }
                 ],
                 "patches_written": ["patches/001_test.patch"],
-                "empty": False,
                 "summary": "fake patch-authoring specialist",
                 "confidence": 0.7,
             }
@@ -181,7 +181,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "env echo",
   "confidence": 0.0,
   "hip_visible": "$HIP_VISIBLE_DEVICES",
@@ -200,7 +199,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "llm env echo",
   "confidence": 0.0,
   "api_timeout_ms": "$API_TIMEOUT_MS",
@@ -350,7 +348,6 @@ async def test_subprocess_path_harvests_done_file(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -363,7 +360,7 @@ async def test_subprocess_path_harvests_done_file(
     result = await runner.run(ctx)
 
     assert result.status == "succeeded"
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done["domain"] == "serving_specialist"
     workspace = session_dir / "runs" / "specialist" / "t-spec-done"
     assert (workspace / "specialist_done.json").exists()
@@ -396,7 +393,6 @@ async def test_local_specialist_spawn_uses_file_stdin(
             claude_executable=str(fake_claude),
             model="",
             framework_source_roots=(str(fake_framework_repo),),
-            per_turn_max_seconds=30.0,
             poll_interval_seconds=0.2,
         ),
         session_dir=session_dir,
@@ -424,7 +420,6 @@ async def test_subprocess_path_injects_allocated_gpu_env(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -468,7 +463,6 @@ async def test_subprocess_path_injects_llm_stability_env(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -500,7 +494,6 @@ async def test_readonly_research_scout_skips_worktree(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -540,7 +533,6 @@ async def test_subprocess_path_collects_patches(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -575,7 +567,6 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -587,7 +578,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 
     result = await runner.run(ctx)
     assert result.status in ("empty_synthesised", "stale")
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "subprocess" in (result.error or "")
 
 
@@ -606,7 +597,6 @@ async def test_subprocess_path_isolates_writes_to_worktree(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -640,7 +630,6 @@ async def test_subprocess_recovers_partial_when_no_final(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -654,13 +643,13 @@ async def test_subprocess_recovers_partial_when_no_final(
     # Salvaged work keeps the findings but must not read as a clean run.
     assert result.status == "partial"
     assert "recovered_from_partial" in result.notes
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done.get("_recovered_from_partial") is True
     assert result.specialist_done["proposal_set"]
 
 
 @pytest.mark.asyncio
-async def test_wall_budget_overrides_legacy_max_seconds(
+async def test_the_dispatch_deadline_kills_a_hung_specialist(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
@@ -674,7 +663,6 @@ async def test_wall_budget_overrides_legacy_max_seconds(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -683,7 +671,7 @@ async def test_wall_budget_overrides_legacy_max_seconds(
         default_max_turns=2,
     )
     ctx = _make_runner_ctx("t-spec-budget")
-    ctx.extra["wall_budget_sec"] = 1.0
+    ctx.extra["specialist_deadline"] = Deadline.after(1.0)
 
     started = time.monotonic()
     result = await runner.run(ctx)
@@ -740,7 +728,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
         workspace=workspace,
         done_files=(),
         heartbeat_file=heartbeat_file,
-        max_seconds=60.0,
+        deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
     _ = await writer
@@ -786,7 +774,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
         workspace=workspace,
         done_files=(),
         heartbeat_file=heartbeat_file,
-        max_seconds=60.0,
+        deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
     assert outcome["stale_heartbeat"] is True, outcome
@@ -828,7 +816,7 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
         workspace=workspace,
         done_files=(),
         heartbeat_file=workspace / "heartbeat.json",
-        max_seconds=0.3,
+        deadline=Deadline.after(0.3),
         started=time.monotonic(),
         task_id="task-base",
     )
@@ -852,7 +840,7 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
             workspace=workspace,
             done_files=(),
             heartbeat_file=workspace / "heartbeat.json",
-            max_seconds=0.3,
+            deadline=Deadline.after(0.3),
             started=time.monotonic(),
             task_id="task-live",
         )
@@ -886,7 +874,7 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
         workspace=workspace,
         done_files=(),
         heartbeat_file=workspace / "heartbeat.json",
-        max_seconds=0.3,
+        deadline=Deadline.after(0.3),
         started=time.monotonic(),
         task_id="task-mine",
     )
@@ -1009,7 +997,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
         disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0, 1),
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
         gpu_lease=lease,
     )
 
@@ -1052,7 +1040,7 @@ async def test_run_clears_stale_wall_budget_extension(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
         gpu_lease=lease,
     )
 
@@ -1196,7 +1184,6 @@ async def test_partial_checkpoint_published_while_alive(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(

@@ -18,40 +18,59 @@ from .storage.connection import SqliteConnection
 
 TOPIC_ALLOWLIST = frozenset(
     {
-        # Optimization-loop topics
         "proposal",
         "observation",
         "event",
         "decision",
         "alert",
-        "historical_warning",
-        "reflection_tick",
-        "do_postmortem",
-        "do_strategic_review",
-        "do_emergency_rca",
-        "synthesize_for_kb",
-        "graceful_stop",
-        "heartbeat",
         "delegated_result",
-        "intent_emitted",
-        "rca_done",
-        # Storage-layer events
         "lease_expired",
-        "lease_acquire_failed",
-        # Agent-to-agent RPC (REQUEST / RESPONSE intents).
         "request",
         "response",
-        # Critic Review Protocol verdict broadcast.
         "review_verdict",
         "advice",
         "strategy_change",
-        # Reserved for a dynamic-specialist dispatch audit trail; no emitter in-tree yet.
-        "dynamic_specialist_dispatched",
-        "dynamic_specialist_status",
-        "dynamic_specialist_results",
-        "dynamic_specialist_error",
     }
 )
+
+# Per-role inbox subscriptions; a role absent from this map receives nothing.
+ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
+    "orchestration": frozenset(
+        {
+            "delegated_result",
+            "review_verdict",
+            "observation",
+            "event",
+            "decision",
+            "alert",
+            "advice",
+            "strategy_change",
+            "response",
+            "lease_expired",
+            "proposal",
+        }
+    ),
+    "critic": frozenset(
+        {
+            "proposal",
+            "review_verdict",
+            "advice",
+            "delegated_result",
+            "observation",
+        }
+    ),
+    "robustness": frozenset(
+        {
+            "delegated_result",
+            "review_verdict",
+            "proposal",
+            "observation",
+            "alert",
+            "strategy_change",
+        }
+    ),
+    "kernel_agent": frozenset({"request"}),
+}
 
 
 _now_iso = now_iso
@@ -173,10 +192,18 @@ class MessageBus:
         after_seq: int,
         limit: int = DEFAULT_EVENTS_KEEP_RECENT,
     ) -> list[Message]:
-        """Used at resume — returns events in monotonic seq order."""
+        """Inbox for one agent: subscribed topics only, never its own messages.
+
+        Raw-DB readers (``lookup_by_id``, ``tail``) bypass both rules.
+        """
+        subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
+        if not subscribed:
+            return []
+        placeholders = ",".join("?" * len(subscribed))
         rows = await self.db.fetchall(
-            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC LIMIT ?",
-            (after_seq, to_agent, limit),
+            f"SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"  # nosec B608
+            f" AND from_agent != ? AND topic IN ({placeholders}) ORDER BY seq ASC LIMIT ?",
+            (after_seq, to_agent, to_agent, *subscribed, limit),
         )
         return [Message.from_row(r) for r in rows]
 
@@ -186,4 +213,4 @@ class MessageBus:
         return Message.from_row(row) if row else None
 
 
-__all__ = ["Message", "MessageBus", "TOPIC_ALLOWLIST"]
+__all__ = ["Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]

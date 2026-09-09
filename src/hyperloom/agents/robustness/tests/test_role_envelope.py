@@ -21,7 +21,6 @@ from hyperloom.agents.robustness.role.envelope import (
     build_delegate,
     build_envelope_dict,
     build_escalate,
-    build_heartbeat,
     build_prune_branch,
     build_send_message,
     build_update_state,
@@ -31,14 +30,12 @@ from hyperloom.agents.robustness.role.envelope import (
 # Builders — happy path
 
 
-def test_heartbeat_builder_uses_known_topic_and_body():
-    intent = build_heartbeat()
+def test_idle_observation_uses_known_topic_and_body():
+    intent = build_send_message("observation", body_md="ok (robustness-agent)")
     assert intent.type is IntentType.SEND_MESSAGE
-    assert intent.payload["topic"] == "heartbeat"
-    assert intent.payload["body_md"]
     assert intent.to_envelope_item() == {
         "intent_type": "send_message",
-        "payload": {"topic": "heartbeat", "body_md": "ok (robustness-agent)"},
+        "payload": {"topic": "observation", "body_md": "ok (robustness-agent)"},
     }
 
 
@@ -165,7 +162,7 @@ def test_update_state_rejects_empty_changes():
 
 def test_envelope_dict_is_json_serialisable():
     intents = [
-        build_heartbeat(),
+        build_send_message("observation", body_md="ok (robustness-agent)"),
         build_alert("medium", "stall detected"),
         build_escalate("crash_count_high", "trigger recover"),
     ]

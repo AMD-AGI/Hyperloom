@@ -120,7 +120,7 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
-        "intvty_p90": v.intvty_p90,
+        "e2e_norm_intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
@@ -170,7 +170,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "request_throughput",
         "total_token_throughput",
         "input_throughput",
-        "intvty_p90",
+        "e2e_norm_intvty_p90",
         "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
@@ -1210,8 +1210,8 @@ async def run_conc_sweep(
         "isl": isl,
         "osl": osl,
         "tp": int(getattr(state, "tp", 0) or 0),
-        # Names the axis pair the points are drawn on, so a reader never has to infer it from whether intvty_p90
-        # happens to be null.
+        # Names the axis pair the points are drawn on, so a reader never has to infer it from whether
+        # e2e_norm_intvty_p90 happens to be null.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "concs_requested": concs,
         "baseline": {

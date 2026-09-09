@@ -30,7 +30,7 @@ from .coordinator_helpers import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..bus.message_bus import Message
+from ..bus.message_bus import Message, TOPIC_ALLOWLIST
 from ..policy.gate import (
     patch_verdict_subject,
     PolicyDenied,
@@ -444,7 +444,7 @@ class IntentRouter:
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
             # rearm never fires.
             try:
-                self._coord._maybe_rearm_enablement(
+                await self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:  # noqa: BLE001 — accounting must never wedge the loop
@@ -568,7 +568,7 @@ class IntentRouter:
                         )
                     except Exception:  # noqa: BLE001 — fall back to registry ttl
                         log.exception(
-                            "WS2: failed to re-source gpu_research_lane TTL; using registry default",
+                            "failed to re-source gpu_research_lane TTL; using registry default",
                         )
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
@@ -1042,6 +1042,7 @@ class IntentRouter:
         # Pre-enablement close guard: drop a premature ``skip_to_close`` while the model is not yet runnable and let
         # the enablement loop continue.
         if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
+            self.shared_state.enablement.skip_to_close_suppressions += 1
             log.info(
                 "escalate_strategy_change: dropping premature skip_to_close from %s "
                 "(pre-enablement: baseline not established; enablement loop still active)",
@@ -1056,6 +1057,7 @@ class IntentRouter:
                         "kind": "enablement_skip_to_close_suppressed",
                         "source": source,
                         "phase": (self.shared_state.phase or ""),
+                        "suppressions": self.shared_state.enablement.skip_to_close_suppressions,
                     },
                 )
             )
@@ -1087,10 +1089,7 @@ class IntentRouter:
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
         """Publish a free-form message onto the bus."""
         topic = intent.payload.get("topic", "observation")
-        if (
-            topic
-            not in __import__("hyperloom.orchestrator.bus.message_bus", fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST
-        ):
+        if topic not in TOPIC_ALLOWLIST:
             # Soft-degrade unknown topic.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"

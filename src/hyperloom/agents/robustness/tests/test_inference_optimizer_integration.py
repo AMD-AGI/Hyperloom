@@ -125,7 +125,7 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_passes_gate(tmp_path):
+async def test_idle_observation_passes_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
     # Disable auto-probe so an inert test host doesn't fire alerts that mask the heartbeat.
@@ -149,7 +149,7 @@ async def test_heartbeat_passes_gate(tmp_path):
         gate = _gate()
         assert len(intents) == 1
         intent = intents[0]
-        assert intent.payload["topic"] == "heartbeat"
+        assert intent.payload["topic"] == "observation"
         gate.validate_intent("robustness", _to_upstream(intent))
     finally:
         await bundle.aclose()

@@ -7,6 +7,19 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+# The canonical corpus, measured from Kimi-K3 session 20260831T124523Z (825
+# requests over the 3600s window). Seeds ``SharedState.agentx_corpus_shape``
+# so semantic consumers have a shape before the first measurement replaces it.
+CANONICAL_CORPUS_LOADER = "semianalysis_cc_traces_weka_062126"
+CANONICAL_CORPUS_ENTRIES = 393
+CANONICAL_CORPUS_DURATION_S = 3600
+CANONICAL_ISL = {"avg": 113814, "p50": 94821, "p75": 119126, "p90": 163328, "p99": 506158}
+CANONICAL_OSL = {"avg": 806, "p50": 333, "p75": 801, "p90": 1874, "p99": 6386}
+CANONICAL_PREFIX_CACHE_HIT = 0.975
+
+# Percentiles carried forward from the aiperf sequence-length distributions.
+_SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
+
 
 def stat(m: Mapping[str, Any], key: str, sub: str = "avg", default: float = 0.0) -> Any:
     """Read ``m[key][sub]`` with graceful fallbacks (avg, then ``default``)."""
@@ -63,8 +76,10 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
-    # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports at p90.
-    intvty_p90 = pct(m, "e2e_output_token_throughput", "p90")
+    # E2E normalised interactivity slow tail. aiperf's ``e2e_output_token_throughput`` is the per-request rate
+    # OSL/E2EL_s and is LARGER_IS_BETTER, so its P10 is 1/P90 of the E2EL/OSL ratio -- upstream's slow-tail
+    # definition (MODELS.md:78). pct() not stat(): avg and P10 differ by an order of magnitude on this corpus.
+    intvty_p90 = pct(m, "e2e_output_token_throughput", "p10")
 
     return {
         "request_throughput": stat(m, "request_throughput"),
@@ -84,7 +99,7 @@ def map_aiperf(
         "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
-        "intvty_p90_tok_s_user": intvty_p90,
+        "e2e_norm_intvty_p90": intvty_p90,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),
@@ -97,4 +112,41 @@ def map_aiperf(
         # Tri-state on purpose: True / False / None(unknown).
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
+        # Upstream's hard validity gate, as a percentage (aiperf declares this
+        # metric PERCENT). ``default=None`` rather than 0.0: aiperf omits the
+        # metric when no request completed, and coalescing that to zero would
+        # report a perfect error rate for a run that measured nothing.
+        "request_error_rate": stat(m, "request_error_rate", default=None),
+        # Corpus shape. A single ISL/OSL scalar cannot describe this workload
+        # (p50 95k, p99 506k), so the distributions travel instead.
+        "corpus_loader": _corpus_loader(d),
+        "isl_distribution": _distribution(m.get("input_sequence_length")),
+        "osl_distribution": _distribution(m.get("output_sequence_length")),
+    }
+
+
+def _corpus_loader(export: Mapping[str, Any]) -> str:
+    """The dataset loader aiperf replayed, from ``metadata.dataset.loader``."""
+    dataset = (export.get("metadata") or {}).get("dataset")
+    return str((dataset or {}).get("loader") or "")
+
+
+def _distribution(metric: Any) -> dict[str, int]:
+    """Project an aiperf sequence-length metric onto :data:`_SHAPE_PERCENTILES`."""
+    if not isinstance(metric, dict):
+        return {}
+    return {key: int(metric[key]) for key in _SHAPE_PERCENTILES if isinstance(metric.get(key), (int, float))}
+
+
+def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a ``SharedState.agentx_corpus_shape`` record from a :func:`map_aiperf` result."""
+    return {
+        "corpus_loader": str(result.get("corpus_loader") or ""),
+        "isl": dict(result.get("isl_distribution") or {}),
+        "osl": dict(result.get("osl_distribution") or {}),
+        "completed_requests": int(result.get("completed") or 0),
+        "duration_s": float(result.get("duration") or 0.0),
+        "prefix_cache_hit": float(result.get("theoretical_prefix_cache_hit") or 0.0),
+        "request_error_rate": float(result.get("request_error_rate") or 0.0),
+        "source": "measured",
     }

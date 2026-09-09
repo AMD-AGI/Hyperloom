@@ -18,6 +18,8 @@ SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 #: Current breakdown schema version. V6 stamps the document once the timeline
 #: is recorded by the actions themselves rather than projected out of their
 #: artefacts afterwards, which is what makes an event's start time its real one.
+#: ``enablement`` gained its ledger-sourced round fields inside this version:
+#: they add a section to the block rather than reshape the document.
 SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
@@ -610,16 +612,13 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop."""
+    """Orchestration turn count for this session.
 
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
+    Attributes:
+        tick_count (int): Coordinator ticks executed.
+    """
+
     tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
 
 
 class Telemetry(TypedDict, total=False):
@@ -633,7 +632,6 @@ class Telemetry(TypedDict, total=False):
     gpu_monitor_aggregate: GpuMonitorAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
-    # SEED/DELTA census + compaction rate for the orchestration conversation.
     orchestration_context: OrchestrationContext
 
 
@@ -1259,7 +1257,8 @@ class ConcSweepSummary(TypedDict, total=False):
     tp: int
     benchmark_mode: str  # "agentx" / "synthetic"; names the axis pair the points carry
     concs_requested: list[int]
-    # {extra_server_args, extra_envs, points[]}.
+    # {extra_server_args, extra_envs, points[]}. A point carries the pair its mode is plotted on:
+    # output_throughput + e2el_mean_ms synthetic, total_token_throughput + e2e_norm_intvty_p90 agentic.
     baseline: dict[str, Any]
     optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
@@ -1413,6 +1412,29 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementRoundSummary(TypedDict, total=False):
+    """One bring-up round, as the durable round ledger recorded it.
+
+    Attributes:
+        round_id: Identity of the round.
+        state: ``open`` while a holder has it, ``settled`` once it ended.
+        outcome: How it ended -- booted / failed / abandoned, or one of the two
+            expiries. Empty while it is open.
+        holder_task_id: The task holding it.
+        fence: The holder's token; only a handoff advances it.
+        opened_unix: When the round was acquired.
+        settled_unix: When it ended, or ``None`` while it is open.
+    """
+
+    round_id: str
+    state: str
+    outcome: str
+    holder_task_id: str
+    fence: int
+    opened_unix: float
+    settled_unix: float | None
+
+
 class EnablementStackActionSummary(TypedDict, total=False):
     """One attempt-runtime stack action considered/applied."""
 
@@ -1463,8 +1485,11 @@ class EnablementBreakdown(TypedDict, total=False):
     succeeded: bool
     pending: bool
     validation_pending: bool
-    stall_streak: int
-    inflight_task_id: str
+    round_id: str
+    round_holder_task_id: str
+    rounds: list[EnablementRoundSummary]
+    round_count: int
+    round_outcomes: dict[str, int]
     last_specialist_task_id: str
     revalidation_task_id: str
     revalidation_generation: int
@@ -2531,6 +2556,7 @@ __all__ = [
     "DiscoveredHotKernel",
     "EnablementAttemptRuntime",
     "EnablementBreakdown",
+    "EnablementRoundSummary",
     "EnablementStackActionSummary",
     "ExecutorClass",
     "KernelBackendAttempt",
