@@ -1699,7 +1699,8 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     )
 
     assert bench["total_token_throughput"] == 25000.0
-    assert bench["intvty_p90"] == 450.0
+    assert bench["e2e_norm_intvty_p90"] == 450.0
+    assert "intvty_p90" not in bench
     assert bench["input_throughput"] == 24900.0
     assert bench["tpot_p90_ms"] == 3.0
     assert measured.to_dict().items() <= bench.items()
@@ -1727,9 +1728,14 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
 @pytest.mark.parametrize(
     "grading_mode,total,intvty,output,missing,expected_status,expected_delta",
     [
-        pytest.param("agentx", 15000.0, 450.0, 200.0, None, "reverted", -25.0, id="output-up-total-down"),
-        pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", None, id="interactivity-regression"),
-        pytest.param("agentx", 25000.0, 450.0, 90.0, None, "kept", 25.0, id="total-up-output-down"),
+        pytest.param("agentx", 15000.0, 450.0, 200.0, None, "reverted", None, id="throughput-tradeoff"),
+        pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", None, id="interactivity-tradeoff"),
+        pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", None, id="both-axes-regress"),
+        pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", None, id="flat-interactivity"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "kept", 10.0, id="intvty-win-output-down"),
+        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "kept", 2.0, id="exact-floor-and-throughput-guard"),
+        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "reverted", None, id="throughput-guard-breach"),
+        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", None, id="below-agentx-floor"),
         pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
         *[
             pytest.param(
@@ -1799,7 +1805,7 @@ async def test_executor_grades_real_patch_bench(
     state = SimpleNamespace(
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
-        current_best={"tput": 100.0, "total_throughput": 20000.0, "intvty_p90": 450.0},
+        current_best={"tput": 100.0, "total_throughput": 20000.0, "e2e_norm_intvty_p90": 450.0},
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
@@ -1812,7 +1818,7 @@ async def test_executor_grades_real_patch_bench(
             else:
                 measured.intvty_p90 = None
         else:
-            state.current_best.pop("total_throughput" if axis == "total" else "intvty_p90")
+            state.current_best.pop("total_throughput" if axis == "total" else "e2e_norm_intvty_p90")
     original_measurement = measured.to_dict()
     original_best = dict(state.current_best)
     executor = IntegratePatchExecutor(session_dir=session_dir)
@@ -1842,7 +1848,7 @@ async def test_executor_grades_real_patch_bench(
         "output_throughput",
         "input_throughput",
         "total_token_throughput",
-        "intvty_p90",
+        "e2e_norm_intvty_p90",
         "tpot_p90_ms",
         "workspace",
     ):

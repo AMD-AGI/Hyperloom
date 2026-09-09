@@ -154,7 +154,7 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 100.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -173,7 +173,7 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "output_throughput": 110.0,
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 110.0,
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
         "submission_valid": True,
@@ -228,7 +228,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 100.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     state.save(session_dir)
@@ -239,7 +239,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "output_throughput": 110.0,
         "input_throughput": 990.0,
         "total_token_throughput": 1100.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 110.0,
         "completed_requests": 80,
         "submission_valid": True,
         "accuracy": 0.80,
@@ -278,7 +278,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
     assert yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
     assert result["status"] == "ok"
     assert result["decision"] == "KEEP"
-    assert result["graded_objective"] == "total_throughput"
+    assert result["graded_objective"] == "e2e_norm_intvty_p90"
     assert result["bench_result"] == measurement
     assert result["gain_pct"] == pytest.approx(10.0)
 
@@ -315,7 +315,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 100.0,
     }
     state.reference_server_args = "--disable-cuda-graph --max-running-requests 64"
     state.reference_envs = {"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"}
@@ -342,7 +342,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
             "output_throughput": tput,
             "input_throughput": tput * 9,
             "total_token_throughput": tput * 10,
-            "intvty_p90": 100.0,
+            "e2e_norm_intvty_p90": 100.0,
             "completed_requests": 80,
             "submission_valid": True,
         }
@@ -575,18 +575,18 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "output,total,stack,accuracy_outcome,decision",
+    "output,total,intvty,stack,accuracy_outcome,decision",
     [
-        pytest.param(90.0, 1100.0, False, "pass", "KEEP", id="total-win-output-drop"),
-        pytest.param(100.1, 1507.5, True, "pass", "KEEP", id="stack-exact-0.5-percent"),
-        pytest.param(100.1, 1509.0, True, "pass", "KEEP", id="stack-0.6-below-primary-1-percent"),
-        pytest.param(90.0, 1100.0, False, "missing", "NEEDS_REVIEW", id="accuracy-missing"),
-        pytest.param(90.0, 1100.0, False, "regressed", "REVERT", id="accuracy-regressed"),
-        pytest.param(90.0, 1100.0, False, "failed", "NEEDS_REVIEW", id="accuracy-failed"),
+        pytest.param(90.0, 1100.0, 110.0, False, "pass", "KEEP", id="intvty-win-output-drop"),
+        pytest.param(100.1, 1500.0, 153.0, True, "pass", "KEEP", id="stack-exact-2-percent-floor"),
+        pytest.param(100.1, 1500.0, 154.5, True, "pass", "KEEP", id="stack-above-agentx-floor"),
+        pytest.param(90.0, 1100.0, 110.0, False, "missing", "NEEDS_REVIEW", id="accuracy-missing"),
+        pytest.param(90.0, 1100.0, 110.0, False, "regressed", "REVERT", id="accuracy-regressed"),
+        pytest.param(90.0, 1100.0, 110.0, False, "failed", "NEEDS_REVIEW", id="accuracy-failed"),
     ],
 )
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
-    session_dir, tmp_path, monkeypatch, output, total, stack, accuracy_outcome, decision
+    session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
     from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
@@ -618,11 +618,13 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 100.0,
     }
     state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
     if stack:
-        state.current_best.update(action="integrate", total_throughput=1500.0, input_throughput=1400.0)
+        state.current_best.update(
+            action="integrate", total_throughput=1500.0, input_throughput=1400.0, e2e_norm_intvty_p90=150.0
+        )
         state.optimization_stack = [dict(state.current_best)]
     state.save(session_dir)
     rounds = []
@@ -637,10 +639,10 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         if run_eval:
             assert output_dir.name == "accuracy_round"
             assert len(rounds) == 3
-        round_output, round_total, intvty = {
-            "warmup_round": (50.0, 500.0, 50.0),
-            "measure_round": (output, total, 100.0),
-            "accuracy_round": (999.0, 9999.0, 1.0),
+        round_output, round_total, round_intvty, round_tpot = {
+            "warmup_round": (50.0, 500.0, 50.0, 20.0),
+            "measure_round": (output, total, intvty, 10.0),
+            "accuracy_round": (999.0, 9999.0, 1.0, 1000.0),
         }[output_dir.name]
         workspace = output_dir / "benchmark_sglang_e2e"
         workspace.mkdir(parents=True, exist_ok=True)
@@ -651,8 +653,8 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
             "output_throughput": round_output,
             "input_throughput": round_total - round_output,
             "total_token_throughput": round_total,
-            "intvty_p90": intvty,
-            "tpot_p90_ms": 1000.0 / intvty,
+            "e2e_norm_intvty_p90": round_intvty,
+            "tpot_p90_ms": round_tpot,
             "completed_requests": 80,
             "submission_valid": True,
             "workspace": str(workspace),
@@ -698,9 +700,10 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     assert len({bench["envs"]["PORT"] for _, bench in rounds}) == 1
     assert len({bench["server_lifecycle"]["pid_dir"] for _, bench in rounds}) == 1
     assert result["decision"] == decision
-    assert result["graded_objective"] == "total_throughput"
-    reference_total = 1500.0 if stack else 1000.0
-    assert result["gain_pct"] == pytest.approx((total - reference_total) / reference_total * 100.0)
+    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    reference_intvty = 150.0 if stack else 100.0
+    assert result["gain_pct"] == pytest.approx((intvty - reference_intvty) / reference_intvty * 100.0)
+    assert result.get("decision_reason") != "stack_positive_increment"
     assert result["new_tput"] == output
     assert "accuracy" not in measured
     assert all(result["bench_result"][key] == value for key, value in measured.items())
@@ -711,8 +714,6 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
         assert result["accuracy_pass"] is True
         assert result["accuracy"] == pytest.approx(0.80)
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
-        if stack:
-            assert result["decision_reason"] == "stack_positive_increment"
     else:
         assert result["decision_reason"] == (
             "accuracy_regression" if accuracy_outcome == "regressed" else "accuracy_evidence_missing"
@@ -726,10 +727,14 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
 @pytest.mark.parametrize(
     "output,total,intvty,decision",
     [
-        pytest.param(110.0, 900.0, 100.0, "REVERT", id="total-regression"),
-        pytest.param(110.0, 1100.0, 90.0, None, id="interactivity-veto"),
-        pytest.param(110.0, 1100.0, 100.0, "KEEP", id="total-win"),
-        pytest.param(90.0, 1100.0, 100.0, "KEEP", id="output-loss-total-win"),
+        pytest.param(110.0, 900.0, 90.0, "REVERT", id="both-axes-regress"),
+        pytest.param(110.0, 1100.0, 90.0, "NEEDS_REVIEW", id="interactivity-tradeoff-recorded"),
+        pytest.param(110.0, 1100.0, 100.0, "NEEDS_REVIEW", id="flat-interactivity-recorded"),
+        pytest.param(110.0, 1000.0, 110.0, "KEEP", id="intvty-win"),
+        pytest.param(90.0, 1000.0, 110.0, "KEEP", id="output-loss-intvty-win"),
+        pytest.param(90.0, 950.0, 102.0, "KEEP", id="exact-floor-and-throughput-guard"),
+        pytest.param(110.0, 949.9, 110.0, "NEEDS_REVIEW", id="throughput-guard-breach"),
+        pytest.param(110.0, 1100.0, 101.99, "NEEDS_REVIEW", id="below-agentx-floor"),
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
@@ -738,17 +743,17 @@ async def test_integrate_handler_grades_full_e2e_measurement(
     _, payload, measurement, target = graded_integrate_case
     if not agentx_env:
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    measurement.update(output_throughput=output, total_token_throughput=total, intvty_p90=intvty)
+    measurement.update(output_throughput=output, total_token_throughput=total, e2e_norm_intvty_p90=intvty)
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert result["status"] == "ok"
-    if decision is None:
-        assert result["decision"] != "KEEP"
-    else:
-        assert result["decision"] == decision
-    assert result["graded_objective"] == "total_throughput"
-    assert result["gain_pct"] == pytest.approx((total - 1000.0) / 1000.0 * 100.0)
+    assert result["decision"] == decision
+    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result["gain_pct"] == pytest.approx(intvty - 100.0)
+    assert ("accuracy_gate" in result) is (decision == "KEEP")
+    if decision == "REVERT":
+        assert result["decision_reason"] == "intvty_regression"
     assert result["base_tput"] == 100.0
     assert result["new_tput"] == output
     assert result["bench_result"] == measurement
@@ -780,7 +785,7 @@ async def test_integrate_handler_requires_requested_axes(
         state.optimization_stack = [dict(state.current_best)]
     incomplete = measurement if missing_from == "candidate" else state.current_best
     total_key = "total_token_throughput" if missing_from == "candidate" else "total_throughput"
-    for axis in ("input_throughput", total_key) if missing_axis == "total" else ("intvty_p90",):
+    for axis in ("input_throughput", total_key) if missing_axis == "total" else ("e2e_norm_intvty_p90",):
         incomplete.pop(axis)
     state.save(session_dir)
 
@@ -816,11 +821,11 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
         state.benchmark_mode = ""
         state.save(session_dir)
-    measurement.update(output_throughput=output, total_token_throughput=900.0, intvty_p90=90.0)
+    measurement.update(output_throughput=output, total_token_throughput=900.0, e2e_norm_intvty_p90=90.0)
     if not with_axes:
-        for axis in ("input_throughput", "total_token_throughput", "intvty_p90"):
+        for axis in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90"):
             measurement.pop(axis)
-        for axis in ("input_throughput", "total_throughput", "intvty_p90"):
+        for axis in ("input_throughput", "total_throughput", "e2e_norm_intvty_p90"):
             state.current_best.pop(axis)
         state.save(session_dir)
 
@@ -838,53 +843,58 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
 @pytest.mark.parametrize(
     "output,total,intvty,decision",
     [
-        pytest.param(100.75, 1350.0, 100.0, "REVERT", id="stack-total-regression"),
-        pytest.param(100.1, 1507.35, 100.0, "NEEDS_REVIEW", id="stack-under-noise-floor"),
-        pytest.param(100.1, 1507.5, 100.0, "KEEP", id="stack-exact-noise-floor"),
-        pytest.param(100.1, 1511.25, 100.0, "KEEP", id="stack-positive-increment"),
-        pytest.param(100.75, 1507.5, 90.0, None, id="stack-interactivity-veto"),
+        pytest.param(100.75, 1350.0, 135.0, "REVERT", id="stack-both-axes-regress"),
+        pytest.param(100.1, 1507.5, 150.75, "NEEDS_REVIEW", id="stack-output-floor-does-not-apply"),
+        pytest.param(100.1, 1507.35, 152.985, "NEEDS_REVIEW", id="stack-under-agentx-floor"),
+        pytest.param(100.1, 1500.0, 153.0, "KEEP", id="stack-exact-agentx-floor"),
+        pytest.param(100.1, 1500.0, 154.5, "KEEP", id="stack-positive-increment"),
+        pytest.param(100.75, 1507.5, 135.0, "NEEDS_REVIEW", id="stack-interactivity-tradeoff-recorded"),
+        pytest.param(100.1, 1424.9, 165.0, "NEEDS_REVIEW", id="stack-throughput-guard-breach"),
     ],
 )
-async def test_integrate_handler_grades_stack_increment_on_live_total_anchor(
+async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
     session_dir, graded_integrate_case, output, total, intvty, decision
 ):
     state, payload, measurement, _ = graded_integrate_case
-    state.current_best.update(action="integrate", total_throughput=1500.0, input_throughput=1400.0)
+    state.current_best.update(
+        action="integrate", total_throughput=1500.0, input_throughput=1400.0, e2e_norm_intvty_p90=150.0
+    )
     state.optimization_stack = [dict(state.current_best)]
     state.save(session_dir)
-    measurement.update(output_throughput=output, total_token_throughput=total, intvty_p90=intvty)
+    measurement.update(output_throughput=output, total_token_throughput=total, e2e_norm_intvty_p90=intvty)
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    if decision is None:
-        assert result["decision"] != "KEEP"
-    else:
-        assert result["decision"] == decision
-    expected_gain = (total - 1500.0) / 1500.0 * 100.0
+    assert result["decision"] == decision
+    expected_gain = (intvty - 150.0) / 150.0 * 100.0
     assert result["gain_pct"] == pytest.approx(expected_gain)
-    assert result["graded_objective"] == "total_throughput"
-    if decision == "KEEP":
-        assert result["decision_reason"] == "stack_positive_increment"
-        assert result["stack_incremental_gain_pct"] == pytest.approx(expected_gain)
-        assert result["stack_incremental_keep_threshold_pct"] == pytest.approx(0.5)
-    else:
-        assert result.get("decision_reason") != "stack_positive_increment"
+    assert result["graded_objective"] == "e2e_norm_intvty_p90"
+    assert result.get("decision_reason") != "stack_positive_increment"
+    assert "stack_incremental_keep_threshold_pct" not in result
+    assert ("accuracy_gate" in result) is (decision == "KEEP")
+    if decision != "KEEP":
         assert result["revert_result"]["status"] == "ok"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gate", ["accuracy", "submission_valid"])
-async def test_integrate_handler_total_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
+async def test_integrate_handler_intvty_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
     _, payload, measurement, target = graded_integrate_case
     measurement[gate] = 0.60 if gate == "accuracy" else False
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    assert result["decision"] != "KEEP"
+    assert result["decision"] == "REVERT"
     assert result["revert_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
     if gate == "accuracy":
         assert result["decision_reason"] == "accuracy_regression"
+        assert result["accuracy_pass"] is False
+        assert result["gain_pct"] == pytest.approx(10.0)
+        assert result["bench_result"] == measurement
+    else:
+        assert result["error_class"] == "bench_exception"
+        assert result["rebaseline_detail"] == measurement
 
 
 @pytest.mark.asyncio
