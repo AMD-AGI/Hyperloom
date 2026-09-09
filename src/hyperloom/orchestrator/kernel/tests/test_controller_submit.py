@@ -185,3 +185,59 @@ def test_a_controller_result_without_usage_files_nothing(tmp_path: Path) -> None
     session_dir.mkdir()
 
     assert controller_submit.record_controller_llm_usage(result={}, session_dir=session_dir) == 0
+
+
+def test_the_analysis_spend_reaches_the_ledger_beside_the_forge_loops(tmp_path: Path) -> None:
+    """The sessions that spent most and bought least were reporting nothing."""
+    from hyperloom.orchestrator.trace.llm_trace import llm_calls_path
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    appended = controller_submit.record_controller_llm_usage(
+        result={
+            "forge_llm_usage": [
+                {
+                    "operator_id": "kernel:forge-loop:moe:sglang:0.5.16:flydsl:mi355x",
+                    "model": "claude-opus-5",
+                    "input_tokens": 1200,
+                    "output_tokens": 340,
+                    "calls": 7,
+                }
+            ],
+            "analysis_llm_usage": [
+                {
+                    "operator_id": "opportunity-analysis",
+                    "model": "claude-opus-5",
+                    "input_tokens": 53,
+                    "output_tokens": 31810,
+                    "calls": 15,
+                }
+            ],
+        },
+        session_dir=session_dir,
+    )
+
+    assert appended == 2
+    rows = [json.loads(line) for line in llm_calls_path(session_dir).read_text(encoding="utf-8").splitlines() if line]
+    assert {row["task_id"] for row in rows} == {
+        "kernel:forge-loop:moe:sglang:0.5.16:flydsl:mi355x",
+        "opportunity-analysis",
+    }
+
+
+def test_an_analysis_only_run_still_files_its_spend(tmp_path: Path) -> None:
+    """No operator published means no forge-loop row to carry the analysis."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    appended = controller_submit.record_controller_llm_usage(
+        result={
+            "analysis_llm_usage": [
+                {"operator_id": "opportunity-analysis", "model": "claude-opus-5", "calls": 15},
+            ]
+        },
+        session_dir=session_dir,
+    )
+
+    assert appended == 1

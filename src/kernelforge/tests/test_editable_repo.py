@@ -34,7 +34,7 @@ from kernelforge.loop.editable_repo import (
 
 
 @pytest.fixture
-def site_dir(tmp_path: Path, monkeypatch) -> Path:
+def site_dir(tmp_path: Path, monkeypatch):
     """A site-packages directory that is the only place the scan will look.
 
     Every source the scan consults has to be redirected, not just ``sys.path``:
@@ -46,6 +46,9 @@ def site_dir(tmp_path: Path, monkeypatch) -> Path:
     directory.mkdir()
     empty = tmp_path / "empty-prefix"
     empty.mkdir()
+    # The scan is memoized for the life of the process, so without this every
+    # test after the first would be answered from the first one's layout.
+    editable_repo._editable_roots_cached.cache_clear()
     monkeypatch.setattr(editable_repo.sys, "path", [str(directory)])
     monkeypatch.setattr(editable_repo.site, "getsitepackages", lambda: [])
     monkeypatch.setattr(editable_repo.site, "getusersitepackages", lambda: "")
@@ -54,7 +57,8 @@ def site_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(editable_repo.sys, "executable", str(empty / "bin" / "python3"))
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
-    return directory
+    yield directory
+    editable_repo._editable_roots_cached.cache_clear()
 
 
 @pytest.fixture

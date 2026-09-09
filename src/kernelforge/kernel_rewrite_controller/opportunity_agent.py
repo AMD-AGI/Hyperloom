@@ -11,8 +11,9 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -34,9 +35,11 @@ from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.scheduler import ANALYSIS_BUDGET_SEC
 from kernelforge.kernel_rewrite_controller.task_publisher import (
     TaskPublicationResult,
+    pending_rejections,
     publish_complete_staged_tasks,
 )
 from kernelforge.llm.git import git
+from kernelforge.tracker.usage import UsageAccumulator
 
 ANALYSIS_STATUS_COMPLETED = "completed"
 ANALYSIS_STATUS_FAILED = "failed"
@@ -48,6 +51,12 @@ _PUBLISH_POLL_SEC = 0.5
 # Caps on what one investigation tool call may return.
 _MAX_GREP_MATCHES = 200
 _MAX_READ_LINES = 2000
+
+# How many times the session may be held open over a refused draft. One round
+# is what an ordinary contract slip needs; a draft that still fails after this
+# many is one the agent cannot fix from the reason it was given, and spending
+# the rest of the analysis budget on it buys nothing.
+_MAX_STOP_DENIALS = 3
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,14 @@ class OpportunityAnalysisResult:
     #: the count alone cannot say which rule it broke. Durable because Hyperloom
     #: discards this process's streams when it hard-kills the controller.
     rejected_tasks: tuple[dict[str, str], ...] = ()
+    #: What this session spent on the model, in ``UsageAccumulator.totals()``
+    #: shape, or ``{}`` when no provider call was counted. Recorded because the
+    #: analysis is the one part of a campaign whose spend nothing else observes:
+    #: it runs in the controller's own process, and a run that publishes no task
+    #: publishes no forge-loop to account for it either.
+    llm_usage: dict[str, Any] = field(default_factory=dict)
+    #: Model the analysis ran on, for the ledger row.
+    agent_model: str = ""
     started_at_unix: float = 0.0
     finished_at_unix: float = 0.0
 
@@ -100,8 +117,10 @@ async def _cap_investigation_result(input_data, _tool_use_id, _context) -> dict:
 class _AnalysisToolGuard:
     """Confine Agent writes to staging and bound what its reads may return."""
 
-    def __init__(self, staging_root: Path) -> None:
+    def __init__(self, staging_root: Path, *, max_stop_denials: int = _MAX_STOP_DENIALS) -> None:
         self.staging_root = staging_root.resolve()
+        self.max_stop_denials = max(0, int(max_stop_denials))
+        self.stop_denials = 0
 
     def hooks(self) -> AgentHooks:
         return AgentHooks(
@@ -118,8 +137,42 @@ class _AnalysisToolGuard:
                     matcher="Read|Grep",
                     callback=_cap_investigation_result,
                 ),
-            ]
+            ],
+            # Stop is a lifecycle event rather than a tool, so it carries no
+            # matcher; ``_hook_matcher`` forwards one only when it is set.
+            stop=[AgentHook(matcher="", callback=self._on_stop)],
         )
+
+    async def _on_stop(self, _input_data, _tool_use_id, _context) -> dict:
+        """Refuse to end the session while a draft stands refused.
+
+        The host validates out of process on a timer, so an agent that writes a
+        malformed draft and stops hears nothing: the run reports fewer tasks than
+        the agent believes it published, and a whole analysis budget buys zero
+        operators over a field it could have corrected in one turn. Denials are
+        capped because a draft breaking a rule the agent cannot satisfy would
+        otherwise spend the rest of the budget failing in place.
+        """
+        pending = pending_rejections(self.staging_root)
+        if not pending or self.stop_denials >= self.max_stop_denials:
+            return {}
+        self.stop_denials += 1
+        refusals = "\n".join(f"- {draft}: {reason}" for draft, reason in sorted(pending.items()))
+        return {
+            "decision": "block",
+            "reason": (
+                "The host refused these staged tasks, so they were never published:\n"
+                f"{refusals}\n"
+                "Each refusal is also written to rejection.json inside the draft's own "
+                "directory. Correct the task.json the reason names and the host will "
+                "revalidate it within a few seconds. If the operator should not be "
+                "published at all, withdraw the draft by rewriting its task.json as "
+                '{"withdrawn": "<why>"} -- you have no tool that can delete a '
+                "directory, so that is how a draft is taken back. Do not stop with a "
+                f"draft neither fixed nor withdrawn (attempt {self.stop_denials} of "
+                f"{self.max_stop_denials})."
+            ),
+        }
 
     async def _on_pre_disallowed_tool(self, _input_data, _tool_use_id, _context) -> dict:
         return {
@@ -278,10 +331,8 @@ subdirectory containing exactly:
 
 task.json must use this exact top-level structure:
 {
-  "schema_version": 1,
   "identity": {
     "producer": "forge-loop",
-    "kernel_name": "<normalized operator name>",
     "framework": "<framework>",
     "framework_version": "<version>",
     "backend": "<backend>",
@@ -290,7 +341,7 @@ task.json must use this exact top-level structure:
   "base_commit": "",
   "repo_root": "<absolute Git top-level>",
   "kernel_path": "<repo-relative source path>",
-  "operator_name": "<name that normalizes to identity.kernel_name>",
+  "operator_name": "<entry point spelled as its source spells it>",
   "driver_path": "driver.py",
   "source_files": ["<repo-relative path>"],
   "target_functions": ["<function>"],
@@ -302,6 +353,7 @@ task.json must use this exact top-level structure:
   }],
   "priority": 0,
   "world_size": 1,
+  "gpu_pct": 15.3,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
     "level": "<measured|corroborated|inferred>",
@@ -312,6 +364,16 @@ task.json must use this exact top-level structure:
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
 to the current repo HEAD before publication.
+gpu_pct is this operator's share of end-to-end GPU time, the measured number
+your ranking already rests on. It is recorded and reported, never checked and
+never acted on, so no task is refused over it; omit it when you have only
+corroborated evidence rather than trade it for a figure you did not measure.
+identity carries no kernel_name: the host derives that dimension from
+operator_name, so supplying one of your own decides nothing. Give operator_name
+the entry point as the source writes it, keeping camel case and any namespace
+prefix -- `aiter::fusedAddRmsNorm`, not `fused_add_rms_norm`. Upstream
+pull-request search splits that spelling into terms, and a name normalized
+before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
 `"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
 kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
@@ -342,6 +404,17 @@ Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
 trying to prove an implementation. Do not write state.json and do not modify
 source repositories or handoff files.
+
+The host validates each draft a few seconds after you stop writing to it, and
+takes the directory away once it passes. A draft still sitting in staging with
+a `rejection.json` beside it was refused and was never published: read that
+file, fix what its reason names, and the host will try again on its own.
+
+When the reason shows the operator should not be published at all, withdraw the
+draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
+delete a directory, so this is how a draft is taken back, and a withdrawn one
+is neither published nor held against you. You cannot end the session while a
+refused draft is neither fixed nor withdrawn.
 """
 
 
@@ -402,6 +475,7 @@ class OpportunityAnalysisAgent:
         layout.agent_staging_root.mkdir(parents=True, exist_ok=True)
         _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
+        usage = UsageAccumulator()
         spec = AgentRunSpec(
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(handoff, layout.agent_staging_root),
@@ -435,6 +509,7 @@ class OpportunityAnalysisAgent:
             run_session_with_api_resume(
                 self.backend,
                 spec,
+                usage=usage,
                 deadline_sec=self.timeout_sec,
             )
         )
@@ -495,12 +570,19 @@ class OpportunityAnalysisAgent:
             for name, result in sorted(publications.items())
             if not result.published
         )
+        # Read off the accumulator rather than off the run result: the session
+        # may have been resumed or cancelled, and the accumulator counted every
+        # provider call either way. ``calls == 0`` means nothing was observed,
+        # which is not the same claim as zero spend.
+        totals = usage.totals()
         outcome = OpportunityAnalysisResult(
             status=status,
             reason=reason,
             published_task_count=published,
             rejected_task_count=len(rejected),
             rejected_tasks=rejected,
+            llm_usage=totals if int(totals.get("calls") or 0) > 0 else {},
+            agent_model=str(self.backend.runtime.model or ""),
             started_at_unix=started,
             finished_at_unix=time.time(),
         )

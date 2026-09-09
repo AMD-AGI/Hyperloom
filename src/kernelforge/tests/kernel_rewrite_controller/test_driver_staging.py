@@ -138,7 +138,7 @@ def test_the_staging_directory_does_not_survive_the_borrow(staged, tmp_path: Pat
     _task, workspace, driver = staged
     assert driver.is_file()
 
-    worktree_module._remove_producer_untracked(workspace)
+    worktree_module.remove_foreign_untracked(workspace, frozenset())
 
     assert not driver.parent.exists()
 
@@ -152,7 +152,7 @@ def test_a_driver_left_by_a_killed_run_is_reclaimed(staged) -> None:
     abandoned.mkdir()
     (abandoned / "driver.py").write_text("stale\n", encoding="utf-8")
 
-    worktree_module._remove_producer_untracked(workspace)
+    worktree_module.remove_foreign_untracked(workspace, frozenset())
 
     assert not abandoned.exists()
 

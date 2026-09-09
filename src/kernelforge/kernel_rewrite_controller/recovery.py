@@ -126,21 +126,20 @@ def _nothing_to_recover_reason(task: KernelRewriteTask, workspace: Path) -> str:
     """Say which of two different facts stopped a recovery.
 
     A borrowed repository is handed back the moment its patch is exported, and
-    forge-loop's best-result bundle lives inside the workspace, so it goes with
-    it. Once that has happened there is nothing here to judge -- reporting "no
-    trusted forge-loop best result" would state a verdict on evidence that was
+    forge-loop's best-result bundle lives inside the workspace. The release
+    archives it rather than deleting it, so the bundle outlives the borrow --
+    but at the operator's own directory, not at the repository the sweep would
+    ask about. Both are read before this is reported.
+
+    Only when neither holds anything is there a fact to state, and it is not
+    "no trusted forge-loop best result": that states a verdict on evidence
     never read, which reads as "the campaign produced nothing" and is a
     different claim entirely.
-
-    The dispatch recovers from the workspace before handing it back, and the
-    sidecar in the task directory outlives the borrow, so both views a
-    completed campaign leaves behind are still reachable. What is not is an
-    interim bundle from a campaign that never reported.
     """
     if needs_inplace(str(task.repo_root)) and not (workspace / FORGE_LOOP_OUTPUT_DIRNAME).is_dir():
         return (
-            "the borrowed repository was handed back, so its forge-loop bundle is gone; "
-            "a completed campaign is recovered during dispatch or from the task's result sidecar"
+            "the borrowed repository was handed back and its archived forge-loop bundle holds no trusted "
+            "best result; a completed campaign is recovered during dispatch or from the task's result sidecar"
         )
     return "no trusted forge-loop best result"
 
@@ -169,8 +168,12 @@ def recover_task_result(
             reason="operator workspace does not exist",
         )
 
+    # The archive second, and only if the workspace holds nothing: a borrowed
+    # repository hands its bundle back to the operator's own directory on
+    # release, which is the one copy a run the host killed still leaves
+    # reachable. For a private checkout the two are the same directory.
     manifest, source = _select_trusted_result(
-        _trusted_manifest(workspace),
+        _trusted_manifest(workspace) or _trusted_manifest(layout.workspace_dir(task.operator_id)),
         _trusted_result_sidecar(Path(task_dir)),
     )
     if manifest is None:

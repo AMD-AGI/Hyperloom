@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -261,17 +262,18 @@ def dispatch_single_task(
             reason=reason,
         )
     finally:
-        # After the recovery above, never before it: the patch is what the
-        # campaign was for, and this returns the tree the patch was built in.
-        #
-        # A borrowed repository takes forge-loop's best-result bundle with it,
-        # so the closing sweep cannot read one out of an in-place workspace --
-        # only a private checkout, which is left standing for exactly that
-        # reason. What a completed in-place campaign leaves reachable is the
-        # recovery above, which runs first, and the result sidecar in the task
-        # directory, which is outside the repository. The sweep says which of
-        # those it found rather than reporting a verdict on a bundle that is
-        # gone; see _nothing_to_recover_reason.
+        # The controller's closing sweep cannot stand in for this one. It runs
+        # after every task's release, and a borrowed repository has by then given
+        # its campaign branch back -- so the best commit a patch would be
+        # exported from is already unreachable. This is the last moment the tree
+        # and the branch still exist, so a recovery that failed for a passing
+        # reason gets one more attempt here. Publication is idempotent.
+        if worktree is not None and worktree.inplace:
+            with contextlib.suppress(Exception):
+                recover_task_result(layout, task_path, update_state=False)
+        # After that, never before: the patch is what the campaign was for, and
+        # this returns the tree the patch was built in. A private checkout is
+        # left standing instead, because the closing sweep does read those.
         _keep_preparation_audit(layout, task, worktree)
         release_operator_worktree(worktree)
 
