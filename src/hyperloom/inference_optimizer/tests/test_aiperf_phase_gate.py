@@ -229,6 +229,9 @@ def test_cpu_frontend_does_not_mask_incomplete_or_ambiguous_gpu_traces(tmp_path,
         _write_trace(tmp_path / "worker.pt.trace.json.gz")
     elif case == "truncated_frontend":
         frontend.write_bytes(frontend.read_bytes()[:-8])
+        now_ns = time.time_ns()
+        os.utime(frontend, ns=(now_ns, now_ns))
+        assert str(frontend.resolve()) in phase_gate.current_traces(dirs, snapshot)
     tp = 2 if case in {"missing_gpu_rank", "unranked_gpu_tp2"} else 1
     assert not phase_gate.traces_complete(dirs, snapshot, tp)
 
