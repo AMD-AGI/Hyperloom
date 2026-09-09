@@ -137,11 +137,11 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     assert row.get("tp") == 8
 
 
-def test_t0_anchor_writes_warm_start_snapshot_to_disk(
+def test_t0_anchor_sets_warm_start_recipe_on_state(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """``warm_start_recipe`` snapshot lands at ``runtime/recipe_kb/.kb_warm.json``."""
+    """``warm_start_recipe`` is set on the shared state after anchor lookup."""
     state = _FakeSharedState()
     run_t0_anchor(
         kb,
@@ -151,14 +151,9 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
         extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
-    warm_path = session_dir / "runtime" / "recipe_kb" / ".kb_warm.json"
-    assert warm_path.is_file()
-    import json
-
-    payload = json.loads(warm_path.read_text())
     # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
-    assert payload["tier"] == "seed_only"
-    assert payload["confidence"] == 0.0
+    assert state.warm_start_recipe.get("tier") == "seed_only"
+    assert state.warm_start_recipe.get("confidence") == 0.0
     assert state.warm_start_context.get("status") == "seed_only"
 
 

@@ -137,6 +137,29 @@ def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
     return bool(getattr(shared_state, "eval_disabled", False))
 
 
+def _variant_with_eval_off(gv: Any) -> Any:
+    """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
+
+    The variant layer is the last one :func:`run_grid` applies over the
+    accumulated stack, so forcing the key here is what makes a session-level
+    ``--no-eval`` hold whatever the stack carries.
+    """
+    envs = dict(gv.extra_envs)
+    envs["RUN_EVAL"] = "false"
+    return _carry_variant_metadata(
+        gv,
+        GridVariant(
+            name=gv.name,
+            extra_server_args=gv.extra_server_args,
+            extra_envs=envs,
+            note=gv.note,
+            remove_args=to_str_list(getattr(gv, "remove_args", [])),
+            unset_envs=to_str_list(getattr(gv, "unset_envs", [])),
+            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+        ),
+    )
+
+
 def _carry_variant_metadata(src: Any, dst: Any) -> Any:
     """Copy the carried audit metadata from ``src`` onto ``dst``."""
     for attr in _CARRIED_VARIANT_ATTRS:
@@ -925,45 +948,14 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
-                if stack_base_args_mode == "replace":
-                    run_remove_args = to_str_list(getattr(gv, "remove_args", []))
-                else:
-                    run_remove_args = list(
-                        dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", [])))
-                    )
-                run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
-                run_extra_envs = dict(stack_extra_envs)
-                run_extra_envs.update(gv.extra_envs)
-                if eval_disabled:
-                    run_extra_envs["RUN_EVAL"] = "false"
-                run_gv = GridVariant(
-                    name=gv.name,
-                    extra_server_args=gv.extra_server_args,
-                    extra_envs=run_extra_envs,
-                    note=gv.note,
-                    remove_args=run_remove_args,
-                    unset_envs=run_unset_envs,
-                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-                )
-                _carry_variant_metadata(gv, run_gv)
-                # The decision round is timed against a throughput-only anchor, so it measures throughput only: the
-                # warmup round already evaluated accuracy and ``parse_eval_results`` falls back to that score.
-                decision_gv = run_gv
-                if use_warm_decision:
-                    decision_envs = dict(run_extra_envs)
-                    decision_envs["RUN_EVAL"] = "false"
-                    decision_gv = _carry_variant_metadata(
-                        run_gv,
-                        GridVariant(
-                            name=gv.name,
-                            extra_server_args=gv.extra_server_args,
-                            extra_envs=decision_envs,
-                            note=gv.note,
-                            remove_args=run_remove_args,
-                            unset_envs=run_unset_envs,
-                            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-                        ),
-                    )
+                # ``--no-eval`` opted the session out of accuracy entirely, so it
+                # holds for every round. The decision round additionally skips
+                # eval when a warmup preceded it: it is timed against a
+                # throughput-only anchor, and ``parse_eval_results`` falls back
+                # to the score the warmup took. Without a warmup there is nothing
+                # to fall back to, so the decision round keeps its own eval.
+                warmup_gv = _variant_with_eval_off(gv) if eval_disabled else gv
+                decision_gv = _variant_with_eval_off(gv) if (use_warm_decision or eval_disabled) else gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
@@ -982,7 +974,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[run_gv],
+                            grid=[warmup_gv],
                             output_root=warmup_slot,
                             variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
@@ -992,6 +984,9 @@ class ExploreExecutor:
                             soft_deadline_sec=None,
                             server_lifecycle=variant_lifecycle,
                             base_args_mode=stack_base_args_mode,
+                            base_extra_envs=dict(stack_extra_envs),
+                            base_remove_args=list(stack_remove_args),
+                            base_unset_envs=list(stack_unset_envs),
                             serving_lease=variant_lease,
                             session_deadline_sec=session_deadline_sec,
                             variant_expected_sec=warmup_expected_sec,
@@ -1084,6 +1079,9 @@ class ExploreExecutor:
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=variant_lifecycle,
                         base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
@@ -1316,12 +1314,23 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack.
+                        # Layer onto the running stack. For
+                        # removal variants, next_args/next_envs are the
+                        # effective launch config that must persist if the KEEP
+                        # survives; gv.extra_* remain only the candidate delta.
+                        _keep_remove_args = (
+                            to_str_list(getattr(gv, "remove_args", []))
+                            if stack_base_args_mode == "replace"
+                            else list(dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", []))))
+                        )
+                        _keep_unset_envs = list(
+                            dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
+                        )
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=run_remove_args,
+                            remove_args=_keep_remove_args,
                             args_mode="replace"
                             if stack_base_args_mode == "replace"
                             else getattr(gv, "args_mode", "append"),
@@ -1334,16 +1343,16 @@ class ExploreExecutor:
                             args_mode=getattr(gv, "args_mode", "append"),
                         )
                         next_envs = dict(stack_extra_envs)
-                        for k in run_unset_envs:
+                        for k in _keep_unset_envs:
                             next_envs.pop(str(k), None)
                         next_envs.update(gv.extra_envs)
                         effective_control_fields = dict(control_fields)
-                        if run_remove_args:
-                            effective_control_fields["remove_args"] = list(run_remove_args)
-                        if run_unset_envs:
-                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        if _keep_remove_args:
+                            effective_control_fields["remove_args"] = list(_keep_remove_args)
+                        if _keep_unset_envs:
+                            effective_control_fields["unset_envs"] = list(_keep_unset_envs)
                         persist_effective_args = bool(
-                            run_remove_args
+                            _keep_remove_args
                             or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
                             or stack_base_args_mode == "replace"
                         )
@@ -1390,8 +1399,8 @@ class ExploreExecutor:
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                         stack_extra_envs = next_envs
-                        stack_remove_args = list(run_remove_args)
-                        stack_unset_envs = list(run_unset_envs)
+                        stack_remove_args = list(_keep_remove_args)
+                        stack_unset_envs = list(_keep_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput

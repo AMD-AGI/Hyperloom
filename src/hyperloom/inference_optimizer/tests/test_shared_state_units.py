@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
+
 import pytest
 
 from hyperloom.orchestrator.state.shared_state import (
@@ -14,6 +17,11 @@ from hyperloom.orchestrator.state.shared_state import (
     inject_stack_base_params,
     resolve_grading_anchor_tput,
 )
+
+
+def _at(unix: float) -> datetime:
+    """Return ``unix`` as an aware UTC datetime for elapsed/remaining math."""
+    return datetime.fromtimestamp(unix, tz=timezone.utc)
 
 
 class TestResolveGradingAnchorTput:
@@ -136,71 +144,77 @@ class TestGridSessionDeadline:
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 
-class TestDeadlineUnix:
-    """The persisted unix deadline is the one remaining-time check."""
+class TestSessionBudget:
+    """Elapsed is summed forward over legs; the budget only ever tightens."""
 
-    def test_an_unbounded_session_does_not_stamp_a_deadline(self):
+    def test_an_unbounded_session_has_no_deadline(self):
         state = SharedState(session_id="s")
-        assert state.stamp_deadline_unix() == 0.0
-        assert state.deadline_unix == 0.0
         assert state.remaining_minutes() is None
+        assert state.session_deadline() is None
 
-    def test_the_first_stamp_is_start_plus_the_budget(self):
-        from hyperloom.common.coerce import to_unix
-
+    def test_a_fresh_leg_starts_with_the_whole_budget(self):
         state = SharedState(session_id="s", max_minutes=60)
-        stamped = state.stamp_deadline_unix()
-        start = to_unix(state.start_ts)
-        assert stamped == pytest.approx(start + 3600.0, abs=1.0)
-        assert state.remaining_minutes() == pytest.approx(60.0, abs=0.1)
+        state.begin_leg(now_unix=1_000.0)
+        assert state.elapsed_minutes(now=_at(1_000.0)) == pytest.approx(0.0)
+        assert state.remaining_minutes(now=_at(1_000.0)) == pytest.approx(60.0)
 
-    def test_a_second_stamp_does_not_reissue_the_budget(self):
+    def test_a_second_leg_resumes_from_what_the_first_spent(self):
         state = SharedState(session_id="s", max_minutes=60)
-        first = state.stamp_deadline_unix(now_unix=1_000.0)
-        state.start_ts = "2099-01-01T00:00:00+00:00"
-        assert state.stamp_deadline_unix(now_unix=9_000.0) == first
-        assert state.deadline_unix == first
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=2_800.0)  # 30 minutes of leg one
+        # Two hours pass with nothing running, then leg two opens.
+        state.begin_leg(now_unix=10_000.0)
+        assert state.elapsed_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
+        assert state.remaining_minutes(now=_at(10_000.0)) == pytest.approx(30.0)
 
-    def test_remaining_minutes_reads_the_stamp_not_elapsed(self):
-        from datetime import datetime, timezone
+    def test_a_killed_leg_and_a_stopped_leg_charge_the_same(self):
+        # Neither leg records how it ended; both are charged by their last
+        # charge_elapsed, which is what makes them indistinguishable here.
+        killed = SharedState(session_id="killed", max_minutes=60)
+        stopped = SharedState(session_id="stopped", max_minutes=60)
+        for state in (killed, stopped):
+            state.begin_leg(now_unix=1_000.0)
+            state.charge_elapsed(now_unix=2_800.0)
+        stopped.stop_reason = "time_exhausted"
+        killed.stop_reason = ""
+        for state in (killed, stopped):
+            state.begin_leg(now_unix=5_000.0)
+        assert killed.remaining_minutes(now=_at(5_000.0)) == stopped.remaining_minutes(now=_at(5_000.0))
 
+    def test_elapsed_never_goes_backwards_across_charges(self):
         state = SharedState(session_id="s", max_minutes=60)
-        state.deadline_unix = 2_000.0
-        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=1_600.0)
+        # A clock that jumps backwards must not refund budget.
+        state.charge_elapsed(now_unix=1_200.0)
+        assert state.elapsed_charged_sec == pytest.approx(600.0)
 
-    def test_a_spent_stamp_reads_as_zero_not_negative(self):
-        from datetime import datetime, timezone
-
+    def test_a_spent_budget_reads_as_zero_not_negative(self):
         state = SharedState(session_id="s", max_minutes=60)
-        state.deadline_unix = 100.0
-        now = datetime.fromtimestamp(500.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == 0.0
+        state.begin_leg(now_unix=1_000.0)
+        assert state.remaining_minutes(now=_at(9_000.0)) == 0.0
 
-    def test_a_stamp_survives_a_max_minutes_truncated_to_zero(self):
-        from datetime import datetime, timezone
+    def test_a_spent_budget_yields_an_expired_deadline_not_none(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        state.begin_leg(now_unix=time.time() - 7_200.0)
+        deadline = state.session_deadline()
+        assert deadline is not None
+        assert deadline.expired()
 
+    def test_an_extension_lengthens_the_budget_without_refunding_elapsed(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        state.begin_leg(now_unix=1_000.0)
+        state.charge_elapsed(now_unix=4_600.0)  # whole budget spent
+        assert state.remaining_minutes(now=_at(4_600.0)) == 0.0
+        assert state.extend_budget_minutes(30.0, reason="operator") == 90.0
+        assert state.elapsed_minutes(now=_at(4_600.0)) == pytest.approx(60.0)
+        assert state.remaining_minutes(now=_at(4_600.0)) == pytest.approx(30.0)
+        assert state.budget_extensions[-1]["reason"] == "operator"
+
+    def test_an_unbounded_session_is_not_bounded_by_an_extension(self):
         state = SharedState(session_id="s")
-        now_unix = 1_000.0
-        state.start_ts = datetime.fromtimestamp(now_unix, tz=timezone.utc).isoformat()
-        stamped = state.stamp_deadline_unix(
-            budget_minutes=0.0001,
-            now_unix=now_unix,
-        )
-        now = datetime.fromtimestamp(now_unix, tz=timezone.utc)
-        assert stamped == pytest.approx(now_unix + 0.006)
-        assert state.remaining_minutes(now=now) == pytest.approx(0.0001)
-        state.max_minutes = 0
-        now = datetime.fromtimestamp(stamped - 6.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(0.1)
-
-    def test_remaining_minutes_reads_a_stamp_when_max_minutes_is_zero(self):
-        from datetime import datetime, timezone
-
-        state = SharedState(session_id="s", max_minutes=0)
-        state.deadline_unix = 2_000.0
-        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
-        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+        assert state.extend_budget_minutes(30.0) == 0.0
+        assert state.remaining_minutes() is None
 
     def test_teardown_timings_accumulate_and_keep_a_total(self):
         state = SharedState(session_id="s")

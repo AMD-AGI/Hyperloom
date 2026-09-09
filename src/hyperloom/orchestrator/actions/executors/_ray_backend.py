@@ -117,9 +117,9 @@ def _run_subprocess_worker(
 ) -> tuple[int, str, str]:
     """Ray worker body: run the subprocess under session-kill semantics."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        run_with_session_kill,
         session_remaining_to_deadline_sec,
     )
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 
     worker_env = _merge_worker_env(env)
     proc = run_with_session_kill(

@@ -75,6 +75,9 @@ def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str
         return raw.split()
 
 
+#: Phase that answers only "does this combo boot and serve": boot, hold,
+#: health, one short completion, tear down. No benchmark client.
+
 # Reuse verdicts for a persistent lifecycle server (see _server_reusable).
 _REUSE = "reuse"  # healthy port + our pid/meta present -> attach a client round
 _BOOT = "boot"  # port not up -> this round boots the server
@@ -124,6 +127,7 @@ def run_benchmark(
         return 2
 
     inferencex_root = bypass_engine.resolve_inferencex_root(bench)
+    # The boot probe runs no benchmark client, so it needs no InferenceX checkout.
     if not inferencex_root or not Path(inferencex_root).is_dir():
         _emit_failure(
             output_dir,
@@ -317,7 +321,9 @@ def run_benchmark(
     start = time.time()
     server_proc = _launch_server(server_cmd, server_env, server_log)
     try:
-        if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout):
+        if not bypass_engine.wait_for_server_ready(
+            base_url, timeout_s=server_ready_timeout, server_exited=lambda: server_proc.poll() is not None
+        ):
             _write_report(
                 workspace,
                 framework,
@@ -392,7 +398,9 @@ def _run_server_phase(
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
         return 2
     proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
+    if not bypass_engine.wait_for_server_ready(
+        base_url, timeout_s=server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
+    ):
         _terminate_server(proc)
         _write_report(
             workspace,
@@ -536,7 +544,9 @@ def _run_lifecycle_all(
         return 2
     start = time.time()
     proc = _launch_server(server_cmd, server_env, server_log)
-    if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
+    if not bypass_engine.wait_for_server_ready(
+        base_url, timeout_s=server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
+    ):
         _terminate_server(proc)
         _write_report(
             workspace,

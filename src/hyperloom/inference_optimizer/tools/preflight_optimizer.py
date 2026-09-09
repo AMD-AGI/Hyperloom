@@ -122,5 +122,21 @@ def main() -> int:
     return 0 if ok else 2
 
 
+def _exit(code: int) -> None:
+    """Leave the process with ``code`` without going through interpreter teardown.
+
+    This exit status is the IR-1 gate the launcher branches on, so nothing
+    in-process may override it. ``import torch`` does exactly that on the ROCm
+    build shipped in these pods: its teardown forces status 0, which silently
+    turned every violation this tool detects into a pass.
+
+    Args:
+        code: The status to leave the process with.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit(main())

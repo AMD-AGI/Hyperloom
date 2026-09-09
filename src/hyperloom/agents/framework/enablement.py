@@ -408,7 +408,6 @@ class EnablementRequest:
     launch_log: str = ""
     work_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "framework-agent-enablement")
     gpu_type: str = ""
-    launch_probe: str = ""
     max_search_candidates: int = 5
 
     @classmethod
@@ -432,7 +431,6 @@ class EnablementRequest:
                 str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))
             ).expanduser(),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
-            launch_probe=str(raw.get("launch_probe") or "").strip(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),
         )
 
@@ -447,61 +445,35 @@ class EnablementRequest:
 
 def runnable_decision(
     *,
-    probe_returncode: int | None,
+    booted: bool | None,
     correctness_ok: bool | None,
-    probe_timed_out: bool = False,
-    before_signature: FailureSignature | None = None,
-    after_signature: FailureSignature | None = None,
+    boot_timed_out: bool = False,
 ) -> tuple[bool, str]:
-    """Decide whether an enablement patch made the combo *run*."""
-    if probe_timed_out:
-        return False, "launch probe timed out"
-    if probe_returncode is None:
-        return False, "launch probe did not run"
-    if probe_returncode != 0:
-        return False, f"launch probe exited {probe_returncode} (still not runnable)"
-    if (
-        before_signature is not None
-        and after_signature is not None
-        and after_signature.is_actionable
-        and after_signature.kind == before_signature.kind
-    ):
-        return False, f"same failure {after_signature.kind} persists after patch"
+    """Decide whether an enablement patch made the combo *run*.
+
+    ``booted`` is the boot verdict off the attempt's ladder observation, never a
+    throughput number: a server that comes up and serves slowly has been
+    enabled. Whether the boot got *further* than the last one is a separate
+    question, answered by ladder arithmetic over two boot observations.
+
+    Args:
+        booted: Whether the attempt reached a serving server; ``None`` when no
+            observation was recorded and the question was never answered.
+        correctness_ok: Minimal-correctness result; ``None`` if not evaluated.
+        boot_timed_out: Whether the attempt was reaped on its wall-clock budget.
+
+    Returns:
+        tuple[bool, str]: ``(runs, reason)``.
+    """
+    if boot_timed_out:
+        return False, "the bring-up was reaped on its budget"
+    if booted is None:
+        return False, "no boot observation was recorded for this attempt"
+    if not booted:
+        return False, "the server did not come up (still not runnable)"
     if correctness_ok is False:
-        return False, "launch succeeded but minimal correctness check failed"
-    return True, "combo now launches" + ("" if correctness_ok is None else " and passes minimal correctness")
-
-
-def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
-    """A coarse, taxonomy-independent identity for a failure signature."""
-    if sig is None:
-        return ("", "", "")
-    excerpt = re.sub(r"\s+", " ", (sig.raw_excerpt or "")).strip().lower()
-    excerpt = re.sub(r"\d+", "#", excerpt)[:160]
-    return (sig.kind or "", (sig.offending_file or "").strip(), excerpt)
-
-
-def _has_failure(sig: FailureSignature | None) -> bool:
-    """True when a signature represents a real (post-)boot failure, not a clean boot."""
-    if sig is None:
-        return False
-    if sig.is_actionable:
-        return True
-    return bool((sig.raw_excerpt or "").strip() or (sig.offending_file or "").strip())
-
-
-def enablement_made_progress(
-    before_signature: FailureSignature | None,
-    after_signature: FailureSignature | None,
-) -> bool:
-    """Whether a patch advanced the boot to a *new, deeper* failure."""
-    # No post-patch failure at all -> clean boot, handled by runnable_decision.
-    if not _has_failure(after_signature):
-        return False
-    if not _has_failure(before_signature):
-        # No prior failure to compare: any post-patch failure is a first step.
-        return True
-    return _failure_identity(after_signature) != _failure_identity(before_signature)
+        return False, "the server came up but the minimal correctness check failed"
+    return True, "the server now comes up" + ("" if correctness_ok is None else " and passes minimal correctness")
 
 
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather than pure-Python guard logic: a native
@@ -552,7 +524,6 @@ __all__ = [
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",
-    "enablement_made_progress",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

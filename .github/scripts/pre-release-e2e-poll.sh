@@ -326,7 +326,7 @@ state_json_query() {
   echo "__UNREADABLE__"
 }
 
-# Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
+# Clean terminal stop_reason values (hyperloom.inference_optimizer.breakdown.stop_reasons.SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {
   case "$1" in
     target_reached|global_converged|time_exhausted|max_ticks|sweep_done|robustness_escalated)

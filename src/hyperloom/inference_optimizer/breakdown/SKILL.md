@@ -180,6 +180,13 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
   so an event's `start_time` is when the work began rather than when its
   artefacts were written, and the KERNEL and BASELINE projections are gone.
   Consumers that sorted around the old collapsed windows need to be rechecked.
+- Inside v6, `enablement` gained the round ledger: `rounds[]` and its
+  counters are added to the block, and the three state-sourced fields they
+  replace (`stall_streak`, `inflight_task_id`, `dispatch_tick`) are no longer
+  emitted. The block is runtime observability that is already `{}` on a
+  session that ran no enablement, so it carries no field a consumer can gate
+  a version on; the disposition of each replaced field is in
+  `docs/reference/session-breakdown.md`.
 - V5 was the preceding cutover, for optimization results: `optimizations` is
   reshaped, and the `optimization_stack`, `attribution`, `geak_invocations`,
   `forge_invocations`, and `gemm_tuning` projections are gone. Consumers

@@ -414,53 +414,63 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     bank_phase_segment(state, until_unix=stop_unix)
 
 
-def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
-    """Mark the start of a resumed run leg on ``state`` (caller persists)."""
+def _begin_resume_leg(state: SharedState) -> str:
+    """Mark the start of a resumed run leg on ``state`` (caller persists).
+
+    Stamps :attr:`SharedState.resumed_ts`, which dates the previous leg's CLOSE
+    transition in ``phase_history`` as a previous leg's and stops the phase
+    clock charging the gap between the two legs to the phase it stopped in.
+    Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
+    makes Orchestration heartbeats think the work is done, and a stale closing
+    flag resumes straight into a wind-down already finished.
+
+    The wall-clock budget is untouched. Elapsed time is summed forward across
+    legs, so this leg starts from whatever the session has already spent;
+    :meth:`SharedState.extend_budget_minutes` is the only way to lengthen it.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+
+    Returns:
+        str: The timestamp stamped as this leg's boundary.
+    """
     _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
-    if reanchor_budget:
-        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats forever think the work is done.
-        state.stop_reason = ""
-        state.stop_ts = ""
-        state.closing_phase = False
-        state.closing_started_unix = 0.0
-        state.closing_report_task_id = ""
-        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
-        state.crash_count = 0
-        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
-        state.start_ts = state.resumed_ts
-        # The stamp is the loop's budget.
-        state.deadline_unix = 0.0
-        state.teardown_timings_sec = {}
+    state.stop_reason = ""
+    state.stop_ts = ""
+    state.closing_phase = False
+    state.closing_started_unix = 0.0
+    state.closing_report_task_id = ""
+    state.crash_count = 0
+    state.teardown_timings_sec = {}
+    state.begin_leg()
     return state.resumed_ts
 
 
-def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
-    """Operator-facing resume notes when the wall-clock stamp is kept."""
+def _resume_budget_lines(state: SharedState, *, extend_hours: float) -> list[str]:
+    """Operator-facing notes about what budget the resumed leg actually has.
+
+    Args:
+        state: Loaded session state after :func:`_begin_resume_leg`.
+        extend_hours: Hours this invocation granted via ``--extend-hours``.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
     elapsed_h = state.elapsed_minutes() / 60.0
     remaining_min = state.remaining_minutes()
-    lines = [
-        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): the persisted deadline is kept",
-    ]
+    lines = [f"  → {elapsed_h:.2f}h charged to this session across every leg so far"]
     if remaining_min is None:
-        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        lines.append("  → budget: unbounded")
         return lines
-    remaining_h = remaining_min / 60.0
-    lines.append(f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp")
-    cli_hours = float(max_hours or 0.0)
+    lines.append(f"  → budget: {float(state.max_minutes) / 60.0:.2f}h total, {remaining_min / 60.0:.2f}h left")
+    if extend_hours > 0.0:
+        lines.append(f"  → --extend-hours added {extend_hours:.2f}h to the session budget")
     if remaining_min <= 0.0:
         lines.append(
-            "  → WARNING: the stamped deadline is already spent; start a fresh "
-            "session, or the run stops almost immediately"
+            "  → WARNING: the budget is spent; this leg will close almost "
+            "immediately. Pass --extend-hours to grant more, or start a fresh session"
         )
-        lines.append(
-            "  → raising --max-hours on a clean-stop resume does not extend the "
-            "stamp; a recorded stop_reason re-anchors the budget"
-        )
-    elif cli_hours > 0.0:
-        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
-        if abs(cli_left_min - remaining_min) > 1.0:
-            lines.append(f"  → this invocation's --max-hours {cli_hours:.2f} does not extend or shrink that stamp")
     return lines
 
 

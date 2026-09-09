@@ -389,7 +389,6 @@ def test_v4_nested_enablement_roundtrips(tmp_path):
     sd.mkdir()
     s = SharedState()
     s.enablement.launch_log = "mla_gluon requires batch_size=1"
-    s.enablement.attempts = 3
     s.enablement.kept_patches = ["/p/a.patch", "/p/b.patch"]
     s.save(sd)
     raw = json.loads((sd / "state.json").read_text())
@@ -398,7 +397,6 @@ def test_v4_nested_enablement_roundtrips(tmp_path):
     assert "enablement_launch_log" not in raw, "flat keys must not appear in v4 output"
     loaded = SharedState.load_or_init(sd)
     assert loaded.enablement.launch_log == "mla_gluon requires batch_size=1"
-    assert loaded.enablement.attempts == 3
     assert loaded.enablement.kept_patches == ["/p/a.patch", "/p/b.patch"]
 
 
