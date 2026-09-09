@@ -69,7 +69,6 @@ def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
-    monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
 
 
 def test_validate_server_args_rejects_bare_positionals():

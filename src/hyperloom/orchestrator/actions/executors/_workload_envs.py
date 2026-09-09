@@ -51,7 +51,6 @@ from ._grid_runner import (
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
-    inject_sglang_moe_runner_backend,
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
@@ -856,19 +855,13 @@ def _finalize_framework_server_args(
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
     )
-    # 4. MoE runner backend: aiter's CK fused-MoE JIT build is broken in some
-    #    images; inject the triton MoE runner unless --moe-runner-backend is
-    #    pinned.
-    if drop_moe_runner_backend:
-        if framework_env == "EXTRA_SGLANG_ARGS":
-            resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
-    else:
-        resolved_server_args = inject_sglang_moe_runner_backend(
-            resolved_server_args,
-            bench.get("framework"),
-            bench.get("model"),
-            gpu_type=gpu_type or bench.get("runner_type"),
-        )
+    # 4. MoE runner backend: no longer forced. sglang's own
+    #    ``--moe-runner-backend auto`` (the default) correctly follows
+    #    SGLANG_USE_AITER without crashing on current sglang/ROCm images, so
+    #    Hyperloom leaves the choice to sglang. A baseline retry can still ask
+    #    to strip an inherited/pinned flag that crashed the server.
+    if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
+        resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
     resolved_server_args = inject_vllm_expert_parallel(
         resolved_server_args,
         bench.get("framework"),
