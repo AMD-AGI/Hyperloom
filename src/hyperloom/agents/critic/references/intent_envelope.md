@@ -45,12 +45,12 @@ The runtime's `runtime.intent_envelope.validate_envelope(...)` delegates
 payload-shape validation to `hyperloom.inference_optimizer.protocol.intent`
 and then applies the Critic role allowlist above. If the SKILL produces a
 malformed review, `commit-review` raises `ReviewValidationError` and the
-host should fall back to a `needs_review` heartbeat (see
+host should fall back to a `needs_review` idle intent (see
 [references/coordinator_protocol.md](coordinator_protocol.md)).
 
-## Heartbeat fallback
+## Idle fallback
 
 When `commit-review` produces zero intents, the runtime appends a single
-`send_message{topic="heartbeat"}` so the Coordinator's reactor pass
+`send_message{topic="observation"}` so the Coordinator's reactor pass
 always observes signal of life — exactly the behaviour the mock
 adapter ships with.

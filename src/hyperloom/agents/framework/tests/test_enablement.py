@@ -224,7 +224,7 @@ def test_enablement_setup_guidance_in_mandate() -> None:
 
 
 def test_enablement_progress_contract_in_mandate() -> None:
-    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty=true."""
+    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty exit."""
     from hyperloom.agents.framework.enablement import EnablementRequest
     from hyperloom.agents.framework.enablement_ops import (
         ENABLEMENT_PROGRESS_GUIDANCE,
@@ -243,10 +243,10 @@ def test_enablement_progress_contract_in_mandate() -> None:
     )
     m = build_mandate(req)
     assert "PROGRESS DELIVERABLE" in m.task_description
-    # The contract must explicitly permit an advance-one-step patch and reserve empty=true for "cannot advance even
-    # one step".
+    # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
+    # advance even one step".
     assert "ADVANCES the boot" in m.task_description
-    assert "empty=true" in m.task_description
+    assert "proposal_set=[]" in m.task_description
     assert ENABLEMENT_PROGRESS_GUIDANCE
 
 

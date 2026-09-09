@@ -116,5 +116,5 @@ shape is structurally valid), but the robustness event detector raises a
 turns that into a HIGH alert carrying the evidence; Orchestration owns the
 decision to finalize at the last validated gain instead of burning budget on
 further doomed recover attempts. The `gpu_memory_leaked` cooldown
-(`cooldown_ticks=5`) is per-dedup_key and only suppresses re-firing of that
+(`cooldown_sec=300`) is per-dedup_key and only suppresses re-firing of that
 symptom.

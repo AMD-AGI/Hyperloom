@@ -30,7 +30,7 @@ from .intent_envelope import (
     Intent,
     build_advice_intent,
     build_envelope,
-    build_heartbeat_intent,
+    build_idle_intent,
     build_review_verdict_intent,
 )
 from .kb_client import KBClient
@@ -718,9 +718,9 @@ class DecisionReviewer:
                 continue
             intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
-        # Heartbeat fallback when nothing to review.
+        # Nothing to review — still report in.
         if not intents:
-            intents.append(build_heartbeat_intent())
+            intents.append(build_idle_intent())
 
         outcome.intent_envelope = build_envelope(intents).to_dict()
 
