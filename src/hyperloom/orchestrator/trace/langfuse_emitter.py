@@ -757,6 +757,7 @@ class LangfuseEmitter:
                 output=(conv_row or {}).get("response"),
                 metadata=lfmap.generation_metadata(base, phase=phase, has_text=has_text),
                 usage_details=lfmap.usage_details(token_row or {}),
+                cost_details=lfmap.cost_details(token_row or {}),
                 level=level,
                 status_message=lfmap.generation_status_message(base),
             )
@@ -1099,7 +1100,9 @@ class LangfuseEmitter:
         if not ext_dir.is_dir():
             return
         unsent = 0
-        for shard in sorted(ext_dir.glob("*.jsonl")):
+        # ``*.detail.jsonl`` is the per-API-call expansion of turn rows already
+        # mirrored from the sibling shard; mirroring it too would double-bill.
+        for shard in sorted(p for p in ext_dir.glob("*.jsonl") if not p.name.endswith(".detail.jsonl")):
             sent = self._ext_rows_sent.get(shard.name, 0)
             rows = _load_jsonl(shard)
             if sent == 0 and rows:

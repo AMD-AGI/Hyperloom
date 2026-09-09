@@ -12,7 +12,14 @@ live Langfuse push (gated on ``HYPERLOOM_LANGFUSE_ENABLE`` + the
 Modules:
 
 * :mod:`llm_trace` — :class:`LLMCallRecord` closed-schema dataclass and
-  :func:`append_llm_call`, the best-effort single-line appender.
+  :func:`append_llm_call`, the best-effort single-line appender. One row is
+  one agentic turn.
+* :mod:`call_detail` — the per-API-call sidecar a turn expands into, joined
+  on ``call_id``.
+* :mod:`geak_harvest` — recovers GEAK's out-of-process spend from the Claude
+  Code transcripts it leaves behind, into the session's ``ext`` shard.
+* :mod:`pricing` — USD for one call, from the provider's own figure when it
+  reports one and the shipped rate card otherwise.
 * :mod:`parse_usage` — parsers that recover ``usage`` token counts from
   out-of-process child output (Claude CLI ``stream-json``, Codex CLI
   ``codex exec --json``), plus sanitized Codex failure messages.
@@ -32,6 +39,12 @@ The collector that joins this ledger with the decision streams lives in
 ``src/hyperloom/inference_optimizer/breakdown/collectors/decision.py`` (``collect_decision_trace``).
 """
 
+from .call_detail import (
+    CallDetailRecord,
+    CallDetailRowError,
+    append_call_detail,
+)
+from .geak_harvest import HarvestResult, harvest_geak_calls
 from .conversation_trace import (
     ConversationRecord,
     ConversationRowError,
@@ -48,6 +61,7 @@ from .orchestration_trace import (
     write_mcp_setup_once,
 )
 from .langfuse_emitter import flush_session, get_emitter
+from .pricing import CostBreakdown, resolve_cost
 from .parse_usage import (
     normalize_usage,
     parse_claude_stream_json_usage,
@@ -58,14 +72,20 @@ from .task_progress import progress_scope, report_progress
 from .trace_env import langfuse_live_enabled
 
 __all__ = [
+    "CallDetailRecord",
+    "CallDetailRowError",
     "ConversationRecord",
     "ConversationRowError",
     "LLMCallRecord",
+    "CostBreakdown",
+    "HarvestResult",
     "LLMTraceRowError",
+    "append_call_detail",
     "append_conversation",
     "append_llm_call",
     "flush_session",
     "get_emitter",
+    "harvest_geak_calls",
     "langfuse_live_enabled",
     "new_call_id",
     "normalize_usage",
@@ -74,6 +94,7 @@ __all__ = [
     "parse_codex_jsonl_usage",
     "progress_scope",
     "redact_secrets",
+    "resolve_cost",
     "report_progress",
     "write_mcp_setup_once",
 ]

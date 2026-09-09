@@ -48,6 +48,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.common.llm_attribution import task_scope
+from ..trace.call_detail import append_turn_call_details
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from ..trace.parse_usage import reasoning_output_tokens
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
@@ -1454,23 +1456,38 @@ class CriticAgentBackend:
             call_id: Per-call id shared with this call's conversation row.
         """
         try:
-            record = LLMCallRecord(
-                session_id=self.session_dir.name,
-                component="critic",
-                role="critic",
-                call_id=call_id,
-                model=self._review_model,
-                tick=self._trace_tick,
-                phase=self._trace_phase,
-                input_tokens=usage_acc.get("input_tokens"),
-                output_tokens=usage_acc.get("output_tokens"),
-                cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
-                cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
-                reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
-                latency_ms=latency_ms,
-                reviewed_msg_ids=self._trace_reviewed_msg_ids,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
+            # Review is a child of whatever action asked for it; naming it here
+            # puts its spend on its own branch of that action's tree.
+            with task_scope("critic"):
+                record = LLMCallRecord(
+                    session_id=self.session_dir.name,
+                    component="critic",
+                    role="critic",
+                    call_id=call_id,
+                    model=self._review_model,
+                    tick=self._trace_tick,
+                    phase=self._trace_phase,
+                    input_tokens=usage_acc.get("input_tokens"),
+                    output_tokens=usage_acc.get("output_tokens"),
+                    cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
+                    cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
+                    reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
+                    latency_ms=latency_ms,
+                    reviewed_msg_ids=self._trace_reviewed_msg_ids,
+                )
+                append_llm_call(session_dir=self.session_dir, record=record)
+                # The review transports report one usage total for the whole
+                # reasoning loop, so the sidecar gets the matching whole-turn row.
+                append_turn_call_details(
+                    session_dir=self.session_dir,
+                    session_id=self.session_dir.name,
+                    component="critic",
+                    metadata={**usage_acc, "model": self._review_model, "call_id": call_id},
+                    role="critic",
+                    tick=self._trace_tick,
+                    phase=self._trace_phase,
+                    turn_latency_ms=latency_ms,
+                )
         except Exception:  # noqa: BLE001 — trace must never break review
             log.debug(
                 "full-trace: critic llm_call append failed",

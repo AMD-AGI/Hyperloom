@@ -405,3 +405,57 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
     assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
     assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
+
+
+# ---- specialist per-call join key ----
+
+
+def _trace_rows(session_dir):
+    """Return the (turn rows, detail rows) a traced specialist turn wrote."""
+    trace = session_dir / "reports" / "trace"
+    def _read(name):
+        path = trace / name
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return _read("llm_calls.jsonl"), _read("llm_calls_detail.jsonl")
+
+
+def test_specialist_turn_keeps_the_backend_call_id(tmp_path):
+    """A backend that stamps a real id keeps it on both halves of the ledger."""
+    r = _runner(session_dir=tmp_path)
+    r._trace_specialist_llm_call(
+        task_id="task-a",
+        turn=3,
+        metadata={"input_tokens": 5, "output_tokens": 7, "call_id": "msg_real", "model": "claude-opus-5"},
+    )
+    turns, _ = _trace_rows(tmp_path)
+    assert [t["call_id"] for t in turns] == ["msg_real"]
+    assert [t["model"] for t in turns] == ["claude-opus-5"]
+
+
+def test_specialist_turn_synthesizes_a_join_key_when_the_backend_omits_one(tmp_path):
+    """Without this the detail rows orphan and drop out of every rollup."""
+    r = _runner(session_dir=tmp_path)
+    r._trace_specialist_llm_call(
+        task_id="task-b", turn=2, metadata={"input_tokens": 5, "output_tokens": 9}
+    )
+    turns, details = _trace_rows(tmp_path)
+    assert [t["call_id"] for t in turns] == ["task-b:turn-2"]
+    # The join, which is the point: every detail row reaches its turn row.
+    assert details and {d["call_id"] for d in details} == {"task-b:turn-2"}
+
+
+def test_specialist_turn_does_not_mutate_the_backend_usage_dict(tmp_path):
+    """The single-turn caller passes the backend's own dict straight through."""
+    r = _runner(session_dir=tmp_path)
+    usage = {"input_tokens": 5}
+    r._trace_specialist_llm_call(task_id="task-c", turn=1, metadata=usage)
+    assert usage == {"input_tokens": 5}
+
+
+def test_specialist_turn_without_token_counters_writes_nothing(tmp_path):
+    r = _runner(session_dir=tmp_path)
+    r._trace_specialist_llm_call(task_id="task-d", turn=1, metadata={"model": "claude-opus-5"})
+    turns, details = _trace_rows(tmp_path)
+    assert turns == [] and details == []

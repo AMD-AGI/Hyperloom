@@ -85,6 +85,10 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
+    # Tell GEAK who is driving. It runs standalone too, and the two modes answer
+    # different questions, so its end-of-run report names itself hl_* rather than
+    # geak_* when this is set. A GEAK build that predates the marker ignores it.
+    env["GEAK_INVOKED_BY"] = "hyperloom"
     # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to
     # self-stop before the outer subprocess kill. Split the inner SOFT deadline
     # from the outer HARD kill so run_e2e can flush result.json before SIGKILL.

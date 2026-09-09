@@ -193,3 +193,48 @@ def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch
     record = llm_trace.LLMCallRecord(session_id="s3", component="forge")
     # Must not raise even though the Langfuse mirror blows up.
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+
+
+def test_widened_row_carries_the_cost_timing_and_path_columns(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
+
+    row = llm_trace.LLMCallRecord(
+        session_id="s1",
+        component="orchestration",
+        task_path="KERNEL_AGENT/geak/HeadKernel",
+        api_calls=3,
+        tool_call_count=7,
+        ttft_ms=120,
+        thinking_ms=300,
+        output_ms=900,
+        stop_reason="end_turn",
+    ).to_row()
+    assert row["task_path"] == "KERNEL_AGENT/geak/HeadKernel"
+    assert row["task_depth"] == 3
+    assert (row["api_calls"], row["tool_call_count"]) == (3, 7)
+    assert (row["ttft_ms"], row["thinking_ms"], row["output_ms"]) == (120, 300, 900)
+    assert row["stop_reason"] == "end_turn"
+    assert set(row) == set(llm_trace._ROW_FIELDS)
+
+
+def test_an_unpriced_row_keeps_cost_none_rather_than_zero():
+    row = llm_trace.LLMCallRecord(
+        session_id="s1", component="orchestration", model="not-on-the-rate-card"
+    ).to_row()
+    assert row["cost_source"] == "unavailable"
+    assert row["cost_usd"] is None
+
+
+def test_append_honours_an_explicit_destination(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
+    dest = tmp_path / "ext" / "geak-9.jsonl"
+    llm_trace.append_llm_call(
+        session_dir=tmp_path,
+        record=llm_trace.LLMCallRecord(session_id="s1", component="geak"),
+        dest=dest,
+    )
+    assert len(dest.read_text().splitlines()) == 1
+    # Writing into the shared ledger from an out-of-process producer is what
+    # the dest argument exists to avoid.
+    assert not (tmp_path / "reports" / "trace" / "llm_calls.jsonl").exists()

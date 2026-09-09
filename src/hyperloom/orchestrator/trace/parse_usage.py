@@ -38,12 +38,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from ._row_utils import coerce_optional_int
+from ._row_utils import coerce_optional_int, coerce_optional_str
 
 log = logging.getLogger(__name__)
 
@@ -249,6 +250,181 @@ def parse_claude_stream_json_response(
     return None
 
 
+def parse_claude_stream_json_cost(log_path: str | Path) -> dict[str, Any] | None:
+    """Recover what the Claude CLI says a run cost, from its stream-json log.
+
+    The terminal ``result`` row is the only place a dollar figure exists, and
+    it is the *provider's own* charge -- authoritative in a way no rate card
+    is, because it already accounts for the plan, the discounts and the model
+    mix. ``modelUsage`` is the per-model breakdown that figure was computed
+    from, so it also says which model spent what when a run mixed several.
+
+    Only the ``result`` row is read. An ``assistant`` row's cumulative usage
+    would double-bill, which is the same trap
+    ``kernelforge/agent_backends/claude.py`` documents.
+
+    Args:
+        log_path: Path to the Claude CLI ``stream-json`` log.
+
+    Returns:
+        ``{"total_cost_usd": float, "by_model": {model: {...}}}`` -- either key
+        absent when the log did not carry it -- or ``None`` when the file is
+        missing or held no ``result`` row with cost.
+    """
+    path = Path(log_path)
+    found: dict[str, Any] | None = None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "result":
+                    continue
+                row: dict[str, Any] = {}
+                total = obj.get("total_cost_usd", obj.get("costUSD"))
+                if isinstance(total, (int, float)):
+                    row["total_cost_usd"] = float(total)
+                per_model = obj.get("modelUsage")
+                if isinstance(per_model, dict) and per_model:
+                    row["by_model"] = {str(name): entry for name, entry in per_model.items() if isinstance(entry, dict)}
+                if row:
+                    found = row
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
+        return None
+    return found
+
+
+def _anthropic_thinking_tokens(usage: Any) -> int | None:
+    """Read Anthropic's hidden-reasoning token count off a ``usage`` block.
+
+    Anthropic bills thinking inside ``output_tokens`` and reports it as a
+    breakdown; the ledger means the visible reply by ``output_tokens``, so a
+    caller that reads this must subtract it rather than add it, or the same
+    tokens are counted twice.
+
+    Args:
+        usage: A usage mapping, provider usage object, or ``None``.
+
+    Returns:
+        The thinking-token count, or ``None`` when the block carries none.
+    """
+    details = _field(usage, "output_tokens_details")
+    if details is None:
+        return None
+    return coerce_optional_int(_field(details, "thinking_tokens"))
+
+
+def parse_claude_transcript_calls(log_path: str | Path) -> list[dict[str, Any]]:
+    """Recover one row per API call from a Claude Code session transcript.
+
+    A Claude Code session writes ``<claude_home>/projects/<slug>/<id>.jsonl``,
+    one line per streamed message. This is the only record of what an agent
+    that drives the SDK itself spent -- GEAK, for instance, runs as a
+    subprocess and never touches Hyperloom's own ledger.
+
+    Rows are keyed on ``message.id`` and each id is kept once. That is not an
+    optimization: one API response arrives as several lines that repeat the
+    same id and the same cumulative ``usage``, so counting lines instead of
+    ids overstates a run's spend by roughly 60%.
+
+    Args:
+        log_path: Path to a Claude Code session transcript.
+
+    Returns:
+        One row per API call in stream order, each carrying ``message_id``,
+        ``ts``, ``model``, ``stop_reason``, the canonical token counters,
+        ``tool_calls`` and, when the transcript records it, ``cost_usd``.
+        Hidden reasoning is moved out of ``output_tokens`` into
+        ``reasoning_output_tokens``; see :func:`_anthropic_thinking_tokens`.
+        ``[]`` when the file is missing or carries no usable message.
+    """
+    path = Path(log_path)
+    calls: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    by_use_id: dict[str, dict[str, Any]] = {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "user":
+                    _attach_tool_results(obj, by_use_id)
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                message = obj.get("message")
+                if not isinstance(message, dict):
+                    continue
+                message_id = coerce_optional_str(message.get("id"))
+                if not message_id:
+                    continue
+                ts = coerce_optional_str(obj.get("timestamp"))
+                row = by_id.get(message_id)
+                if row is None:
+                    row = {
+                        "message_id": message_id,
+                        "ts": ts,
+                        "model": coerce_optional_str(message.get("model")),
+                        "stop_reason": coerce_optional_str(message.get("stop_reason")),
+                        "tool_calls": [],
+                    }
+                    usage = message.get("usage")
+                    normalized = normalize_usage(usage if isinstance(usage, dict) else None)
+                    if normalized:
+                        row.update(normalized)
+                    thinking = _anthropic_thinking_tokens(usage)
+                    if thinking is not None:
+                        row["reasoning_output_tokens"] = thinking
+                        visible = row.get("output_tokens")
+                        if isinstance(visible, int):
+                            row["output_tokens"] = max(0, visible - thinking)
+                    cost = obj.get("costUSD", message.get("costUSD"))
+                    if isinstance(cost, (int, float)):
+                        row["cost_usd"] = float(cost)
+                    by_id[message_id] = row
+                    calls.append(row)
+                elif row.get("stop_reason") is None:
+                    row["stop_reason"] = coerce_optional_str(message.get("stop_reason"))
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = str(block.get("name") or "").strip()
+                    if not name:
+                        continue
+                    entry: dict[str, Any] = {
+                        "tool": name,
+                        "query": _summarize_tool_input(block.get("input")),
+                    }
+                    use_id = coerce_optional_str(block.get("id"))
+                    if use_id:
+                        entry["tool_use_id"] = use_id
+                        by_use_id[use_id] = entry
+                    if ts:
+                        entry["ts"] = ts
+                    row["tool_calls"].append(entry)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        log.warning("parse_usage: failed reading claude transcript %s: %r", path, exc)
+        return []
+    return calls
+
+
 def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
     """Read the authoritative output-token count off a ``result`` row.
 
@@ -283,9 +459,9 @@ def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
 
 
 def _reattach_turn_output(
-    usages: list[dict[str, int | None]],
+    usages: list[dict[str, Any]],
     session_output: int | None,
-) -> list[dict[str, int | None]]:
+) -> list[dict[str, Any]]:
     """Swap placeholder per-turn ``output_tokens`` for the session's real count.
 
     See :func:`parse_claude_stream_json_turn_usages` for why the per-response
@@ -295,6 +471,8 @@ def _reattach_turn_output(
 
     Args:
         usages: De-duplicated per-response usages, in stream order (mutated).
+            Rows may carry identity keys beside the counters; only
+            ``output_tokens`` is touched.
         session_output: The session's true output-token count, or ``None``
             when the log carried no ``result`` row to read it from.
 
@@ -314,7 +492,7 @@ def _reattach_turn_output(
 
 def parse_claude_stream_json_turn_usages(
     log_path: str | Path,
-) -> list[dict[str, int | None]]:
+) -> list[dict[str, Any]]:
     """Recover *per-API-response* usage from a Claude CLI stream-json log.
 
     Unlike :func:`parse_claude_stream_json_usage` (which returns one cumulative
@@ -339,6 +517,14 @@ def parse_claude_stream_json_turn_usages(
 
     Input and cache counters need no such repair and are kept as the responses
     reported them; de-duplicated, they reconcile with the ``result`` row.
+
+    Each row also carries the response's **identity** beside its counters, in
+    the spelling :class:`~hyperloom.orchestrator.trace.llm_trace.LLMCallRecord`
+    reads: ``call_id`` (the ``message.id`` this parse already de-duplicates on)
+    and ``model``. Without them a specialist's ledger row is unpriceable (no
+    model to look a rate up by) and its per-API-call detail rows cannot be
+    joined back to it, which is what left sub-agent spend uncosted. Both keys
+    are omitted when the log does not name them, never emitted empty.
 
     Assistant lines carrying no ``message.id`` cannot be de-duplicated safely,
     so such a log yields ``[]`` and the caller falls back to the cumulative
@@ -382,6 +568,10 @@ def parse_claude_stream_json_turn_usages(
                     if message_id in seen_ids:
                         continue
                     seen_ids.add(message_id)
+                    normalized["call_id"] = message_id
+                model = message.get("model") if isinstance(message, dict) else None
+                if isinstance(model, str) and model:
+                    normalized["model"] = model
                 usages.append(normalized)
     except FileNotFoundError:
         return []
@@ -398,6 +588,57 @@ def parse_claude_stream_json_turn_usages(
     return _reattach_turn_output(usages, session_output)
 
 
+def _iso_delta_ms(start: str | None, end: str | None) -> int | None:
+    """Milliseconds between two ISO-8601 stamps, or ``None`` if unusable.
+
+    Args:
+        start: The earlier timestamp.
+        end: The later timestamp.
+
+    Returns:
+        The non-negative delta in ms, or ``None`` when either stamp is missing
+        or unparseable, or the pair runs backwards.
+    """
+    if not start or not end:
+        return None
+    try:
+        began = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    delta = (ended - began).total_seconds() * 1000.0
+    return int(delta) if delta >= 0 else None
+
+
+def _attach_tool_results(obj: dict[str, Any], by_use_id: dict[str, dict[str, Any]]) -> None:
+    """Close out the tool calls this ``user`` row carries results for.
+
+    A ``tool_result`` block names the ``tool_use_id`` it answers, which is the
+    only reliable pairing: results come back out of order when the agent runs
+    calls in parallel.
+
+    Args:
+        obj: A decoded ``{"type": "user", ...}`` row.
+        by_use_id: Open tool-call entries keyed by their ``tool_use_id``,
+            mutated in place.
+    """
+    if not by_use_id:
+        return
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return
+    ended = coerce_optional_str(obj.get("timestamp"))
+    for block in message.get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        entry = by_use_id.pop(coerce_optional_str(block.get("tool_use_id")) or "", None)
+        if entry is None:
+            continue
+        duration = _iso_delta_ms(entry.get("ts"), ended)
+        if duration is not None:
+            entry["duration_ms"] = duration
+
+
 def parse_claude_stream_json_tool_calls(
     log_path: str | Path,
 ) -> list[dict[str, Any]]:
@@ -407,16 +648,25 @@ def parse_claude_stream_json_tool_calls(
     surface what the specialist actually read (WebSearch / WebFetch / Grep /
     Read / ...). This is the data behind the per-call ``intel:<tool>`` spans.
 
-    Each returned entry is ``{"tool": <name>, "query": <short input summary>}``,
-    in call order. The input summary prefers common query-ish keys
-    (``query`` / ``url`` / ``pattern`` / ``path`` / ``prompt``) and otherwise
-    falls back to a compact clipped JSON of the input.
+    Each returned entry carries ``{"tool": <name>, "query": <short input
+    summary>}`` in call order, plus whatever the log supports: ``tool_use_id``,
+    the emitting response's ``turn_index``, the block's ``ts``, and
+    ``duration_ms`` measured against the matching ``tool_result``. The input
+    summary prefers common query-ish keys (``query`` / ``url`` / ``pattern`` /
+    ``path`` / ``prompt``) and otherwise falls back to a compact clipped JSON
+    of the input.
+
+    ``duration_ms`` is the round trip the agent waited on -- issue to result --
+    which is why a turn's wall-clock can dwarf the model time inside it. It is
+    absent when the log carries no timestamps or the call never returned.
 
     Tolerant by contract: a missing file, malformed lines, or no tool calls
     returns ``[]``.
     """
     path = Path(log_path)
     calls: list[dict[str, Any]] = []
+    by_use_id: dict[str, dict[str, Any]] = {}
+    turn_ids: list[str] = []
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -427,23 +677,41 @@ def parse_claude_stream_json_tool_calls(
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                if not isinstance(obj, dict):
+                    continue
+                kind = obj.get("type")
+                if kind == "user":
+                    _attach_tool_results(obj, by_use_id)
+                    continue
+                if kind != "assistant":
                     continue
                 message = obj.get("message")
                 if not isinstance(message, dict):
                     continue
+                ts = coerce_optional_str(obj.get("timestamp"))
+                message_id = coerce_optional_str(message.get("id"))
+                if message_id and message_id not in turn_ids:
+                    turn_ids.append(message_id)
+                turn_index = turn_ids.index(message_id) if message_id else None
                 for block in message.get("content") or []:
                     if not isinstance(block, dict) or block.get("type") != "tool_use":
                         continue
                     name = str(block.get("name") or "").strip()
                     if not name:
                         continue
-                    calls.append(
-                        {
-                            "tool": name,
-                            "query": _summarize_tool_input(block.get("input")),
-                        }
-                    )
+                    entry: dict[str, Any] = {
+                        "tool": name,
+                        "query": _summarize_tool_input(block.get("input")),
+                    }
+                    use_id = coerce_optional_str(block.get("id"))
+                    if use_id:
+                        entry["tool_use_id"] = use_id
+                        by_use_id[use_id] = entry
+                    if ts:
+                        entry["ts"] = ts
+                    if turn_index is not None:
+                        entry["turn_index"] = turn_index
+                    calls.append(entry)
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -821,13 +1089,19 @@ def parse_codex_jsonl_tool_calls(
     a warning — an unmodelled tool must not vanish from the trace, and must not
     crash the parse either.
 
+    ``item.started`` and ``item.completed`` bracket one call, so the pair also
+    yields its ``duration_ms`` when the log timestamps its events.
+
     Args:
         log_path: Path to the Codex CLI JSONL log.
 
     Returns:
-        One ``{"tool", "query"}`` entry per call, or ``[]`` when there were none.
+        One entry per call carrying ``{"tool", "query"}`` plus whatever the log
+        supports (``tool_use_id``, ``ts``, ``duration_ms``), or ``[]`` when
+        there were none.
     """
     calls: list[dict[str, Any]] = []
+    open_calls: dict[str, dict[str, Any]] = {}
     seen_ids: set[str] = set()
     unknown_types: set[str] = set()
     for event in _iter_codex_events(log_path):
@@ -839,17 +1113,28 @@ def parse_codex_jsonl_tool_calls(
         kind = str(item.get("type") or "").strip()
         if not kind or kind in _CODEX_NON_TOOL_ITEM_TYPES:
             continue
-        # ``item.started`` and ``item.completed`` describe one call; count it once.
+        ts = coerce_optional_str(event.get("timestamp") or item.get("timestamp"))
         item_id = str(item.get("id") or "")
+        if item_id and item_id in seen_ids:
+            entry = open_calls.pop(item_id, None)
+            if entry is not None:
+                duration = _iso_delta_ms(entry.get("ts"), ts)
+                if duration is not None:
+                    entry["duration_ms"] = duration
+            continue
         if item_id:
-            if item_id in seen_ids:
-                continue
             seen_ids.add(item_id)
         tool = _CODEX_TOOL_NAMES.get(kind)
         if tool is None:
             unknown_types.add(kind)
             tool = kind
-        calls.append({"tool": tool, "query": _summarize_codex_item(kind, item)})
+        entry = {"tool": tool, "query": _summarize_codex_item(kind, item)}
+        if item_id:
+            entry["tool_use_id"] = item_id
+            open_calls[item_id] = entry
+        if ts:
+            entry["ts"] = ts
+        calls.append(entry)
     if unknown_types:
         log.warning(
             "parse_usage: codex log %s carried unmodelled item types %s; recorded under their raw names",
@@ -931,10 +1216,12 @@ def parse_forge_steps(stdout: str) -> dict[str, Any] | None:
 
 __all__ = [
     "normalize_usage",
+    "parse_claude_stream_json_cost",
     "parse_claude_stream_json_response",
     "parse_claude_stream_json_tool_calls",
     "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
+    "parse_claude_transcript_calls",
     "parse_codex_jsonl_error",
     "parse_codex_jsonl_response",
     "parse_codex_jsonl_tool_calls",

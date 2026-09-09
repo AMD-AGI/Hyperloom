@@ -18,6 +18,7 @@ import importlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -31,6 +32,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from ..prompts.transport import TRANSPORT_TOOLS
 from ..trace.llm_trace import new_call_id
+from ..trace.parse_usage import reasoning_output_tokens
+from hyperloom.common.timeutil import now_iso
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -138,6 +141,70 @@ _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 # Retried timeouts get a progressively larger idle budget so a genuinely slow
 # gateway is not re-killed at the same wall.
 _RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
+
+
+def _is_terminal_result(message: Any) -> bool:
+    """Whether a streamed message is the run's terminal summary.
+
+    Its ``usage`` is cumulative over the whole turn, so it must never be
+    counted as one more API call. The class name identifies it under the real
+    SDK; the run-summary fields identify it under any stand-in.
+
+    Args:
+        message (Any): A streamed SDK message.
+
+    Returns:
+        bool: ``True`` when the message is the terminal ``ResultMessage``.
+    """
+    if type(message).__name__ == "ResultMessage":
+        return True
+    return getattr(message, "num_turns", None) is not None or getattr(message, "total_cost_usd", None) is not None
+
+
+def _tool_use_entry(block: Any) -> dict[str, Any] | None:
+    """Project any tool-use block onto a ledger tool-call entry.
+
+    Unlike :meth:`ClaudeBackend._is_tool_use_for_emit_intent` this counts every
+    tool the model called, not just the intent transport, because the report
+    asks what work a call did and a file read is work.
+
+    Args:
+        block (Any): A single SDK content block.
+
+    Returns:
+        dict | None: The ``{tool, tool_use_id}`` entry, or ``None`` when the
+        block is not a tool use.
+    """
+    if type(block).__name__ not in ("ToolUseBlock", "ServerToolUseBlock"):
+        return None
+    name = getattr(block, "name", None)
+    if not isinstance(name, str) or not name:
+        return None
+    entry: dict[str, Any] = {"tool": name}
+    tool_use_id = getattr(block, "id", None)
+    if isinstance(tool_use_id, str) and tool_use_id:
+        entry["tool_use_id"] = tool_use_id
+    return entry
+
+
+@dataclass
+class _TurnCollection:
+    """What one streamed turn yielded, beyond its intents and text.
+
+    ``api_calls`` holds one entry per real API call the turn made, in order,
+    shaped for :class:`..trace.call_detail.CallDetailRecord`. The backend is
+    stateless about the session directory, so it collects the rows and the
+    caller -- which holds that context -- writes them.
+    """
+
+    intents: list[Intent] = field(default_factory=list)
+    raw_text: str = ""
+    tool_block_count: int = 0
+    usage: dict[str, Any] = field(default_factory=dict)
+    session_id: str | None = None
+    stop_reason: str | None = None
+    api_calls: list[dict[str, Any]] = field(default_factory=list)
+    total_cost_usd: float | None = None
 
 
 def _intent_fingerprint(intent: Intent) -> str:
@@ -399,11 +466,11 @@ class ClaudeBackend:
         # budget), not the total turn; each retry amplifies the idle budget.
         attempt_state = {"n": 0}
 
-        async def _one_attempt() -> tuple[Any, ...]:
+        async def _one_attempt() -> _TurnCollection:
             """Run one SDK invocation under an amplified per-attempt idle timeout.
 
             Returns:
-                The collected ``_invoke_and_collect`` result tuple.
+                The turn's collected :class:`_TurnCollection`.
 
             Raises:
                 asyncio.TimeoutError: If the stream stays idle (no new message)
@@ -428,14 +495,7 @@ class ClaudeBackend:
             )
 
         try:
-            (
-                intents,
-                raw_text,
-                tool_block_count,
-                usage,
-                session_id,
-                stop_reason,
-            ) = await retry_with_backoff(
+            collected = await retry_with_backoff(
                 _one_attempt,
                 policy=self.retry_policy,
                 retry_on=(
@@ -446,6 +506,12 @@ class ClaudeBackend:
                 ),
                 on_retry=_note_retry,
             )
+            intents = collected.intents
+            raw_text = collected.raw_text
+            tool_block_count = collected.tool_block_count
+            usage = collected.usage
+            session_id = collected.session_id
+            stop_reason = collected.stop_reason
         except asyncio.TimeoutError as exc:
             self.calls.append(
                 {
@@ -543,6 +609,15 @@ class ClaudeBackend:
                 # Per-request context size; the counters above sum the call's
                 # internal turns and are spend, not size.
                 "context_tokens_peak": safe_int(usage.get("context_tokens_peak") if usage else None),
+                # How many real API calls this one turn made, and what each of
+                # them cost in tokens and wall-clock. The caller holds the
+                # session context, so it writes them to the sidecar ledger.
+                "api_calls": len(collected.api_calls) or None,
+                "api_call_details": collected.api_calls,
+                # The CLI prices the whole turn and its figure wins over the
+                # rate card. Read only off the terminal result: an assistant
+                # message's own cost field would double-bill.
+                "total_cost_usd": collected.total_cost_usd,
                 # Full conversation text so the caller (which holds the
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
@@ -876,10 +951,8 @@ class ClaudeBackend:
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
-    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
-        """Stream SDK messages, collecting intents, raw text, tool counts,
-        the latest `ResultMessage.usage` dict, the SDK ``session_id`` and the
-        model's ``stop_reason``.
+    ) -> _TurnCollection:
+        """Stream SDK messages, collecting everything one turn yielded.
 
         Args:
             prompt: The composed prompt to stream to the SDK.
@@ -890,11 +963,11 @@ class ClaudeBackend:
                 slow-but-live reasoning model is never killed (issue #679).
 
         Returns:
-            A tuple ``(intents, raw_text, tool_block_count, usage, session_id,
-            stop_reason)`` where ``usage`` is the latest cumulative usage dict
-            plus a per-request ``context_tokens_peak``, ``session_id`` is the
-            SDK session token (or ``None``), and ``stop_reason`` is the last
-            reason the model reported (or ``None``).
+            The :class:`_TurnCollection` for the turn: its intents, raw text,
+            tool-block count, the latest cumulative usage dict plus a
+            per-request ``context_tokens_peak``, the SDK session token, the last
+            ``stop_reason`` the model reported, one entry per API call, and the
+            CLI's own charge for the turn when it reported one.
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
@@ -909,6 +982,14 @@ class ClaudeBackend:
         num_turns = 0
         session_id: str | None = None
         stop_reason: str | None = None
+        # One entry per real API call, for the per-call sidecar ledger. The SDK
+        # hands over whole messages, so a call's span is the gap between message
+        # arrivals and there is no first-token instant to read: ``ttft_ms`` is
+        # left unset here rather than filled with the full latency.
+        api_calls: list[dict[str, Any]] = []
+        total_cost_usd: float | None = None
+        call_started = time.perf_counter()
+        call_started_ts = now_iso()
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
@@ -927,8 +1008,12 @@ class ClaudeBackend:
                 if isinstance(msg_session, str) and msg_session:
                     session_id = msg_session
                 self._record_message_diagnostic(message)
+                msg_tool_calls: list[dict[str, Any]] = []
                 for block in self._iter_blocks(message):
                     self._record_tool_block_diagnostic(block)
+                    tool_entry = _tool_use_entry(block)
+                    if tool_entry is not None:
+                        msg_tool_calls.append(tool_entry)
                     if self._is_tool_use_for_emit_intent(block):
                         tool_block_count += 1
                         intent = self._parse_tool_use_block(block)
@@ -962,9 +1047,35 @@ class ClaudeBackend:
                 msg_stop = getattr(message, "stop_reason", None)
                 if isinstance(msg_stop, str) and msg_stop:
                     stop_reason = msg_stop
+                is_result = _is_terminal_result(message)
+                if is_result:
+                    msg_cost = getattr(message, "total_cost_usd", None)
+                    if isinstance(msg_cost, (int, float)):
+                        total_cost_usd = float(msg_cost)
                 msg_usage = getattr(message, "usage", None)
                 if isinstance(msg_usage, dict) and msg_usage:
                     usages.append(dict(msg_usage))
+                    # The terminal summary restates the turn; only the messages
+                    # before it describe single requests.
+                    if not is_result:
+                        now = time.perf_counter()
+                        api_calls.append(
+                            {
+                                "api_call_index": len(api_calls),
+                                "started_ts": call_started_ts,
+                                "latency_ms": int((now - call_started) * 1000),
+                                "model": getattr(message, "model", None) or self.model,
+                                "stop_reason": msg_stop if isinstance(msg_stop, str) else None,
+                                "input_tokens": safe_int(msg_usage.get("input_tokens")),
+                                "output_tokens": safe_int(msg_usage.get("output_tokens")),
+                                "cache_creation_input_tokens": safe_int(msg_usage.get("cache_creation_input_tokens")),
+                                "cache_read_input_tokens": safe_int(msg_usage.get("cache_read_input_tokens")),
+                                "reasoning_output_tokens": reasoning_output_tokens(msg_usage),
+                                "tool_calls": msg_tool_calls or None,
+                            }
+                        )
+                        call_started = now
+                        call_started_ts = now_iso()
         except Exception as exc:
             # The SDK raises on a terminal ResultMessage with is_error=True. Two
             # such subtypes are NON-fatal turn boundaries, not real failures, and
@@ -1013,7 +1124,16 @@ class ClaudeBackend:
                 last_usage,
                 num_turns=num_turns,
             )
-        return intents, raw_text, tool_block_count, last_usage, session_id, stop_reason
+        return _TurnCollection(
+            intents=intents,
+            raw_text=raw_text,
+            tool_block_count=tool_block_count,
+            usage=last_usage,
+            session_id=session_id,
+            stop_reason=stop_reason,
+            api_calls=api_calls,
+            total_cost_usd=total_cost_usd,
+        )
 
     @staticmethod
     def _iter_blocks(message: Any):

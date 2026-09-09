@@ -27,6 +27,8 @@ from typing import Any
 
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, is_secret_shaped_env_name, redact_secret_values
 
+from .pricing import SOURCE_UNAVAILABLE
+
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
 
@@ -273,6 +275,32 @@ def usage_details(row: dict[str, Any]) -> dict[str, int]:
     return {k: int(v) for k, v in raw.items() if v is not None}
 
 
+def cost_details(row: dict[str, Any]) -> dict[str, float]:
+    """Project a token row's USD figures onto Langfuse ``cost_details``.
+
+    Only a row whose ``cost_source`` says the figure is real contributes: an
+    unpriced call carries no cost keys at all, so Langfuse shows a gap rather
+    than a confident zero. ``total`` is the whole; the other four are its parts.
+
+    Args:
+        row: A token trace row dict.
+
+    Returns:
+        Mapping of Langfuse cost key to USD (empty when the row is unpriced).
+    """
+    source = str(row.get("cost_source") or "").strip().lower()
+    if source in ("", SOURCE_UNAVAILABLE):
+        return {}
+    raw = {
+        "total": row.get("cost_usd"),
+        "input": row.get("cost_input_usd"),
+        "output": row.get("cost_output_usd"),
+        "thinking": row.get("cost_thinking_usd"),
+        "cache": row.get("cost_cache_usd"),
+    }
+    return {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
+
+
 def generation_name(row: dict[str, Any]) -> str:
     """Human-friendly Generation name: component, falling back to role.
 
@@ -343,6 +371,15 @@ def generation_metadata(
         "component": row.get("component"),
         "has_text": has_text,
         "latency_ms": row.get("latency_ms"),
+        "ttft_ms": row.get("ttft_ms"),
+        "thinking_ms": row.get("thinking_ms"),
+        "output_ms": row.get("output_ms"),
+        "task_path": row.get("task_path"),
+        "task_depth": row.get("task_depth"),
+        "api_calls": row.get("api_calls"),
+        "tool_call_count": row.get("tool_call_count"),
+        "stop_reason": row.get("stop_reason"),
+        "cost_source": row.get("cost_source"),
         "reviewed_msg_ids": row.get("reviewed_msg_ids"),
         "status": row.get("status") or _STATUS_OK,
         "error_type": row.get("error_type"),
@@ -624,6 +661,7 @@ __all__ = [
     "correlation_seed",
     "decision_to_scores",
     "derive_trace_id",
+    "cost_details",
     "generation_metadata",
     "generation_name",
     "generation_start",

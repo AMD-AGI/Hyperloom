@@ -224,6 +224,7 @@ hyperloom = [
     # Release-contract shell installers + configs.
     "assets/*.sh",
     "assets/*.example",
+    "assets/*.yaml",
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
     "assets/agentx/*.py",

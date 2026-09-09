@@ -81,6 +81,7 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec, timed
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
+from ..trace.call_detail import append_turn_call_details
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
@@ -2075,6 +2076,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             agent_name: The reactor role; doubles as trace component and role.
             result: The backend turn result whose metadata carries token
                 counters.
+            latency_ms: Measured wall-clock of the turn, when available.
         """
         try:
             metadata = result.metadata or {}
@@ -2099,6 +2101,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
+            append_turn_call_details(
+                session_dir=self.session_dir,
+                session_id=self.session_dir.name,
+                component=agent_name,
+                metadata=metadata,
+                role=agent_name,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+            )
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",

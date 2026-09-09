@@ -11,6 +11,7 @@ of that logic; ``parse_usage`` shares the int coercion.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -48,6 +49,29 @@ def coerce_optional_int(value: Any) -> int | None:
         return None
 
 
+def coerce_optional_float(value: Any) -> float | None:
+    """Coerce a value to a finite ``float``, or ``None`` on a miss / bad type.
+
+    Keeps ``None`` distinct from ``0.0`` -- the difference between "this call
+    was not priced" and "this call was free" is the whole point of the cost
+    columns. Non-finite values are rejected rather than written, since JSON has
+    no spelling for them.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The float value, or ``None`` on failure.
+    """
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def validate_closed_row(
     row: dict[str, Any],
     *,
@@ -82,4 +106,9 @@ def validate_closed_row(
         raise error_cls(f"{label} row 'component'={component!r} is not one of {sorted(valid_components)!r}")
 
 
-__all__ = ["coerce_optional_str", "coerce_optional_int", "validate_closed_row"]
+__all__ = [
+    "coerce_optional_float",
+    "coerce_optional_int",
+    "coerce_optional_str",
+    "validate_closed_row",
+]
