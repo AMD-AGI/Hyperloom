@@ -4055,7 +4055,7 @@ class WritebackCollaborator:
                             decision = "no_material"
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
                 pending_tid = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-                from ..phases.geak_rebench import geak_rebench_should_apply_result
+                from ..phases.geak_rebench import geak_harness_replays_workload, geak_rebench_should_apply_result
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
@@ -4170,7 +4170,14 @@ class WritebackCollaborator:
                     except Exception:  # noqa: BLE001 - journey reject is best-effort
                         log.exception("geak no_material: journey rejection failed")
                     self.shared_state.geak_pending = {}
-                    self.shared_state.resume_pending_revalidation = False
+                    # ``resume_pending_revalidation`` tracks the accepted stack,
+                    # not this candidate, and the watermark is deliberately left
+                    # alone above. Under the canonical workload the flag
+                    # therefore stays until a revalidation reconciles it; where
+                    # the GEAK harness can replay, clearing it here is the
+                    # long-standing behaviour and is left as it is.
+                    if geak_harness_replays_workload(self.shared_state):
+                        self.shared_state.resume_pending_revalidation = False
                 elif decision == "no_promote":
                     # Well-measured + engaged over baseline, but does not beat
                     # current_best. This is a real result, NOT inconclusive, so
@@ -4248,22 +4255,26 @@ class WritebackCollaborator:
                         except Exception:  # noqa: BLE001
                             log.debug("geak v4 fallback-exception recording failed", exc_info=True)
                     if not bool(fallback_result.get("validated")):
+                        from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
+
                         geak_result = (
                             dict(self.shared_state.geak_result)
                             if isinstance(getattr(self.shared_state, "geak_result", None), dict)
                             else {}
                         )
+                        # 2a reports a refusal it will repeat for this workload
+                        # as a typed status. Persist it beside the verdict: the
+                        # reason text is for the report, and a later KERNEL entry
+                        # needs to know the replay is settled, not merely broken.
+                        refusal = str(fallback_result.get("status") or "")
                         geak_result["revalidation_status"] = "fallback_failed"
+                        geak_result["revalidation_error_class"] = refusal
                         geak_result["revalidation_error"] = str(
-                            fallback_result.get("reason")
-                            or fallback_result.get("status")
-                            or "GEAK harness fallback did not validate"
+                            fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
                         )[:500]
                         self.shared_state.geak_result = geak_result
                         self.shared_state.geak_pending = {}
-                        result["status"] = (
-                            "incomparable" if fallback_result.get("status") == "incomparable" else "failed"
-                        )
+                        result["status"] = refusal if refusal == INCOMPARABLE_REVALIDATION else "failed"
                         result[PROMOTION_REFUSED_KEY] = True
                     else:
                         promoted = True

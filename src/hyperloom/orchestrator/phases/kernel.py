@@ -1104,6 +1104,11 @@ class KernelPhase(PhaseHandler):
             except json.JSONDecodeError:
                 return {}
 
+        def _settled_replay(candidate: dict[str, Any]) -> bool:
+            """Whether ``candidate`` is a result this session already settled."""
+            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
+
         def _promote_recovered_result(
             result: dict[str, Any],
             *,
@@ -1152,12 +1157,18 @@ class KernelPhase(PhaseHandler):
         def _finish_skip(result: dict[str, Any]) -> None:
             """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
 
-            Always records the normalized outcome into ``geak_result``,
-            mirrors the failure reason onto the phase-entry evidence (so the
+            Records the normalized outcome into ``geak_result``, mirrors the
+            failure reason onto the phase-entry evidence (so the
             session-breakdown surfaces WHY the e2e run did not land), then sets
             the ``skip_to_sweep`` hint so the coordinator never deadlocks.
+
+            An entry that produced no candidate cannot retire a settled one, so
+            a terminal verdict and the result it was reached on survive; this
+            entry's failure is carried by the evidence below.
             """
-            state.geak_result = result
+            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            if not (agentx and _geak_rebench.geak_verdict_is_terminal(prev)):
+                state.geak_result = result
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -1276,6 +1287,14 @@ class KernelPhase(PhaseHandler):
                 pending.pop("revalidation_task_id", None)
                 pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
                 state.geak_pending = pending
+                if agentx and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION:
+                    verdict = dict(state.geak_result)
+                    verdict["revalidation_status"] = "fallback_failed"
+                    verdict["revalidation_error_class"] = _geak_rebench.INCOMPARABLE_REVALIDATION
+                    verdict["revalidation_error"] = pending["revalidation_error"]
+                    # This refusal is reusable only while its overlay remains unloadable.
+                    verdict["revalidation_blocked_overlay"] = str(verdict.get("final_overlay") or "")
+                    state.geak_result = verdict
                 state.save(self.session_dir)
                 return False
 
@@ -1344,15 +1363,11 @@ class KernelPhase(PhaseHandler):
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
         # Tombstone a result already adjudicated by 2b so stale result.json
-        # cannot re-enqueue a settled candidate on a later KERNEL entry.
-        prev_geak = (
-            self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
-        )
-        already_adjudicated = str(prev_geak.get("revalidation_status") or "") in {
-            "no_material",
-            "no_promote",
-        }
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not already_adjudicated:
+        # cannot re-enqueue a settled candidate on a later KERNEL entry. Where
+        # the GEAK harness cannot replay the workload the verdict also has to
+        # name the result it was reached on, so a rerun that crashed before
+        # handback is still recovered.
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not _settled_replay(recovered):
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1471,7 +1486,7 @@ class KernelPhase(PhaseHandler):
             # The graceful SIGTERM gives run_e2e a window to flush result.json;
             # keep a real win instead of discarding the phase as a timeout.
             recovered = _read_geak_result(result_path)
-            if recovered.get("status") == "ok":
+            if recovered.get("status") == "ok" and not (agentx and _settled_replay(recovered)):
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
@@ -1506,6 +1521,20 @@ class KernelPhase(PhaseHandler):
                     "status": "error",
                     "error_class": "no_result_json",
                     "error": (f"runner rc={proc.returncode} produced no parseable result.json at {result_path}"),
+                    "stderr_tail": stderr_tail,
+                }
+            )
+            return
+        if agentx and _settled_replay(result):
+            # The runner left the candidate this session already settled, so it
+            # shipped no product: recording it would retire the verdict and
+            # re-enqueue the revalidation that produced it. The file stays for
+            # the next run to overwrite.
+            _finish_skip(
+                {
+                    "status": "error",
+                    "error_class": "no_new_geak_product",
+                    "error": (f"runner rc={proc.returncode} left the already-adjudicated result.json at {result_path}"),
                     "stderr_tail": stderr_tail,
                 }
             )
@@ -4123,6 +4152,7 @@ class KernelPhase(PhaseHandler):
             record_controller_llm_usage(result=result, session_dir=self.session_dir)
             if int(result.get("patch_count") or 0) > 0:
                 try:
+                    from ..actions.executors._workload_envs import agentx_active
                     from ..kernel.controller_patch_integration import (
                         integrate_controller_patches,
                     )
