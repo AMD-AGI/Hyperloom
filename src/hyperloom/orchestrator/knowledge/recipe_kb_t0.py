@@ -72,6 +72,51 @@ def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
     return str(getattr(kb, "backend_name", "") or "recipe-kb")
 
 
+def _experience_rows(raw: Any, required_key: str, label: str) -> list[dict[str, Any]]:
+    """Normalise a recipe row's ``lessons`` / ``pitfalls`` into flat rows.
+
+    The stored shape is flat — ``Recipe.to_dict`` and the ``_normalise_*``
+    helpers write ``{statement, ...}`` / ``{description, ...}``. The remote
+    projection (``knowledge_to_warm_recipe``) copies rows out of the record
+    without going through ``Recipe.from_dict``, so a wrapped row can still arrive
+    that way; this is the single place it is unwrapped, and no reader downstream
+    has to know about two shapes.
+
+    Rows missing *required_key* are dropped here rather than silently vanishing
+    in the prompt renderer, which is what let a wrong shape pass unnoticed: the
+    section rendered "(none)" off a non-empty list with no log and no error.
+
+    Args:
+        raw: The row list as read off the recipe.
+        required_key: The field a usable row must carry.
+        label: Field name for the warning.
+
+    Returns:
+        The flat rows that carry *required_key*.
+    """
+    out: list[dict[str, Any]] = []
+    dropped = 0
+    for item in raw or []:
+        if not isinstance(item, Mapping):
+            dropped += 1
+            continue
+        wrapped = item.get("attrs")
+        row = dict(wrapped) if isinstance(wrapped, Mapping) and wrapped else dict(item)
+        if not str(row.get(required_key) or "").strip():
+            dropped += 1
+            continue
+        out.append(row)
+    if dropped:
+        log.warning(
+            "warm_start_%s: dropped %d row(s) missing %r; kept %d",
+            label,
+            dropped,
+            required_key,
+            len(out),
+        )
+    return out
+
+
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     """True when a warm recipe carries something worth replaying or priors."""
     if not isinstance(row, Mapping):
@@ -1219,8 +1264,8 @@ def run_t0_anchor(
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     exact_history = warm_point.get("exact_history")
     history_source = exact_history if isinstance(exact_history, Mapping) else warm_point
-    pitfalls_list: list[dict[str, Any]] = list(history_source.get("pitfalls") or [])
-    lessons_list: list[dict[str, Any]] = list(history_source.get("lessons") or [])
+    pitfalls_list = _experience_rows(history_source.get("pitfalls"), "description", "pitfalls")
+    lessons_list = _experience_rows(history_source.get("lessons"), "statement", "lessons")
     try:
         pit_path = recipe_kb_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)

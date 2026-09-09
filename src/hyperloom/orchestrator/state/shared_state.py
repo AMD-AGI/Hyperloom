@@ -877,9 +877,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     recipe_kb_session_id: str = ""
     # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output, the ``{workload, hw, tier, confidence, recipe}`` envelope where ``recipe`` is the matched row; empty on first session for a (workload, hw) pair. Bookkeeping, not a prompt input — the model-facing view is ``warm_start_context``.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
+    # Snapshot of the recipe row's ``pitfalls`` (negative priors), flat ``{description, severity, ...}`` rows as written by ``Recipe.to_dict``; consumed by the specialist prompt. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
+    # T0 snapshot of the recipe row's ``lessons`` (positive priors), flat ``{statement, measured_impact, ...}`` rows, symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
