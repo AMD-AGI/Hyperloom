@@ -1202,6 +1202,53 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["unset", "unset-and-reassign", "replace-empty", "remove-all", "baseline"])
+async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatch, case):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"].update(EXTRA_SGLANG_ARGS="--ambient-flag 1", SGLANG_REMOVE_ME="recipe")
+    base.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("EXTRA_SGLANG_ARGS", "--ambient-flag 1")
+    monkeypatch.setenv("SGLANG_REMOVE_ME", "ambient")
+    variant = GridVariant(
+        case,
+        unset_envs=["SGLANG_REMOVE_ME"] if case.startswith("unset") else [],
+        extra_envs={"SGLANG_REMOVE_ME": "accepted"} if case == "unset-and-reassign" else {},
+        args_mode="replace" if case == "replace-empty" else "append",
+        remove_args=["--ambient-flag"] if case == "remove-all" else [],
+    )
+    observed = []
+    managed_run = gr.run_with_session_kill
+
+    def launch_observer(cmd, **kwargs):
+        config_path = Path(cmd[cmd.index("--benchmark-config") + 1])
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        observer = (
+            "import json, os, subprocess, sys, yaml; from pathlib import Path; "
+            "env = os.environ.copy(); "
+            "env.update({k:str(v) for k,v in yaml.safe_load(Path(sys.argv[1]).read_text())['benchmark']['envs'].items()}); "
+            "subprocess.run([sys.executable, '-S', '-c', "
+            "\"import json,os; print(json.dumps([os.environ.get('EXTRA_SGLANG_ARGS'), os.environ.get('SGLANG_REMOVE_ME')]))\"], "
+            "env=env, check=True)"
+        )
+        result = managed_run([sys.executable, "-c", observer, str(config_path)], **kwargs)
+        assert result.returncode == 0, result.stderr
+        observed.append(json.loads(result.stdout))
+        _fake_workspace(slot)
+        return result
+
+    monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
+    await run_grid(
+        base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out", variant_timeout_sec=15
+    )
+    assert observed
+    expected_args = "" if case in {"replace-empty", "remove-all"} else "--ambient-flag 1"
+    expected_env = None if case == "unset" else ("accepted" if case == "unset-and-reassign" else "recipe")
+    assert all(row == [expected_args, expected_env] for row in observed)
+
+
 # Framework-aware help-text probe (atom + multi-framework cache)
 
 

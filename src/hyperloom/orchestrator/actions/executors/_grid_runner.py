@@ -504,8 +504,8 @@ def _build_variant_yaml(
             combined = _remove_moe_runner_backend_arg(combined)
     if combined:
         envs[extra_args_env] = _shell_safe_dedupe(combined)
-    elif extra_args_env in envs:
-        envs.pop(extra_args_env, None)
+    elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
+        envs[extra_args_env] = ""
     # Composed base-then-variant, so a variant unsetting a key the base sets
     # removes it: the last layer to name a key is the one that decides it.
     for k in to_str_list(base_unset_envs):
@@ -799,6 +799,7 @@ def _run_magpie(
     serving_lease: Any = None,
     on_output: Callable[[], None] | None = None,
     session_deadline_sec: float | None = None,
+    unset_envs: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
     # Pre-clean lingering servers + shared memory (skip under pytest, and for lifecycle re-attach rounds that would
@@ -807,6 +808,9 @@ def _run_magpie(
         _kill_stale_servers()
 
     env = scrub_benchmark_process_env(os.environ.copy())
+    for name in unset_envs or []:
+        if name.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES:
+            env.pop(name, None)
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
@@ -1144,7 +1148,9 @@ async def run_grid(
             index=idx + 1,
             total=len(grid),
         ) as activity:
-            return await asyncio.to_thread(_run_magpie, on_output=activity.note, **kwargs)
+            return await asyncio.to_thread(
+                _run_magpie, on_output=activity.note, unset_envs=grid[idx].unset_envs, **kwargs
+            )
 
     # Variant boundary: a progress heartbeat so a grid that runs for hours is distinguishable from one that hung on
     # its first variant.
