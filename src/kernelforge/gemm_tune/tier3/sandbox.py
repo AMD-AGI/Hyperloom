@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..utils import cap_build_parallelism
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
@@ -73,6 +75,11 @@ def run_generated_tuner(
         }
     )
     env.update(env_overrides or {})
+    # After the overrides, so a caller that named a number keeps it. A generated
+    # tuner reaches aiter the same way every other tuner does, and it is the one
+    # least able to survive an OOM-killed build: it gets a single sandbox run and
+    # a dead build reads as "the script it wrote does not work".
+    cap_build_parallelism(env)
 
     log_path = work_dir / "sandbox.log"
     started = time.perf_counter()

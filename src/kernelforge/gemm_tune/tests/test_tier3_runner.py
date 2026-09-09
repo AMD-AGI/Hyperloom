@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.gemm_tune import utils
 from kernelforge.gemm_tune.tier3 import gate, ledger, sandbox
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
 from kernelforge.gemm_tune.tier3.runner import attempt_generated_tuner
@@ -156,6 +157,36 @@ open({str(out)!r}, "w").write(os.environ.get("HIP_VISIBLE_DEVICES", "?"))
         )
         sandbox.run_generated_tuner(script, tmp_path, expect=[out], gpu_id="3", timeout_s=60)
         assert out.read_text(encoding="utf-8") == "3"
+
+    def test_the_build_is_sized_to_the_container(self, tmp_path, monkeypatch):
+        # The generated tuner shells out to aiter like every other tuner, but
+        # unlike them it gets one run: a build killed for memory comes back as
+        # "the script it wrote does not work".
+        monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
+        monkeypatch.setattr(utils, "cgroup_memory_limit", lambda: 128 * 1024**3)
+        out = tmp_path / "jobs.txt"
+        script = self._script(
+            tmp_path,
+            f"""
+import os
+open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
+""",
+        )
+        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        assert out.read_text(encoding="utf-8") == "44"
+
+    def test_a_caller_who_named_a_number_keeps_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
+        out = tmp_path / "jobs.txt"
+        script = self._script(
+            tmp_path,
+            f"""
+import os
+open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
+""",
+        )
+        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60, env_overrides={"MAX_JOBS": "8"})
+        assert out.read_text(encoding="utf-8") == "8"
 
 
 class TestLedger:
