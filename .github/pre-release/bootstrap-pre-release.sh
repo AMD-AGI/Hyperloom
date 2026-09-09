@@ -257,13 +257,15 @@ run_leg() {
         echo "E2E_DEMO_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
         local leg_mem leg_shm
+        # Fallbacks must match the dispatch defaults: the nested limits sum against
+        # one host pod, so a stale value here oversubscribes it and OOM-kills them all.
         case "$leg" in
           *-3h)
             leg_mem="${DOCKER_LEG_MEM_3H:-256g}"
             leg_shm="${DOCKER_LEG_SHM_3H:-64g}"
             ;;
           *-12h)
-            leg_mem="${DOCKER_LEG_MEM_12H:-512g}"
+            leg_mem="${DOCKER_LEG_MEM_12H:-352g}"
             leg_shm="${DOCKER_LEG_SHM_12H:-64g}"
             ;;
           *)

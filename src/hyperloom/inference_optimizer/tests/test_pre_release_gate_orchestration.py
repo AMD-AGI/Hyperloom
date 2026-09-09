@@ -197,13 +197,13 @@ def test_the_eval_dataset_is_read_from_the_shared_cache_offline(dispatch_script:
         assert key in DOTENV_EXACT_ALLOWLIST, f"{key} would be ignored when read back from .env"
 
 
-def test_nested_container_memory_fits_the_host_pod(dispatch_script: str) -> None:
+def test_nested_container_memory_fits_the_host_pod(dispatch_script: str, bootstrap_script: str) -> None:
     """Docker legs share one pod, so their limits must sum under its memory request.
 
     Docker enforces --memory per container while Kubernetes enforces the pod
-    total, so oversubscribing here is invisible until several legs peak together
-    and the pod is OOM-killed, taking every docker leg with it. Adding a leg is
-    the moment this silently breaks.
+    total, so oversubscribing is invisible until several legs peak together and
+    the pod is OOM-killed. Both writers of the limit are checked: bootstrap's
+    fallback applies whenever dispatch does not pass the value through.
     """
 
     def _default(name: str) -> str:
@@ -211,14 +211,25 @@ def test_nested_container_memory_fits_the_host_pod(dispatch_script: str) -> None
         assert m, f"could not find default for {name}"
         return m.group(1)
 
+    def _fallback(name: str) -> str:
+        m = re.search(rf'leg_mem="\$\{{{name}:-([^}}]+)\}}"', bootstrap_script)
+        assert m, f"could not find bootstrap fallback for {name}"
+        return m.group(1)
+
     def _gib(text: str) -> float:
         m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(Gi|g|G)", text.strip())
         assert m, f"unrecognised memory literal {text!r}"
         return float(m.group(1))
 
+    for name in ("DOCKER_LEG_MEM_3H", "DOCKER_LEG_MEM_12H"):
+        assert _default(name) == _fallback(name), (
+            f"{name} defaults to {_default(name)} in dispatch but {_fallback(name)} in bootstrap; "
+            "a leg started without the variable would size itself off the stale value"
+        )
+
     legs = re.search(r'ALL_LEGS="(.*?)"', dispatch_script, re.S).group(1).split()
     docker_legs = [leg for leg in legs if leg.startswith("docker-")]
-    per_leg = {"-3h": _gib(_default("DOCKER_LEG_MEM_3H")), "-12h": _gib(_default("DOCKER_LEG_MEM_12H"))}
+    per_leg = {"-3h": _gib(_fallback("DOCKER_LEG_MEM_3H")), "-12h": _gib(_fallback("DOCKER_LEG_MEM_12H"))}
     requested = sum(per_leg["-3h"] if leg.endswith("-3h") else per_leg["-12h"] for leg in docker_legs)
     host = _gib(_default("HOST_MEM"))
     assert requested <= host, (
@@ -282,7 +293,7 @@ def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
 
 def test_docker_host_is_dispatched_before_baremetal(dispatch_script: str) -> None:
     """The 8-GPU docker host schedules slowly; queue it before the 1-GPU baremetal pods."""
-    docker_pos = dispatch_script.index("queue it before the four 1-GPU baremetal pods")
+    docker_pos = dispatch_script.index("# ---- docker legs: one privileged 8-GPU host")
     bare_pos = dispatch_script.index("# ---- baremetal legs: one non-privileged 1-GPU workload each")
     assert docker_pos < bare_pos
 
