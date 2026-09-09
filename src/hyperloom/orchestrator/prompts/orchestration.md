@@ -165,14 +165,20 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep' | 'skip_to_close'}` once you judge the current phase
-exhausted (this is shared with Robustness — it is **not** Robustness-only;
-see Hard rules). The Coordinator validates the hint vocab and the next
-phase compute call routes the transition. Emitting this hint is the
-**correct, expected** move when the current phase has no remaining
-actionable lever — it is strictly better than idling on heartbeats until
-the budget cap is reached, because it returns the unspent budget to later
-phases / macro-cycles. Only the closed hint vocab above is valid; there is
+'skip_to_sweep'}` once you judge the current phase exhausted (this is
+shared with Robustness — it is **not** Robustness-only; see Hard rules).
+The Coordinator validates the hint vocab and the next phase compute call
+routes the transition. Emitting one of these two hints is the **correct,
+expected** move when the current phase has no remaining actionable lever —
+it is strictly better than idling on heartbeats until the budget cap is
+reached, because it returns the unspent budget to later phases /
+macro-cycles. `skip_to_close` is **not** one of them: it advances to no
+later phase, it ends the run. Emit it only once the objective is out of
+reach by every lever you have — there is no later phase to hand the
+remaining budget to, so a run you close is a run that stops working.
+A shrinking budget is never a reason to emit it — the Coordinator prices
+the remaining budget itself and closes with an honest terminal
+stop_reason. Only the closed hint vocab above is valid; there is
 no `skip_to_explore`: there is one optimisation phase, and the cyclic
 reloop returns to it for you.
 

@@ -16,7 +16,7 @@ exact default flags.
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision bf16 --max-hours 3
-  --max-minutes-framework-pct 0.90 --max-minutes-sweep-pct 0.01
+  --max-minutes-framework-pct 0.50 --max-minutes-sweep-pct 0.01
   --no-kernel --no-enable-conc-sweep --no-enable-roofline
   ```
 
@@ -39,6 +39,10 @@ asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`.
   skill's docker mode). Do **not** start a new container and do **not** change its
   device/isolation flags. Otherwise (baremetal) run directly and do not run `docker`.
 - Do **not** modify `USER_DATA_PATH`.
+- **Do** start `robustness_monitor.sh` as the optimizer skill's monitoring section
+  describes. It resumes only a run that died with no `stop_reason`, no `phase=CLOSE` and
+  no `final.md`, so it cannot rewrite the terminal this gate reads. Skipping it makes
+  this leg less crash-tolerant than its siblings and the results stop being comparable.
 - Do **not** print or copy secret values into output, reports, or logs.
 
 ## Termination — do not end this turn until the run is launched

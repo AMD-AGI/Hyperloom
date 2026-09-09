@@ -400,8 +400,9 @@ brief:
   phase stays open on the other lever. **Both arms dry advances the phase**
   via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
   LLM may also emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive.
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it judges
+  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
+  the remaining budget and is reserved for genuine early abandonment.
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
