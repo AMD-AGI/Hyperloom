@@ -1305,13 +1305,37 @@ class _ArtifactSpec:
     description: str = ""
 
 
+def _artifact_candidates(root: Path, rel: str) -> list[Path]:
+    """The joins a root admits for a framework-relative artifact target.
+
+    A pip-installed root is the package directory itself, so a target that
+    repeats the package name (``vllm/model_executor/...``) belongs under the
+    root's parent; a checkout holds the package one level down and joins
+    directly. Both are offered and the caller picks by which parent exists,
+    the same rule ``_resolve_focus_dir`` applies to prompt focus directories.
+
+    Args:
+        root: A framework search root.
+        rel: The framework-relative target.
+
+    Returns:
+        Candidate absolute paths, direct join first.
+    """
+    candidates = [(root / rel).resolve()]
+    if (root / "__init__.py").is_file():
+        candidates.append((root.parent / rel).resolve())
+    return candidates
+
+
 def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
     A relative target picks the framework root whose tree already contains the
-    target's parent directory (so a ``vllm/...`` config lands under the vllm
-    root); else the first existing root. Either way the resolved path must stay
-    within the chosen root, so a ``..`` cannot walk out of the tree it names.
+    target's parent directory; else the first existing root. On a pip-installed
+    root both joins in :func:`_artifact_candidates` are tried, so a ``vllm/...``
+    config lands beside the package rather than under a doubled ``vllm/vllm/``.
+    Either way the resolved path must stay within the chosen root, so a ``..``
+    cannot walk out of the tree it names.
 
     Args:
         rel_target: The install path authored by the specialist (framework-
@@ -1338,13 +1362,13 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
-        cand = (root / rel).resolve()
-        if _is_within(cand, root) and cand.parent.is_dir():
-            return cand, cand.relative_to(root).as_posix(), root
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root) and cand.parent.is_dir():
+                return cand, cand.relative_to(root).as_posix(), root
     for root in roots:
-        cand = (root / rel).resolve()
-        if _is_within(cand, root):
-            return cand, cand.relative_to(root).as_posix(), root
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root):
+                return cand, cand.relative_to(root).as_posix(), root
     return None
 
 

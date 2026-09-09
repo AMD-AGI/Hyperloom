@@ -257,6 +257,50 @@ def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
     )
 
 
+def test_resolve_artifact_target_pip_root_does_not_double_the_package_name(tmp_path, monkeypatch):
+    """A package-prefixed target must land beside the package, not under it.
+
+    A pip-installed root IS the package dir, so joining ``vllm/...`` onto it
+    yields ``.../vllm/vllm/...``. Nothing downstream catches that: the install
+    site mkdirs the parent and copies, so the write reports success while the
+    runtime never reads the path.
+    """
+    pkg = tmp_path / "dist-packages" / "vllm"
+    (pkg / "model_executor" / "configs").mkdir(parents=True)
+    (pkg / "__init__.py").touch()
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(pkg)])
+
+    out = ip._resolve_artifact_target("vllm/model_executor/configs/E=8.json")
+    assert out is not None
+    target, rel, root = out
+    assert target == (pkg / "model_executor" / "configs" / "E=8.json").resolve()
+    assert rel == "model_executor/configs/E=8.json"
+    assert root == pkg.resolve()
+
+
+def test_resolve_artifact_target_pip_root_still_joins_a_bare_target_directly(tmp_path, monkeypatch):
+    """A target that does not repeat the package name keeps the direct join."""
+    pkg = tmp_path / "dist-packages" / "vllm"
+    (pkg / "model_executor" / "configs").mkdir(parents=True)
+    (pkg / "__init__.py").touch()
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(pkg)])
+
+    out = ip._resolve_artifact_target("model_executor/configs/E=8.json")
+    assert out is not None
+    assert out[0] == (pkg / "model_executor" / "configs" / "E=8.json").resolve()
+
+
+def test_resolve_artifact_target_checkout_root_is_unaffected(tmp_path, monkeypatch):
+    """A checkout has no ``__init__.py`` at its root, so only the direct join applies."""
+    checkout = tmp_path / "sgl-workspace" / "vllm"
+    (checkout / "vllm" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(checkout)])
+
+    out = ip._resolve_artifact_target("vllm/configs/E=8.json")
+    assert out is not None
+    assert out[0] == (checkout / "vllm" / "configs" / "E=8.json").resolve()
+
+
 def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeypatch):
     """An absolute target containing ``..`` is rejected even if it would
     normalise inside a root."""
