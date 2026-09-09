@@ -46,7 +46,10 @@ _KEY = {
 }
 _SHAPE = "|".join(f"{k}={v}" for k, v in _KEY.items())
 _KN1 = "flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_kw2_fp4"
-_KN2 = "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic"
+# Tile K=128, not 256: stage 2 walks K over inter_dim, and 384 % 256 sends
+# aiter to a smaller tile than the name says. This fixture read 256 until the
+# check for it existed, which is the case for the check.
+_KN2 = "flydsl_moe2_afp4_wfp4_bf16_t32x128x128_atomic"
 _CAND = {"backend": "aiter_fmoe", "config": f"block_m=32;ksplit=0;kernelName1={_KN1};kernelName2={_KN2}"}
 
 
@@ -182,6 +185,91 @@ class TestThePairAiterWillActuallyRun:
         # resolve, which _build already catches -- and a list maintained on
         # this side would go stale against the generator that owns it.
         assert dp.aiter_honours_kernel_pair("flydsl_moe1_no_such_tile", "flydsl_moe2_no_such_tile")
+
+
+class TestAPairThatNamesOneKernelAndRunsAnother:
+    """Both silent substitutions, refused on paper rather than measured.
+
+    aiter downgrades a tile that does not divide the dimension it walks, and
+    indexes tokens at ``block_m`` regardless of what the names say. Neither
+    faults; both were measured on gfx950 returning a mean error near 1.4 while
+    running *faster* than the default path.
+    """
+
+    def test_a_tile_that_divides_is_fine(self):
+        assert (
+            dp.flydsl_pair_misconfigured(
+                "flydsl_moe1_afp4_wfp4_bf16_t32x128x256_w2",
+                "flydsl_moe2_afp4_wfp4_bf16_t32x128x128_atomic",
+                32,
+                384,
+            )
+            == ""
+        )
+
+    def test_stage_one_tile_n_that_does_not_divide_inter_dim(self):
+        # 384 % 256 -- aiter's resolve_flydsl_stage1_tile_n would run 128.
+        assert "stage-1 tile N=256" in dp.flydsl_pair_misconfigured(
+            "flydsl_moe1_afp4_wfp4_bf16_t32x256x256",
+            "flydsl_moe2_afp4_wfp4_bf16_t32x128x128_atomic",
+            32,
+            384,
+        )
+
+    def test_stage_two_tile_k_that_does_not_divide_inter_dim(self):
+        assert "stage-2 tile K=256" in dp.flydsl_pair_misconfigured(
+            "flydsl_moe1_afp4_wfp4_bf16_t32x128x256",
+            "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic",
+            32,
+            384,
+        )
+
+    def test_the_same_tile_is_legal_when_it_does_divide(self):
+        # The constraint is on the shape, not on the number: inter_dim=512
+        # makes both of the above legal.
+        assert (
+            dp.flydsl_pair_misconfigured(
+                "flydsl_moe1_afp4_wfp4_bf16_t32x256x256",
+                "flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic",
+                32,
+                512,
+            )
+            == ""
+        )
+
+    def test_block_m_below_the_tile(self):
+        # The measured case: t128 stage 1 with the default block_m of 32 ran at
+        # 71.70us against a 111.67us baseline and was wrong by 1.404.
+        assert "block_m=32 is not the stage-1 tile M=128" in dp.flydsl_pair_misconfigured(
+            "flydsl_moe1_afp4_wfp4_bf16_t128x128x256",
+            "flydsl_moe2_afp4_wfp4_bf16_t128x128x128_atomic",
+            32,
+            384,
+        )
+
+    def test_block_m_matching_only_one_of_the_two(self):
+        assert "stage-2 tile M=32" in dp.flydsl_pair_misconfigured(
+            "flydsl_moe1_afp4_wfp4_bf16_t128x128x256",
+            "flydsl_moe2_afp4_wfp4_bf16_t32x128x128_atomic",
+            128,
+            384,
+        )
+
+    def test_a_foreign_partner_is_not_second_guessed(self):
+        # A CKTile name carries no t<M>x<N>x<K>, so there is nothing to check.
+        # Skipping it beats inventing a reading of a spelling we do not own.
+        assert (
+            dp.flydsl_pair_misconfigured(
+                "flydsl_moe1_afp4_wfp4_bf16_t32x128x256",
+                "cktile_moe2_something",
+                32,
+                384,
+            )
+            == ""
+        )
+
+    def test_a_flydsl_name_with_no_tile_at_all_is_left_alone(self):
+        assert dp.flydsl_tile("flydsl_moe1_no_such_tile") is None
 
 
 class TestReadingBackWhatAiterServed:

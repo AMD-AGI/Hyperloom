@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -110,7 +111,9 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
         "`M` tile of *both* names. Measured on gfx950, every mismatch of the three ran without "
         "faulting and returned garbage -- a mean error of 1.1 to 1.4 against the default path -- "
         "and the mismatched pairs were the fastest thing in the search, so a tuner that pins "
-        "`block_m` and trusts its clock will rank nonsense first. A pair that aiter does not "
+        "`block_m` and trusts its clock will rank nonsense first. Both of those are refused here "
+        "before any GPU work, so a search that ignores this paragraph will spend its budget "
+        "collecting refusals rather than wrong answers. A pair that aiter does not "
         "resolve to is refused rather than "
         "timed: the adapter reads back which kernels aiter actually chose, and a row it ignored "
         "would otherwise be timed as the default path and scored as a tie."
@@ -498,11 +501,16 @@ class _FusedMoeAdapter:
             )
             return None
         key = moe_shape_key(shape)
+        block_m = int(cfg.get("block_m", 32))
+        wrong = flydsl_pair_misconfigured(kn1, kn2, block_m, int(key["inter_dim"]))
+        if wrong:
+            log.info("tier3: refusing (%s, %s) -- %s", kn1, kn2, wrong)
+            return None
         row = {
             "gfx": self._gfx(),
             "cu_num": self._cu_num(),
             **key,
-            "block_m": cfg.get("block_m", 32),
+            "block_m": block_m,
             "ksplit": cfg.get("ksplit", 0),
             "us1": 0,
             "kernelName1": kn1,
@@ -916,6 +924,56 @@ def aiter_honours_kernel_pair(kernel_name_1: str, kernel_name_2: str) -> bool:
     ``aiter/fused_moe.py``'s ``is_flydsl1 or is_flydsl2`` guard.
     """
     return kernel_name_1.startswith(FLYDSL_KERNEL_PREFIX) or kernel_name_2.startswith(FLYDSL_KERNEL_PREFIX)
+
+
+#: The tile a FlyDSL kernel name carries, as ``_t<M>x<N>x<K>``.
+FLYDSL_TILE = re.compile(r"_t(\d+)x(\d+)x(\d+)")
+
+
+def flydsl_tile(kernel_name: str) -> tuple[int, int, int] | None:
+    """The ``(M, N, K)`` tile in a FlyDSL name, or None if it carries none.
+
+    A CK, CKTile or Opus partner is spelled differently and returns None, which
+    is not an error -- the checks below skip whatever they cannot read rather
+    than refusing a name whose shape they do not know how to see.
+    """
+    if not kernel_name.startswith(FLYDSL_KERNEL_PREFIX):
+        return None
+    found = FLYDSL_TILE.search(kernel_name)
+    return (int(found.group(1)), int(found.group(2)), int(found.group(3))) if found else None
+
+
+def flydsl_pair_misconfigured(kernel_name_1: str, kernel_name_2: str, block_m: int, inter_dim: int) -> str:
+    """Why this pair would run something other than what it names -- or "".
+
+    Two ways to name one kernel and get another, both of which aiter accepts in
+    silence and neither of which faults:
+
+    * **A tile that does not divide the dimension it walks.** Stage 1 walks N
+      over ``inter_dim`` and stage 2 walks K over it. ``moe_kernels.py``'s
+      ``resolve_flydsl_stage1_tile_n`` and ``resolve_flydsl_stage2_tile_k``
+      quietly halve a tile that does not divide, so the kernel that runs is not
+      the one measured. Its own docstrings say tuners should not offer these.
+    * **A ``block_m`` that is not the pair's M tile.** ``block_m`` is the
+      granularity the tokens are sorted into before either kernel indexes them,
+      so a mismatch reads the wrong rows -- quickly. Measured on gfx950, nine
+      combinations with no exception: correct only when ``block_m`` equals the M
+      tile of *both* names, and the mismatched pairs were the fastest thing in
+      the search at 72us against a 112us default, wrong by a mean error of 1.4.
+
+    The correctness gate catches both, which is why this is a saving rather than
+    a safety net: a candidate refused here costs no GPU time, and a search that
+    keeps proposing them is told why instead of silently scoring zero.
+    """
+    tile_1, tile_2 = flydsl_tile(kernel_name_1), flydsl_tile(kernel_name_2)
+    if tile_1 and inter_dim % tile_1[1]:
+        return f"stage-1 tile N={tile_1[1]} does not divide inter_dim={inter_dim}; aiter would run a smaller tile"
+    if tile_2 and inter_dim % tile_2[2]:
+        return f"stage-2 tile K={tile_2[2]} does not divide inter_dim={inter_dim}; aiter would run a smaller tile"
+    for which, tile in (("stage-1", tile_1), ("stage-2", tile_2)):
+        if tile and tile[0] != block_m:
+            return f"block_m={block_m} is not the {which} tile M={tile[0]}; the token sort would not match the indexing"
+    return ""
 
 
 def mean_error(got: Any, ref: Any) -> float:
