@@ -385,6 +385,37 @@ COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
 # kernelName values with these libtypes are not linked into serving ``module_*.so``.
 NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
 
+# Longest prefix first: a bpreshuffle CSV may carry ``libtype=cktile`` rows whose
+# kernelName is ``a8w8_blockscale_cktile_*`` (no bpreshuffle infix).
+_KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
+    (
+        "a8w8_blockscale_bpreshuffle",
+        {
+            "ck": "module_gemm_a8w8_blockscale_bpreshuffle",
+            "cktile": "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+            "asm": "module_gemm_a8w8_blockscale_bpreshuffle_asm",
+        },
+    ),
+    (
+        "a8w8_blockscale",
+        {
+            "ck": "module_gemm_a8w8_blockscale",
+            "cktile": "module_gemm_a8w8_blockscale_cktile",
+            "asm": "module_gemm_a8w8_blockscale_asm",
+        },
+    ),
+    (
+        "a8w8_bpreshuffle",
+        {
+            "ck": "module_gemm_a8w8_bpreshuffle",
+            "cktile": "module_gemm_a8w8_bpreshuffle_cktile",
+        },
+    ),
+    ("a8w8", {"ck": "module_gemm_a8w8"}),
+    ("a4w4_blockscale", {"ck": "module_gemm_a4w4_blockscale"}),
+    ("a4w4", {"ck": "module_gemm_a4w4_blockscale"}),
+)
+
 # Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
 AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
@@ -436,28 +467,77 @@ def csv_kernel_names(
     return names
 
 
+def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
+    """Serving ``module_*.so`` that should contain this JIT kernel name."""
+    lib = str(libtype or "").strip().lower() or "ck"
+    for prefix, by_lib in _KERNEL_PREFIX_TO_MODULE:
+        if kernel_name.startswith(prefix):
+            return by_lib.get(lib)
+    return None
+
+
+def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
+    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``."""
+    rows: list[tuple[str, str]] = []
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                name = str(row.get("kernelName") or "").strip()
+                if not name:
+                    continue
+                libtype = str(row.get("libtype") or "").strip().lower()
+                if libtype in NON_JIT_SO_LIBTYPES:
+                    continue
+                if not libtype and name.startswith("_ZN"):
+                    continue
+                rows.append((name, libtype))
+    except OSError:
+        return []
+    return rows
+
+
 def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every JIT ``kernelName`` in the CSV appears in a serving .so.
+    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``; missing .so files mean the next start will compile from the
-    current CSV, so that case is treated as covered.
+    ``module_*.so``. A name is looked up in the module implied by its prefix and
+    ``libtype``, falling back to ``modules``. Missing .so files mean the next start
+    will compile from the current CSV, so that case is treated as covered.
     """
-    names = csv_kernel_names(csv_path, skip_libtypes=NON_JIT_SO_LIBTYPES)
-    if not names:
+    rows = csv_jit_kernel_rows(csv_path)
+    if not rows:
         return True
-    blobs: list[bytes] = []
-    for module in modules:
-        so_path = jit_dir / f"{module}.so"
-        if so_path.is_file():
-            try:
-                blobs.append(so_path.read_bytes())
-            except OSError:
-                return False
-    if not blobs:
-        return True
-    joined = b"".join(blobs)
-    return all(name.encode("utf-8") in joined for name in names)
+    blobs: dict[str, bytes | None] = {}
+
+    def _read(module: str) -> bytes | None:
+        if module not in blobs:
+            so_path = jit_dir / f"{module}.so"
+            data: bytes | None = None
+            if so_path.is_file():
+                try:
+                    data = so_path.read_bytes()
+                except OSError:
+                    data = None
+            blobs[module] = data
+        return blobs[module]
+
+    for name, libtype in rows:
+        resolved = serving_module_for_kernel(name, libtype)
+        search = (resolved,) if resolved else modules
+        encoded = name.encode("utf-8")
+        saw_so = False
+        found = False
+        for module in dict.fromkeys(search):
+            data = _read(module)
+            if data is None:
+                continue
+            saw_so = True
+            if encoded in data:
+                found = True
+                break
+        if saw_so and not found:
+            return False
+    return True
 
 
 def _resolve_serving_jit_dir() -> Path | None:
@@ -512,7 +592,7 @@ def _invalidate_jit_build(jit_dir: Path, backup_dir: Path) -> dict[str, Any]:
 
 
 def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
-    if envs is None:
+    if not envs:
         modules: list[str] = []
         for names in AITER_ENV_TO_SERVING_MODULES.values():
             modules.extend(names)
@@ -551,6 +631,10 @@ def prepare_serving_so_for_csvs(
         if serving_modules_cover_csv(jit_dir, modules, csv_path):
             continue
         modules_needed.extend(modules)
+        for name, libtype in csv_jit_kernel_rows(csv_path):
+            resolved = serving_module_for_kernel(name, libtype)
+            if resolved:
+                modules_needed.append(resolved)
     modules_needed_t = tuple(dict.fromkeys(modules_needed))
     if not modules_needed_t:
         return {"action": "skip", "jit_dir": str(jit_dir)}
@@ -611,6 +695,7 @@ __all__ = [
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
     "clean_stale_aiter_locks",
+    "csv_jit_kernel_rows",
     "csv_kernel_names",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
@@ -618,6 +703,7 @@ __all__ = [
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
     "result_is_aiter_jit_registry_mismatch",
+    "serving_module_for_kernel",
     "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",

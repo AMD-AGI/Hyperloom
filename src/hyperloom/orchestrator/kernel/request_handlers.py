@@ -6221,7 +6221,12 @@ def _workspace_has_compiled_registry_error(
                     size = handle.tell()
                     handle.seek(max(0, size - 65536))
                 else:
-                    handle.seek(start)
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    if start >= size:
+                        handle.seek(max(0, size - 65536))
+                    else:
+                        handle.seek(start)
                 text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             continue
