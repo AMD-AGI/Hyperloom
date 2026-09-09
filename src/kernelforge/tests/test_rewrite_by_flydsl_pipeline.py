@@ -1170,20 +1170,19 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
     # The PORT publish, then one per KEEP, then the run's final result.
     port, first_keep, second_keep, final = writes
     assert port["best_commit"] == ""
-    # The PORT publish predates OPTIMIZE, so it is named after its artifact.
-    assert "session_digest" not in port
+    # PORT names its record after its own session. With no commit to name it here, the artifact does.
+    assert port["session_key"] == ""
 
     assert [first_keep["best_commit"], second_keep["best_commit"]] == ["c1", "c2"]
     assert first_keep["content_override"] == b"import flydsl\n# kept at c1\n"
     assert second_keep["content_override"] == b"import flydsl\n# kept at c2\n"
     assert [first_keep["flydsl_best_ms"], second_keep["flydsl_best_ms"]] == [0.9, 0.7]
 
-    # One name for the whole run, so each publication replaces the last rather
-    # than filing a sibling record.
-    run_digest = hashlib.sha256(b"EXP").hexdigest()
-    assert first_keep["session_digest"] == run_digest
-    assert second_keep["session_digest"] == run_digest
-    assert final["session_digest"] == run_digest
+    # One name for the whole OPTIMIZE session, so each publication replaces the last rather than filing a sibling.
+    run_key = hashlib.sha256(b"EXP").hexdigest()
+    assert first_keep["session_key"] == run_key
+    assert second_keep["session_key"] == run_key
+    assert final["session_key"] == run_key
 
 
 def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
@@ -1314,10 +1313,10 @@ def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkey
     )
 
     assert out["port_ok"] is True
-    # The PORT publish and the final one; the KEEP had nothing to publish, and
-    # the final write falls back to naming the record after the artifact.
+    # The PORT publish and the final one; the KEEP had nothing to publish, so the run's final result belongs to the
+    # PORT session and lands on its record rather than beside it.
     assert len(writes) == 2
-    assert not writes[1]["session_digest"]
+    assert writes[1]["session_key"] == writes[0]["session_key"]
 
 
 def test_run_rewrite_port_failure_short_circuits(tmp_path, monkeypatch, capsys):

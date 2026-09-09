@@ -347,6 +347,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         best_commit="a" * 40,
         framework="vllm",
+        session_key="a" * 40,
     )
     second = kb.write_flydsl_kb_solution(
         spec,
@@ -356,6 +357,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         best_commit="b" * 40,
         framework="vllm",
+        session_key="b" * 40,
     )
 
     assert first["canonical_id"] == second["canonical_id"] == SOFTMAX_IDENTITY
@@ -704,6 +706,7 @@ def _publish_ranked_candidates(spec, driver, config, ranks):
             flydsl_best_ms=best_ms,
             best_commit=str(rank) * 40,
             framework="vllm",
+            session_key=str(rank) * 40,
         )
         assert written["written"] is True
 
@@ -836,6 +839,51 @@ def test_a_field_entirely_under_the_floor_leaves_the_workspace_alone(tmp_path, m
     assert restored.read_reason == "candidates_rejected"
     assert {attempt["reason"] for attempt in restored.attempts} == {"below_claim_floor"}
     assert Path(spec.flydsl_kernel).read_text() == seed
+
+
+def test_one_trial_cannot_spend_the_whole_search_budget(tmp_path, monkeypatch):
+    """The budget bounds the field, so it has to bound each trial in it.
+
+    A stage left at its own ceiling outlives the budget it runs under, and the first candidate then consumes a field
+    that was widened precisely so several could be measured.
+    """
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    monkeypatch.setenv("FORGE_KB_WARMSTART_BUDGET_SEC", "60")
+
+    _publish_ranked_candidates(spec, driver, config, [(1, 10.0, 5.0)])
+    stage_timeouts: list[int] = []
+
+    class Report:
+        all_passed = True
+        results = [type("Result", (), {"snr_db": 80.0})()]
+
+    async def validation(**kwargs):
+        stage_timeouts.append(kwargs["timeout_per_stage"])
+        return Report()
+
+    monkeypatch.setattr(kb, "run_validation_pipeline", validation)
+    monkeypatch.setattr(
+        kb.driver_contract,
+        "preflight_candidate",
+        lambda *_a, **_k: driver_contract.PreflightReport(ok=True, timing_ms=5.0),
+    )
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+
+    asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            framework="vllm",
+            validation_timeout_sec=1800,
+        )
+    )
+
+    # Its own ceiling is 1800s; what it may actually take is whatever is left of the 60s budget.
+    assert stage_timeouts and all(0 < timeout <= 60 for timeout in stage_timeouts)
 
 
 # --------------------------------------------------------------------------- # local mode uses the same record layout

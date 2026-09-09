@@ -16,9 +16,10 @@ import os
 #: candidate read may be measured, so this also bounds the trials; :data:`DEFAULT_BUDGET_SEC` bounds their wall time.
 DEFAULT_TOP_K = 10
 
-#: The lowest claimed speedup worth spending a trial on. Below it a record is a port that lost badly, and it is not
-#: offered as prompt reference material either. The claim is not comparable across tasks -- it was computed over
-#: whatever cases the producing task scored -- so this screens for catastrophe; measurement ranks the survivors.
+#: The lowest claimed speedup worth spending a trial on. A trial's cost scales with how slow the candidate is, since
+#: the correctness suite and the benchmark both run the kernel, so a port orders of magnitude off the pace can spend
+#: the whole search budget on itself. The claim is not comparable across tasks -- it was computed over whatever cases
+#: the producing task scored -- so it can only screen for that catastrophe; measurement ranks the survivors.
 DEFAULT_MIN_CLAIMED_SPEEDUP = 0.3
 
 #: Wall-clock ceiling on the whole candidate search, in seconds. One candidate is a compile plus a correctness suite

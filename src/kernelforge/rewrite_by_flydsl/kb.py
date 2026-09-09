@@ -34,6 +34,22 @@ _REWRITE_KIND = "standalone_flydsl"
 _KERNEL_ARTIFACT = "kernel.py"
 _REFERENCE_CONTENT_CAP = 12_000
 
+# Ceiling on the benchmark that times one candidate, when nothing tighter bounds it.
+_BENCH_TIMEOUT_SEC = 600
+
+
+def _stage_timeout(cap_sec: int, search_deadline: float, run_deadline_sec: float | None) -> int:
+    """Seconds one measurement stage may take without outliving the search or the run.
+
+    The search budget bounds the field, not each trial, so a stage allowed to run to its own ceiling could spend the
+    whole budget on the first candidate and leave the rest of the field unmeasured -- which is the opposite of what
+    reading a wide field is for.
+    """
+    allowance = search_deadline - time.monotonic()
+    if run_deadline_sec is not None:
+        allowance = min(allowance, run_deadline_sec)
+    return max(1, min(cap_sec, int(allowance)))
+
 
 @dataclass
 class RewriteKbReadResult:
@@ -237,8 +253,9 @@ async def try_flydsl_kb_warmstart(
         if remaining is not None and remaining <= 0:
             result.read_reason = "deadline"
             break
-        # Skipped whole: not downloaded, not admitted, and not added to ``references``. A port this far behind the
-        # source baseline is not instructive, and one trial costs a compile, a correctness suite and a benchmark.
+        # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
+        # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
+        # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
         if warmstart_policy.below_floor(candidate["speedup"]):
             result.attempts.append(
                 {
@@ -289,13 +306,10 @@ async def try_flydsl_kb_warmstart(
                     validation = await run_validation_pipeline(
                         driver_script=driver_path,
                         snr_threshold=spec.snr_threshold,
-                        timeout_per_stage=(
-                            validation_timeout_sec
-                            if remaining is None
-                            else max(
-                                1,
-                                min(validation_timeout_sec, int(remaining)),
-                            )
+                        timeout_per_stage=_stage_timeout(
+                            validation_timeout_sec,
+                            search_deadline,
+                            remaining,
                         ),
                     )
                     if not validation.all_passed:
@@ -307,7 +321,7 @@ async def try_flydsl_kb_warmstart(
                             benched = driver_contract.preflight_candidate(
                                 spec,
                                 driver_path,
-                                timeout_sec=(600 if remaining is None else max(1, min(600, int(remaining)))),
+                                timeout_sec=_stage_timeout(_BENCH_TIMEOUT_SEC, search_deadline, remaining),
                             )
                             candidate_ms = benched.timing_ms if benched.ok else None
                         snr = validation.results[-1].snr_db if validation.results else None
@@ -380,17 +394,17 @@ def write_flydsl_kb_solution(
     best_commit: str = "",
     framework: str = "",
     snr_db: float | None = None,
-    session_digest: str = "",
+    session_key: str = "",
     content_override: bytes | None = None,
 ) -> dict:
     """Record a validated FlyDSL port as a candidate under its identity.
 
-    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``session_digest`` substitutes
-    for the artifact digest inside the candidate name -- not for the whole name, so the identity fingerprint still
-    partitions artifact storage -- which lets a caller publishing on every KEEP replace its last record instead of
-    burying the identity's history under one run. ``content_override`` supplies the kernel bytes for a caller
-    publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy measured for *this* artifact;
-    a caller that did not measure it passes ``None``, because a reading taken from another kernel is not a substitute.
+    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``session_key`` names the
+    session this record belongs to, so a caller publishing repeatedly through one session replaces its own record
+    rather than burying the identity's history under a sibling per publication. ``content_override`` supplies the
+    kernel bytes for a caller publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy
+    measured for *this* artifact; a caller that did not measure it passes ``None``, because a reading taken from
+    another kernel is not a substitute.
     """
     store = create_rewrite_record_store(config)
     if store is None:
@@ -408,11 +422,10 @@ def write_flydsl_kb_solution(
             source_text=_source_text(spec),
         )
         content_hash = hashlib.sha256(content).hexdigest()
-        session_id = candidate_session_id(
-            canonical_id,
-            identity.kernel_name,
-            session_digest or best_commit or content_hash,
-        )
+        # Only when the caller has no session identity at all does the artifact name the record, and then every
+        # publication is a sibling. ``best_commit`` is metadata here, never a name: a caller that wants its commit to
+        # name the record says so through ``session_key``.
+        session_id = candidate_session_id(canonical_id, identity.kernel_name, session_key or content_hash)
         knowledge = {
             "producer": identity.producer,
             "speedup": round(speedup, 4) if speedup is not None else None,

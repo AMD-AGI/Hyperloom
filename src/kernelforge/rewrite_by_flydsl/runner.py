@@ -412,6 +412,7 @@ def run_rewrite(
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
+            session_key=port_commit,
         )
         print(
             f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
@@ -453,11 +454,11 @@ def run_rewrite(
     # Every KEEP is published, not just the run's final best, because an OPTIMIZE session can be terminated at its
     # cutoff or killed outright. forge-loop cannot do this itself -- it runs here under --no-experience-kb because the
     # rewrite identity is not its own -- so the rewrite layer watches its result file and publishes to its own store.
-    # Naming the candidate after the forge-loop run rather than the artifact makes each publication replace the last.
-    optimize_session_digest = ""
+    # Naming the record after the forge-loop session rather than the artifact makes each publication replace the last.
+    optimize_session_key = ""
 
     def _publish_keep(payload: dict) -> None:
-        nonlocal optimize_session_digest
+        nonlocal optimize_session_key
         commit = str(payload.get("best_commit") or "")
         # Read the kernel out of the commit, never off disk: the workspace still belongs to the running agent, and the
         # best is only restored there once OPTIMIZE is over.
@@ -468,7 +469,7 @@ def run_rewrite(
                 flush=True,
             )
             return
-        optimize_session_digest = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
+        optimize_session_key = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
         write = write_flydsl_kb_solution(
             spec,
             driver_path,
@@ -480,7 +481,7 @@ def run_rewrite(
             # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
             # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
             snr_db=None,
-            session_digest=optimize_session_digest,
+            session_key=optimize_session_key,
             content_override=shown.stdout.encode(),
         )
         print(
@@ -530,9 +531,9 @@ def run_rewrite(
             # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
             # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
             snr_db=port.snr_db if final_commit == port_commit else None,
-            # Replace this run's KEEP record rather than adding a sibling. Empty when OPTIMIZE published nothing, which
-            # falls back to naming the candidate after the artifact.
-            session_digest=optimize_session_digest,
+            # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
+            # otherwise -- either way it replaces that session's record instead of standing beside it.
+            session_key=optimize_session_key or port_commit,
         )
     else:
         kb_write = {"written": False, "reason": "disabled"}
