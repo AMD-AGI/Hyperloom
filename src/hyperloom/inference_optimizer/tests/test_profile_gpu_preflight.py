@@ -58,10 +58,7 @@ def test_disjoint_from_the_cuda_graph_classifier():
 
 
 def test_compiled_registry_mismatch_is_not_a_cuda_graph_class():
-    blob = (
-        "Exception: Capture cuda graph failed: "
-        "kernel 'k' is not present in the compiled registry."
-    )
+    blob = "Exception: Capture cuda graph failed: kernel 'k' is not present in the compiled registry."
     assert is_aiter_jit_registry_mismatch(blob)
 
 

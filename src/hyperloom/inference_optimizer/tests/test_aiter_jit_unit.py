@@ -410,10 +410,7 @@ def test_sweep_dead_compiler_keeps_fresh_ownerless_lock(tmp_path, monkeypatch):
 def test_csv_kernel_names_skips_blank_rows(tmp_path):
     csv_path = tmp_path / "tuned.csv"
     csv_path.write_text(
-        "M,N,K,kernelName\n"
-        "16,512,7168,kernel_a\n"
-        "32,512,7168,\n"
-        "64,512,7168,kernel_b\n",
+        "M,N,K,kernelName\n16,512,7168,kernel_a\n32,512,7168,\n64,512,7168,kernel_b\n",
         encoding="utf-8",
     )
     assert aj.csv_kernel_names(csv_path) == {"kernel_a", "kernel_b"}
