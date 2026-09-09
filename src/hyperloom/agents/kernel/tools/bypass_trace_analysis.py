@@ -40,6 +40,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
+import _capture_shapes as _capshapes  # noqa: E402
 import _trace_shape_manifest as _tsm  # noqa: E402
 
 # Shared provenance builder (WP-0). Optional import: this tool is also invoked
@@ -191,7 +192,8 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
                 "message": (
                     "no main profiler trace found; analysis ran on a sglang CUDA-graph "
                     "capture shard (device-kernel sparse). Ensure the main "
-                    "*-TP-*.trace.json.gz (not just capture_traces/bs_*) was captured."
+                    "*-TP-*.trace.json.gz was captured, not just the graph_capture_profile/ "
+                    "sidecars."
                 ),
             }
         )
@@ -211,19 +213,24 @@ _SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
 #: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
-#: Searched rather than matched from the start: an SGLang without the profiler
-#: patch prefixes the runner name, as in ``DecodeCudaGraphRunner_bs_104_rank0``,
+#: Searched rather than matched from the start: the upstream per-bs exporter
+#: prefixes the runner name, as in ``DecodeCudaGraphRunner_bs_104_rank0``,
 #: and an anchored read falls through to the bare stem -- which differs per rank,
 #: so the label dedup below stops collapsing the ranks of one batch.
 _VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
 #: Which files carry an indexable per-variant shape. Deliberately NOT the shared
 #: ``_capture_shapes`` classifier: that one answers "is this a sidecar rather
 #: than a workload trace", which is a wider question than this one. A
-#: whole-capture-per-rank file such as an unpatched SGLang's
-#: ``cuda_graph_capture-<runner>-TP-<n>`` is certainly a sidecar, but it holds
+#: whole-capture-per-rank file, which is what ``SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE``
+#: writes as ``cuda_graph_capture-<runner>-TP-<n>``, is certainly a sidecar, but it holds
 #: every batch size at once and carries no variant identity, so admitting it
 #: mints one bogus variant per rank -- TP=8 would inflate ``variant_count`` by
-#: eight shape-identical entries and defeat the dedup a few lines down. Admit a
+#: eight shape-identical entries and defeat the dedup a few lines down. The
+#: identity is not inside the file either: the capture-phase ``record_function``
+#: spans are not emitted on that path (measured on a GLM-5.2 MI355X capture:
+#: 15166 user_annotation events, none of them a capture span), so there is
+#: nothing to split it on -- ``_unindexable_capture_names`` says so out loud
+#: rather than letting it read as an ordinary eager fallback. Admit a
 #: ``bs_<batch>`` token anywhere (both SGLang layouts) or the vLLM prefix whose
 #: batch/mode arrive via execution_details.json.
 _CAPTURE_FILE_RE = re.compile(r"bs_\d+|\Agraph_capture", re.IGNORECASE)
@@ -234,6 +241,9 @@ _CAPTURE_FILE_RE = re.compile(r"bs_\d+|\Agraph_capture", re.IGNORECASE)
 #: drop is logged.
 _MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
 _DEFAULT_MAX_CAPTURES = 64
+#: Sidecar metadata written beside the capture files, not a trace itself. Named
+#: once because both the reader below and the unindexable-layout probe need it.
+_EXECUTION_DETAILS_NAME = "execution_details.json"
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -257,13 +267,69 @@ def _load_execution_details(capdir: Path) -> dict[str, dict[str, Any]]:
     """
     out: dict[str, dict[str, Any]] = {}
     try:
-        data = json.loads((capdir / "execution_details.json").read_text(encoding="utf-8"))
+        data = json.loads((capdir / _EXECUTION_DETAILS_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return out
     for e in data if isinstance(data, list) else []:
         if isinstance(e, dict) and e.get("file"):
             out[str(e["file"])] = {"batch_size": e.get("batch_size"), "mode": e.get("mode")}
     return out
+
+
+def _capture_roots(trace_input: str, capture_folder: str) -> list[Path]:
+    """Directories a capture sidecar may live in, in priority order.
+
+    ``capture_folder`` when the coordinator resolved one, then the trace input
+    itself (or its parent, for a single-file input).
+    """
+    roots: list[Path] = []
+    if capture_folder:
+        roots.append(Path(capture_folder))
+    ti = Path(trace_input)
+    roots.append(ti if ti.is_dir() else ti.parent)
+    return roots
+
+
+def _unindexable_capture_names(trace_input: str, capture_folder: str) -> list[str]:
+    """Capture sidecars that are present but carry no per-variant identity.
+
+    The combined layout -- one ``cuda_graph_capture-<runner>-TP-<n>`` per rank,
+    which ``SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE`` selects -- holds every
+    batch size in a single file, so :data:`_CAPTURE_FILE_RE` rejects it on
+    purpose (see the note there: admitting it mints one bogus variant per rank).
+
+    Rejecting it is right; rejecting it *silently* is not. Without this the
+    manifest falls back to eager exactly as it does when graph capture never
+    ran, and the two are indistinguishable downstream -- Forge loses the per-bs
+    dense shapes with nothing in the output saying why. Naming the files lets
+    the caller separate "no capture" from "capture this manifest cannot index".
+
+    The sibling ``execution_details.json`` is not a way out, though it looks
+    like one: it carries the schema :func:`_load_execution_details` reads, but
+    on this layout it records a single ``batch_size`` for a file holding every
+    batch size (measured on a GLM-5.2 MI355X capture: 256 for all eight decode
+    ranks, 8 for all eight EAGLE draft ranks). Admitting the file on the
+    strength of that would not recover the variants -- it would label one
+    all-batch aggregate as a single batch and hand Forge a dense shape that is
+    wrong rather than missing.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in _capture_roots(trace_input, capture_folder):
+        if not root.exists():
+            continue
+        for cand in _reader._trace_candidates(root):
+            key = str(cand.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            if cand.name == _EXECUTION_DETAILS_NAME:
+                continue
+            if _CAPTURE_FILE_RE.search(cand.name):
+                continue
+            if _capshapes.is_capture_fragment(cand, root):
+                out.append(cand.name)
+    return sorted(out)
 
 
 def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tuple[Path, str, str | None]]:
@@ -276,11 +342,7 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
 
     Looks in ``capture_folder`` when given, else under the trace-input tree.
     """
-    roots: list[Path] = []
-    if capture_folder:
-        roots.append(Path(capture_folder))
-    ti = Path(trace_input)
-    roots.append(ti if ti.is_dir() else ti.parent)
+    roots = _capture_roots(trace_input, capture_folder)
     seen: set[str] = set()
     seen_labels: set[str] = set()
     exec_cache: dict[Path, dict[str, dict[str, Any]]] = {}
@@ -468,12 +530,39 @@ def _maybe_build_shape_manifest(
             f"rows={len(manifest.get('rows', []))} path={out_path}",
             file=sys.stderr,
         )
+        warnings = list(manifest.get("warnings", []))
+        # An eager manifest is the right answer when graph capture never ran. It
+        # is a silent regression when capture *did* run and only the layout is
+        # unreadable, so separate the two before the distinction leaves here --
+        # downstream sees one eager manifest either way. Probed only on the
+        # empty path: it costs a directory walk.
+        unindexable = (
+            [] if capture_variants else _unindexable_capture_names(args.trace_input, args.capture_folder or "")
+        )
+        if unindexable:
+            message = (
+                "graph capture ran, but its trace carries no per-batch-size identity, so the "
+                "shape manifest fell back to eager and Forge has no per-bs dense shapes. The "
+                "combined layout (SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE) writes one file per "
+                "rank holding every batch size at once; the per-bs exporter that would carry "
+                "the identity crashes the server during capture on any model that captures "
+                f"more than one variant per batch size. Files: {', '.join(unindexable[:4])}"
+            )
+            warnings.append(
+                {
+                    "code": "shape_manifest_capture_not_indexable",
+                    "severity": "warning",
+                    "message": message,
+                    "capture_files": unindexable[:8],
+                }
+            )
+            print(f"[trace_shape_manifest] {message}", file=sys.stderr)
         return {
             "status": "ok",
             "path": str(out_path),
             "variant_count": len(capture_variants),
             "row_count": len(manifest.get("rows", [])),
-            "warnings": manifest.get("warnings", []),
+            "warnings": warnings,
         }
     except Exception as exc:  # noqa: BLE001 — manifest must never break bypass
         msg = f"error: {type(exc).__name__}: {exc}"
