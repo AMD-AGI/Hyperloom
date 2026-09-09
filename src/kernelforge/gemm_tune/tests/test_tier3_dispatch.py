@@ -158,14 +158,26 @@ class _FakeTorch:
         return self._matmul_result
 
 
-def _install_aiter(monkeypatch: pytest.MonkeyPatch, *, asm_result=None, raises: bool = False):
-    """Wire a fake ``aiter`` package, including the two submodules imported."""
-    calls: dict[str, int] = {"findallsols": 0, "workspace_init": 0}
+def _install_aiter(monkeypatch: pytest.MonkeyPatch, *, asm_result=None, raises: bool = False, sols=(7,)):
+    """Wire a fake ``aiter`` package, including the two submodules imported.
+
+    ``sols`` is what hipBLASLt says it can serve for these operands. It has to be
+    a real list rather than None, because ``_build`` now refuses a ``solidx``
+    that is not in it -- running an invented one aborts the process from C++.
+    """
+    calls: dict[str, int] = {"findallsols": 0, "workspace_init": 0, "create_extension": 0}
 
     aiter = types.ModuleType("aiter")
 
+    def _create_extension(*_a, **_k):
+        calls["create_extension"] += 1
+
     def _findallsols(*_a, **_k):
+        # findallsols on a handle nobody created aborts the same way hipb_mm
+        # does, so the order is part of what the fake has to enforce.
+        assert calls["create_extension"], "hipb_findallsols before hipb_create_extension"
         calls["findallsols"] += 1
+        return list(sols)
 
     def _hipb_mm(*_a, **_k):
         return _T([1.0, 2.0, 3.0])
@@ -175,6 +187,7 @@ def _install_aiter(monkeypatch: pytest.MonkeyPatch, *, asm_result=None, raises: 
             raise RuntimeError("asm kernel exploded")
         return asm_result if asm_result is not None else _T([1.0, 2.0, 3.0])
 
+    aiter.hipb_create_extension = _create_extension
     aiter.hipb_findallsols = _findallsols
     aiter.hipb_mm = _hipb_mm
     aiter.gemm_a16w16_asm = _gemm_asm
@@ -321,9 +334,16 @@ class TestWhatCanAndCannotBeDispatched:
         call = adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=7"})
 
         assert call is not None
+        assert calls["create_extension"] == 1
         assert calls["findallsols"] == 1
-        adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=9"})
+        adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=7"})
         assert calls["findallsols"] == 1, "the handle is created once, not per candidate"
+
+    def test_a_solidx_hipblaslt_never_offered_is_refused(self, adapter, monkeypatch):
+        # Not a typo-catcher: hipb_mm on an index outside the solution list
+        # aborts from C++ with INVALID_VALUE, which no `except` here can catch.
+        _install_aiter(monkeypatch, sols=(7,))
+        assert adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=9"}) is None
 
     def test_the_asm_backend_without_a_kernel_name_is_not_dispatchable(self, adapter, monkeypatch):
         _install_aiter(monkeypatch)
