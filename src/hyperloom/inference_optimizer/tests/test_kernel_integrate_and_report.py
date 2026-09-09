@@ -213,6 +213,45 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
     assert result["stale_jit_lock"]["retry_attempted"] is False
 
 
+@pytest.mark.asyncio
+async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path, monkeypatch):
+    dropped: list[dict] = []
+
+    def _drop(envs=None, *, backup_dir=None):
+        dropped.append({"envs": envs, "backup_dir": backup_dir})
+        return {"action": "invalidate"}
+
+    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
+        _drop,
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_registry_mismatch",
+                "error": "kernel 'k' is not present in the compiled registry",
+            }
+        return {"status": "succeeded", "output_throughput": 100.0}
+
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        object(),
+        workspace=tmp_path,
+        reason="test integrate registry",
+    )
+
+    assert calls == 2
+    assert dropped
+    assert result["status"] == "succeeded"
+    assert result["aiter_jit_registry_mismatch_retry"]["retry_succeeded"] is True
+
+
 def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     session_dir,
     tmp_path,

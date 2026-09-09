@@ -16,15 +16,19 @@ that needs the same module.
 This module resolves and sweeps both trees. Upstream lock files do not encode an
 owner pid, so shared-cache locks are removed only after the conservative age
 threshold and only when no compiler is alive. Forge-owned private caches carry
-separate owner metadata and are cleaned by KernelForge. Build artifacts are
-never deleted.
+separate owner metadata and are cleaned by KernelForge. Serving
+``module_*.so`` files are unlinked when a tuned CSV's kernel names are missing
+from the compiled registry, so the next server start re-JITs from the CSV
+it will actually load.
 """
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -473,16 +477,230 @@ def find_aiter_baton_wait(
     return None
 
 
+COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
+
+# Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
+AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
+        "module_gemm_a8w8_blockscale_bpreshuffle",
+        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+        "module_gemm_a8w8_blockscale_bpreshuffle_asm",
+    ),
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": (
+        "module_gemm_a8w8_blockscale",
+        "module_gemm_a8w8_blockscale_cktile",
+        "module_gemm_a8w8_blockscale_asm",
+    ),
+    "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": (
+        "module_gemm_a8w8_bpreshuffle",
+        "module_gemm_a8w8_bpreshuffle_cktile",
+    ),
+    "AITER_CONFIG_GEMM_A8W8": ("module_gemm_a8w8",),
+    "AITER_CONFIG_GEMM_A4W4": ("module_gemm_a4w4_blockscale",),
+}
+
+
+def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
+    """True when logs show a tuned CSV kernel name missing from the compiled .so."""
+    blob = "\n".join(t for t in texts if t).lower()
+    return COMPILED_REGISTRY_MARKER in blob
+
+
+def csv_kernel_names(csv_path: Path) -> set[str]:
+    """Return non-empty ``kernelName`` values from a tuned GEMM CSV."""
+    names: set[str] = set()
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                name = str(row.get("kernelName") or "").strip()
+                if name:
+                    names.add(name)
+    except OSError:
+        return set()
+    return names
+
+
+def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
+    """True when every CSV kernel name appears in at least one serving .so.
+
+    Missing .so files mean the next start will compile from the current CSV, so
+    that case is treated as covered.
+    """
+    names = csv_kernel_names(csv_path)
+    if not names:
+        return True
+    blobs: list[bytes] = []
+    for module in modules:
+        so_path = jit_dir / f"{module}.so"
+        if so_path.is_file():
+            try:
+                blobs.append(so_path.read_bytes())
+            except OSError:
+                return False
+    if not blobs:
+        return True
+    joined = b"".join(blobs)
+    return all(name.encode("utf-8") in joined for name in names)
+
+
+def _resolve_serving_jit_dir() -> Path | None:
+    """The aiter ``jit/`` directory that holds serving ``module_*.so`` files."""
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(Path(path) for path in _resolve_aiter_jit_dir_dynamic())
+    candidates.extend(Path(path) for path in AITER_JIT_PROBE_PATHS)
+    for path in candidates:
+        if path.is_dir():
+            return path
+    return None
+
+
+def _jit_build_dir(jit_dir: Path) -> Path:
+    return jit_dir if jit_dir.name == "build" else jit_dir / "build"
+
+
+def _unlink_serving_modules(jit_dir: Path, modules: tuple[str, ...]) -> list[str]:
+    removed: list[str] = []
+    for module in modules:
+        so_path = jit_dir / f"{module}.so"
+        if not so_path.is_file():
+            continue
+        try:
+            so_path.unlink()
+            removed.append(str(so_path))
+        except OSError as exc:
+            log.warning("failed to unlink serving so %s: %s", so_path, exc)
+    return removed
+
+
+def _invalidate_jit_build(jit_dir: Path, backup_dir: Path) -> dict[str, Any]:
+    """Move ``jit/build`` aside so the next import re-runs codegen for the new CSV."""
+    try:
+        from hyperloom.agents.kernel.tools.apply_kernel_patch import _invalidate_aiter_jit_build
+    except ImportError:
+        build = _jit_build_dir(jit_dir)
+        if not build.is_dir():
+            return {"status": "clean", "reason": "aiter jit/build/ does not exist"}
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        dest = backup_dir / f"jit_build_{time.time_ns()}"
+        shutil.move(str(build), str(dest))
+        return {"status": "ok", "src": str(build), "backup_path": str(dest)}
+    return _invalidate_aiter_jit_build(
+        target_file=jit_dir / "core.py",
+        backup_dir=backup_dir,
+        jit_build_dir=_jit_build_dir(jit_dir),
+    )
+
+
+def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
+    if not envs:
+        modules: list[str] = []
+        for names in AITER_ENV_TO_SERVING_MODULES.values():
+            modules.extend(names)
+        return tuple(dict.fromkeys(modules))
+    modules: list[str] = []
+    for key in envs:
+        modules.extend(AITER_ENV_TO_SERVING_MODULES.get(str(key), ()))
+    return tuple(dict.fromkeys(modules))
+
+
+def prepare_serving_so_for_csvs(
+    envs: dict[str, str],
+    *,
+    backup_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Skip when serving .so already covers the CSV; otherwise unlink and re-JIT.
+
+    Args:
+        envs: ``AITER_CONFIG_*`` paths about to be used to start the server.
+        backup_dir: Where to move ``jit/build`` if invalidation runs.
+
+    Returns:
+        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
+    """
+    jit_dir = _resolve_serving_jit_dir()
+    if jit_dir is None:
+        return {"action": "noop", "reason": "aiter jit dir not found"}
+    modules_needed: list[str] = []
+    for env_var, csv_path_raw in envs.items():
+        modules = AITER_ENV_TO_SERVING_MODULES.get(str(env_var), ())
+        if not modules:
+            continue
+        csv_path = Path(str(csv_path_raw))
+        if not csv_path.is_file():
+            continue
+        if serving_modules_cover_csv(jit_dir, modules, csv_path):
+            continue
+        modules_needed.extend(modules)
+    modules_needed_t = tuple(dict.fromkeys(modules_needed))
+    if not modules_needed_t:
+        return {"action": "skip", "jit_dir": str(jit_dir)}
+    dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
+    removed = _unlink_serving_modules(jit_dir, modules_needed_t)
+    invalidation = _invalidate_jit_build(jit_dir, dest)
+    log.info(
+        "aiter serving so does not cover tuned CSV; unlinked %d module(s) jit_build=%s",
+        len(removed),
+        invalidation.get("status"),
+    )
+    return {
+        "action": "invalidate",
+        "jit_dir": str(jit_dir),
+        "removed": removed,
+        "jit_build": invalidation,
+    }
+
+
+def drop_serving_so_for_envs(
+    envs: dict[str, str] | None = None,
+    *,
+    backup_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds."""
+    jit_dir = _resolve_serving_jit_dir()
+    if jit_dir is None:
+        return {"action": "noop", "reason": "aiter jit dir not found"}
+    modules = _modules_for_envs(envs)
+    dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
+    removed = _unlink_serving_modules(jit_dir, modules)
+    invalidation = _invalidate_jit_build(jit_dir, dest)
+    return {
+        "action": "invalidate",
+        "jit_dir": str(jit_dir),
+        "removed": removed,
+        "jit_build": invalidation,
+    }
+
+
+def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool:
+    """True when an integrate/baseline result is a compiled-registry miss."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("error_class") or "") == "aiter_jit_registry_mismatch":
+        return True
+    return is_aiter_jit_registry_mismatch(str(result.get("error") or ""))
+
+
 __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
+    "AITER_ENV_TO_SERVING_MODULES",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
+    "COMPILED_REGISTRY_MARKER",
     "clean_stale_aiter_locks",
+    "csv_kernel_names",
+    "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
+    "is_aiter_jit_registry_mismatch",
+    "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "result_is_aiter_jit_registry_mismatch",
+    "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
     "_resolve_aiter_jit_dir_dynamic",

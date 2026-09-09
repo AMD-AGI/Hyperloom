@@ -28,6 +28,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _is_cuda_graph_capture_failure,
     _is_insufficient_gpu_memory,
 )
+from hyperloom.orchestrator.actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
 
 
 # --------------------------------------------------------------------------
@@ -69,6 +70,14 @@ def test_disjoint_from_the_cuda_graph_classifier():
     # The two retry adaptations must not both fire on the same failure.
     assert not _is_cuda_graph_capture_failure(_VLLM_REFUSAL)
     assert not _is_insufficient_gpu_memory("Capture cuda graph failed")
+
+
+def test_compiled_registry_mismatch_is_not_a_cuda_graph_class():
+    blob = (
+        "Exception: Capture cuda graph failed: "
+        "kernel 'k' is not present in the compiled registry."
+    )
+    assert is_aiter_jit_registry_mismatch(blob)
 
 
 # --------------------------------------------------------------------------
