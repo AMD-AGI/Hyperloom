@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pytest
@@ -194,6 +195,56 @@ def test_provider_probe_failure_does_not_retry_another_model() -> None:
         create_registered_backend(runtime, probe_cwd="/tmp")
 
     assert attempted_models == ["future-model"]
+
+
+def test_unavailable_provider_logs_and_does_not_probe(caplog) -> None:
+    """Preflight failure is logged as provider unavailability, not a model probe."""
+    _register_fake("offlinecli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli")
+    with caplog.at_level(logging.WARNING, logger="kernelforge.agent_backends.registry"):
+        with pytest.raises(AgentProviderUnavailableError, match="offlinecli"):
+            create_registered_backend(runtime)
+
+    assert "agent provider unavailable" in caplog.text
+    assert "offlinecli" in caplog.text
+
+
+def test_fallback_provider_failure_raises_combined_error() -> None:
+    """When both the primary and fallback providers fail, both names are reported."""
+    _register_fake("offlinecli", unavailable=True)
+    _register_fake("backupcli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    with pytest.raises(
+        AgentProviderUnavailableError,
+        match="offlinecli unavailable:.*fallback backupcli unavailable",
+    ):
+        create_registered_backend(runtime)
+
+
+def test_broken_entry_point_is_isolated(monkeypatch) -> None:
+    """A plugin that fails to load is recorded and skipped, not raised."""
+
+    class _EntryPoint:
+        name = "brokencli"
+
+        @staticmethod
+        def load():
+            raise RuntimeError("boom")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            if group == registry.PROVIDER_ENTRY_POINT_GROUP:
+                return [_EntryPoint()]
+            return []
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+    assert "brokencli" in registry._plugin_errors
+    with pytest.raises(ValueError, match="plugin error"):
+        get_agent_provider("brokencli")
 
 
 def test_select_prefers_model_owning_provider() -> None:
