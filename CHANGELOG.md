@@ -196,37 +196,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **A run that closes because its budget ran out now exits zero.** The
-  Coordinator stamps `robustness_escalated` whenever the LLM asks to close
-  early, including the ordinary case where nothing is left to try and the clock
-  is nearly up. That reason is not in the CLI's success set, so a run that
-  optimized for its whole budget and closed cleanly returned exit 1. SWEEP
-  already scales a floor to the session length and compares it against the
-  seconds remaining before opening another macro-cycle; the same comparison now
-  runs where the escalation is stamped, and too little left reports
-  `time_exhausted`. `robustness_escalated` keeps its documented meaning — a
-  genuine early abandonment with budget still on the clock — and the transition
-  evidence now carries both budget numbers instead of only naming the LLM.
-
-- **Unsupported server flags are filtered out again before a variant is run.**
-  The per-framework `--help` probe named symbols neither framework exports:
-  `sglang.launch_server.parser` (v0.5.18 builds its parser inside
-  `prepare_server_args`) and `make_arg_parser(None)` (the first statement of
-  that function is `parser.add_argument`). Both exit 1 on every call, and a
-  failed probe disables flag filtering for that framework, so variants carrying
-  flags the deployed build does not accept went to warmup and died there —
-  each one costing a full server boot and its timeout. Both probes now build a
-  parser and hand it to the framework's own registrar, the probe budget covers
-  the framework import, and a failed probe reports its stderr rather than a
-  bare exit code.
-
-- **`KERNEL_OPT_BACKEND_ORDER` written to `.env` survives the setup backend.**
-  `install_baremetal.sh` defaulted the kernel backend from the process
-  environment only and then wrote that default back over `.env`, so a `forge`
-  value the setup skill had just written was replaced by `geak` before the
-  optimizer ever read it. It now resolves process env, then `.env`, then the
-  default — the precedence `USER_DATA_PATH` uses on the line above. This
-  applies to every run mode: `setup.py` routes all of them through this script.
+- **SWEEP is one concurrency sweep, and it produces the chart a submission is
+  read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
+  three axes carried nothing under an agentic replay — request shapes come from
   the trace corpus, so ISL and OSL are inert placeholders — and the concurrency
   axis is what `conc_sweep` already swept. `conc_sweep` is now the only sweep,
   on by default for both workloads, and every rung carries `intvty_p90`,
