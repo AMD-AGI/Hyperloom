@@ -130,16 +130,13 @@ _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os
 
 _n = [0]
-# Distributed observations, collected only when the caller declares a rank
-# count. A single-rank probe leaves torch.distributed untouched and unhooks the
-# import interposer as soon as the graph patch lands, exactly as before.
+# Collected only when the caller declares a rank count. A single-rank probe
+# reports replays alone, exactly as before.
 _expect_ranks = 0
 try:
     _expect_ranks = int(os.environ.get("GRAPH_PROBE_EXPECT_RANKS") or 0)
 except ValueError:
     _expect_ranks = 0
-_reduce_ops = set()
-_gathers = [0]
 
 
 def _ancestor_pids():
@@ -178,68 +175,9 @@ def _install():
     return True
 
 
-def _install_dist():
-    """Record which cross-rank reductions the run actually performs.
-
-    Which op a collective was given is the difference between reporting the
-    slowest rank and reporting an average that hides a laggard, and it cannot
-    be read off the source: the op is a runtime value.
-    """
-    try:
-        import torch.distributed as dist
-    except Exception:
-        return False
-    if not hasattr(dist, "all_reduce"):
-        return False
-
-    def _record_op(*a, **k):
-        """Note which reduction a call asked for, positionally or by keyword."""
-        try:
-            if len(a) > 1:
-                _reduce_ops.add(str(a[1]))
-            elif "op" in k:
-                _reduce_ops.add(str(k["op"]))
-            else:
-                # The signature default is SUM, so an omitted op is a SUM.
-                _reduce_ops.add("ReduceOp.SUM")
-        except Exception:
-            pass
-
-    def _wrap_reduction(fn):
-        def _reduction(*a, **k):
-            _record_op(*a, **k)
-            return fn(*a, **k)
-
-        return _reduction
-
-    # dist.reduce as well as dist.all_reduce: taking the max to rank 0 is a
-    # legitimate way to report the slowest rank, and counting only all_reduce
-    # reported such a driver as never having taken it.
-    for name in ("all_reduce", "reduce"):
-        original = getattr(dist, name, None)
-        if original is not None:
-            setattr(dist, name, _wrap_reduction(original))
-
-    for name in ("all_gather", "all_gather_into_tensor", "gather"):
-        orig_gather = getattr(dist, name, None)
-        if orig_gather is None:
-            continue
-
-        def _wrap(fn):
-            def _gather(*a, **k):
-                _gathers[0] += 1
-                return fn(*a, **k)
-
-            return _gather
-
-        setattr(dist, name, _wrap(orig_gather))
-    return True
-
-
 _graph_ready = _install()
-_dist_ready = _install_dist() if _expect_ranks > 1 else True
 
-if not (_graph_ready and _dist_ready):
+if not _graph_ready:
     # torch is imported by the driver, not by us. Hook the import so the patch
     # lands before any graph is created.
     import builtins
@@ -247,38 +185,35 @@ if not (_graph_ready and _dist_ready):
     _real_import = builtins.__import__
 
     def _hooked(name, *a, **k):
-        global _graph_ready, _dist_ready
+        global _graph_ready
         mod = _real_import(name, *a, **k)
         if name == "torch" or name.startswith("torch."):
-            if not _graph_ready:
-                _graph_ready = _install()
-            if not _dist_ready:
-                _dist_ready = _install_dist()
-            if _graph_ready and _dist_ready:
+            _graph_ready = _install()
+            if _graph_ready:
                 builtins.__import__ = _real_import
         return mod
 
     builtins.__import__ = _hooked
 
 
-def _distributed_state():
-    """Which device this rank bound, and whether it left the group standing."""
-    device = None
-    live = None
-    try:
-        import torch
+def _harness_measured():
+    """Whether this rank measured inside dist_harness rather than on its own.
 
-        if torch.cuda.is_initialized():
-            device = int(torch.cuda.current_device())
-    except Exception:
-        device = None
-    try:
-        import torch.distributed as dist
+    The harness owns every property a multi-rank measurement has to hold -- the
+    launch, the device binding, per-rank seeding, barrier placement, the
+    cross-rank reduction and the teardown -- so this one fact stands in for all
+    of them. A driver that reimplemented the launch is refused for that, rather
+    than for whichever property it happened to get wrong.
+    """
+    import sys as _sys
 
-        live = bool(dist.is_initialized())
+    module = _sys.modules.get("dist_harness")
+    if module is None:
+        return False
+    try:
+        return int(module.MEASURED[0]) > 0
     except Exception:
-        live = None
-    return device, live
+        return False
 
 
 def _dump():
@@ -300,11 +235,7 @@ def _dump():
             ),
         }
         if _expect_ranks > 1:
-            device, live = _distributed_state()
-            payload["device"] = device
-            payload["dist_live"] = live
-            payload["reduce_ops"] = sorted(_reduce_ops)
-            payload["gathers"] = _gathers[0]
+            payload["harness"] = _harness_measured()
         # One file per process: ranks of a torchrun job would otherwise
         # overwrite each other and the count would be one rank's, or zero.
         with open(f"{out}.{os.getpid()}", "w") as fh:
@@ -369,14 +300,13 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
 
     ``expected_world_size`` additionally holds the shards to the distributed
     contract: the declared rank count must be the one that actually launched,
-    each rank must own its own device, and no rank may exit with its process
-    group still standing.
+    and every rank must have measured inside ``dist_harness``.
 
-    It does not require a cross-rank reduction. A run that reduced nothing is
-    left alone deliberately, because an empty op set is as easily a driver that
-    bound its collectives before the probe patched them as one that never
-    reduced -- see ``_distributed_contract_violation``. What is refused is
-    reducing across ranks without ever taking the slowest one.
+    Those are two facts, not a reading of how the run behaved. The harness owns
+    device binding, per-rank seeding, barrier placement, the cross-rank
+    reduction and the teardown, so a rank that ran inside it holds all of them
+    by construction and one that did not is refused for that -- see
+    :func:`_distributed_contract_violation`.
     """
     unranked_replays: list[int] = []
     ranked_processes: dict[
@@ -519,49 +449,22 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
 def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
     """Return why the observed multi-rank run is not a trustworthy measurement.
 
-    Only what the run itself reported is judged here. Properties a probe cannot
-    see -- that the correctness reference is itself distributed, that inputs
-    differ per rank, that no barrier sits inside the timed region -- are stated
-    in the driver contract instead of guessed at from the source.
+    One question is asked, because one answer settles the rest: did the ranks
+    measure inside ``dist_harness``? The harness binds each rank to its own
+    device, seeds them apart, keeps the timed region free of synchronization,
+    reduces with the slowest rank and destroys the process group -- properties
+    that used to be inferred one at a time from what the run happened to do,
+    each inference weaker than the property it stood for. A driver that went its
+    own way is refused for that, not for whichever of them it broke first.
     """
-    devices = {rank: shard.get("device") for rank, shard in worker_payloads.items()}
-    bound = {rank: device for rank, device in devices.items() if isinstance(device, int)}
-    if len(bound) == len(worker_payloads) and len(set(bound.values())) != len(bound):
-        shared = sorted({device for device in bound.values() if list(bound.values()).count(device) > 1})
+    outside = sorted(rank for rank, shard in worker_payloads.items() if shard.get("harness") is not True)
+    if outside:
         return (
-            f"ranks share GPU(s) {shared}: {bound}. Two ranks on one device measure intra-device copies, "
-            "so bind each rank to its own device with torch.cuda.set_device(LOCAL_RANK) and refuse to run "
-            "when fewer devices are visible than the task declares"
-        )
-
-    live = [rank for rank, shard in worker_payloads.items() if shard.get("dist_live") is True]
-    if live:
-        return (
-            f"rank(s) {sorted(live)} exited with the process group still initialized; destroy it before "
-            "exiting or the next stage inherits a wedged communicator"
-        )
-
-    observed_ops: set[str] = set()
-    gathers = 0
-    for shard in worker_payloads.values():
-        raw_ops = shard.get("reduce_ops")
-        if isinstance(raw_ops, list):
-            observed_ops.update(str(op) for op in raw_ops)
-        try:
-            gathers += int(shard.get("gathers") or 0)
-        except (TypeError, ValueError):
-            pass
-    if observed_ops and not any("MAX" in op for op in observed_ops) and not gathers:
-        # Purpose is not observable: the hook sees every reduction the process
-        # made, and a conforming driver's correctness reference is itself a
-        # distributed collective, so its SUM lands here too. What can be said
-        # is that nothing in the run took a maximum or gathered, which no
-        # driver reporting the slowest rank can be true of.
-        return (
-            f"the run reduced across ranks only with {sorted(observed_ops)} and never took a maximum or "
-            "gathered per-rank values, so nothing here reported the slowest rank. A collective is as fast "
-            "as its laggard, so an averaging reduction reports a speedup a slow rank did not earn: reduce "
-            "latency with ReduceOp.MAX, or gather every rank's time and take the max"
+            f"rank(s) {outside} did not measure inside dist_harness. Every guarantee this task's number "
+            "rests on -- one device per rank, inputs that differ per rank, no synchronization in the timed "
+            "region, the slowest rank's time, a process group that is torn down -- belongs to the harness, "
+            "so a driver that launches the ranks itself is not measured. Call dist_harness.run() from the "
+            "driver's __main__ and supply build_inputs / call_candidate / reference"
         )
     return ""
 
@@ -1050,6 +953,20 @@ def _safe_unlink(path: Path) -> None:
             path.unlink()
 
 
+def _dist_harness_text() -> str | None:
+    """Return the shipped distributed harness's own source.
+
+    Read from this package rather than from the reference examples the way
+    ``graph_harness`` is: the examples tree is authoring scaffolding that
+    preparation deletes, while a multi-rank driver imports this module on every
+    later run of the loop, so it has to come from something the wheel carries.
+    """
+    try:
+        return (Path(__file__).parent / "dist_harness.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def _find_reference_harness(ref_dir: Path | None) -> str | None:
     """Return the text of a capture-guarded graph harness from the reference tree."""
     if ref_dir is None or not ref_dir.is_dir():
@@ -1486,72 +1403,62 @@ def _distributed_contract_note(nproc: int) -> str:
     if nproc <= 1:
         return ""
     return f"""
-## This task runs on {nproc} GPUs — the driver must launch them
+## This task runs on {nproc} GPUs — measure it through `dist_harness`
 
 The kernel is a collective: it only computes the right answer when {nproc} ranks
-participate. Your driver owns the launch. One file, two roles:
+participate. You do NOT write the launch, the timing, or the reporting.
+`dist_harness.py` sits beside the driver and owns all of it — the torchrun
+re-exec, one device per rank, the process group, per-rank seeding, warmup, graph
+capture, barrier placement, the cross-rank reduction, rank-0 printing and the
+teardown. Do NOT rewrite it, and do NOT launch ranks yourself.
 
-* No `LOCAL_RANK` in the environment: re-exec this same file under
-  `torch.distributed.run --standalone --nproc-per-node={nproc}` and forward the
-  exit code. Do NOT use `start_new_session`; the caller kills the whole process
-  group on timeout and a detached torchrun would survive holding its GPUs.
-* `LOCAL_RANK` present: bind it with `torch.cuda.set_device`, call
-  `dist.init_process_group`, and run the measurement as a worker.
+Your driver supplies three functions per case and hands them over:
 
-Branch on `LOCAL_RANK`, not on `RANK`. Job launchers routinely preset `RANK=0`
-and `WORLD_SIZE=1` in the environment forge-loop inherits, and a driver that
-reads those as "I am already a worker" never launches the other ranks and then
-measures a one-rank collective. Only torchrun sets `LOCAL_RANK`. Assert that
-`WORLD_SIZE` equals {nproc} once you are a worker, so an inherited value cannot
-pass for the real one.
+```python
+from dist_harness import Case, run
 
-Requirements specific to a collective:
+def build_inputs(ctx):        # ctx.rank, ctx.world_size, ctx.device, ctx.case_id
+    ...                       # return whatever call_candidate/reference take
 
-* Build whatever context the kernel needs before calling it. A compiled
+def call_candidate(ctx, inputs):
+    ...                       # the kernel under optimization
+
+def reference(ctx, inputs):
+    ...                       # the matching torch.distributed collective
+
+if __name__ == "__main__":
+    raise SystemExit(run(
+        [Case("default", build_inputs, call_candidate, reference)],
+        world_size={nproc},
+    ))
+```
+
+The harness calls `build_inputs` under a seed it chooses, once per rank and
+again for the second parity call, so inputs cannot be identical across ranks or
+across the two calls — which is what lets a collective that silently drops a
+rank pass parity. It issues both candidate calls before comparing either, so a
+second call overwriting the first's registered scratch buffer is visible. It
+takes the SLOWEST rank's time and the WORST rank's SNR. None of that is yours to
+remember.
+
+What is still yours:
+
+* Build whatever context the kernel needs inside `build_inputs`. A compiled
   collective usually takes an opaque handle (IPC buffer, registered workspace,
   communicator) that must be created and exchanged across ranks first. Read the
   kernel's own Python binding to see what it expects.
-* Check correctness against the matching `torch.distributed` collective — it is
-  the only reference that is itself distributed.
-* Validate two calls back to back, never one at a time. Build two different
-  inputs, issue both candidate calls, and compare both results only afterwards.
-  A compiled collective usually writes into a registered scratch buffer, so a
-  second call can overwrite the first call's output before anything has read
-  it. Validating each call the moment it is issued cannot see that, because
-  nothing has overwritten anything yet — and removing a synchronisation, which
-  is the change this lane's optimizer is most likely to make, is exactly what
-  opens the race.
-* Reduce every metric across ranks before printing: take the SLOWEST rank's
-  time (a collective is as fast as its laggard) and the WORST rank's SNR (one
-  wrong rank is a wrong collective). Print only from rank 0.
-* Destroy the process group before exiting, or the next stage inherits a wedged
-  communicator.
-* Give each rank its own device via `LOCAL_RANK`, and refuse to run when fewer
-  than {nproc} devices are visible. Two ranks sharing one GPU measure
-  intra-device copies, and that speedup does not exist on the real path.
-* Seed inputs per rank (for example `manual_seed(seed + rank)`). Identical
-  inputs on every rank let a collective that silently drops a rank still pass
-  parity.
-* Keep the timed region free of synchronization. Issue at most one barrier
-  BEFORE `start.record()` and none between it and `end.record()`, and do not
-  re-synchronize between samples. A barrier inside the timed region resets the
-  ranks to a fully synchronised state, which is exactly the condition that
-  makes deleting an internal barrier look free — it turns a slower
-  implementation into an apparent speedup.
+* Make `reference` a real `torch.distributed` collective. This is the one
+  requirement the harness cannot hold for you: a single-GPU reference is still a
+  function returning a tensor, and a candidate that quietly drops a rank's
+  contribution matches it. Getting this wrong costs more than a wasted
+  validation — it lets such a candidate report a real speedup and pass, and the
+  end-to-end gate downstream can adopt on throughput alone without ever scoring
+  accuracy. Nothing after you is guaranteed to catch it.
+* Declare one `Case` per case id the task's invocation specification lists.
 
-The deterministic check observes the run itself and will reject it when the
-declared {nproc} ranks did not launch, when two ranks share a device, when the
-benchmark reduces across ranks without ever taking the slowest one, or when a
-rank exits with its process group still initialized.
-
-Every other requirement above is yours to hold, and they are not all the same
-size. Getting the timed region wrong costs an end-to-end validation that was
-never going to pay out. Getting a correctness one wrong -- identical inputs on
-every rank, a single-GPU reference, or validating one call at a time -- costs
-much more than that: each of them lets a candidate that quietly drops work
-report a real speedup and pass, and the end-to-end gate downstream can adopt on
-throughput alone without ever scoring accuracy. Nothing after you is guaranteed
-to catch it.
+The deterministic check confirms that {nproc} ranks launched and that every one
+of them measured inside the harness. A driver that launches ranks itself is
+rejected for that, whatever else it got right.
 """
 
 
@@ -1748,6 +1655,11 @@ async def prepare_task(
     # where placing it at the root left the agent to find nothing and write its
     # own -- tripping the guard that protects harness files from being rewritten.
     harness_path = driver_access_dir / "graph_harness.py"
+    # Unlike graph_harness, this one is not optional and is not retired when the
+    # driver appears not to use it: a multi-rank driver that does not import it
+    # is rejected by preflight, so its absence could only turn that verdict into
+    # an ImportError.
+    dist_harness_path = driver_access_dir / "dist_harness.py"
 
     def _audit_text(relative: str, text: str) -> None:
         if audit_dir is None:
@@ -1879,6 +1791,9 @@ async def prepare_task(
         *(path.as_posix() for path in protected),
         *(read_only_files or []),
         *([spec_path.as_posix()] if spec_path is not None else []),
+        # Protected rather than merely discouraged: the distributed guarantees
+        # are only guarantees while this file is the one KernelForge shipped.
+        *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
     ]
 
     # (2) Pre-place a correct, capture-guarded graph_harness.py so the agent can import a known-good cuda_graph_bench
@@ -1896,6 +1811,20 @@ async def prepare_task(
             "`dirty`/`verify`). Do NOT rewrite it. Only implement custom timing in the\n"
             "driver if this operator genuinely cannot be captured into a static-input\n"
             "graph.\n\n" + reference_prefix
+        )
+
+    # (3) A multi-rank task measures inside dist_harness or it is not measured,
+    # so the module is placed before the agent is asked for anything.
+    canonical_dist_harness = _dist_harness_text() if nproc_per_node > 1 else None
+    if canonical_dist_harness is not None:
+        dist_harness_path.write_text(canonical_dist_harness, encoding="utf-8")
+    elif nproc_per_node > 1:
+        # Not fatal here so the failure is reported by preflight, against the
+        # driver, in the same shape as every other distributed refusal.
+        log.error(
+            "could not read the packaged dist_harness source; this %d-rank task has no harness to "
+            "measure inside and its driver will be refused",
+            nproc_per_node,
         )
     reference_note = reference_prefix + _reference_note(ref_dir, agent_workspace)
 
@@ -1936,6 +1865,8 @@ async def prepare_task(
             )
         if provided_harness:
             harness_path.write_text(canonical_harness)
+        if canonical_dist_harness is not None:
+            dist_harness_path.write_text(canonical_dist_harness, encoding="utf-8")
         if spec_path is not None and canonical_spec:
             spec_path.parent.mkdir(parents=True, exist_ok=True)
             spec_path.write_text(canonical_spec, encoding="utf-8")

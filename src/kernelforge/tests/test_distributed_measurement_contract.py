@@ -3,19 +3,17 @@
 
 """What the graph probe concludes about a multi-rank measurement.
 
-A collective task is only worth an end-to-end validation if the micro number it
-produced describes the collective it claims to. These checks cover the failure
-modes that still print a plausible speedup: the ranks never launched, two of
-them shared a device, the per-rank times were averaged instead of maxed, or the
-process group was left standing. Each is judged from what the run reported, so
-a driver written in any style passes as long as it actually did the work.
+The probe asks two things of a collective task: that the declared ranks really
+launched, and that every one of them measured inside ``dist_harness``. It does
+not re-derive how the run behaved. The harness owns device binding, per-rank
+seeding, barrier placement, the cross-rank reduction and the teardown, so a rank
+that ran inside it holds those by construction -- and a rank that did not is
+refused for that rather than for whichever of them it broke first.
 """
 
 from __future__ import annotations
 
 import json
-
-import pytest
 
 from kernelforge.loop import task_preparer
 from kernelforge.loop.task_preparer import (
@@ -40,11 +38,7 @@ def _worker(rank: int, **overrides) -> dict:
         "pid": 100 + rank,
         "ppid": 50,
         "ancestors": [50],
-        "device": rank,
-        "dist_live": False,
-        # The spelling torch actually reports for a ReduceOp at runtime.
-        "reduce_ops": ["RedOpType.MAX", "RedOpType.MIN"],
-        "gathers": 0,
+        "harness": True,
     }
     payload.update(overrides)
     return payload
@@ -84,108 +78,48 @@ def test_a_rank_count_that_disagrees_with_the_task_is_refused(tmp_path):
     assert "launched 2 ranks" in reason
 
 
-def test_two_ranks_sharing_one_device_are_refused(tmp_path):
-    """Intra-device copies are not the multi-GPU path the speedup claims."""
+def test_a_driver_that_launched_its_own_ranks_is_refused(tmp_path):
+    """Reaching the right rank count by hand forfeits every other guarantee.
+
+    Nothing else about such a run is worth reading: the properties the number
+    rests on are the harness's, so their absence is the finding, not whichever
+    of them the driver happened to break.
+    """
     for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, device=0 if rank < 2 else rank))
+        _shard(tmp_path, str(rank), _worker(rank, harness=False))
 
     replays, reason = _read(tmp_path)
 
     assert replays == PROBE_DISTRIBUTED_VIOLATION
-    assert "share GPU" in reason
+    assert "did not measure inside dist_harness" in reason
+    assert "dist_harness.run()" in reason
 
 
-@pytest.mark.parametrize("sum_op", ["RedOpType.SUM", "ReduceOp.SUM"])
-def test_an_averaging_reduction_is_refused(tmp_path, sum_op):
-    """A mean over ranks hides the laggard that bounds the collective.
-
-    Both spellings are accepted as input because the probe records whatever
-    ``str()`` gives it, and that has differed across torch versions.
-    """
+def test_one_rank_outside_the_harness_refuses_the_whole_run(tmp_path):
+    """A collective is one measurement; a rank measured elsewhere is not part of it."""
     for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=[sum_op]))
+        _shard(tmp_path, str(rank), _worker(rank, harness=rank != 2))
 
     replays, reason = _read(tmp_path)
 
     assert replays == PROBE_DISTRIBUTED_VIOLATION
-    assert "slowest" in reason
+    assert "[2]" in reason
 
 
-def test_gathering_every_rank_time_is_accepted_instead_of_max(tmp_path):
-    """Taking the max in Python off a gather is the same guarantee."""
-    for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=["RedOpType.SUM"], gathers=5))
+def test_a_shard_that_never_reported_the_harness_is_refused(tmp_path):
+    """Absent is not the same as true, and must not be read as it.
 
-    replays, reason = _read(tmp_path)
-
-    assert (replays, reason) == (30, "")
-
-
-def test_taking_the_maximum_to_rank_zero_is_accepted(tmp_path):
-    """``dist.reduce(op=MAX, dst=0)`` reports the slowest rank just as well.
-
-    Only rank 0 prints, so reducing to it is the natural way to write this.
-    Watching ``all_reduce`` alone reported such a driver as never having taken
-    the slowest rank -- a refusal earned by which collective it chose, not by
-    what it measured.
+    A shard predating the harness, or written by a process that died before the
+    field was set, says nothing about where the measurement happened.
     """
     for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=["RedOpType.SUM", "RedOpType.MAX"]))
+        shard = _worker(rank)
+        del shard["harness"]
+        _shard(tmp_path, str(rank), shard)
 
-    replays, reason = _read(tmp_path)
-
-    assert (replays, reason) == (30, "")
-
-
-def test_the_refusal_does_not_claim_to_know_why_a_reduction_happened(tmp_path):
-    """The hook sees every reduction, including the correctness reference's.
-
-    A conforming driver checks against a distributed collective, whose SUM
-    lands in the same op set, so the message cannot say the benchmark reduced
-    with SUM. What it can say is that nothing took a maximum or gathered.
-    """
-    for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=["RedOpType.SUM"]))
-
-    _replays, reason = _read(tmp_path)
-
-    assert "never took a maximum or gathered" in reason
-    assert "the benchmark reduced" not in reason
-
-
-def test_a_run_that_reduced_nothing_is_not_second_guessed(tmp_path):
-    """No observed reduction is no evidence, and must not become a rejection.
-
-    Code that bound ``all_reduce`` before the probe patched it reports an empty
-    op set; rejecting on that would fail drivers for how they imported, not for
-    what they measured.
-    """
-    for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, reduce_ops=[]))
-
-    replays, reason = _read(tmp_path)
-
-    assert (replays, reason) == (30, "")
-
-
-def test_a_rank_that_leaves_its_process_group_standing_is_refused(tmp_path):
-    for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, dist_live=rank == 2))
-
-    replays, reason = _read(tmp_path)
+    replays, _reason = _read(tmp_path)
 
     assert replays == PROBE_DISTRIBUTED_VIOLATION
-    assert "still initialized" in reason
-
-
-def test_unreported_devices_do_not_fail_a_run_that_is_otherwise_sound(tmp_path):
-    """An unobservable property must not become a rejection."""
-    for rank in range(4):
-        _shard(tmp_path, str(rank), _worker(rank, device=None))
-
-    replays, reason = _read(tmp_path)
-
-    assert (replays, reason) == (30, "")
 
 
 def test_a_single_rank_task_is_not_held_to_the_distributed_contract(tmp_path):
@@ -205,8 +139,7 @@ def test_a_malformed_shard_is_a_probe_failure_not_a_driver_verdict(tmp_path):
     assert "invalid graph probe shard" in reason
 
 
-@pytest.mark.parametrize("declared", [2, 4, 8])
-def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch, declared):
+def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch):
     """One declared number reaches both the launcher and the observer."""
     captured: dict = {}
 
@@ -216,16 +149,14 @@ def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch, 
 
     monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _fake_create)
 
-    task_preparer.asyncio.run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5, require_ranks=declared)
-    )
+    task_preparer.asyncio.run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5, require_ranks=4))
 
-    assert captured["FORGE_NPROC_PER_NODE"] == str(declared)
-    assert captured["GRAPH_PROBE_EXPECT_RANKS"] == str(declared)
+    assert captured["FORGE_NPROC_PER_NODE"] == "4"
+    assert captured["GRAPH_PROBE_EXPECT_RANKS"] == "4"
 
 
-def test_a_single_rank_probe_leaves_torch_distributed_alone(monkeypatch):
-    """The added observation is opt-in, so the single-GPU path is unchanged.
+def test_a_single_rank_probe_declares_no_rank_count(monkeypatch):
+    """The distributed observation is opt-in, so the single-GPU path is unchanged.
 
     Both names are cleared first: the probe inherits the caller's environment,
     and a rank count left over from whatever ran before would otherwise decide
@@ -245,3 +176,24 @@ def test_a_single_rank_probe_leaves_torch_distributed_alone(monkeypatch):
 
     assert "GRAPH_PROBE_EXPECT_RANKS" not in captured
     assert "FORGE_NPROC_PER_NODE" not in captured
+
+
+def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch):
+    """The shard's ``harness`` field is what the module under test actually writes.
+
+    Asserting the field by hand everywhere else would let the probe and the
+    reader drift apart silently, so the recorded source is executed once.
+    """
+    namespace: dict = {}
+    monkeypatch.setenv("GRAPH_PROBE_EXPECT_RANKS", "4")
+    monkeypatch.setenv("GRAPH_PROBE_OUT", str(tmp_path / "probe"))
+    exec(compile(task_preparer._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
+
+    assert namespace["_harness_measured"]() is False
+
+    class _Harness:
+        MEASURED = [1]
+
+    monkeypatch.setitem(__import__("sys").modules, "dist_harness", _Harness)
+
+    assert namespace["_harness_measured"]() is True

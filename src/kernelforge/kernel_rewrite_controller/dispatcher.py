@@ -105,10 +105,13 @@ def _insufficient_gpus(task: KernelRewriteTask) -> str:
     Silence when the count cannot be established: refusing on an answer nobody
     gave would ground every task on a host this cannot read.
 
-    Worth its own check rather than leaving it to the run: two ranks sharing one
-    device do not fail, they deadlock inside the collective and take the whole
-    budget with them, and the per-rank device check cannot report what a hung
-    process never got to write.
+    ``dist_harness`` refuses the same shortage at launch, and this check is kept
+    anyway because the two say different things. A task whose ranks exceed the
+    machine is sound; the machine is wrong. Asked here, before a campaign opens,
+    the answer is a skip that leaves the task for a host that can run it. Left to
+    the harness, it is a driver that exits non-zero, which is a failed campaign
+    against a task that deserved none -- after preparation has already spent
+    most of its budget.
     """
     if task.world_size <= 1:
         return ""
