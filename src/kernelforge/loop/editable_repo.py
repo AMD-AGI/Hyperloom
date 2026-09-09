@@ -68,48 +68,50 @@ def editable_roots() -> list[str]:
             cand = os.path.join(prefix, sub)
             if os.path.isdir(cand):
                 scan_dirs.append(cand)
-    for d in scan_dirs:
-        if not d or d in seen_dirs or not os.path.isdir(d):
+    for scan_dir in scan_dirs:
+        if not scan_dir or scan_dir in seen_dirs or not os.path.isdir(scan_dir):
             continue
-        seen_dirs.add(d)
+        seen_dirs.add(scan_dir)
         try:
-            names = os.listdir(d)
+            entries = os.listdir(scan_dir)
         except OSError:
             continue
-        for n in names:
-            if not n.startswith("__editable__"):
+        for entry in entries:
+            if not entry.startswith("__editable__"):
                 continue
-            if not (n.endswith(".pth") or n.endswith("_finder.py")):
+            if not (entry.endswith(".pth") or entry.endswith("_finder.py")):
                 continue
-            fpath = os.path.join(d, n)
             try:
-                with open(fpath, errors="replace") as _fh:
-                    txt = _fh.read()
+                with open(os.path.join(scan_dir, entry), errors="replace") as handle:
+                    text = handle.read()
             except OSError:
+                # This one file, not the scan: a root named by a later finder is
+                # still a root, and a swallowed scan would hand a campaign a
+                # private checkout of a repository that must be edited in place.
                 continue
             # Layout 0: bare absolute path on a line (no quotes, no import).
-            for line in txt.splitlines():
+            for line in text.splitlines():
                 line = line.strip()
                 if line.startswith("/") and not line.startswith("#") and "import" not in line and os.path.isdir(line):
                     roots.add(os.path.realpath(line))
             # Layout 1: quoted absolute paths directly in the file.
-            for m in re.findall(r"['\"](/[^'\"]+)['\"]", txt):
-                if os.path.isdir(m):
-                    roots.add(os.path.realpath(m))
+            for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", text):
+                if os.path.isdir(quoted):
+                    roots.add(os.path.realpath(quoted))
             # Layout 2: .pth imports a _finder.py; read its MAPPING dict for
             # paths. The finder file lives next to the .pth in site-packages.
-            if n.endswith(".pth"):
-                fm = re.search(r"import\s+(__editable___\w+_finder)", txt)
-                if fm:
-                    finder_file = os.path.join(d, fm.group(1) + ".py")
+            if entry.endswith(".pth"):
+                imported = re.search(r"import\s+(__editable___\w+_finder)", text)
+                if imported:
+                    finder_file = os.path.join(scan_dir, imported.group(1) + ".py")
                     try:
-                        with open(finder_file, errors="replace") as _fh2:
-                            ftxt = _fh2.read()
+                        with open(finder_file, errors="replace") as finder_handle:
+                            finder_text = finder_handle.read()
                     except OSError:
                         continue
-                    for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
-                        if os.path.isdir(m):
-                            roots.add(os.path.realpath(m))
+                    for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", finder_text):
+                        if os.path.isdir(quoted):
+                            roots.add(os.path.realpath(quoted))
     return sorted(roots)
 
 
@@ -130,8 +132,10 @@ def needs_inplace(kernel_repo: str) -> bool:
     if not kernel_repo:
         return False
     repo = os.path.realpath(kernel_repo)
-    for r in editable_roots():
-        if r == repo or r.startswith(repo + os.sep) or repo.startswith(r + os.sep):
+    for root in editable_roots():
+        # The separators matter: without them /a/repo-2 would match /a/repo and
+        # a sibling checkout would be borrowed and force-checked-out.
+        if root == repo or root.startswith(repo + os.sep) or repo.startswith(root + os.sep):
             return True
     return False
 
