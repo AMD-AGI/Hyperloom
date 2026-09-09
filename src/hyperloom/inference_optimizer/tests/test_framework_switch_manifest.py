@@ -610,9 +610,9 @@ _DEFAULT_MANIFEST: list[dict[str, Any]] = [
 @pytest.fixture(autouse=True)
 def _allowlist_tmp_framework_roots(monkeypatch, tmp_path):
     """Let integrate_patch treat the test's temp checkout as framework source."""
-    from .conftest import patch_integrate_patch_allowlist
+    from .conftest import patch_integrate_patch_roots
 
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
 async def _run_rewrite_integrate(

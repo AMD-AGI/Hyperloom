@@ -197,3 +197,59 @@ def _isolated_state_root(request, _state_root_base, monkeypatch):
         return
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)[-120:]
     monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(_state_root_base / slug))
+
+
+def kb_store_run_config(tmp_path: Path, token: str) -> "object":
+    """A KB Store run configuration whose credential is a recognizable string.
+
+    Three modules build the same remote-knowledge ``Config`` to assert that the
+    token never reaches a persisted error, a log line, or an agent prompt. The
+    assertions only mean something while all three agree on the shape, so the
+    builder lives here rather than as three copies that can drift apart. The
+    imports are deferred: conftest is imported during collection, before the
+    guardrails above are installed.
+    """
+    from kernelforge.config import Config
+    from kernelforge.knowledge.experience_store import (
+        REMOTE_BACKEND_KB_STORE,
+        KnowledgeConfig,
+    )
+
+    knowledge = KnowledgeConfig.from_env(
+        {},
+        mode="remote",
+        local_root=tmp_path / "remote-knowledge",
+        kb_store_url="http://in-memory",
+        kb_store_token=token,
+        remote_backend=REMOTE_BACKEND_KB_STORE,
+    )
+    return Config.from_env(
+        workspace=str(tmp_path),
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
+    )
+
+
+@pytest.fixture
+def isolated_provider_registry(monkeypatch):
+    """Give the requesting test its own copy of the agent-provider registry.
+
+    ``register_agent_provider`` writes into module-level state that outlives the
+    test that called it, and the registry offers no way to unregister, so a fake
+    registered by one test stays visible to every later test in the same worker
+    process -- which is how these tests came to depend on the order xdist
+    happened to shard them in. Discovery runs first so the snapshot already
+    holds the built-ins and any installed plugin; the module globals are then
+    rebound to copies that monkeypatch drops during teardown.
+
+    Opt in per module with an autouse wrapper rather than making this autouse
+    here: discovery is wasted work for the thousands of tests that never touch
+    the registry.
+    """
+    from kernelforge.agent_backends import registry
+
+    registry.discover_agent_providers()
+    monkeypatch.setattr(registry, "_providers", dict(registry._providers))
+    monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))

@@ -39,11 +39,6 @@ from kernelforge.orchestrator.contracts import PlanCriticOutcome
 from kernelforge.tracker import ExperimentTracker
 
 
-class _NoopEvolver:
-    def on_experiment_complete(self, experiment):
-        return {}
-
-
 def _loop(tmp_path, monkeypatch):
     """A loop with a committed workspace and a durable event log."""
     workspace = tmp_path / "workspace"
@@ -89,7 +84,6 @@ def _open_loop(workspace, experiments_root, monkeypatch):
         ),
         ExperimentTracker(experiments_root / "experiments"),
         config=object(),
-        evolver=_NoopEvolver(),
     )
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()

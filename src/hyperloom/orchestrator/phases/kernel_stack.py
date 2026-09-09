@@ -435,7 +435,6 @@ class KernelStackPhase(PhaseHandler):
                     "kernel_id": entry.get("kernel_id"),
                     "patch_path": entry.get("patch_path"),
                     "target_file": entry.get("target_file"),
-                    "allow_unknown_target": True,
                 }
                 applied = _maybe_apply_kernel_patch(
                     payload,

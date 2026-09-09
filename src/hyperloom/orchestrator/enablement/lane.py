@@ -390,9 +390,7 @@ class EnablementLane(CoordinatorCollaborator):
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
         # Set on every round so neither outlives the round it describes.
-        state.enablement.last_grounding_drop_reason = [
-            str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
-        ]
+        state.enablement.last_grounding_drop_reason = [str(d) for d in (res.get("patches_ungrounded") or [])[:8]]
         state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()

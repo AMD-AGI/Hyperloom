@@ -216,6 +216,27 @@ class ExperimentTracker:
                 parent_experiment_id=parent_experiment_id,
             )
 
+    def list_experiments(self) -> list[Experiment]:
+        """List all experiments, newest first."""
+        experiments = []
+        for path in sorted(self.dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                with open(path) as f:
+                    payload = json.load(f)
+                if not isinstance(payload, dict) or not payload.get("experiment_id") or not payload.get("created_at"):
+                    continue
+                experiments.append(Experiment.from_dict(payload))
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OSError,
+                UnicodeDecodeError,
+            ):
+                continue
+        return experiments
+
     def get(self, experiment_id: str) -> Experiment:
         """Load an experiment by ID."""
         return self._load(experiment_id)
@@ -270,32 +291,3 @@ class ExperimentTracker:
             if exp.baseline_wall_ms is None:
                 exp.baseline_wall_ms = baseline_wall_ms
                 self._save(exp)
-
-    def list_experiments(self) -> list[Experiment]:
-        """List all experiments, newest first."""
-        experiments = []
-        for path in sorted(self.dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                with open(path) as f:
-                    payload = json.load(f)
-                if not isinstance(payload, dict) or not payload.get("experiment_id") or not payload.get("created_at"):
-                    continue
-                experiments.append(Experiment.from_dict(payload))
-            except (
-                json.JSONDecodeError,
-                KeyError,
-                TypeError,
-                ValueError,
-                OSError,
-                UnicodeDecodeError,
-            ):
-                continue
-        return experiments
-
-    def get_best(self, experiment_id: str) -> Iteration | None:
-        """Get the best-performing iteration from an experiment."""
-        return self._load(experiment_id).best_iteration()
-
-    def summary(self, experiment_id: str) -> str:
-        """Get a formatted summary table for an experiment."""
-        return self._load(experiment_id).summary_table()

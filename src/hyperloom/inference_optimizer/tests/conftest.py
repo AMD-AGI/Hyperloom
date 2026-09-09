@@ -263,26 +263,28 @@ def build_lifecycle(build_coord):
     return BuildLifecycleCollaborator(build_coord)
 
 
-def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:
-    """Register common tmp_path framework repos for integrate_patch allowlist tests."""
+def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
+    """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.framework import paths as fp
 
-    real = fp.resolve_source_file_allowlist
+    real = fp.resolve_kernel_search_roots
 
     def _merged() -> tuple[str, ...]:
-        extras: list[str] = []
+        # The tmp repos lead: a relative artifact target must land in the tree
+        # the test built, not in whatever framework happens to be installed on
+        # the host running the suite.
+        merged: list[str] = []
         for name in ("fw", "repo", "framework"):
             cand = tmp_path / name
             if cand.is_dir():
-                extras.append(str(cand.resolve()))
-        merged = list(real())
-        for extra in extras:
-            if extra not in merged:
-                merged.append(extra)
+                merged.append(str(cand.resolve()))
+        for root in real():
+            if root not in merged:
+                merged.append(root)
         return tuple(merged)
 
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", _merged)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
 
 
 # ---------------------------------------------------------------------------

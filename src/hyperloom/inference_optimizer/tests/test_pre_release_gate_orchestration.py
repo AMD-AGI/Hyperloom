@@ -24,6 +24,7 @@ tests pin the invariants it depends on.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -31,6 +32,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+from hyperloom.common.env_safety import DOTENV_EXACT_ALLOWLIST
+from hyperloom.inference_optimizer.cli import _SUCCESS_STOP_REASONS
 
 _SELF_HOSTED_LABEL = "hyperloom-pre-e2e-baremetal"
 
@@ -145,6 +149,140 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     assert "leave_running" in body
 
 
+def test_every_copy_of_the_clean_terminal_vocabulary_agrees(poll_script: str, bootstrap_script: str) -> None:
+    """Three copies of this list decide the same thing and must not drift apart.
+
+    bootstrap ends the pod, poll writes the gate verdict and the CLI sets the
+    exit code. A value present in one and missing from another means the same
+    leg is judged both ways: the pod exits failed while the gate reports a pass.
+    """
+
+    def _case_arm(script: str) -> set[str]:
+        m = re.search(r"is_clean_stop_reason\(\) \{\n\s*case \"\$1\" in\n\s*([^)]+)\)", script)
+        assert m, "could not read the clean-terminal case arm"
+        return set(m.group(1).split("|"))
+
+    assert _case_arm(bootstrap_script) == _case_arm(poll_script) == set(_SUCCESS_STOP_REASONS)
+
+
+def test_an_llm_closeout_is_a_clean_terminal(poll_script: str) -> None:
+    """robustness_escalated is written for one thing only: the model closing early.
+
+    Nothing in the run is broken when it appears. A run whose infrastructure
+    really failed carries baseline_failed, crash_threshold_exceeded, policy_loop
+    or signal, so failing the gate on this value rejects runs that optimized and
+    closed normally.
+    """
+    clean = re.search(r"is_clean_stop_reason\(\) \{\n\s*case \"\$1\" in\n\s*([^)]+)\)", poll_script)
+    assert clean, "could not read the clean-terminal case arm"
+    assert "robustness_escalated" in clean.group(1).split("|")
+
+
+def test_the_eval_dataset_is_read_from_the_shared_cache_offline(dispatch_script: str, bootstrap_script: str) -> None:
+    """The eval must not depend on the hub being reachable or generous.
+
+    lm_eval resolves its dataset through the hub API, every leg leaves through
+    one egress IP, and anonymous access is rate limited per IP: the legs that
+    reach eval last are refused and lose a benchmark that already succeeded.
+    A warm shared cache plus offline mode removes the dependency instead of
+    raising the ceiling on it.
+    """
+    assert dispatch_script.count("HF_HOME:$hfhome") == 2, (
+        "both the per-leg env and the docker host env must point at the shared cache"
+    )
+    assert "${NFS_ROOT%/}/hf-cache" in dispatch_script, "the cache lives beside the run tree on NFS"
+    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE"):
+        assert f'echo "{key}=' in bootstrap_script, f"{key} must reach the leg .env"
+        # A key outside the allowlist is dropped with a warning, so writing it is not enough.
+        assert key in DOTENV_EXACT_ALLOWLIST, f"{key} would be ignored when read back from .env"
+
+
+def test_nested_container_memory_fits_the_host_pod(dispatch_script: str, bootstrap_script: str) -> None:
+    """Docker legs share one pod, so their limits must sum under its memory request.
+
+    Docker enforces --memory per container while Kubernetes enforces the pod
+    total, so oversubscribing is invisible until several legs peak together and
+    the pod is OOM-killed. Both writers of the limit are checked: bootstrap's
+    fallback applies whenever dispatch does not pass the value through.
+    """
+
+    def _default(name: str) -> str:
+        m = re.search(rf'{name}="\$\{{{name}:-([^}}]+)\}}"', dispatch_script)
+        assert m, f"could not find default for {name}"
+        return m.group(1)
+
+    def _fallback(name: str) -> str:
+        m = re.search(rf'leg_mem="\$\{{{name}:-([^}}]+)\}}"', bootstrap_script)
+        assert m, f"could not find bootstrap fallback for {name}"
+        return m.group(1)
+
+    def _gib(text: str) -> float:
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(Gi|g|G)", text.strip())
+        assert m, f"unrecognised memory literal {text!r}"
+        return float(m.group(1))
+
+    for name in ("DOCKER_LEG_MEM_3H", "DOCKER_LEG_MEM_12H"):
+        assert _default(name) == _fallback(name), (
+            f"{name} defaults to {_default(name)} in dispatch but {_fallback(name)} in bootstrap; "
+            "a leg started without the variable would size itself off the stale value"
+        )
+
+    legs = re.search(r'ALL_LEGS="(.*?)"', dispatch_script, re.S).group(1).split()
+    docker_legs = [leg for leg in legs if leg.startswith("docker-")]
+    per_leg = {"-3h": _gib(_fallback("DOCKER_LEG_MEM_3H")), "-12h": _gib(_fallback("DOCKER_LEG_MEM_12H"))}
+    requested = sum(per_leg["-3h"] if leg.endswith("-3h") else per_leg["-12h"] for leg in docker_legs)
+    host = _gib(_default("HOST_MEM"))
+    assert requested <= host, (
+        f"{len(docker_legs)} docker legs request {requested:.0f}Gi of nested container "
+        f"memory but the host pod only has {host:.0f}Gi"
+    )
+
+
+def test_every_leg_name_resolves_through_the_glob_helpers(dispatch_script: str, tmp_path: Path) -> None:
+    """The leg helpers parse by suffix glob, so a new name can silently resolve to nothing.
+
+    Runs the real helpers over the real leg list: a name whose duration suffix is
+    not last, or whose backend token is missing, yields an empty field and the
+    workload is dispatched with no model, no budget or no framework.
+    """
+    lines = dispatch_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("ALL_LEGS="))
+    end = next(i for i in range(start, len(lines)) if lines[i].rstrip().endswith('"') and i > start)
+    harness = "\n".join(
+        [
+            "set -eu",
+            "MODEL_3H=/m3",
+            "MODEL_12H=/m12",
+            *lines[start : end + 1],
+            *[line for line in lines if line.startswith(("leg_model_path()", "leg_hours()", "leg_backend()"))],
+            'for leg in $ALL_LEGS; do echo "$leg|$(leg_model_path "$leg")|$(leg_hours "$leg")|$(leg_backend "$leg")"; done',
+        ]
+    )
+    script = tmp_path / "legs.sh"
+    script.write_text(harness, encoding="utf-8")
+    out = subprocess.run(["bash", str(script)], text=True, capture_output=True, check=True).stdout
+    unresolved = [line for line in out.splitlines() if "||" in line or line.endswith("|")]
+    assert unresolved == []
+    assert "docker-vllm-forge-12h|/m12|12|vllm" in out.splitlines()
+
+
+def test_dispatch_does_not_reap_before_it_needs_the_capacity(dispatch_script: str) -> None:
+    """A push must not stop legs that are still running when the cluster has room.
+
+    The predecessor's poll leaves its workloads alive on purpose, so reclaiming
+    them up front throws away a run that could have finished. Let SaFE's
+    admission decide: dispatch first, reclaim only once a create is refused.
+    """
+    top_level_calls = [line for line in dispatch_script.splitlines() if line == "reap_stale_workloads"]
+    assert top_level_calls == []
+    assert "reap_stale_workloads_once" in dispatch_script
+
+
+def test_dispatch_retries_a_refused_create_after_reclaiming(dispatch_script: str) -> None:
+    """The reclaim is only useful if the create that triggered it is retried."""
+    assert "_reaped_for_capacity" in dispatch_script
+
+
 def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
     """Reap must distinguish repeated pushes that reuse the same CI_VERSION wheel."""
     assert (
@@ -155,7 +293,7 @@ def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
 
 def test_docker_host_is_dispatched_before_baremetal(dispatch_script: str) -> None:
     """The 8-GPU docker host schedules slowly; queue it before the 1-GPU baremetal pods."""
-    docker_pos = dispatch_script.index("queue it before the four 1-GPU baremetal pods")
+    docker_pos = dispatch_script.index("# ---- docker legs: one privileged 8-GPU host")
     bare_pos = dispatch_script.index("# ---- baremetal legs: one non-privileged 1-GPU workload each")
     assert docker_pos < bare_pos
 
@@ -168,6 +306,28 @@ def test_poll_exits_when_a_newer_run_is_queued(poll_script: str, workflow: dict)
     assert "dispatch reap will stop" in poll_script
     run_env = yaml.safe_dump(workflow["jobs"]["run"].get("env", {}))
     assert "HEAD_REF:" in run_env
+
+
+def test_a_clean_stop_reason_alone_never_means_the_run_finished() -> None:
+    """stop_reason is stamped entering CLOSE; only close_sequence_done proves it finished.
+
+    Any script that judges completion from the clean-terminal vocabulary must
+    consult the completion flag too, or it will treat the transition as the end
+    and tear the pod down mid-closeout.
+    """
+    assert _GITHUB is not None
+    offenders = [
+        path.relative_to(_GITHUB).as_posix()
+        for path in sorted(_GITHUB.rglob("*.sh"))
+        if "sweep_done" in (text := path.read_text(encoding="utf-8")) and "close_sequence_done" not in text
+    ]
+    assert offenders == []
+
+
+def test_bootstrap_does_not_exit_on_final_json_alone(bootstrap_script: str) -> None:
+    """final.json is written by the first CLOSE step, long before the sequence ends."""
+    assert 'if [ -f "$final_json" ]; then' not in bootstrap_script
+    assert 'if [ -f "$final_json" ] && [ "$close_done" = "true" ]; then' in bootstrap_script
 
 
 def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) -> None:
@@ -462,6 +622,108 @@ def test_a_stale_session_pin_cannot_pass_the_gate(poll_script: str, tmp_path: Pa
 
     pin.write_text(f"{finished}\nthis-run\n", encoding="utf-8")
     assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == str(finished)
+
+
+def _mtu_block(bootstrap_script: str) -> str:
+    """The real DOCKER_MTU derivation, lifted out of the bootstrap."""
+    lines = bootstrap_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("# Every probe here is"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == 'DOCKER_MTU="${DOCKER_MTU:-1450}"')
+    return "\n".join(lines[start : end + 1])
+
+
+def test_nested_dockerd_matches_the_pod_uplink_mtu(bootstrap_script: str) -> None:
+    """docker0 defaults to 1500 while the pod overlay is 1450; the gap blackholes bulk TLS."""
+    assert "--mtu='$DOCKER_MTU'" in bootstrap_script
+
+
+@pytest.mark.parametrize(
+    ("prelude", "expected"),
+    [
+        ("", None),  # derived from this host's uplink; any value, just not a crash
+        ("PATH=/nonexistent", "1450"),  # no `ip` at all -> documented fallback
+        ("PATH=/nonexistent; DOCKER_MTU=9000", "9000"),  # operator override wins
+    ],
+)
+def test_the_mtu_probe_cannot_abort_the_bootstrap(bootstrap_script: str, prelude: str, expected: str | None) -> None:
+    """The probe runs at module scope under `set -euo pipefail`.
+
+    An `ip` that is missing, or a probe address with no route, must not take the
+    whole bootstrap down before a single leg starts.
+    """
+    script = f'set -euo pipefail\n{prelude}\n{_mtu_block(bootstrap_script)}\nprintf "%s" "$DOCKER_MTU"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, f"MTU probe aborted the shell: {proc.stderr[-300:]}"
+    assert proc.stdout.strip(), "DOCKER_MTU resolved empty; dockerd would get --mtu=''"
+    if expected is not None:
+        assert proc.stdout.strip() == expected
+
+
+def _judge_leg(poll_script: str, runs_dir: Path, leg: str, run_tag: str, wphase: str = "Running") -> str:
+    """Run the real judge_leg() out of the poll script."""
+    lines = poll_script.splitlines()
+    fns = []
+    for name in ("leg_session_dir() {", "state_json_query() {", "is_clean_stop_reason() {", "judge_leg() {"):
+        start = next(i for i, line in enumerate(lines) if line.startswith(name))
+        end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+        fns.append("\n".join(lines[start : end + 1]))
+    body = "\n".join(fns)
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'runs_dir="$1"; RUN_TAG="$2"; MAX_CRASHES=0\n{body}\njudge_leg "$3" "$4"',
+            "_",
+            str(runs_dir),
+            run_tag,
+            leg,
+            wphase,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _stage_leg(runs_dir: Path, leg: str, run_tag: str, state: dict) -> None:
+    """Write a leg's session pin + state.json the way a pod would."""
+    session = runs_dir / leg / "session"
+    sdir = session / "Qwen3-8B" / "20260907T000000Z-abcdef01"
+    sdir.mkdir(parents=True)
+    (session / ".session_dir").write_text(f"{sdir}\n{run_tag}\n", encoding="utf-8")
+    (sdir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_a_leg_that_stalled_mid_close_does_not_pass(poll_script: str, tmp_path: Path) -> None:
+    """stop_reason is stamped entering CLOSE, so it alone cannot prove the run finished."""
+    tag = "this-run"
+    _stage_leg(
+        tmp_path,
+        "baremetal-vllm-3h",
+        tag,
+        {"stop_reason": "time_exhausted", "crash_count": 0, "close_sequence_done": False},
+    )
+    verdict = _judge_leg(poll_script, tmp_path, "baremetal-vllm-3h", tag)
+    assert verdict == ("PENDING|stop=time_exhausted but close_sequence_done=false (CLOSE still running or stalled)")
+
+
+def test_a_leg_that_finished_closing_passes(poll_script: str, tmp_path: Path) -> None:
+    """A clean stop_reason with the close sequence recorded done is the PASS case."""
+    tag = "this-run"
+    _stage_leg(
+        tmp_path,
+        "docker-sglang-3h",
+        tag,
+        {
+            "stop_reason": "sweep_done",
+            "crash_count": 0,
+            "close_sequence_done": True,
+            "cumulative_gain_validated": 1.83,
+        },
+    )
+    verdict = _judge_leg(poll_script, tmp_path, "docker-sglang-3h", tag)
+    assert verdict == "PASS|stop=sweep_done gain=1.83%"
 
 
 def test_the_run_tag_reaches_the_pod_and_the_poll(dispatch_script: str, bootstrap_script: str) -> None:

@@ -2443,6 +2443,18 @@ class WritebackCollaborator:
             source=source,
             run_error=run_error,
         )
+        # Specialist notes reach the prompt only through this task's one inbox
+        # line; ``last_action_failures`` is rendered every SEED turn.
+        ungrounded = done_payload.get("patches_ungrounded")
+        if isinstance(ungrounded, list) and ungrounded:
+            self.shared_state.record_action_failure(
+                action="specialist",
+                task_id=task.task_id,
+                result={
+                    "error_class": "patch_targets_ungrounded",
+                    "error": "; ".join(str(d) for d in ungrounded[:4]),
+                },
+            )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
@@ -3085,6 +3097,15 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
+        # ``integrate_patch`` settles "apply_failed" / "reverted", which promote,
+        # so a promoted result is still the only record of why a patch failed.
+        error_class = str(result.get("error_class") or "").strip()
+        if error_class and task is not None:
+            self.shared_state.record_action_failure(
+                action=task_kind,
+                task_id=task.task_id,
+                result=result,
+            )
         # ``replay_warm_recipe`` is mirrored by _promote_replay_warm_recipe
         # instead: its executor settles on "succeeded" and the keep decision is
         # only reached further down this call, so mirroring it here published

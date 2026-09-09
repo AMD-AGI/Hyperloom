@@ -1717,7 +1717,8 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from hyperloom.orchestrator.framework import paths as fp
 
-    monkeypatch.setattr(fp, "resolve_source_file_allowlist", lambda: ["/src/root"])
+    monkeypatch.setattr(fp, "resolve_kernel_search_roots", lambda: ["/src/root"])
+    monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")
 
     params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
     await coord._warm_specialist_params(params)
@@ -1726,6 +1727,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert params["research_hints"] == "HINTS-TEXT"
     assert params["arch_notes"] == "ARCH-NOTES"
     assert params["framework_source_roots"] == ["/src/root"]
+    assert params["session_framework_tree"] == "/src/root/vllm/"
     assert params["gap_symptom"] == "mem bound"
     assert "roofline_evidence" in params
 
@@ -1845,6 +1847,29 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
     )
     last = coord.shared_state.last_specialist
     assert last.get("task_id") == "rec-spec-1"
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinator) -> None:
+    """A patch nobody could ground has to reach the durable failure log.
+
+    The specialist's own notes reach the prompt only through the single inbox
+    line for its task, which is rendered once.
+    """
+    task = _ptask("rec-spec-ug", "specialist")
+    await coord._record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "kernel_agent",
+            "gap_canonical_id": "g1",
+            "proposal_set": [],
+            "patches_ungrounded": ["missing_target: vllm/nope.py"],
+        },
+        source="specialist:rec-spec-ug",
+    )
+    failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-ug"]
+    assert [f["error_class"] for f in failures] == ["patch_targets_ungrounded"]
+    assert "vllm/nope.py" in failures[0]["error_excerpt"]
 
 
 @pytest.mark.asyncio

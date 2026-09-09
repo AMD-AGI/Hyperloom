@@ -137,17 +137,6 @@ def test_path_under_session_inside_and_escape(tmp_path: Path) -> None:
     assert g._path_under_session("/etc/passwd") is False
 
 
-def test_path_in_source_allowlist(monkeypatch) -> None:
-    g = _gate(None)
-    monkeypatch.setattr(pol, "resolve_source_file_allowlist", lambda: ("/srv/sglang/",))
-    assert g._path_in_source_allowlist("/srv/sglang/foo.py") is True
-    assert g._path_in_source_allowlist("/srv/sglang/sub/foo.py") is True
-    assert g._path_in_source_allowlist("/other/foo.py") is False
-    # Traversal and shared-prefix boundary must NOT slip past.
-    assert g._path_in_source_allowlist("/srv/sglang/../etc/passwd") is False
-    assert g._path_in_source_allowlist("/srv/sglangX/foo.py") is False
-
-
 def test_path_in_trace_allowlist(monkeypatch) -> None:
     g = _gate(None)
     monkeypatch.setattr(pol, "_trace_path_allowlist", lambda: ("/shared/profile/",))

@@ -20,9 +20,8 @@ captured once at build time, the finder locates a kernel's source in the
   asked to rewrite a source that has no single editable ``__global__``.
 
 Triton/TileLang ``.py`` kernels are resolved upstream directly from the trace's
-``kernel_file`` (see :func:`_bypass_source_resolver.resolve_triton_py`, which
-pins the exact ``@triton.jit`` def line via AST), so the finder does not need
-any launcher-path hints.
+``kernel_file`` (the exact ``@triton.jit`` def line is pinned via AST), so the
+finder does not need any launcher-path hints.
 
 Every resolve is timed. :func:`latency_report` returns average/percentile
 latency keyed by the detected framework versions, so the cost of the live lookup
@@ -47,11 +46,11 @@ log = logging.getLogger(__name__)
 
 try:  # package import (TraceLens route / tests)
     from . import kernel_source_index, source_env
-    from ._bypass_source_resolver import is_editable_source
-except ImportError:  # flat top-level import (bypass route puts tools/ on sys.path)
+    from .kernel_source_index import is_editable_source
+except ImportError:  # flat top-level import (tools/ on sys.path)
     import kernel_source_index  # type: ignore[no-redef]
     import source_env  # type: ignore[no-redef]
-    from _bypass_source_resolver import is_editable_source  # type: ignore[no-redef]
+    from kernel_source_index import is_editable_source  # type: ignore[no-redef]
 
 __all__ = [
     "ResolveResult",
@@ -417,8 +416,8 @@ def resolve_source(
 ) -> tuple[str, str]:
     """Resolve to the legacy ``(source_file, method)`` shape.
 
-    The sole entry point used by ``_bypass_source_resolver.resolve_source``; the
-    method is ``"symbol_index"`` on a hit, else ``"unresolved"`` / ``"non_patchable"``.
+    Returns the legacy ``(source_file, method)`` pair; the method is
+    ``"symbol_index"`` on a hit, else ``"unresolved"`` / ``"non_patchable"``.
     """
     return resolve(op_name, framework=framework, device_kernel_name=device_kernel_name).as_legacy_tuple()
 
