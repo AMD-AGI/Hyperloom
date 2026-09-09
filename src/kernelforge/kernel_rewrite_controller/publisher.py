@@ -165,7 +165,10 @@ def render_operator_report(
     # worth a campaign, and a reader comparing patches wants it beside the
     # speedup; nothing downstream computes with it.
     if task.gpu_pct is not None:
-        lines.append(f"- **Operator share of E2E GPU time:** `{task.gpu_pct}`")
+        # ``!r`` because the field is deliberately unchecked: a value carrying a
+        # backtick or a newline would otherwise break the document around it,
+        # and refusing the task instead would trade an operator for a cast.
+        lines.append(f"- **Operator share of E2E GPU time:** `{task.gpu_pct!r}`")
     if details.get("mean_case_speedup") is not None:
         lines.append(f"- **Mean case speedup:** `{float(details['mean_case_speedup']):.6f}x`")
     if details.get("iteration") is not None:

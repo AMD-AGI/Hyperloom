@@ -4027,17 +4027,20 @@ class KernelPhase(PhaseHandler):
         # they left is part of what the server is now running. Committing it is
         # what lets a campaign name its own baseline -- the diff's starting
         # point, and the state a borrowed repository is handed back at.
-        baseline_pins: dict[str, str] = {}
+        baselines: dict[str, object] = {}
         try:
             from ..kernel.campaign_baseline import seal_campaign_baseline
 
-            baseline_pins = seal_campaign_baseline(
+            baselines = seal_campaign_baseline(
                 self.shared_state,
                 session_id=str(getattr(self.shared_state, "session_id", "") or self.session_dir.name),
                 macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
             )
-            if baseline_pins:
-                log.info("KERNEL entry: sealed campaign baselines %s", baseline_pins)
+            if baselines:
+                log.info(
+                    "KERNEL entry: sealed campaign baselines %s",
+                    {repo: baseline.commit for repo, baseline in baselines.items()},
+                )
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:
@@ -4053,17 +4056,18 @@ class KernelPhase(PhaseHandler):
                 self.shared_state,
                 env_spec=env_spec,
                 handoff_dir=handoff_dir,
+                baselines=baselines,
             )
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: Forge handoff generation failed")
-        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baseline_pins)
+        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
     async def _run_kernel_rewrite_controller(
         self,
         handoff_dir: Path,
         output_dir: Path,
-        baseline_pins: dict[str, str] | None = None,
+        baselines: dict[str, object] | None = None,
     ) -> None:
         """Run one Controller attempt without preselecting operators."""
         from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
@@ -4137,7 +4141,7 @@ class KernelPhase(PhaseHandler):
             try:
                 from ..kernel.campaign_baseline import reclaim_campaign_repositories
 
-                reclaimed = reclaim_campaign_repositories(baseline_pins or {})
+                reclaimed = reclaim_campaign_repositories(baselines or {})
                 if reclaimed:
                     result["reclaimed_repositories"] = reclaimed
             except Exception:  # noqa: BLE001

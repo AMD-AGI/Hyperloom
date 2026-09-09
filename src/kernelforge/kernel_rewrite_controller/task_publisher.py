@@ -31,6 +31,13 @@ log = logging.getLogger(__name__)
 #: atomic, so the pair existing does not mean the pair is finished.
 PUBLISH_QUIESCENT_SEC = 5.0
 
+#: What an agent writes into ``task.json`` to take a draft back. It has no tool
+#: that can delete a directory -- the analysis session runs without a shell, and
+#: Write cannot remove -- so withdrawing has to be something it can write. Any
+#: draft whose task.json carries this key is neither published nor counted as
+#: refused, and the Stop hook stops holding the session open for it.
+WITHDRAWN_KEY = "withdrawn"
+
 #: Where a refusal is left for the agent to read, inside the draft it refused.
 #: Validation runs out of process on a timer, so there is no tool result to
 #: return the reason on; without a file the agent finishes the session believing
@@ -222,11 +229,21 @@ def _write_rejection(staged: Path, reason: str) -> None:
         log.warning("could not record the refusal of staged task %s", staged.name)
 
 
+def _is_withdrawn(staged: Path) -> bool:
+    """True when the agent has taken this draft back rather than fixed it."""
+    try:
+        payload = json.loads((staged / "task.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get(WITHDRAWN_KEY))
+
+
 def pending_rejections(staging_root: Path) -> dict[str, str]:
     """Return the refusal still standing against each staged draft.
 
     A published draft is deleted whole and a re-refused one is overwritten, so
-    the note's presence is what says the draft is currently refused.
+    the note's presence is what says the draft is currently refused -- unless
+    the agent has withdrawn it, which is the one way out it can actually take.
     """
     root = Path(staging_root)
     if not root.is_dir():
@@ -239,7 +256,7 @@ def pending_rejections(staging_root: Path) -> dict[str, str]:
             payload = json.loads((entry / REJECTION_FILENAME).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict):
+        if isinstance(payload, dict) and not _is_withdrawn(entry):
             pending[entry.name] = str(payload.get("reason") or "")
     return pending
 
@@ -281,6 +298,12 @@ def publish_complete_staged_tasks(
             continue
         if refused is not None and refused.get(entry.name) == newest:
             continue
+        if _is_withdrawn(entry):
+            # Taken back by the agent. Left in place as the record of a
+            # candidate it examined and rejected, and not offered again.
+            if refused is not None:
+                refused[entry.name] = newest
+            continue
         result = publish_staged_task(layout, entry)
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
@@ -299,6 +322,7 @@ def publish_complete_staged_tasks(
 __all__ = [
     "PUBLISH_QUIESCENT_SEC",
     "REJECTION_FILENAME",
+    "WITHDRAWN_KEY",
     "TaskPublicationResult",
     "pending_rejections",
     "publish_complete_staged_tasks",

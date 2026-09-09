@@ -25,16 +25,33 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
-import shutil
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from kernelforge.kernel_rewrite_controller.worktree import (
-    CAMPAIGN_BRANCH_PREFIX,
-    FORGE_LOOP_OUTPUT_DIRNAME,
+    reclaim_campaign_branch,
+    untracked_paths,
 )
+
+
+@dataclass(frozen=True)
+class RepoBaseline:
+    """What one repository looked like when the campaign was given it.
+
+    The commit alone is not enough to hand a repository back. A campaign can
+    commit a file the base does not carry, and switching away from its branch
+    turns that file untracked rather than removing it -- so without knowing
+    which untracked paths were already there, nothing can tell the campaign's
+    leavings from the operator's own, and the residue this whole path exists to
+    stop accumulates again.
+    """
+
+    commit: str
+    untracked: frozenset[str] = frozenset()
+
 
 log = logging.getLogger(__name__)
 
@@ -132,11 +149,11 @@ def session_branch_name(session_id: str, macro_cycle: int) -> str:
     return f"hyperloom/{safe or 'session'}-c{max(0, int(macro_cycle))}"
 
 
-def _seal_one(repo: Path, branch: str) -> str:
-    """Commit this repository's tracked changes and return the commit to build on."""
+def _seal_one(repo: Path, branch: str) -> RepoBaseline:
+    """Commit this repository's tracked changes and describe what it then was."""
     head = _git(repo, "rev-parse", "HEAD").stdout.strip().lower()
     if not _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        return head
+        return RepoBaseline(commit=head, untracked=untracked_paths(repo))
 
     current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if current != branch:
@@ -153,8 +170,11 @@ def _seal_one(repo: Path, branch: str) -> str:
         f"hyperloom: seal the serving tree for {branch}",
     )
     sealed = _git(repo, "rev-parse", "HEAD").stdout.strip().lower()
-    log.info("sealed %s at %s (was %s) on %s", repo, sealed[:12], head[:12], branch)
-    return sealed
+    # Named in the log because the repository is left on this branch: the seal
+    # has no inverse, and an operator reading their own checkout afterwards
+    # should be able to find out from here what moved it.
+    log.info("sealed %s at %s (was %s) and left it on %s", repo, sealed[:12], head[:12], branch)
+    return RepoBaseline(commit=sealed, untracked=untracked_paths(repo))
 
 
 def seal_campaign_baseline(
@@ -170,16 +190,21 @@ def seal_campaign_baseline(
     refuses individually; it must not cost the whole KERNEL phase.
     """
     branch = session_branch_name(session_id, macro_cycle)
-    pins: dict[str, str] = {}
+    baselines: dict[str, RepoBaseline] = {}
     for repo in campaign_repositories(state):
         try:
-            pins[str(repo)] = _seal_one(repo, branch)
+            baselines[str(repo)] = _seal_one(repo, branch)
         except (OSError, subprocess.SubprocessError) as error:
-            log.warning("could not seal the serving tree in %s: %s", repo, error)
-    return pins
+            log.warning(
+                "could not seal the serving tree in %s: %s; in-place operators in this "
+                "repository will be skipped for having no base commit to borrow at",
+                repo,
+                error,
+            )
+    return baselines
 
 
-def reclaim_campaign_repositories(pins: Mapping[str, str]) -> dict[str, str]:
+def reclaim_campaign_repositories(baselines: Mapping[str, RepoBaseline]) -> dict[str, str]:
     """Put back a repository the controller was killed before it could return.
 
     A hard timeout kills the process tree, so the controller's own restore never
@@ -192,26 +217,27 @@ def reclaim_campaign_repositories(pins: Mapping[str, str]) -> dict[str, str]:
     Returns the repositories that were actually reclaimed.
     """
     reclaimed: dict[str, str] = {}
-    for raw_repo, base_commit in pins.items():
+    for raw_repo, baseline in baselines.items():
         repo = Path(raw_repo)
         try:
-            branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD", check=False).stdout.strip()
-            if not branch.startswith(CAMPAIGN_BRANCH_PREFIX):
-                continue
-            # ``--force`` because the campaign's own edits are still in the tree
-            # and every one of them is either already an exported patch or of no
-            # further use.
-            _git(repo, "checkout", "--force", base_commit)
-            _git(repo, "branch", "-D", branch, check=False)
-            shutil.rmtree(repo / FORGE_LOOP_OUTPUT_DIRNAME, ignore_errors=True)
-            reclaimed[str(repo)] = branch
-            log.warning("reclaimed %s from abandoned campaign branch %s", repo, branch)
+            # One implementation, reached from both directions: here after a kill,
+            # and from the next borrow finding the repository still on a branch.
+            branch = reclaim_campaign_branch(
+                repo,
+                baseline.commit,
+                baseline_untracked=baseline.untracked,
+            )
         except (OSError, subprocess.SubprocessError) as error:
             log.warning("could not reclaim %s after the controller exited: %s", repo, error)
+            continue
+        if branch:
+            reclaimed[str(repo)] = branch
+            log.warning("reclaimed %s from abandoned campaign branch %s", repo, branch)
     return reclaimed
 
 
 __all__ = [
+    "RepoBaseline",
     "campaign_repositories",
     "reclaim_campaign_repositories",
     "seal_campaign_baseline",

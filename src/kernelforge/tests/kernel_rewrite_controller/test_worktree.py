@@ -14,10 +14,13 @@ from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 import kernelforge.kernel_rewrite_controller.worktree as worktree_module
 from kernelforge.kernel_rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
+    FORGE_LOOP_OUTPUT_DIRNAME,
     WorktreeError,
     create_operator_worktree,
     export_patch_from_base,
+    reclaim_campaign_branch,
     release_operator_worktree,
+    untracked_paths,
 )
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
@@ -280,6 +283,10 @@ def test_an_editable_repository_is_borrowed_rather_than_copied(
 def test_releasing_a_borrowed_repository_undoes_the_campaign(tmp_path: Path, editable) -> None:
     """The patch is already published, so the tree it was built in is disposable."""
     repo, base_commit = _source_repo(tmp_path)
+    # Written before the borrow, which is what makes it the operator's: after it,
+    # an untracked file is indistinguishable from one the campaign added.
+    keepsake = repo / "operator-notes.txt"
+    keepsake.write_text("mine\n", encoding="utf-8")
     editable(repo)
     task, _ = _task(tmp_path, repo, base_commit)
     layout = ControllerLayout(tmp_path / "output")
@@ -289,8 +296,6 @@ def test_releasing_a_borrowed_repository_undoes_the_campaign(tmp_path: Path, edi
     borrowed.kernel_path.write_text("VALUE = 2\n", encoding="utf-8")
     (repo / "forge_experiments").mkdir(exist_ok=True)
     (repo / "forge_experiments" / "iteration.json").write_text("{}", encoding="utf-8")
-    keepsake = repo / "operator-notes.txt"
-    keepsake.write_text("mine\n", encoding="utf-8")
 
     release_operator_worktree(borrowed)
 
@@ -360,3 +365,96 @@ def test_a_campaign_branch_a_killed_run_left_behind_is_reclaimed(tmp_path: Path,
         assert borrowed.kernel_path.read_text(encoding="utf-8") == "VALUE = 1\n"
     finally:
         release_operator_worktree(borrowed)
+
+
+def test_release_removes_what_the_campaign_created_and_keeps_what_it_found(
+    tmp_path: Path,
+    editable,
+) -> None:
+    """A file the campaign committed survives `checkout <base> -- <path>`.
+
+    The base does not carry the path, so that restore cannot touch it; it only
+    reads as untracked once HEAD and the index have moved. Removing it needs an
+    inventory of what was untracked before the borrow -- by name it is
+    indistinguishable from a file the repository's owner keeps.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    keepsake = repo / "operator-notes.txt"
+    keepsake.write_text("mine\n", encoding="utf-8")
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    borrowed.kernel_path.write_text("VALUE = 2\n", encoding="utf-8")
+    (repo / "new_kernel_helper.py").write_text("helper\n", encoding="utf-8")
+    (repo / "generated").mkdir()
+    (repo / "generated" / "kernel.h").write_text("h\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "campaign work")
+    (repo / "scratch.tmp").write_text("x\n", encoding="utf-8")
+
+    release_operator_worktree(borrowed)
+
+    assert borrowed.kernel_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (repo / "new_kernel_helper.py").exists()
+    assert not (repo / "generated").exists()
+    assert not (repo / "scratch.tmp").exists()
+    assert keepsake.read_text(encoding="utf-8") == "mine\n"
+    assert _git(repo, "status", "--porcelain") == "?? operator-notes.txt"
+
+
+def test_release_keeps_the_campaign_bookkeeping_out_of_the_repository(
+    tmp_path: Path,
+    editable,
+) -> None:
+    """Every in-place task in one repository is handed the same directory.
+
+    So it cannot be left there -- the next campaign would resume this one's
+    state -- but a run that published no patch has nothing else to be read from.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    (repo / FORGE_LOOP_OUTPUT_DIRNAME / "best_result.json").write_text("{}", encoding="utf-8")
+
+    release_operator_worktree(borrowed)
+
+    assert not (repo / FORGE_LOOP_OUTPUT_DIRNAME).exists()
+    archived = layout.workspace_dir(task.operator_id) / FORGE_LOOP_OUTPUT_DIRNAME
+    assert (archived / "best_result.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_reclaiming_a_branch_also_removes_what_that_campaign_created(tmp_path: Path) -> None:
+    """`checkout --force` restores tracked content and leaves the rest behind."""
+    repo, base_commit = _source_repo(tmp_path)
+    baseline = untracked_paths(repo)
+    _git(repo, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}killed", base_commit)
+    (repo / "left_behind.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "killed campaign")
+
+    branch = reclaim_campaign_branch(repo, base_commit, baseline_untracked=baseline)
+
+    assert branch == f"{CAMPAIGN_BRANCH_PREFIX}killed"
+    assert not (repo / "left_behind.py").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_releasing_a_borrowed_repository_twice_is_harmless(tmp_path: Path, editable) -> None:
+    """Three lanes take this lock and each releases from a finally."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    release_operator_worktree(borrowed)
+    release_operator_worktree(borrowed)
+
+    again = create_operator_worktree(task, layout)
+    assert again.inplace is True
+    release_operator_worktree(again)

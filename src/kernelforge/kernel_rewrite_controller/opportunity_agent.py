@@ -170,9 +170,12 @@ class _AnalysisToolGuard:
                 f"{refusals}\n"
                 "Each refusal is also written to rejection.json inside the draft's own "
                 "directory. Correct the task.json the reason names and the host will "
-                "revalidate it within a few seconds; delete the draft instead if the "
-                "operator turned out not to be publishable. Do not stop with a draft "
-                f"still refused (attempt {self.stop_denials} of {self.max_stop_denials})."
+                "revalidate it within a few seconds. If the operator should not be "
+                "published at all, withdraw the draft by rewriting its task.json as "
+                '{"withdrawn": "<why>"} -- you have no tool that can delete a '
+                "directory, so that is how a draft is taken back. Do not stop with a "
+                f"draft neither fixed nor withdrawn (attempt {self.stop_denials} of "
+                f"{self.max_stop_denials})."
             ),
         }
 
@@ -367,9 +370,13 @@ source repositories or handoff files.
 The host validates each draft a few seconds after you stop writing to it, and
 takes the directory away once it passes. A draft still sitting in staging with
 a `rejection.json` beside it was refused and was never published: read that
-file, fix what its reason names, and the host will try again on its own. Delete
-the draft instead if the operator turned out not to be publishable. You cannot
-end the session while a refused draft remains.
+file, fix what its reason names, and the host will try again on its own.
+
+When the reason shows the operator should not be published at all, withdraw the
+draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
+delete a directory, so this is how a draft is taken back, and a withdrawn one
+is neither published nor held against you. You cannot end the session while a
+refused draft is neither fixed nor withdrawn.
 """
 
 

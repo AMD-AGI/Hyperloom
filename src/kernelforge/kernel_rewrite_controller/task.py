@@ -187,10 +187,8 @@ def parse_task_payload(
 
     # Carried verbatim rather than validated: no code reads a case, so a shape
     # the contract disagrees with is still worth more to the driver author than
-    # a refused task. A lone object is wrapped so the field stays a sequence.
+    # a refused task -- and by the same argument, not reshaped either.
     shape_cases = payload.get("shape_cases", [])
-    if not isinstance(shape_cases, list):
-        shape_cases = [shape_cases]
     evidence = payload.get("evidence", [])
     if not isinstance(evidence, list):
         raise TaskContractError("evidence must be a JSON list")
@@ -209,7 +207,9 @@ def parse_task_payload(
         priority=priority,
         source_files=_string_list(payload, "source_files", paths=True),
         target_functions=_string_list(payload, "target_functions"),
-        shape_cases=tuple(copy.deepcopy(shape_cases)),
+        shape_cases=tuple(copy.deepcopy(shape_cases))
+        if isinstance(shape_cases, list)
+        else (copy.deepcopy(shape_cases),),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
         # Unchecked by contract: it is read by people, not by the run, and a

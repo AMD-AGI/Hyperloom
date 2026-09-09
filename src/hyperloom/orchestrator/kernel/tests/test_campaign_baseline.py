@@ -13,6 +13,7 @@ import pytest
 
 import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 from hyperloom.orchestrator.kernel.campaign_baseline import (
+    RepoBaseline,
     campaign_repositories,
     reclaim_campaign_repositories,
     seal_campaign_baseline,
@@ -76,7 +77,7 @@ def test_a_clean_repository_is_pinned_without_a_new_commit(tmp_path: Path) -> No
 
     pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
 
-    assert pins == {str(repo): head.lower()}
+    assert pins[str(repo)].commit == head.lower()
     assert _git(repo, "rev-parse", "HEAD") == head
 
 
@@ -88,7 +89,7 @@ def test_the_serving_tree_is_sealed_into_the_pinned_commit(tmp_path: Path) -> No
 
     pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
 
-    sealed = pins[str(repo)]
+    sealed = pins[str(repo)].commit
     assert sealed != head.lower()
     assert _git(repo, "rev-parse", "HEAD").lower() == sealed
     assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
@@ -116,17 +117,17 @@ def test_a_detached_head_is_sealed_onto_the_session_branch(tmp_path: Path) -> No
     pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
 
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == session_branch_name("s1", 0)
-    assert _git(repo, "rev-parse", "HEAD").lower() == pins[str(repo)]
+    assert _git(repo, "rev-parse", "HEAD").lower() == pins[str(repo)].commit
 
 
 def test_a_second_entry_seals_on_top_of_the_first(tmp_path: Path) -> None:
     """A macro cycle can enter KERNEL twice, and the branch is already there."""
     repo = _repo(tmp_path)
     (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
-    first = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)]
+    first = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)].commit
     (repo / "kernel.py").write_text("VALUE = 3\n", encoding="utf-8")
 
-    second = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)]
+    second = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)].commit
 
     assert second != first
     assert _git(repo, "show", f"{second}:kernel.py") == "VALUE = 3"
@@ -211,7 +212,7 @@ def test_a_repository_a_killed_controller_left_on_a_branch_is_reclaimed(tmp_path
     _git(repo, "commit", "-m", "campaign work")
     (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir()
 
-    reclaimed = reclaim_campaign_repositories({str(repo): base})
+    reclaimed = reclaim_campaign_repositories({str(repo): RepoBaseline(commit=base)})
 
     assert str(repo) in reclaimed
     assert _git(repo, "rev-parse", "HEAD").lower() == base
@@ -224,7 +225,7 @@ def test_a_repository_the_controller_returned_cleanly_is_left_alone(tmp_path: Pa
     base = _git(repo, "rev-parse", "HEAD").lower()
     branch_before = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
 
-    assert reclaim_campaign_repositories({str(repo): base}) == {}
+    assert reclaim_campaign_repositories({str(repo): RepoBaseline(commit=base)}) == {}
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch_before
 
 
@@ -275,7 +276,10 @@ def test_reclaiming_a_repository_that_is_gone_is_reported_not_raised(tmp_path: P
     _git(good, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}abandoned")
 
     reclaimed = reclaim_campaign_repositories(
-        {str(tmp_path / "absent"): "b" * 40, str(good): base},
+        {
+            str(tmp_path / "absent"): RepoBaseline(commit="b" * 40),
+            str(good): RepoBaseline(commit=base),
+        },
     )
 
     assert str(good) in reclaimed

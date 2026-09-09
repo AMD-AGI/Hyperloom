@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,10 +157,18 @@ def dispatch_single_task(
             reason=reason,
         )
     finally:
-        # After the recovery above, never before it: the patch is what the
-        # campaign was for, and this returns the tree the patch was built in.
-        # A private checkout is left standing instead, because the controller's
-        # closing sweep still reads results out of it.
+        # The controller's closing sweep cannot stand in for this one. It runs
+        # after every task's release, and a borrowed repository has by then given
+        # its campaign branch back -- so the best commit a patch would be
+        # exported from is already unreachable. This is the last moment the tree
+        # and the branch still exist, so a recovery that failed for a passing
+        # reason gets one more attempt here. Publication is idempotent.
+        if worktree is not None and worktree.inplace:
+            with contextlib.suppress(Exception):
+                recover_task_result(layout, task_path, update_state=False)
+        # After that, never before: the patch is what the campaign was for, and
+        # this returns the tree the patch was built in. A private checkout is
+        # left standing instead, because the closing sweep does read those.
         release_operator_worktree(worktree)
 
 

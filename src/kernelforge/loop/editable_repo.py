@@ -155,16 +155,28 @@ def needs_inplace(kernel_repo: str) -> bool:
 
 
 class RepoLock:
-    """Owned in-place repo lock; released explicitly after restore."""
+    """Owned in-place repo lock; released explicitly after restore.
+
+    Releasing twice is a no-op rather than an error. Three lanes now take this
+    lock and each releases it from a ``finally``, so a second release is the
+    ordinary shape of a nested cleanup -- and answering it by raising from
+    ``fileno()`` on a closed file would turn tidying up into a failure.
+    """
 
     def __init__(self, fh) -> None:
         self._fh = fh
+        self._released = False
+
+    @property
+    def released(self) -> bool:
+        return self._released
 
     @property
     def fd(self) -> int:
         return self._fh.fileno()
 
     def close(self) -> None:
+        self._released = True
         self._fh.close()
 
 
@@ -191,8 +203,8 @@ def acquire_repo_lock(repo: str) -> RepoLock | None:
 
 
 def release_repo_lock(lock: RepoLock | None) -> None:
-    """Release + close the in-place repo lock (best-effort)."""
-    if lock is None:
+    """Release + close the in-place repo lock (best-effort, idempotent)."""
+    if lock is None or lock.released:
         return
     try:
         fcntl.flock(lock.fd, fcntl.LOCK_UN)

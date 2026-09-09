@@ -148,17 +148,22 @@ def test_a_virtualenv_site_packages_off_the_path_is_still_scanned(
     assert editable_repo._scan_editable_roots() == (str(root.resolve()),)
 
 
-def test_releasing_a_lock_twice_over_is_reported_by_the_caller(tmp_path) -> None:
-    """Documents today's behaviour: the second release is the caller's error.
+def test_releasing_a_lock_twice_over_is_a_no_op(tmp_path) -> None:
+    """Three lanes take this lock and each releases it from a ``finally``.
 
-    Unreachable from the lanes, which release once in a ``finally``, and left
-    as it is rather than swallowed so a double release stays visible.
+    A second release is the ordinary shape of a nested cleanup, so answering it
+    by raising from ``fileno()`` on a closed file would turn tidying up into a
+    failure.
     """
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     lock = editable_repo.acquire_repo_lock(str(repo))
     assert lock is not None
+
+    editable_repo.release_repo_lock(lock)
     editable_repo.release_repo_lock(lock)
 
-    with pytest.raises(ValueError, match="closed file"):
-        editable_repo.release_repo_lock(lock)
+    assert lock.released is True
+    again = editable_repo.acquire_repo_lock(str(repo))
+    assert again is not None
+    editable_repo.release_repo_lock(again)
