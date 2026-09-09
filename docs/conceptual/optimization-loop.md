@@ -148,7 +148,7 @@ upstream (whether the capability already exists and in which version/PR). That
 picks the entry rung. **Climb (as needed):** start at the lowest plausible rung
 and go up only when the current rung cannot make it boot; after each cleared
 boot failure, re-diagnose the new (deeper) failure and pick a rung again
-(serial enablement — progress is stacked). A model whose architecture is
+(serial enablement — each round's fix is cumulative). A model whose architecture is
 already supported but merely un-wired needs only the cheap top rungs; a
 genuinely-new architecture climbs higher.
 

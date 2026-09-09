@@ -1288,15 +1288,25 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
             {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
         ]
 
-    def test_agentx_grades_on_total_token_throughput(self):
-        comparison, summary = _build_comparison(
-            self._pts("baseline", 183.0, 20000.0),
-            self._pts("optimized", 183.0, 26000.0),
+    def _intvty_pts(self, arm: str, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_agentx_grades_on_e2e_norm_intvty_p90(self):
+        """AgentX grades on the slow-tail interactivity axis."""
+        _comparison, summary = _build_comparison(
+            self._intvty_pts("baseline", 22.5, 20000.0),
+            self._intvty_pts("optimized", 24.0, 21000.0),
             metric_key=graded_metric_key(benchmark_mode="agentx"),
         )
-        assert summary["metric"] == "total_token_throughput"
-        assert summary["best_speedup"] == pytest.approx(26000.0 / 20000.0)
-        assert comparison[0]["baseline_tput"] == pytest.approx(20000.0)
+        assert summary["metric"] == "e2e_norm_intvty_p90"
 
     def test_synthetic_stays_on_output_throughput(self):
         _comparison, summary = _build_comparison(
@@ -1308,8 +1318,8 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert summary["best_speedup"] == pytest.approx(1.3)
 
     def test_the_key_follows_the_mode(self):
-        assert graded_metric_key(benchmark_mode="agentx") == "total_token_throughput"
-        assert graded_metric_key(benchmark_mode="AgentX") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="agentx") == "e2e_norm_intvty_p90"
+        assert graded_metric_key(benchmark_mode="AgentX") == "e2e_norm_intvty_p90"
         assert graded_metric_key(benchmark_mode="synthetic") == "output_throughput"
         assert graded_metric_key(benchmark_mode="") == "output_throughput"
 
@@ -1317,14 +1327,16 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         """The summary follows the axis the KEEP verdicts were taken on."""
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
-        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
-        assert graded_metric_key(benchmark_mode="synthetic") == "total_token_throughput"
+        from hyperloom.common.perf_metric import INTVTY_V1
+
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+        assert graded_metric_key(benchmark_mode="synthetic") == "e2e_norm_intvty_p90"
 
     def test_the_ambient_agentx_signal_reaches_the_summary(self, monkeypatch):
-        """A session whose mode never persisted still grades on the total axis."""
+        """A session whose mode never persisted still grades on the interactivity axis."""
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        assert graded_metric_key(benchmark_mode="") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
 
 
 class TestAnUnreportedTotalComesFromItsHalves:
@@ -1376,13 +1388,14 @@ class TestTheCurveCarriesBothAxisPairs:
                 output_throughput=183.44,
                 total_token_throughput=25984.8,
                 input_throughput=25801.36,
-                intvty_p90=447.2,
+                intvty_p90=447.2,  # VariantResult field name
                 tpot_p90_ms=2.4,
             ),
             arm="optimized",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
-        assert point["intvty_p90"] == pytest.approx(447.2)
+        # _point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
+        assert point["e2e_norm_intvty_p90"] == pytest.approx(447.2)
         assert point["input_throughput"] == pytest.approx(25801.36)
         assert point["tpot_p90_ms"] == pytest.approx(2.4)
 
@@ -1393,7 +1406,7 @@ class TestTheCurveCarriesBothAxisPairs:
         )
         assert point["output_throughput"] == pytest.approx(1200.0)
         assert point["e2el_mean_ms"] == pytest.approx(850.0)
-        assert point["intvty_p90"] is None
+        assert point["e2e_norm_intvty_p90"] is None
 
     def test_the_csv_carries_the_agentic_axes_too(self, session_dir: Path):
         """The CSV is the download button; it has to draw the same chart."""
@@ -1417,7 +1430,7 @@ class TestTheCurveCarriesBothAxisPairs:
             session_dir,
         )
         row = next(iter(csv.DictReader(csv_path.open())))
-        assert row["intvty_p90"] == "447.2"
+        assert row["e2e_norm_intvty_p90"] == "447.2"
         assert row["total_token_throughput"] == "25984.8"
 
 
@@ -1550,7 +1563,7 @@ class TestTheChartFollowsTheGradedAxis:
                         "conc": 8,
                         "output_throughput": 183.44,
                         "total_token_throughput": 25984.8,
-                        "intvty_p90": 447.2,
+                        "e2e_norm_intvty_p90": 447.2,
                     }
                 ]
             },
@@ -1588,7 +1601,7 @@ class TestTheChartFollowsTheGradedAxis:
             ("agentx", {}),
             ("synthetic", {}),
             ("agentx", {"HYPERLOOM_PERF_METRIC": "output_throughput"}),
-            ("synthetic", {"HYPERLOOM_PERF_METRIC": "composite_v1"}),
+            ("synthetic", {"HYPERLOOM_PERF_METRIC": "intvty_v1"}),
             ("", {"HYPERLOOM_AGENTX": "1"}),
         ],
     )
@@ -1603,11 +1616,20 @@ class TestTheChartFollowsTheGradedAxis:
 
         metric = graded_metric_key(benchmark_mode=mode)
         payload = self._payload(mode, metric)
-        axes = plot._axes_for_metric(plot._graded_metric_of(payload), tp_eff=8.0)
-
+        chart_metric = plot._graded_metric_of(payload)
+        axes = plot._axes_for_metric(chart_metric, tp_eff=8.0)
         _xs, ys = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
 
-        assert ys == [pytest.approx(payload["baseline"]["points"][0][metric] / 8.0)]
+        # AgentX chart: x = interactivity, y = total_token_throughput / tp.
+        # Synthetic chart: x = output_throughput / conc, y = output_throughput / tp.
+        from hyperloom.common.perf_metric import GRADED_OUTPUT
+
+        if chart_metric != GRADED_OUTPUT:
+            # AgentX: y is total throughput per chip
+            assert ys == [pytest.approx(25984.8 / 8.0)]
+        else:
+            # Synthetic: y is output throughput per TP
+            assert ys == [pytest.approx(183.44 / 8.0)]
 
     def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
@@ -1615,7 +1637,7 @@ class TestTheChartFollowsTheGradedAxis:
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=1.0)
         points = [
             {"conc": 8, "total_token_throughput": 25984.8},
-            {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
+            {"conc": 4, "total_token_throughput": 20000.0, "e2e_norm_intvty_p90": 500.0},
         ]
         xs, ys = plot._arm_series(points, 1.0, axes)
         assert xs == [pytest.approx(500.0)]
@@ -1636,7 +1658,7 @@ class TestTheRooflineNeedsBothItsAxisAndARealShape:
                         "conc": 8,
                         "output_throughput": 183.44,
                         "total_token_throughput": 25984.8,
-                        "intvty_p90": 447.2,
+                        "e2e_norm_intvty_p90": 447.2,
                     }
                 ]
             },

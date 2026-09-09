@@ -1477,7 +1477,7 @@ async def _run_subprocess(
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
         env.setdefault("PYTHONUNBUFFERED", "1")
-        # run_with_session_kill reaps the whole descendant tree on every exit path.
+        # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
             env=env,

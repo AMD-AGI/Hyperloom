@@ -104,7 +104,9 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
-    assert envs["SGLANG_REMOVE_ME"] == "override"
+    # Named in both extra_envs and unset_envs: the removal is the more specific
+    # intent and wins, so the bare-string unset_envs form is proven to apply.
+    assert "SGLANG_REMOVE_ME" not in envs
 
 
 def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch):
@@ -712,14 +714,14 @@ def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
     assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
-def test_agentx_kb_write_blocked_matches_agentx_active(monkeypatch):
-    # agentx_kb_write_blocked delegates to agentx_active; both signals still work.
+def test_agentx_kb_blocked_matches_agentx_active(monkeypatch):
+    # agentx_kb_blocked delegates to agentx_active; both signals still work.
     _clear_env(monkeypatch)
-    assert we.agentx_kb_write_blocked() is False
+    assert we.agentx_kb_blocked() is False
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert we.agentx_kb_write_blocked() is True
+    assert we.agentx_kb_blocked() is True
     _clear_env(monkeypatch)
-    assert we.agentx_kb_write_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
+    assert we.agentx_kb_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
 # Scriptable baseline sampling cost (measurement contract values)

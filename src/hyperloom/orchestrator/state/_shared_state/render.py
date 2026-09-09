@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
 
@@ -269,19 +270,19 @@ class _RenderMixin:
     def to_resource_pools_summary(self) -> str:
         """Render the GPU pool / lane capacity block."""
         from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.gate import (
-            _effective_gpu_specialist_pool_size,
-            _serving_tp_for_policy,
-            _whole_machine_pool_size,
+        from ...policy.projection import (
+            effective_gpu_specialist_pool_size,
             gpu_specialist_ceiling,
+            serving_tp_for_policy,
+            whole_machine_pool_size,
         )
 
         lines = [
-            f"serving_tp={_serving_tp_for_policy(self)}",
+            f"serving_tp={serving_tp_for_policy(self)}",
             f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={_effective_gpu_specialist_pool_size(self)}"
+            f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(self)}"
             "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={_whole_machine_pool_size()}"
+            f"whole_machine_gpu_pool={whole_machine_pool_size()}"
             "  (bench / framework-authoring specialists admit against this)",
             f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
             f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
@@ -328,7 +329,7 @@ class _RenderMixin:
                 out.append(f"  · {first_line[:240]}")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
@@ -727,6 +728,9 @@ class _RenderMixin:
         tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
         gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        # The gain column is meaningless without the axis it was taken on.
+        graded_obj = str(entry.get("graded_objective") or "").strip()
+        graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
@@ -764,7 +768,7 @@ class _RenderMixin:
             anchor_s = ("  " + " ".join(anchors)) if anchors else ""
 
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
+        return f"{name:28s} {gain_s:>9}{graded_obj_s}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:

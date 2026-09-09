@@ -978,6 +978,51 @@ def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, 
     assert "eval_dest" in out["error"]
 
 
+def test_failed_patch_anchors_in_ignores_rot_outside_the_named_root(tmp_path, monkeypatch):
+    """Scoped verification must not inherit env-wide discovery."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        failed_patch_anchors,
+        failed_patch_anchors_in,
+    )
+
+    pinned = tmp_path / "InferenceX@deadbeef"
+    _write_full_lib(pinned)
+    bundled = tmp_path / "site-packages"
+    rotted = _write_full_lib(bundled / "InferenceX")
+    rotted.write_text(
+        rotted.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("MAGPIE_PATH", str(bundled))
+
+    assert [s.name for s in failed_patch_anchors(pinned)] == ["eval_dest"]
+    assert failed_patch_anchors_in(pinned) == []
+    assert [s.name for s in failed_patch_anchors_in(bundled / "InferenceX")] == ["eval_dest"]
+
+
+def test_baseline_hook_proceeds_when_only_the_magpie_bundled_tree_rots(tmp_path, monkeypatch):
+    """Magpie benchmarks the tree the config pins, so rot in the InferenceX
+    bundled with the installed Magpie must not abort this run's eval."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_full_lib(ix_root)
+    _write_eval_probe_target(ix_root)
+    bundled = tmp_path / "site-packages"
+    rotted = _write_full_lib(bundled / "InferenceX")
+    rotted.write_text(
+        rotted.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("MAGPIE_PATH", str(bundled))
+
+    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
+
+    assert out is None
+
+
 def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, monkeypatch):
     """eval_start is a log breadcrumb for the soft-deadline watcher: worth reporting, never worth aborting a run for."""
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor

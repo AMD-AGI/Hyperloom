@@ -186,11 +186,11 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
-        anchor = (d.kb_anchor or "").strip()
+        anchor = d.kb_anchor.strip()
         if anchor:
             seen.setdefault(anchor, None)
     for extra in EXTRA_KNOWLEDGE_DOMAIN_TAGS:
-        tag = (extra or "").strip()
+        tag = extra.strip()
         if tag:
             seen.setdefault(tag, None)
     return tuple(seen.keys())
@@ -205,7 +205,7 @@ def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
     """Build a map from KB anchor to its representative domain entry."""
     out: dict[str, SpecialistDomain] = {}
     for d in SPECIALIST_DOMAINS:
-        anchor = (d.kb_anchor or "").strip()
+        anchor = d.kb_anchor.strip()
         if anchor and anchor not in out:
             out[anchor] = d
     return out
@@ -215,8 +215,17 @@ _ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
 
 
 def domain_for_tag(tag: str) -> "SpecialistDomain | None":
-    """Return a representative catalogue entry for a knowledge-domain tag (matched first by ``kb_anchor``, then by ``key``)."""
-    t = (tag or "").strip()
+    """Return a representative catalogue entry for a knowledge-domain
+    tag (matched first by ``kb_anchor``, then by ``key``).
+
+    Args:
+        tag: The knowledge-domain tag to look up.
+
+    Returns:
+        The matching catalogue entry, or ``None`` when the tag is empty or
+        unknown.
+    """
+    t = tag.strip()
     if not t:
         return None
     hit = _ANCHOR_TO_DOMAIN.get(t)
