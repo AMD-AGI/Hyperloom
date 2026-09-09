@@ -307,8 +307,8 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     state.framework = "vllm"
-    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 500.0, "intvty_p90": 4.0}
-    state.current_best.update({"input_throughput": 450.0, "total_throughput": 600.0, "intvty_p90": 4.0})
+    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 500.0, "e2e_norm_intvty_p90": 5.0}
+    state.current_best.update({"input_throughput": 450.0, "total_throughput": 600.0, "e2e_norm_intvty_p90": 6.0})
     state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
     state.cumulative_gain = 20.0
     state.cumulative_gain_validated = 20.0
@@ -324,7 +324,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         # Proposal measurements must never fill missing canonical rebench axes.
         "input_throughput": 9999.0,
         "total_throughput": 10000.0,
-        "intvty_p90": 99.0,
+        "e2e_norm_intvty_p90": 99.0,
     }
     return coord
 
@@ -421,10 +421,10 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         "tput": measured,
         "input_throughput": 800.0 - measured,
         "total_throughput": 800.0,
-        "intvty_p90": 4.0,
+        "e2e_norm_intvty_p90": 8.0,
     }
     if case == "missing_axes":
-        measurement.pop("intvty_p90")
+        measurement.pop("e2e_norm_intvty_p90")
     elif case == "missing_output":
         measured = None
         measurement.pop("tput")
@@ -443,7 +443,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             "fingerprint": measurement.pop("fingerprint"),
             measurement_location: measurement,
             "total_throughput": 10000.0,
-            "intvty_p90": 99.0,
+            "e2e_norm_intvty_p90": 99.0,
         }
     result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
     await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
@@ -455,7 +455,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.current_best["tput"] == measured
         assert state.current_best["input_throughput"] == 800.0 - measured
         assert state.current_best["total_throughput"] == 800.0
-        assert state.current_best["intvty_p90"] == 4.0
+        assert state.current_best["e2e_norm_intvty_p90"] == 8.0
         assert state.cumulative_gain_validated == pytest.approx(60.0)
         assert state.cumulative_gain_validated_stack_len == 2
         assert state.resume_pending_revalidation is False

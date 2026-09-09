@@ -2786,31 +2786,38 @@ class WritebackCollaborator:
         """
         from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
 
+        prebaseline_enablement = (
+            task_kind == "integrate_patch"
+            and float(self.shared_state.baseline_tput or 0.0) <= 0.0
+            and bv.get("baseline_enablement") is True
+            and bv.get("attribution_eligible") is False
+        )
         cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
-        graded = resolve_graded_comparison(self.shared_state, cand_source)
-        if not graded.comparable:
-            log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
-            return False
-        if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
-            log.info(
-                "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
-                task_kind,
-                graded.verdict,
-                graded.reference,
-                graded.candidate,
-                graded.tput_reference,
-                graded.tput_candidate,
-            )
-            return False
-        if graded.reference > 0 and graded.candidate <= graded.reference:
-            log.info(
-                "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
-                graded.reference,
-                graded.objective,
-                task_kind,
-                graded.candidate,
-            )
-            return False
+        if not prebaseline_enablement:
+            graded = resolve_graded_comparison(self.shared_state, cand_source)
+            if not graded.comparable:
+                log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
+                return False
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+                log.info(
+                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    task_kind,
+                    graded.verdict,
+                    graded.reference,
+                    graded.candidate,
+                    graded.tput_reference,
+                    graded.tput_candidate,
+                )
+                return False
+            if graded.reference > 0 and graded.candidate <= graded.reference:
+                log.info(
+                    "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
+                    graded.reference,
+                    graded.objective,
+                    task_kind,
+                    graded.candidate,
+                )
+                return False
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
@@ -4089,7 +4096,7 @@ class WritebackCollaborator:
                         "input_throughput",
                         "total_throughput",
                         "total_token_throughput",
-                        "intvty_p90",
+                        "e2e_norm_intvty_p90",
                         "tpot_p90_ms",
                         "submission_valid",
                         "submission_invalid_reasons",

@@ -528,10 +528,11 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
-async def test_explore_required_axes_rejects_incomplete_measurement(
-    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis
+@pytest.mark.parametrize("output,expected_outcome", [(20000.0, "KEEP"), (180.0, "REVERT")])
+async def test_explore_missing_axes_grades_both_sides_on_output(
+    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis, output, expected_outcome
 ):
-    """An output gain cannot replace the total/interactivity evidence requested by AgentX."""
+    """Incomplete AgentX evidence degrades the pair, not just one side, to output throughput."""
     _force_cold_decision(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -541,7 +542,7 @@ async def test_explore_required_axes_rejects_incomplete_measurement(
     state.baseline_perf = {
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
-        "intvty_p90": 300.0,
+        "e2e_norm_intvty_p90": 300.0,
     }
     base_tput = state.baseline_tput
     if missing_from == "current_best":
@@ -549,13 +550,13 @@ async def test_explore_required_axes_rejects_incomplete_measurement(
             "action": "explore",
             "tput": 250.0,
             "total_token_throughput": 25000.0,
-            "intvty_p90": 300.0,
+            "e2e_norm_intvty_p90": 300.0,
         }
         base_tput = 250.0
     candidate_axes = {
         "input_throughput": 20000.0,
         "total_token_throughput": 40000.0,
-        "intvty_p90_tok_s_user": 300.0,
+        "e2e_norm_intvty_p90": 300.0,
     }
     incomplete = {
         "candidate": candidate_axes,
@@ -563,9 +564,7 @@ async def test_explore_required_axes_rejects_incomplete_measurement(
         "baseline": state.baseline_perf,
     }[missing_from]
     missing_keys = (
-        ("input_throughput", "total_token_throughput")
-        if missing_axis == "total"
-        else ("intvty_p90_tok_s_user" if missing_from == "candidate" else "intvty_p90",)
+        ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
     )
     for key in missing_keys:
         incomplete.pop(key, None)
@@ -577,7 +576,7 @@ async def test_explore_required_axes_rejects_incomplete_measurement(
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=20000.0, perf_axes=candidate_axes)
+        _fake_workspace(slot, tput=output, perf_axes=candidate_axes)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     task = await tr.create(
@@ -600,27 +599,40 @@ async def test_explore_required_axes_rejects_incomplete_measurement(
 
     out = res.result
     tested = out["explore_search_update"]["tested"][canonical_fingerprint("--incomplete-flag", {})]
-    assert tested["status"] == "succeeded", "the benchmark must succeed before grading refuses its evidence"
-    assert tested["outcome"] in {"REVERT", "FAILED"}
-    assert tested["tput"] == 20000.0
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["tput"] == output
     assert tested["base_tput"] == base_tput
-    assert out["winners"] == []
-    assert out["best_variant"] is None
-    assert out["output_throughput"] is None
-    assert out["running_base_tput"] == base_tput
-    assert len(out["losers"]) == 1
-    assert out["losers"][0]["reason"]
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / base_tput - 1.0) * 100.0)
+        assert [winner["name"] for winner in out["winners"]] == ["v_incomplete"]
+        assert out["best_variant"]["name"] == "v_incomplete"
+        assert out["output_throughput"] == output
+        assert out["running_base_tput"] == output
+        assert out["losers"] == []
+    else:
+        assert tested["gain_pct"] is None
+        assert out["winners"] == []
+        assert out["best_variant"] is None
+        assert out["output_throughput"] is None
+        assert out["running_base_tput"] == base_tput
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
-@pytest.mark.parametrize("next_total,expected_outcome", [(23000.0, "KEEP"), (21000.0, "REVERT")])
-async def test_explore_required_axes_rejection_preserves_running_anchor(
-    sub_agent_runner, tmp_path, monkeypatch, missing_axis, next_total, expected_outcome
+@pytest.mark.parametrize("incomplete_output", [170.0, 20000.0], ids=["fallback-revert", "fallback-keep"])
+@pytest.mark.parametrize(
+    "next_intvty,next_total,intvty_outcome",
+    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
+)
+async def test_explore_missing_axes_preserves_running_grading_anchor(
+    sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
 ):
-    """KEEP, incomplete candidate, then full evidence must grade against the last real KEEP."""
+    """A fallback REVERT keeps the measured anchor; a fallback KEEP degrades the next comparison."""
     _force_cold_decision(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -630,7 +642,7 @@ async def test_explore_required_axes_rejection_preserves_running_anchor(
     state.baseline_perf = {
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
-        "intvty_p90": 300.0,
+        "e2e_norm_intvty_p90": 300.0,
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
@@ -642,21 +654,19 @@ async def test_explore_required_axes_rejection_preserves_running_anchor(
         name = slot.parent.name
         config = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
         observed_args[name] = config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
-        output, total = {
-            "v00_v_good": (180.0, 22000.0),
-            "v01_v_incomplete": (20000.0, 40000.0),
-            "v02_v_next": (160.0, next_total),
+        output, total, intvty = {
+            "v00_v_good": (180.0, 22000.0, 330.0),
+            "v01_v_incomplete": (incomplete_output, 40000.0, 360.0),
+            "v02_v_next": (160.0, next_total, next_intvty),
         }[name]
         axes = {
             "input_throughput": total - output,
             "total_token_throughput": total,
-            "intvty_p90_tok_s_user": 300.0,
+            "e2e_norm_intvty_p90": intvty,
         }
         if name == "v01_v_incomplete":
             for key in (
-                ("input_throughput", "total_token_throughput")
-                if missing_axis == "total"
-                else ("intvty_p90_tok_s_user",)
+                ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
             ):
                 axes.pop(key)
         _fake_workspace(slot, tput=output, perf_axes=axes)
@@ -689,24 +699,32 @@ async def test_explore_required_axes_rejection_preserves_running_anchor(
     assert out["status"] == "succeeded"
     assert len(tested) == 3
     assert tested["v_good"]["outcome"] == "KEEP"
-    assert tested["v_good"]["graded_objective"] == "total_throughput"
+    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p90"
     assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
     assert tested["v_good"]["tput"] == 180.0
     assert tested["v_incomplete"]["status"] == "succeeded"
-    assert tested["v_incomplete"]["outcome"] in {"REVERT", "FAILED"}
+    fallback_kept = incomplete_output > 180.0
+    assert tested["v_incomplete"]["outcome"] == ("KEEP" if fallback_kept else "REVERT")
+    assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
     assert tested["v_incomplete"]["base_tput"] == 180.0
-    assert tested["v_next"]["base_tput"] == 180.0
-    assert tested["v_next"]["graded_objective"] == "total_throughput"
-    assert tested["v_next"]["gain_pct"] == pytest.approx((next_total / 22000.0 - 1.0) * 100.0)
+    expected_base = incomplete_output if fallback_kept else 180.0
+    expected_outcome = "REVERT" if fallback_kept else intvty_outcome
+    assert tested["v_next"]["base_tput"] == expected_base
+    assert tested["v_next"]["graded_objective"] == ("output_throughput" if fallback_kept else "e2e_norm_intvty_p90")
+    if expected_outcome == "REVERT":
+        assert tested["v_next"]["gain_pct"] is None
+    else:
+        assert tested["v_next"]["gain_pct"] == pytest.approx((next_intvty / 330.0 - 1.0) * 100.0)
     assert tested["v_next"]["outcome"] == expected_outcome
     assert "--good-flag" in observed_args["v02_v_next"]
-    assert "--incomplete-flag" not in observed_args["v02_v_next"]
+    assert ("--incomplete-flag" in observed_args["v02_v_next"]) is fallback_kept
     assert "--next-flag" in observed_args["v02_v_next"]
-    expected_winners = ["v_good", "v_next"] if expected_outcome == "KEEP" else ["v_good"]
+    expected_winners = ["v_good"] + (["v_incomplete"] if fallback_kept else [])
+    if expected_outcome == "KEEP":
+        expected_winners.append("v_next")
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (160.0 if expected_outcome == "KEEP" else 180.0)
-    assert all("--incomplete-flag" not in row["extra_server_args"] for row in out["winners"])
+    assert out["running_base_tput"] == (160.0 if expected_outcome == "KEEP" else expected_base)
 
 
 @pytest.mark.asyncio
@@ -757,7 +775,11 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
     assert tested["status"] == "succeeded"
     assert tested["outcome"] == expected_outcome
     assert tested["graded_objective"] == "output_throughput"
-    assert tested["gain_pct"] == pytest.approx((output / 200.0 - 1.0) * 100.0)
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / 200.0 - 1.0) * 100.0)
+    else:
+        assert tested["gain_pct"] is None
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
     assert bool(out["winners"]) is (expected_outcome == "KEEP")
     assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
 

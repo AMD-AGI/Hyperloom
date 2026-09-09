@@ -458,21 +458,21 @@ async def test_promote_integrate_patch_carries_nested_launch_evidence(session_di
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lane", ["fusion", "integrate_patch"])
-@pytest.mark.parametrize("vetoed", [False, True], ids=["total_win_output_drop", "intvty_veto"])
+@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win_output_drop", "intvty_regression"])
 async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monkeypatch, lane, vetoed):
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     coord = _coord(session_dir)
     s = coord.shared_state
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "intvty_p90": 100.0}
+    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
     anchor = {
         "action": "explore",
         "tput": 100.0,
         "total_throughput": 1100.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 110.0,
         "extra_server_args": "",
         "extra_envs": {},
     }
@@ -485,7 +485,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "output_throughput": 90.0,
         "total_token_throughput": 1200.0,
         "input_throughput": 1110.0,
-        "intvty_p90": 50.0 if vetoed else 100.0,
+        "e2e_norm_intvty_p90": 50.0 if vetoed else 120.0,
         "tpot_p90_ms": 10.0,
         "ttft_mean_ms": 12.0,
         "e2el_mean_ms": 23.0,
@@ -512,7 +512,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "new_tput": 9999.0,
         "total_throughput": 2000.0,
         "input_throughput": 1860.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 100.0,
         "tpot_p90_ms": 99.0,
         "ttft_mean_ms": 99.0,
         "e2el_mean_ms": 99.0,
@@ -562,7 +562,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     assert s.current_best["tput"] == 90.0
     assert s.current_best["total_throughput"] == 1200.0
     assert s.current_best["input_throughput"] == 1110.0
-    assert s.current_best["intvty_p90"] == 100.0
+    assert s.current_best["e2e_norm_intvty_p90"] == 120.0
     assert s.cumulative_gain_validated == pytest.approx(20.0)
     assert s.cumulative_gain_validated_stack_len == 1
     assert len(s.optimization_stack) == 1
@@ -777,6 +777,10 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     s.benchmark_mode = benchmark_mode
     s.baseline_tput = 0.0
     s.pending_integrate = {"task_id": "t-enable"}
+    validate = Mock()
+    watermark = AsyncMock()
+    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", validate)
+    monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
 
     await coord._promote_to_shared_state(
         "integrate_patch",
@@ -810,6 +814,8 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     assert s.cumulative_gain_validated == 0.0
     assert s.cumulative_gain_validated_stack_len == 0
     assert s.pending_integrate == {}
+    validate.assert_not_called()
+    watermark.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1832,20 +1838,20 @@ def test_lift_accepts_winner_that_beats_current_best(session_dir):
 class TestWritebackRequiredAxes:
     @pytest.fixture
     def coord(self, session_dir, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
         monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
         coord = _coord(session_dir)
         state = coord.shared_state
         state.framework = "sglang"
         state.benchmark_mode = "agentx"
         state.baseline_tput = 100.0
-        state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "intvty_p90": 100.0}
+        state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
         state.current_best = {
             "action": "explore",
             "variant_name": "prior",
             "tput": 120.0,
             "total_throughput": 1200.0,
-            "intvty_p90": 100.0,
+            "e2e_norm_intvty_p90": 120.0,
             "extra_server_args": "--page-size 16",
             "extra_envs": {"PRIOR_ENV": "1"},
         }
@@ -1873,7 +1879,7 @@ class TestWritebackRequiredAxes:
             "output_throughput": 150.0,
             "tput": 150.0,
             "total_throughput": 1600.0,
-            "intvty_p90": 100.0,
+            "e2e_norm_intvty_p90": 150.0,
             "extra_server_args": "--page-size 32",
             "extra_envs": {"NEXT_ENV": "1"},
             "unset_envs": ["PRIOR_ENV"],
@@ -1894,7 +1900,7 @@ class TestWritebackRequiredAxes:
         )
 
     @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
-    @pytest.mark.parametrize("axis", ["total_throughput", "intvty_p90"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_lift_refuses_missing_required_axes_without_mutation(self, coord, missing_from, axis):
         state = coord.shared_state
         candidate = self._candidate()
@@ -1918,7 +1924,7 @@ class TestWritebackRequiredAxes:
         assert state.to_dict() == before
         assert candidate == original_candidate
 
-    @pytest.mark.parametrize("axis", ["total_throughput", "intvty_p90"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_prebaseline_markers_cannot_bypass_measured_baseline(self, coord, axis):
         state = coord.shared_state
         candidate = self._candidate()
@@ -1934,7 +1940,7 @@ class TestWritebackRequiredAxes:
         assert candidate == original_candidate
 
     @pytest.mark.parametrize("missing_from", ["candidate", "baseline"])
-    @pytest.mark.parametrize("axis", ["total_throughput", "intvty_p90"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_cumulative_missing_required_axes_preserves_validation(self, coord, monkeypatch, missing_from, axis):
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -1957,7 +1963,7 @@ class TestWritebackRequiredAxes:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("lane", ["integrate", "integrate_patch", "explore"])
-    @pytest.mark.parametrize("axis", ["total_throughput", "intvty_p90"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     async def test_complete_local_winner_with_missing_baseline_axes_skips_validation(
         self, coord, monkeypatch, lane, axis
     ):
@@ -2014,6 +2020,7 @@ class TestWritebackRequiredAxes:
         assert state.current_best["variant_name"] == "next"
         assert state.current_best["tput"] == 150.0
         assert state.current_best["total_throughput"] == 1600.0
+        assert state.current_best["e2e_norm_intvty_p90"] == 150.0
         assert state.current_best["extra_server_args"] == "--page-size 32"
         assert state.current_best["extra_envs"]["NEXT_ENV"] == "1"
         assert len(state.optimization_stack) == 2
@@ -2030,7 +2037,7 @@ class TestWritebackRequiredAxes:
         watermark.assert_not_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("axis", ["total_throughput", "intvty_p90"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     async def test_incomparable_resume_revalidation_remains_pending(self, coord, monkeypatch, axis):
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2058,13 +2065,13 @@ class TestWritebackRequiredAxes:
         assert state.optimization_stack == prior_stack
         record.assert_not_called()
 
-    def test_explicit_output_without_composite_axes_still_lifts_and_validates(self, coord, monkeypatch):
+    def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         state = coord.shared_state
         candidate = self._candidate()
-        for axis in ("total_throughput", "intvty_p90"):
+        for axis in ("total_throughput", "e2e_norm_intvty_p90"):
             state.baseline_perf.pop(axis)
             state.current_best.pop(axis)
             candidate.pop(axis)
@@ -2178,30 +2185,30 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "last_tput,last_total,rejected",
-    [(130.0, 1250.0, False), (90.0, 1250.0, False), (140.0, 1150.0, True)],
-    ids=["last_winner_total", "last_winner_output_drop", "last_duplicate_rejected"],
+    "last_tput,last_total,last_intvty,rejected",
+    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, False), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_winner_output_drop", "last_duplicate_recorded"],
 )
 async def test_promote_explore_cumulative_uses_last_lifted_measurement(
-    session_dir, monkeypatch, last_tput, last_total, rejected
+    session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected
 ):
     """Cumulative validation must use the last successful lift's own measurement."""
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     coord = _coord(session_dir)
     s = coord.shared_state
     s.framework = "sglang"
     s.benchmark_mode = "agentx"
     s.baseline_tput = 100.0
-    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "intvty_p90": 100.0}
-    s.current_best = {"action": "baseline", "tput": 100.0, "total_throughput": 1000.0, "intvty_p90": 100.0}
+    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.current_best = {"action": "baseline", "tput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
     first = {
         "name": "first",
         "fingerprint": "fp_first",
         "tput": 120.0,
         "total_throughput": 1200.0,
         "input_throughput": 1080.0,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": 120.0,
         "tpot_p90_ms": 10.0,
         "gain_pct": 20.0,
         "candidate_extra_server_args": "--flag-a 1",
@@ -2216,7 +2223,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "tput": last_tput,
         "total_throughput": last_total,
         "input_throughput": last_total - last_tput,
-        "intvty_p90": 100.0,
+        "e2e_norm_intvty_p90": last_intvty,
         "tpot_p90_ms": 9.0,
         "gain_pct": 4.0,
         "candidate_extra_server_args": "--flag-b 2",
