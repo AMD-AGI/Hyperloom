@@ -214,8 +214,16 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
     return token
 
 
-def parse_log(text: str) -> dict[str, Any]:
-    """Parse a serving log into demands, an apply verdict and dispatch facts."""
+def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
+    """Parse a serving log into demands, an apply verdict and dispatch facts.
+
+    Args:
+        text: The serving log.
+        hit_logging: Whether ``AITER_LOG_TUNED_CONFIG`` was on for the run that
+            wrote this log. ``None`` means unknown, which keeps a zero-hit
+            result ``inconclusive_no_hit_logging``; ``True`` resolves it to
+            ``zero_hit``. A caller that set the variable itself should say so.
+    """
     demands: dict[str, Demand] = {}
     key_counts: dict[str, dict[tuple, int]] = {}
     hits = 0
@@ -380,7 +388,7 @@ def parse_log(text: str) -> dict[str, Any]:
             "hit": hits,
             "miss": misses,
             "hit_ratio": (hits / total) if total else None,
-            "verdict": _apply_verdict(hits, misses),
+            "verdict": _apply_verdict(hits, misses, hit_logging),
         },
         "merged_tables": sorted(set(merged)),
         "consulted_tables": sorted(consulted),
@@ -391,23 +399,26 @@ def parse_log(text: str) -> dict[str, Any]:
     }
 
 
-def _apply_verdict(hits: int, misses: int) -> str:
+def _apply_verdict(hits: int, misses: int, hit_logging: bool | None = None) -> str:
     if hits == 0 and misses > 0:
-        # Hit lines need AITER_LOG_TUNED_CONFIG=1.
-        return "inconclusive_no_hit_logging"
+        # Hit lines need AITER_LOG_TUNED_CONFIG=1; miss lines are unconditional.
+        # From the counts alone "flag off" and "flag on, nothing matched" look
+        # identical, so stay inconclusive unless the caller set the flag itself.
+        # Matches ``apply_verification.verify_applied``'s ``zero_hit``.
+        return "zero_hit" if hit_logging else "inconclusive_no_hit_logging"
     if hits == 0 and misses == 0:
         return "no_lookups"
     return "served" if hits > 0 else "unknown"
 
 
-def parse_log_file(path: Path | str) -> dict[str, Any]:
+def parse_log_file(path: Path | str, *, hit_logging: bool | None = None) -> dict[str, Any]:
     """Parse a log file; a missing/unreadable file yields an empty report."""
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         log.warning("cannot read serving log %s: %s", path, exc)
-        return parse_log("")
-    return parse_log(text)
+        return parse_log("", hit_logging=hit_logging)
+    return parse_log(text, hit_logging=hit_logging)
 
 
 def load_demand(path: Path | str) -> dict[str, Any] | None:
@@ -455,7 +466,28 @@ def demand_shapes(
     limit: int | None = None,
     bucket: bool = True,
 ) -> list[dict[str, Any]]:
-    """Requested keys for one table, most-requested first."""
+    """Requested keys for one table, most-requested first.
+
+    **What ``requests`` can and cannot rank.** It counts *log lines*, and the
+    lookup is memoized (``get_CKGEMM_config`` is ``functools.lru_cache``-d), so
+    a shape is logged once per process however often its kernel runs. Summing
+    per bucket therefore measures how many distinct M happen to fall inside the
+    bucket -- and ``padded_m`` buckets double in width, so wide high-M buckets
+    accumulate hundreds of raw keys while a narrow decode bucket accumulates the
+    handful of batch sizes the scheduler used. Measured on a Qwen3-14B-FP8
+    sglang arm: bucket M=2048 summed 551 requests from 391 raw M and ranked 1st,
+    while every decode bucket summed 1-2 and ranked 33rd-56th of 56; a budget of
+    14 then cut the band entirely and the prefill-only table won +1.30% e2e and
+    was reverted.
+
+    So this ordering is sound for the *prefill* tail but must never decide
+    whether the decode band is tuned at all -- callers guarantee that band from
+    the concurrency contract instead, in
+    ``tuners._aiter_dense_common._ensure_decode_m_coverage``. The measurement
+    once quoted here ("share of logged misses served": 95.6% at budget 24) is
+    the same log-line metric, so it cannot see this failure and must not be read
+    as coverage of GPU time.
+    """
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
         m, n, k = _as_int(key.get("M")), _as_int(key.get("N")), _as_int(key.get("K"))
