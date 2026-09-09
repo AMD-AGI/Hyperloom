@@ -62,32 +62,6 @@ def _integrate_state(kernel_id: str, decision: str, gain: float | None = None) -
 # Capability counting
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Fragment identity
 
 
@@ -180,16 +154,6 @@ def test_fragment_written_under_the_old_name_keeps_that_name(tmp_path: Path) -> 
 
 
 # Timeline de-duplication
-
-
-
-
-
-
-
-
-
-
 
 
 # Skipped-section evidence

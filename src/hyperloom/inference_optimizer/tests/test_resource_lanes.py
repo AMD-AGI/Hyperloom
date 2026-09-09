@@ -631,12 +631,6 @@ def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
     return session_dir, db
 
 
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_concurrent_acquires_respect_capacity(conn, locks):
     """Three async acquires racing for capacity=2; exactly one fails."""

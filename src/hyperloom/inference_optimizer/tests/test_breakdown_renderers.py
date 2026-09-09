@@ -182,9 +182,7 @@ def test_kernel_lifecycle_selected_but_no_lane_stall():
 
 
 def test_kernel_lifecycle_no_decisions_not_attempted():
-    out = kl.render(
-        {"timeline": [_kernel_event(forge={"discovered_kernels": [{"kernel_id": "k1", "name": "x"}]})]}
-    )
+    out = kl.render({"timeline": [_kernel_event(forge={"discovered_kernels": [{"kernel_id": "k1", "name": "x"}]})]})
 
     assert any(d.kind == "not_attempted" for d in out.decisions)
 

@@ -428,15 +428,15 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
             "target_file": "vllm/attention.py",
             "error_class": None,
             "rejected_reason": None,
-                "retryable": False,
-                "settled_at": "2026-09-02T00:20:00",
-                "settled_in_macro_cycle": 3,
-                "extra_server_args": None,
-                "basis": None,
-                "alignment_status": None,
-                "gain_attributed": None,
-            }
-        ]
+            "retryable": False,
+            "settled_at": "2026-09-02T00:20:00",
+            "settled_in_macro_cycle": 3,
+            "extra_server_args": None,
+            "basis": None,
+            "alignment_status": None,
+            "gain_attributed": None,
+        }
+    ]
     # And the same verdict reaches the row it ruled on, joined by kernel_id.
     assert ext["forge"]["lanes"]["kernel_rewrites"][0]["e2e"] == {
         "integrated": True,

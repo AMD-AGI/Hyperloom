@@ -43,14 +43,6 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
 def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
     result = {
         "accepted_kernels": [
@@ -62,12 +54,6 @@ def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
         "kernel_a",
         "kernel_b",
     ]
-
-
-
-
-
-
 
 
 def _acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -153,20 +139,6 @@ def test_cand_tag_recognises_slot_tags_only() -> None:
 # --------------------------------------------------------------------------
 # B3 — one admission test, shared with the ledger
 # --------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # --------------------------------------------------------------------------

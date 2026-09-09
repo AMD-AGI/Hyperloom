@@ -191,5 +191,3 @@ def test_tool_version_probe_cmd_and_dist() -> None:
     # dist strategy resolves an installed package and rejects a bogus name.
     assert tool_versions._dist_version(("pytest",))
     assert tool_versions._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
-
-

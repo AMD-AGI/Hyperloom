@@ -219,14 +219,6 @@ def test_an_unproven_overlay_records_the_row_without_a_gain() -> None:
     assert entry["attempts"][0]["decision"] == "UNATTRIBUTED"
 
 
-
-
-
-
-
-
-
-
 def test_two_kernels_on_one_rebench_share_no_invented_split() -> None:
     phase = _phase()
     result = {

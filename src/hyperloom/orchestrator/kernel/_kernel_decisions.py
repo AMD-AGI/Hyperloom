@@ -28,7 +28,6 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
-from ._recorder_trace import trace_recording_skipped
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
     VERDICT_STATUSES,

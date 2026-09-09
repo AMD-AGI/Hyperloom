@@ -573,8 +573,7 @@ def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch)
         (event["type"], event["status"], event["ext"]["run_kind"]) for event in read_timeline_events(tmp_path)
     ] == expected
     assert [
-        (event["type"], event["status"], event["ext"]["run_kind"])
-        for event in collect_v6_timeline(tmp_path, [])
+        (event["type"], event["status"], event["ext"]["run_kind"]) for event in collect_v6_timeline(tmp_path, [])
     ] == expected
     latest_gate = read_timeline_event(tmp_path, "model_gate")
     assert latest_gate is not None

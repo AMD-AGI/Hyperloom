@@ -571,14 +571,14 @@ async def test_wall_clock_closing_stops_rebench_and_settles(coordinator) -> None
     assert st.resume_pending_revalidation is False
 
 
-def _render_final(geak_candidate: dict, *, rebench: dict | None = None, claim: dict | None = None) -> tuple[list[str], list[str]]:
+def _render_final(
+    geak_candidate: dict, *, rebench: dict | None = None, claim: dict | None = None
+) -> tuple[list[str], list[str]]:
     from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
 
     timeline = []
     if rebench is not None or claim is not None:
-        timeline.append(
-            {"type": "kernel", "ext": {"geak": {"rebench": rebench or {}, "claim": claim or {}}}}
-        )
+        timeline.append({"type": "kernel", "ext": {"geak": {"rebench": rebench or {}, "claim": claim or {}}}})
     section = render(
         {
             "outcome": {

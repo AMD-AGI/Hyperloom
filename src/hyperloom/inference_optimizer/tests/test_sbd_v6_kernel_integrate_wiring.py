@@ -101,9 +101,7 @@ def test_the_adoptions_server_args_reach_the_verdict_that_carried_them(tmp_path:
     """The stack entry an adoption introduces is part of what the gate kept."""
     _visited_kernel(macro_cycle=2)
 
-    _state(macro_cycle=2).record_kernel_integrate_result(
-        _result(extra_server_args="--enable-chunked-prefill")
-    )
+    _state(macro_cycle=2).record_kernel_integrate_result(_result(extra_server_args="--enable-chunked-prefill"))
 
     assert _integrate_rows(tmp_path)[0]["extra_server_args"] == "--enable-chunked-prefill"
 

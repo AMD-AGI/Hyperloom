@@ -97,8 +97,6 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
-
-
 # ---- write_breakdown_json ----
 
 
@@ -339,10 +337,6 @@ def _write_checkpoint_events(session_dir: Path, levels: list[int], *, degenerate
         conn.commit()
     finally:
         conn.close()
-
-
-
-
 
 
 def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
@@ -694,8 +688,6 @@ def test_the_merged_section_measures_its_own_elapsed_time():
 
 
 # ---- every collector is isolated ----
-
-
 
 
 def test_collector_arguments_are_evaluated_inside_the_isolation():
