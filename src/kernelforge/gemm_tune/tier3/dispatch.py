@@ -23,6 +23,64 @@ MAX_RELATIVE_ERROR = 5e-2
 # Tables this module knows how to exercise.
 SUPPORTED_TABLES = ("bf16_tuned_gemm.csv",)
 
+#: What ``_Bf16DenseAdapter._build`` will accept, backend by backend.
+#:
+#: Load-bearing, not documentation: ``_build`` refuses a backend that is not a
+#: key here, and :func:`describe_candidate_protocol` renders it into the
+#: mandate. So the vocabulary the author is given and the vocabulary the referee
+#: understands are the same object, and cannot drift apart silently.
+#:
+#: They *had* drifted, in the only direction that matters. The mandate asked for
+#: candidates "carrying enough detail to be dispatched by code that did not
+#: write your script" and then never said what that code reads. Nothing named
+#: the five backends, the ``k=v;k=v`` grammar, or the fact that the keys of
+#: ``candidates.json`` are parsed as ``MxNxK``. An author working from the
+#: mandate alone -- which is the entire premise -- would have had to guess all
+#: three, and every wrong guess is recorded as "not dispatchable": the gate
+#: opens, the search runs, and nothing can possibly be re-timed.
+DENSE_BF16_BACKENDS: dict[str, str] = {
+    "torch": "the unmodified path, `torch.matmul(a, b.t())`. No config. Propose it only as a control.",
+    "hipblaslt": (
+        "`solidx=<int>` (required). Must be an index hipBLASLt itself offers for these exact "
+        "operands -- `aiter.hipb_findallsols` after `aiter.hipb_create_extension` is the "
+        "authoritative list. An invented index is refused, because running one kills the process."
+    ),
+    "aiter_asm": "`kernelName=<str>` (required), `splitK=<int>` (default 0).",
+    "aiter_opus": "`kernelId=<int>` (required), `splitK=<int>` (default 1).",
+    "aiter_flydsl": (
+        "`tile_m`, `tile_n`, `tile_k`, `split_k` (default 1), `block_m_warps`/`block_n_warps`/"
+        "`block_k_warps` (default 1), `stages` (default 4), `async_copy`/`b_to_lds` (default True)."
+    ),
+}
+
+
+def describe_candidate_protocol(table: str) -> str:
+    """How to write a candidate this module can actually dispatch, or "".
+
+    Empty for a table with no adapter, which is the same answer
+    :func:`adapters_for` gives: there is no protocol to describe because
+    nothing would re-time the result anyway.
+    """
+    if table != "bf16_tuned_gemm.csv":
+        return ""
+    backends = "\n".join(f"- `{name}` -- {detail}" for name, detail in DENSE_BF16_BACKENDS.items())
+    return (
+        "Each candidate is an object with a `backend` and a `config`, and the shape it belongs\n"
+        'to is the key it is filed under, written `MxNxK` -- `"8192x3456x1152"`, matching the\n'
+        "M, N and K columns of the same row in the CSV. `config` is `key=value` pairs joined by\n"
+        "`;` (never a comma); values that look like integers or `True`/`False` are read as such.\n"
+        "\n"
+        "These are the backends that can be re-dispatched, and the keys each one reads.\n"
+        "A candidate naming anything else, or omitting a required key, is recorded as not\n"
+        "dispatchable and cannot win -- so a well-measured candidate described in some other\n"
+        "vocabulary is worth exactly nothing here.\n"
+        "\n" + backends + "\n"
+        "\n"
+        "Anything the harness cannot re-dispatch is still worth reporting in the CSV; it just\n"
+        "cannot be promoted. If the only axis you find is unreachable through these backends,\n"
+        "say so plainly -- that is a real finding about this hardware, not a failure."
+    )
+
 
 def adapters_for(table: str) -> Any | None:
     """Return the dispatch adapter for a table, or None if we have none."""
@@ -181,11 +239,23 @@ class _Bf16DenseAdapter:
         return self._hipb_sols[key]
 
     def _build(self, key: tuple[int, int, int], cand: dict[str, Any]) -> Callable[[], Any] | None:
-        """One candidate as a callable, or None when we cannot dispatch it."""
+        """One candidate as a callable, or None when we cannot dispatch it.
+
+        None is recorded by the referee as "not dispatchable", which is a result
+        worth having; approximating what the candidate meant is not.
+        """
+        backend = str(cand.get("backend", ""))
+        if backend not in DENSE_BF16_BACKENDS:
+            # Checked against the same table the mandate is rendered from, so
+            # "the author was told about it" and "we can run it" are one fact.
+            # First, before aiter or the operands: a name we never offered is
+            # refused on paper, without allocating or importing anything.
+            log.info("tier3: unknown backend %r in a candidate", backend)
+            return None
+
         import aiter
 
         torch = self._torch()
-        backend = str(cand.get("backend", ""))
         cfg = parse_config(cand.get("config", ""))
         m, n, _k = key
         a, b = self._ops(key)
@@ -253,7 +323,9 @@ class _Bf16DenseAdapter:
             log.info("tier3: cannot dispatch %s: %r", backend, exc)
             return None
 
-        log.info("tier3: unknown backend %r in a candidate", backend)
+        # Declared above but not built here: a gap in this module, not in the
+        # candidate. Named as such so it is not mistaken for a bad proposal.
+        log.warning("tier3: backend %r is advertised in the mandate but not implemented", backend)
         return None
 
     def _is_correct(self, key: tuple[int, int, int], cand: dict[str, Any]) -> bool:

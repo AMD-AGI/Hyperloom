@@ -1,7 +1,37 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The brief handed to whoever writes a generated tuner."""
+"""The brief handed to whoever writes a generated tuner.
+
+Five things, because a tuner cannot be written without any of them: the output
+contract, the demand it must cover, why the existing tiers did not, the shape a
+candidate has to take to be re-dispatchable, and a skeleton that already runs on
+this hardware.
+
+The fourth was missing for as long as this tier existed, and it made the others
+moot. The brief asked for candidates "carrying enough detail to be dispatched by
+code that did not write your script" without saying what that code reads, so an
+author following it exactly proposed configurations in a vocabulary
+:mod:`.dispatch` does not parse -- every one recorded as "not dispatchable". It
+now comes from ``dispatch.describe_candidate_protocol``, so the words the author
+is given are generated from the code that reads them back.
+
+Three clauses are not style preferences. On the first real MI355X trial both an
+LLM-written tuner and aiter's own official tuner were confidently wrong the same
+two ways. Correctness must be re-checked on fresh inputs several times: four
+split-K winners were wrong on 1.25-3.98% of elements, and *which* elements
+changed between identical calls, so a single check passes them at random -- the
+generated tuner reported a worst-case relative error of 7.65e-3 for candidates a
+repeated audit measured at 17 to 50. A Python-loop timer cannot rank these
+kernels: one dispatch costs ~12us against kernels of 5-13us, so every candidate
+collapses to the same number and the honest conclusion from that data was "there
+is nothing to tune here"; capturing N calls into a graph removes the host cost.
+And its own timings decide nothing -- :mod:`.referee` re-times everything, which
+is what makes the rest survivable.
+
+The mandate is data. Rendering it as text is a convenience; the fields are what
+downstream code checks against.
+"""
 
 from __future__ import annotations
 
@@ -36,6 +66,7 @@ class TunerMandate:
     gpu: str = ""
     framework: str = ""
     dtype_note: str = ""
+    candidate_protocol: str = ""
     reference_skeleton: str = ""
     budget_seconds: int = 1500
     output_csv: str = "/tmp/generated_tuner/out.csv"
@@ -57,6 +88,7 @@ class TunerMandate:
             "gpu": self.gpu,
             "framework": self.framework,
             "dtype_note": self.dtype_note,
+            "candidate_protocol": self.candidate_protocol,
             "budget_seconds": self.budget_seconds,
             "output_csv": self.output_csv,
             "candidates_json": self.candidates_json,
@@ -81,6 +113,12 @@ class TunerMandate:
             candidates_json=self.candidates_json,
             top_k=self.max_candidates_per_shape,
             why=self.why_existing_tiers_failed,
+            protocol=self.candidate_protocol
+            or (
+                "Nothing on this box knows how to re-dispatch a candidate for this table, so\n"
+                "describe each one however is clearest and expect the result to be reported\n"
+                "rather than promoted."
+            ),
             trials=CORRECTNESS_TRIALS,
             max_rel=MAX_RELATIVE_ERROR,
             max_rel_def=MAX_RELATIVE_ERROR_DEFINITION,
@@ -117,9 +155,11 @@ Write `{output_csv}` with exactly this header:
   candidate; `improved` is True when tuned_us < default_us.
 - Emit one row per shape even when nothing beat the default.
 
-Also write `{candidates_json}`: for each shape, up to {top_k} candidates ranked
-best first, each carrying enough detail to be dispatched by code that did not
-write your script.
+Also write `{candidates_json}`: a JSON object mapping each shape to up to {top_k}
+candidates, ranked best first. This file is the only part of your work that can
+be promoted, because the harness re-times what is in it and nothing else.
+
+{protocol}
 
 ## Correctness
 Check every candidate against a reference implementation {trials} times, on
@@ -167,18 +207,31 @@ def build_mandate(
     gpu: str = "",
     framework: str = "",
     dtype_note: str = "",
+    candidate_protocol: str | None = None,
     reference_skeleton: str = "",
     budget_seconds: int = 1500,
 ) -> TunerMandate:
-    """Turn a coverage gap plus its demanded shapes into a mandate."""
+    """Turn a coverage gap plus its demanded shapes into a mandate.
+
+    ``candidate_protocol`` defaults to whatever the dispatch adapter for this
+    table says it can run, rather than to nothing: the author has no other way
+    to learn it, and a candidate the referee cannot re-dispatch is unpromotable
+    however well it was measured.
+    """
+    table = str(getattr(gap, "table", "") or "")
+    if candidate_protocol is None:
+        from .dispatch import describe_candidate_protocol
+
+        candidate_protocol = describe_candidate_protocol(table)
     return TunerMandate(
-        table=str(getattr(gap, "table", "") or ""),
+        table=table,
         key_schema=list(getattr(gap, "key_schema", []) or []),
         demand_shapes=list(demand_shapes),
         why_existing_tiers_failed=str(getattr(gap, "reason", "") or ""),
         gpu=gpu,
         framework=framework,
         dtype_note=dtype_note,
+        candidate_protocol=candidate_protocol,
         reference_skeleton=reference_skeleton,
         budget_seconds=budget_seconds,
     )
