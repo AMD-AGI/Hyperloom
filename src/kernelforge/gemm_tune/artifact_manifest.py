@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""TuningArtifactManifest: the provenance + coverage record shipped with a
-tuned CSV (P0-A / WP-4).
-
-A tuned CSV is only reusable under the exact conditions it was produced. This
-manifest pins those conditions so a downstream consumer (Hyperloom engagement /
-E2E gate) can decide reuse-vs-stale and prove how much of the target GEMM time
-the artifact actually covers, instead of applying a bare CSV by model name.
-
-Records: tool/version + generation time, tuning provenance (gpu/dtype/quant/tp/
-lib), the source TraceShapeManifest linkage (trace/capture hashes, graph
-variants, manifest hash), per-tuner micro results + CSV sha256, a weighted
-ShapeCoverageFactor, and invalidation keys. Pure stdlib; unit-testable.
-"""
+"""TuningArtifactManifest: the provenance + coverage record shipped with a tuned CSV (P0-A / WP-4)."""
 
 from __future__ import annotations
 
@@ -28,11 +16,7 @@ TUNING_ARTIFACT_SCHEMA_VERSION = 1
 
 
 def _source_manifest_block(shape_manifest_path: str | Path | None) -> tuple[dict[str, Any], dict | None]:
-    """Return (source_manifest_block, loaded_manifest_or_None).
-
-    Loads the input TraceShapeManifest (if supplied) for trace provenance and
-    coverage denominators; degrades to ``{"present": False}`` on absence/error.
-    """
+    """Return (source_manifest_block, loaded_manifest_or_None)."""
     if not shape_manifest_path:
         return {"present": False}, None
     try:
@@ -55,13 +39,7 @@ def _source_manifest_block(shape_manifest_path: str | Path | None) -> tuple[dict
 
 
 def _coverage_block(manifest: dict | None, results: list) -> dict[str, Any]:
-    """Weighted ShapeCoverageFactor = improved-target GEMM weight / total target
-    GEMM weight, using the source manifest's per-(M,N,K) steady-state weights.
-
-    "Covered" = a shape the tuner actually improved (i.e. produced an applicable
-    tuned config); a no-improvement shape keeps the default and is not counted.
-    Returns nulls (not a fabricated number) when no source manifest is present.
-    """
+    """Weighted ShapeCoverageFactor = improved-target GEMM weight / total target GEMM weight, using the source manifest's per-(M,N,K) steady-state weights."""
     if manifest is None:
         return {"shape_coverage_factor": None, "note": "no source manifest supplied"}
     shapes = _sm.manifest_to_shapes(manifest, target_only=True)
@@ -117,9 +95,8 @@ def build_artifact_manifest(
 
     return {
         "schema_version": TUNING_ARTIFACT_SCHEMA_VERSION,
-        # Stable artifact identifier, deliberately not renamed when the tuner
-        # folded into the one forge CLI: it keys already-written manifests, and
-        # the invocation it once named is recorded by "version" + schema_version.
+        # Stable artifact identifier, deliberately not renamed when the tuner folded into the one forge CLI: it keys
+        # already-written manifests, and the invocation it once named is recorded by "version" + schema_version.
         "tool": "forge-gemm-tune",
         "version": __version__,
         "generated_at": generated_at,

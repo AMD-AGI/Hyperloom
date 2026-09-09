@@ -75,9 +75,7 @@ def _ctx(crash_count: int = 0) -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
 # Happy path
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -106,9 +104,7 @@ async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path
     assert row["intents"][0]["intent_type"] == "alert"
 
 
-# ---------------------------------------------------------------------------
 # DegradeRouter integration
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -121,9 +117,7 @@ async def test_reactor_returns_empty_data_when_primary_fails(tmp_path: Path):
     assert any(i.type is IntentType.SEND_MESSAGE and i.payload.get("topic") == "heartbeat" for i in intents)
 
 
-# ---------------------------------------------------------------------------
 # Policy filtering
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -150,9 +144,7 @@ async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path
     assert all(i.payload.get("severity") for i in intents if i.type is IntentType.ALERT)
 
 
-# ---------------------------------------------------------------------------
 # FindingSink unit tests (folded in from test_findings_sink.py)
-# ---------------------------------------------------------------------------
 
 
 def _finding(**overrides) -> Finding:

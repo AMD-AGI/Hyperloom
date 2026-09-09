@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Conversation no-progress circuit-breaker signal.
-
-Fires ``conversation_no_progress`` (HIGH) when the Coordinator reports a
-stalled orchestration conversation. Alert-only: the ladder attaches no
-recovery intent, so a stall never terminates the run on its own.
-"""
+"""Conversation no-progress circuit-breaker signal."""
 
 from __future__ import annotations
 
@@ -18,11 +13,7 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class ConversationProgressConfig:
-    """Tunables for :func:`evaluate_conversation_progress_signals`.
-
-    Attributes:
-        enabled (bool): Set to ``False`` to disable this signal entirely.
-    """
+    """Tunables for :func:`evaluate_conversation_progress_signals`."""
 
     enabled: bool = True
 
@@ -32,17 +23,7 @@ def evaluate_conversation_progress_signals(
     *,
     config: ConversationProgressConfig | None = None,
 ) -> list[Symptom]:
-    """Emit a HIGH symptom when the Coordinator reports a stalled conversation.
-
-    Args:
-        ctx (ReactorContext): Per-tick input carrying a
-            ``conversation_progress`` record parsed from the Coordinator prompt.
-        config (ConversationProgressConfig | None): Tunables; defaults to
-            :class:`ConversationProgressConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: At most one HIGH symptom per tick.
-    """
+    """Emit a HIGH symptom when the Coordinator reports a stalled conversation."""
     cfg = config or ConversationProgressConfig()
     if not cfg.enabled:
         return []

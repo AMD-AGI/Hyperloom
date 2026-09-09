@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for Coordinator pure/sync helper methods.
-
-Builds one Coordinator with mock backends and exercises the formatting / gap /
-fact / tag helpers directly, avoiding the async event loop."""
+"""Coverage for Coordinator pure/sync helper methods."""
 
 from __future__ import annotations
 
@@ -565,11 +562,7 @@ def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
 
 
 def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coordinator) -> None:
-    """Selection is linear: the discovery specialist already ranked the batch.
-
-    Re-ranking here would overrule a judgement made with the gap and the
-    tried-ledger in view, using less context than the specialist had.
-    """
+    """Selection is linear: the discovery specialist already ranked the batch."""
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []

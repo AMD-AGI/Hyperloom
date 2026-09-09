@@ -1,39 +1,5 @@
 #!/usr/bin/env python3
-"""Self-contained on-demand rocprof-compute profiling for a GPU kernel.
-
-Runs ROCm Compute Profiler (`rocprof-compute`) on a driver command and prints its
-Top-Stats + System Speed-of-Light (and, with --roofline, the empirical roofline)
-tables, plus where the raw counters landed. You then classify the bottleneck by
-reading `measure_triage.md` + `measure_roofline.md` in this folder.
-
-Design notes (why it looks like this):
-  * SELF-CONTAINED: stdlib only. It does NOT import any project package, so it
-    keeps working regardless of changes elsewhere in the repo. It only shells out
-    to the supported `rocprof-compute` CLI.
-  * ZERO-CONFIG availability: rocprof-compute needs its own Python deps — installed
-    by the `[forge-profiling]` extra (`pip install -e ".[forge-profiling]"`), or by
-    rocprof-compute's requirements.txt. This script AUTO-DETECTS an interpreter
-    that can run the CLI — the current interpreter, the system /usr/bin/python3,
-    then `python3` on PATH — and runs the profiler under the first that works. If
-    none can, it prints an "unavailable" notice and SKIPS (exit 3); there is no env
-    var or hand-built venv to configure.
-  * DIRECT CLI: it invokes `rocprof-compute` as a subprocess (which isolates its
-    sys.exit/global state) and never patches the shared /opt/rocm install. The
-    profiled command runs under the CURRENT python (your kernel/torch env).
-  * GENERIC: no kernel name, output layout, or bottleneck rule is baked in. It
-    prints the profiler's own tables for you to interpret.
-
-Usage:
-    python3 rocpc_profile.py --driver <driver.py> [--roofline]
-                             [--kernel <index>] [--out DIR]
-
-  --driver   driver/harness that runs the kernel (e.g. forge_driver.py). REQUIRED.
-  --roofline also build the empirical roofline (AI + distance-to-roof); one-time ~70s microbench.
-  --kernel   isolate ONE kernel by its index from the "Top Stats" table (default: show all + aggregate).
-  --out      dir to keep the raw workload/counters in (default: ./forge_profile).
-
-Env: ROCM_PATH (optional) — used only to locate rocprofiler-compute if not at /opt/rocm.
-"""
+"""Self-contained on-demand rocprof-compute profiling for a GPU kernel."""
 
 from __future__ import annotations
 
@@ -59,11 +25,7 @@ def _resolve_libexec() -> str | None:
 
 
 def _python_can_run_rocpc(python: str, libexec: str) -> bool:
-    """True iff `python` can run the rocprof-compute CLI.
-
-    A `rocprof-compute --help` under this interpreter runs the launcher's
-    verify_deps preflight first, so exit 0 confirms its deps are present.
-    """
+    """True iff `python` can run the rocprof-compute CLI."""
     try:
         p = subprocess.run(
             [python, os.path.join(libexec, "rocprof-compute"), "--help"],
@@ -87,17 +49,13 @@ def _detect_rocpc_python(libexec: str) -> str | None:
     return None
 
 
-# The in-flight rocprof-compute child, so an external SIGTERM (e.g. the agent's
-# Bash `timeout`) can reap its whole subtree instead of orphaning rocprofv3.
+# The in-flight rocprof-compute child, so an external SIGTERM (e.g. the agent's Bash `timeout`) can reap its whole
+# subtree instead of orphaning rocprofv3.
 _CURRENT_PROC = None
 
 
 def _descendant_pids(root_pid: int) -> list[int]:
-    """All descendant PIDs of ``root_pid`` via /proc PPID links (best-effort).
-
-    PPID links survive setsid, so this reaches the rocprofv3 + driver subtree that
-    rocprof-compute detaches into its own session. Returns [] on any error.
-    """
+    """All descendant PIDs of ``root_pid`` via /proc PPID links (best-effort)."""
     children: dict = {}
     try:
         entries = os.listdir("/proc")
@@ -126,12 +84,7 @@ def _descendant_pids(root_pid: int) -> list[int]:
 
 
 def _kill_tree(pid: int) -> None:
-    """SIGKILL a process, its whole descendant tree, and its process group.
-
-    rocprof-compute drives rocprofv3 (one per counter pass) which runs the driver;
-    those are detached into their own sessions, so a plain group kill misses them.
-    Kill the descendant tree (via /proc) + the group so nothing is orphaned.
-    """
+    """SIGKILL a process, its whole descendant tree, and its process group."""
     for p in _descendant_pids(pid):
         with contextlib.suppress(OSError):
             os.kill(p, signal.SIGKILL)
@@ -143,25 +96,14 @@ def _kill_tree(pid: int) -> None:
 
 
 def _on_terminate(signum, _frame):
-    """Reap the in-flight rocprof-compute subtree on external SIGTERM/SIGINT.
-
-    The agent runs this script under a Bash `timeout`; without this, a timeout
-    SIGTERM kills only this python and orphans the stuck rocprofv3 + driver, which
-    keep holding the GPU and block the caller's pipe read. Kill the whole subtree.
-    """
+    """Reap the in-flight rocprof-compute subtree on external SIGTERM/SIGINT."""
     if _CURRENT_PROC is not None:
         _kill_tree(_CURRENT_PROC.pid)
     os._exit(128 + signum)
 
 
 def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1200):
-    """Run the rocprof-compute CLI in a subprocess and capture output.
-
-    The child runs in its OWN session (setsid). On timeout (or an external
-    SIGTERM via :func:`_on_terminate`) the WHOLE descendant tree is SIGKILLed —
-    rocprof-compute detaches its rocprofv3 + driver into separate sessions, so a
-    plain group kill would orphan them and leave a process pinned to the GPU.
-    """
+    """Run the rocprof-compute CLI in a subprocess and capture output."""
     global _CURRENT_PROC
     cmd = [rocpc_python, os.path.join(libexec, "rocprof-compute"), *native]
     proc = subprocess.Popen(
@@ -192,8 +134,8 @@ def main() -> int:
     ap.add_argument("--out", default="", help="dir to keep the raw workload (default ./forge_profile)")
     a = ap.parse_args()
 
-    # Reap the rocprof-compute subtree if we're killed externally (the agent runs
-    # this under a Bash `timeout`), so a stuck rocprofv3 never orphans + poisons GPU.
+    # Reap the rocprof-compute subtree if we're killed externally (the agent runs this under a Bash `timeout`), so a
+    # stuck rocprofv3 never orphans + poisons GPU.
     signal.signal(signal.SIGTERM, _on_terminate)
     signal.signal(signal.SIGINT, _on_terminate)
 
@@ -214,19 +156,14 @@ def main() -> int:
     os.makedirs(out, exist_ok=True)
 
     # 1) profile: replay the driver to collect counters (+ roofline microbench if asked).
-    #    Without --roofline, restrict to the System-Speed-of-Light block (-b 2, the
-    #    block analyzed below): roughly halves the counter-replay passes and skips
-    #    instruction-level groups (e.g. SQ_INST_LEVEL_SMEM) that have intermittently
-    #    hung rocprofv3. NOTE -b also SKIPS the roofline microbench, so it is applied
-    #    only on the roofline-less path; --roofline keeps the full profile.
     prof = ["profile", "-n", "run"]
     if not a.roofline:
         prof += ["--no-roof", "-b", "2"]
     prof += ["--", driver_python, a.driver, "--profile-run"]
     rc, log = _run(rocpc_python, libexec, prof, cwd=out, timeout=1800)
     if rc != 0:
-        # Deps were already verified by _detect_rocpc_python, so a failure here is
-        # almost always the driver: it crashed or launched no GPU kernel.
+        # Deps were already verified by _detect_rocpc_python, so a failure here is almost always the driver: it
+        # crashed or launched no GPU kernel.
         print("PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
               "launched no GPU kernel — see its traceback in the tail below.")
         print("--- rocprof-compute output tail ---")

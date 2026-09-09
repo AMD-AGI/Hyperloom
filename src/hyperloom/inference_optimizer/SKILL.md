@@ -132,11 +132,15 @@ TraceLens is required by `_server_patcher`),
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
-Paths emitted by agents must resolve under the **session dir** — PolicyGate
-enforces this (with a framework-source allowlist for `source_file`:
-`/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
-`$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
-with defaults; auto-probed by `src/hyperloom/inference_optimizer/assets/install.sh`).
+Artefact paths emitted by agents must resolve under the **session dir**;
+PolicyGate enforces that. `source_file` and `framework_source_root` are exempt —
+they name framework source, which lives outside the session dir by construction,
+and where a patch may land is decided when `integrate_patch` applies it.
+`hyperloom.orchestrator.framework.paths.resolve_framework_tree` names the tree a
+session optimises and `resolve_kernel_search_roots` the trees worth searching;
+`$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` (colon-separated) supplements the
+latter and is auto-probed by
+`src/hyperloom/inference_optimizer/assets/install.sh`.
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 **session dir** over guessing from terminal logs.
@@ -400,8 +404,9 @@ brief:
   phase stays open on the other lever. **Both arms dry advances the phase**
   via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
   LLM may also emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive.
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it judges
+  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
+  the remaining budget and is reserved for genuine early abandonment.
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
@@ -998,7 +1003,7 @@ shell — set it when you resume a non-default session.
 `profile_atom.yaml`; the Magpie atom wrapper bridges `PROFILE=1` to
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
-are in PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo
+are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
 URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,

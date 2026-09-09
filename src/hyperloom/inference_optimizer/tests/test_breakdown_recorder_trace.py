@@ -57,21 +57,14 @@ def test_a_write_says_what_it_wrote_and_who_asked(tmp_path, traced):
     assert "section=measurements" in line
     assert "measurement_id=m-1" in line
     assert "outcome=created" in line
-    # Both sides of the SDK: the helper that built the payload, and the code
-    # that decided to record something.
+    # Both sides of the SDK: the helper that built the payload, and the code that decided to record something.
     assert "via=instrument.py:" in line
     assert "record_measurement" in line
     assert f"from={__file__.rsplit('/', 1)[-1]}:" in line
 
 
 def test_an_overwritten_reading_is_named_with_both_values(tmp_path, traced):
-    """The gemma overwrite, as it would have looked while it was happening.
-
-    A fragment id is stable per entity, so a second write of the same id merges
-    into the first. That is what lets a later re-measure land on the readings an
-    earlier decision was made on, and it is invisible in the archive that
-    results. Here it is a line saying so, at the moment it happens.
-    """
+    """The gemma overwrite, as it would have looked while it was happening."""
     for value in (5081.0100767, 5100.763142143991):
         record_measurement(tmp_path, measurement_id="m-final", name="final_throughput", value=value)
 
@@ -148,12 +141,7 @@ def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypa
 
 
 def test_a_credential_in_a_recorded_value_is_masked(tmp_path, traced):
-    """Producers record diagnostic text, and text is where credentials hide.
-
-    The values a merging write names are the ones worth reading in full, which
-    is exactly what makes this line the widest copy of whatever a producer put
-    in the payload.
-    """
+    """Producers record diagnostic text, and text is where credentials hide."""
     for detail in ("Authorization: Bearer tok-aaaaaaaaaaaa", "retry failed"):
         record_operation(tmp_path, operation_id="op-1", kind="integrate", error=detail)
 
@@ -180,11 +168,7 @@ def test_the_trace_level_stays_below_debug():
 
 
 def test_turning_the_trace_off_is_not_the_same_as_leaving_it_unset(tmp_path, caplog):
-    """Clearing the level hands the decision to whatever the root happens to be.
-
-    A root logger at NOTSET enables everything, so a caller that explicitly
-    asked for silence kept getting a firehose.
-    """
+    """Clearing the level hands the decision to whatever the root happens to be."""
     caplog.set_level(trace_mod.TRACE, logger=trace_mod.log.name)
     trace_mod.enable_trace(True)
     trace_mod.enable_trace(False)
@@ -260,12 +244,7 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):
-    """The recorder can only trace calls that arrive.
-
-    Producers call it from inside ``try`` blocks wider than the call itself, so
-    a failure in the import, the arguments, or a pre-condition means none of
-    the recorder's own guards ever rule and the loss is silent.
-    """
+    """The recorder can only trace calls that arrive."""
     trace_recording_skipped(
         "kernel_e2e",
         reason="caller raised before the recorder",
@@ -282,12 +261,7 @@ def test_a_call_that_never_reached_the_recorder_says_so(traced):
 
 
 def test_an_integrate_the_orchestrator_could_not_record_is_named(traced):
-    """The path a lost adoption actually takes out of the run.
-
-    ``record_kernel_e2e`` is called under a condition checked before the
-    recorder is reached, so on a KEEP with no session directory the adoption
-    that credits the integrate is never written and nothing rules on it.
-    """
+    """The path a lost adoption actually takes out of the run."""
 
     state = SharedState()
     assert state._session_dir is None
@@ -308,12 +282,7 @@ def test_an_integrate_the_orchestrator_could_not_record_is_named(traced):
 
 
 def test_a_keep_that_no_e2e_confirmed_is_not_mistaken_for_a_lost_record(tmp_path, traced):
-    """Not every missing adoption is a missing write, and the two must differ.
-
-    A GEMM keep that end-to-end validation never confirmed records its
-    operation and deliberately records no adoption. Downstream that is the same
-    absence a dropped write leaves, so the reason has to be stated here.
-    """
+    """Not every missing adoption is a missing write, and the two must differ."""
     record_gemm_tuning_operation(
         tmp_path,
         payload={"task_id": "gemm-1"},

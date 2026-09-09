@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,25 +18,7 @@ from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "controller-test",
-    "GIT_AUTHOR_EMAIL": "controller-test@local",
-    "GIT_COMMITTER_NAME": "controller-test",
-    "GIT_COMMITTER_EMAIL": "controller-test@local",
-}
-
-
-def _git(repo: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env={**os.environ, **_GIT_IDENTITY},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return completed.stdout.strip()
+from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 
 def _source_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -108,8 +88,8 @@ def test_forge_loop_output_is_invisible_to_the_workspace_guard(tmp_path: Path) -
 
     worktree = create_operator_worktree(task, ControllerLayout(tmp_path / "output"))
 
-    # The JIT cache reaches this depth, and the guard asks git for new paths with
-    # exactly this command, so a shallower assertion would not cover the failure.
+    # The JIT cache reaches this depth, and the guard asks git for new paths with exactly this command, so a shallower
+    # assertion would not cover the failure.
     jit_artifact = worktree.workspace / "forge_experiments" / "aiter_cache" / "sources" / "abc" / "launch_moe"
     jit_artifact.parent.mkdir(parents=True)
     jit_artifact.write_text("compiled\n", encoding="utf-8")

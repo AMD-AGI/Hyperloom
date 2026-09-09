@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Driver-owned full-suite SNR pre-filter.
-
-The driver owns the complete case selection. Forge invokes that suite without
-shape or mode selectors and consumes its aggregate SNR result.
-
-This is a pre-filter, not the KEEP gate. It is cheap enough to run every
-iteration and it stops an obviously broken candidate before the benchmark, but
-its threshold is forge's own and no scorer uses it. A candidate that clears it
-is still judged by the task's declared correctness suite -- see
-``loop/canonical_correctness.py``.
-"""
+"""Driver-owned full-suite SNR pre-filter."""
 
 from __future__ import annotations
 
@@ -88,16 +78,7 @@ async def run_validation_pipeline(
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     timeout_per_stage: int = 1800,
 ) -> ValidationReport:
-    """Run the driver's complete correctness suite once.
-
-    Args:
-        driver_script: Test driver that owns all correctness cases.
-        snr_threshold: SNR pre-filter threshold.
-        timeout_per_stage: Max seconds for the complete suite.
-
-    Returns:
-        ValidationReport with results from all completed stages.
-    """
+    """Run the driver's complete correctness suite once."""
     result = await test_correctness(
         driver_script=driver_script,
         driver_args=[],

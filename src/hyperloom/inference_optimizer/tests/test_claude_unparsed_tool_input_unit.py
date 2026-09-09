@@ -172,12 +172,7 @@ _WRAPPER_WITH_JUNK = {**_WRAPPER_EMIT, "junk": 1}
 
 
 def _registered_emit_intent_tool() -> Any:
-    """The emit_intent tool as the real SDK decorator registers it.
-
-    Captured off the ``server_factory`` seam so the ``tool`` decorator, the
-    schema and the handler are all the production ones, without depending on
-    where a given ``mcp`` release keeps its server internals.
-    """
+    """The emit_intent tool as the real SDK decorator registers it."""
     sdk = pytest.importorskip("claude_agent_sdk")
     captured: list[Any] = []
 
@@ -204,11 +199,7 @@ def _registered_emit_intent_tool() -> Any:
     ids=["native", "wrapper", "native-with-wrapper", "junk", "wrapper-with-junk"],
 )
 async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], accepted: bool) -> None:
-    """The declared schema gates the call before the handler ever runs, so a
-    shape the handler accepts but the schema rejects can never land. Both are
-    checked here against the same tool the SDK registers, because they used to
-    disagree: the handler decoded the wrapper the schema had already refused.
-    """
+    """The declared schema gates the call before the handler ever runs, so a shape the handler accepts but the schema rejects can never land."""
     jsonschema = pytest.importorskip("jsonschema")
     tool = _registered_emit_intent_tool()
 
@@ -242,8 +233,7 @@ async def test_handler_reports_malformed_wrapped_raw() -> None:
 
 
 def test_registered_schema_offers_both_shapes() -> None:
-    """The declared schema is what the model reads, so the wrapper alternative
-    has to survive into it and say it is internal."""
+    """The declared schema is what the model reads, so the wrapper alternative has to survive into it and say it is internal."""
     schema = _registered_emit_intent_tool().input_schema
     assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
     assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]

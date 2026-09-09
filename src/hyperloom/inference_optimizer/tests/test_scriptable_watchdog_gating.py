@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Server-less (scriptable) benchmarks must leave the server-log watchdogs off.
-
-``watchdog_active`` / ``stall_active`` are gated on ``bool(server_log_path)``
-alone, so passing a ``server.log`` for a framework that never writes one arms
-both against a file that can never exist.
-"""
+"""Server-less (scriptable) benchmarks must leave the server-log watchdogs off."""
 
 from __future__ import annotations
 

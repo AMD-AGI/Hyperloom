@@ -430,8 +430,8 @@ def test_close_publishes_exactly_three_columns(tmp_path: Path) -> None:
         "extra_server_args": "--first --final",
         "extra_envs": {"SGLANG_USE_AITER": "1"},
     }
-    # A session that harvested no overlay leaves the column unproduced rather
-    # than publishing an empty shell, so the record distinguishes the two.
+    # A session that harvested no overlay leaves the column unproduced rather than publishing an empty shell, so the
+    # record distinguishes the two.
     assert value["patch"] == {}
     assert bundle.knowledge["provenance"]["staged_sections"] == ["config", "kernel"]
     row = knowledge_to_warm_recipe({"canonical_id": "inference:test", "knowledge": bundle.knowledge})
@@ -585,12 +585,7 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) 
 
 
 def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path) -> None:
-    """An adopted overlay keeps the checkout its prior record named.
-
-    Dropping the prior apply_root would leave the re-homed overlay rootless, and
-    the next generation's fail-closed replay would then skip the whole Recipe --
-    so the root travels with the bytes onto the new ref.
-    """
+    """An adopted overlay keeps the checkout its prior record named."""
     old_ref = "patch/overlays/000004/00-upstream.patch"
     warm = tmp_path / "warm"
     old_patch = warm / "files" / old_ref
@@ -713,11 +708,7 @@ def test_close_fails_when_a_replayed_prior_overlay_is_absent_from_prior_knowledg
 
 
 def test_provenance_records_a_checkout_per_overlay_ref(tmp_path: Path) -> None:
-    """Overlays cut from different trees each keep their own checkout.
-
-    One answer for the set would place an overlay against a tree it was never
-    measured on, so the ref is what the root hangs off.
-    """
+    """Overlays cut from different trees each keep their own checkout."""
     sections = KnowledgeSections(tmp_path / "draft")
 
     assert PatchKB(sections).stage_provenance(

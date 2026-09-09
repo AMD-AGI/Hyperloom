@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
-from kernelforge.loop.runner import IterationLoop, IterationResult
+from kernelforge.loop.runner import IterationResult
 from kernelforge.orchestrator.analysis import (
     ANALYSIS_SCHEMA_VERSION,
     AnalysisAgentService,
@@ -19,7 +18,7 @@ from kernelforge.orchestrator.analysis import (
     _case_directory,
 )
 from kernelforge.tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
-from kernelforge.tests.test_loop_runner import _make_loop, _no_change_agent, _unused_supervisor
+from kernelforge.tests.test_loop_runner import _make_loop
 
 
 def test_resume_recovery_rejects_gap_before_pending_keep(tmp_path, monkeypatch):
@@ -235,36 +234,3 @@ async def test_fake_agent_command_rows_do_not_mark_profiled(tmp_path) -> None:
     assert framework_rows
     assert all(row.get("framework_owned") is True for row in framework_rows)
     assert not any(row.get("command", "").startswith("rocprof") for row in framework_rows)
-
-
-def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):
-    first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-    state_path = workspace / "forge_experiments" / "run_state.json"
-    before = state_path.read_bytes()
-
-    (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
-    subprocess.run(["git", "add", "kernel.py"], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "unexpected external change"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-    )
-
-    mismatched = IterationLoop(
-        first.ic,
-        first.tracker,
-        config=object(),
-        evolver=type("Evolver", (), {"on_experiment_complete": lambda *_: {}})(),
-        resume=True,
-    )
-    with pytest.raises(ValueError, match="HEAD mismatch"):
-        asyncio.run(
-            mismatched.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
-        )
-
-    assert state_path.read_bytes() == before

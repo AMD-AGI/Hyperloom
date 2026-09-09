@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured roofline snapshot extraction for final report / dashboards.
-
-Parses TraceLens ``analysis.md`` Executive Summary tables and
-``category_data/*_metrics.json`` for a compact before/after comparison
-shape consumed by ``report.py`` and downstream frontends.
-"""
+"""Structured roofline snapshot extraction for final report / dashboards."""
 
 from __future__ import annotations
 
@@ -41,15 +36,7 @@ def saturation_within_threshold_pct() -> float:
 
 
 def _parse_pct(raw: str | None) -> float | None:
-    """Extract a leading percentage number from a raw table cell.
-
-    Args:
-        raw (str | None): The raw cell text (e.g. ``"28.78%"``), or ``None``.
-
-    Returns:
-        float | None: The parsed number rounded to two decimals, or ``None``
-            when the input is missing or unparseable.
-    """
+    """Extract a leading percentage number from a raw table cell."""
     if raw is None:
         return None
     m = _PCT_NUM_RE.search(str(raw).replace(",", ""))
@@ -62,16 +49,7 @@ def _parse_pct(raw: str | None) -> float | None:
 
 
 def _parse_executive_table(text: str) -> dict[str, str]:
-    """Parse a markdown Executive Summary table into a label→value map.
-
-    Skips header and separator rows.
-
-    Args:
-        text (str): The markdown text containing the two-column table.
-
-    Returns:
-        dict[str, str]: Mapping of row label to its raw value cell.
-    """
+    """Parse a markdown Executive Summary table into a label→value map."""
     rows: dict[str, str] = {}
     for m in _TABLE_ROW_RE.finditer(text):
         label = m.group("label").strip()
@@ -83,14 +61,7 @@ def _parse_executive_table(text: str) -> dict[str, str]:
 
 
 def _parse_top_bottleneck(raw: str | None) -> str | None:
-    """Strip the trailing ``(pct%)`` annotation from a bottleneck label.
-
-    Args:
-        raw (str | None): Raw cell such as ``"MoE_fused (28.78%)"``.
-
-    Returns:
-        str | None: The bare category name, or ``None`` when empty.
-    """
+    """Strip the trailing ``(pct%)`` annotation from a bottleneck label."""
     if not raw:
         return None
     name = raw.split("(")[0].strip()
@@ -98,16 +69,7 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
 
 
 def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
-    """Best-effort workload-level metrics from Executive Summary table.
-
-    Args:
-        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
-
-    Returns:
-        dict[str, Any]: Mapping with ``compute_pct`` / ``idle_pct`` /
-            ``comm_pct`` / ``top_bottleneck`` keys; values are ``None`` when
-            the file is missing or a metric cannot be parsed.
-    """
+    """Best-effort workload-level metrics from Executive Summary table."""
     path = Path(analysis_md_path)
     out: dict[str, Any] = {
         "compute_pct": None,
@@ -130,31 +92,12 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
 
 
 def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
-    """Return the TraceLens output directory containing an ``analysis.md``.
-
-    Args:
-        analysis_md_path (Path): Path to an ``analysis.md`` file.
-
-    Returns:
-        Path: The parent directory holding the TraceLens artifacts.
-    """
+    """Return the TraceLens output directory containing an ``analysis.md``."""
     return analysis_md_path.parent
 
 
 def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
-    """Return the highest ``percent_of_total`` operation across category metrics.
-
-    Scans the sibling ``category_data/*_metrics.json`` files for the operation
-    with the largest share of total GPU time.
-
-    Args:
-        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
-
-    Returns:
-        dict[str, Any] | None: The top kernel descriptor (``name`` / ``gpu_pct``
-            / ``efficiency_pct`` / ``bound_type`` / ``category``), or ``None``
-            when no category data is available or no named op was found.
-    """
+    """Return the highest ``percent_of_total`` operation across category metrics."""
     md_path = Path(analysis_md_path)
     cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
     if not cat_dir.is_dir():
@@ -202,20 +145,7 @@ def within_roofline_pct(*, peak: float, achieved: float) -> float | None:
 
 
 def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
-    """Split a raw within-roofline ratio into the reported and overshoot values.
-
-    A measured throughput above the modelled ceiling means the ceiling is wrong
-    (stale dtype / quantization assumption), not that the run beat physics. The
-    reported ``within`` is capped at 100 so ``gap`` never goes negative, and the
-    uncapped value is kept so an overshoot stays visible instead of being
-    silently rounded away.
-
-    Args:
-        raw: The uncapped ``achieved / peak * 100`` ratio, or ``None``.
-
-    Returns:
-        A ``(within, gap)`` tuple, both ``None`` when ``raw`` is ``None``.
-    """
+    """Split a raw within-roofline ratio into the reported and overshoot values."""
     if raw is None:
         return None, None
     within = min(float(raw), 100.0)
@@ -227,24 +157,12 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive.
-
-    Args:
-        peak: The theoretical peak throughput (tok/s).
-        achieved: The achieved throughput (tok/s).
-
-    Returns:
-        A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
-        when either input is non-positive. ``within`` is capped at 100.
-    """
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
     return _clamp_within(within_roofline_pct(peak=peak, achieved=achieved))
 
 
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
-    """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*.
-
-    Best-effort and in place: any failure leaves *snapshot* untouched.
-    """
+    """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
     try:
         from .roofline_ceiling import (
             apply_runtime_dtype,
@@ -327,49 +245,12 @@ def build_roofline_snapshot(
     e2e_mean_ms: float = 0.0,
     roofline_ideal_ms: float = 0.0,
 ) -> dict[str, Any]:
-    """Materialise one side (baseline or latest) of the comparison.
-
-    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling;
-    mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and
-    ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All
-    default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
-
-    Args:
-        snapshot_id: The snapshot identifier, or ``None``.
-        ts: The capture timestamp string.
-        analysis_md_path: Path to the TraceLens ``analysis.md``; when empty the
-            workload/top-kernel fields are left unset.
-        theoretical_peak_tok_per_sec: Primary decode roofline ceiling (tok/s).
-        achieved_tok_per_sec: Snapshot-time ``output_throughput`` (tok/s).
-        mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
-        cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
-        bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
-        throughput_unit: Unit for the ``*_tok_per_sec`` fields (``tok/s`` for
-            text generation, ``img/s`` for xDiT).
-        framework: Session framework tag persisted into the snapshot; the report
-            layer (``_fmt_tput``) uses it to pick the achieved-metric unit.
-        e2e_mean_ms: Scriptable/diffusion primary metric — measured per-image
-            end-to-end latency (ms). The compute-bound analogue of
-            ``achieved_tok_per_sec`` (which is a memory-bound tok/s throughput);
-            stored as a sibling so the renderer picks the metric by unit.
-        roofline_ideal_ms: Compute-roofline ideal per-image latency ceiling
-            (ms) — the analogue of ``theoretical_peak_tok_per_sec`` for
-            scriptable workloads. When both ``roofline_ideal_ms`` and
-            ``e2e_mean_ms`` are positive and no tok/s ceiling applies,
-            ``within_roofline_pct`` is derived from them (ideal / measured) so
-            the same within/gap fields stay populated across units.
-
-    Returns:
-        A snapshot dict with the ceiling, achieved throughput, derived
-        within/gap percentages, and workload/top-kernel fields parsed from the
-        analysis.md when available.
-    """
+    """Materialise one side (baseline or latest) of the comparison."""
     within_raw = within_roofline_pct(
         peak=theoretical_peak_tok_per_sec,
         achieved=achieved_tok_per_sec,
     )
-    # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the
-    # ms pair as within = ideal / measured.
+    # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the ms pair as within = ideal / measured.
     if within_raw is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
         within_raw = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
     within, gap = _clamp_within(within_raw)
@@ -400,8 +281,8 @@ def build_roofline_snapshot(
         "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
-        # Uncapped ratio + the flag derived from it: an achieved throughput above
-        # the modelled ceiling is a ceiling-model problem the report must show.
+        # Uncapped ratio + the flag derived from it: an achieved throughput above the modelled ceiling is a
+        # ceiling-model problem the report must show.
         "within_roofline_pct_uncapped": within_raw,
         "roofline_ceiling_exceeded": bool(within_raw is not None and within_raw > 100.0),
     }
@@ -424,16 +305,7 @@ def build_roofline_snapshot(
 
 
 def _num_delta(latest: float | None, baseline: float | None) -> float | None:
-    """Return ``latest - baseline`` rounded to two decimals.
-
-    Args:
-        latest (float | None): The latest value.
-        baseline (float | None): The baseline value.
-
-    Returns:
-        float | None: The rounded delta, or ``None`` if either input is
-            ``None``.
-    """
+    """Return ``latest - baseline`` rounded to two decimals."""
     if latest is None or baseline is None:
         return None
     return round(latest - baseline, 2)
@@ -444,15 +316,7 @@ _CEILING_REL_TOL: float = 0.01
 
 
 def _ceiling_of(snapshot: dict[str, Any]) -> tuple[str, float] | None:
-    """Return one snapshot's ceiling as ``(unit, value)``, or ``None``.
-
-    Args:
-        snapshot: A roofline snapshot dict.
-
-    Returns:
-        ``("tok/s", peak)`` for serving snapshots, ``("ms", ideal)`` for
-        scriptable/diffusion ones, or ``None`` when neither ceiling is set.
-    """
+    """Return one snapshot's ceiling as ``(unit, value)``, or ``None``."""
     peak = snapshot.get("theoretical_peak_tok_per_sec")
     if isinstance(peak, (int, float)) and peak > 0:
         return "tok/s", float(peak)
@@ -466,21 +330,7 @@ def ceilings_comparable(
     baseline: dict[str, Any] | None,
     latest: dict[str, Any] | None,
 ) -> bool:
-    """Whether both snapshots were measured against the same modelled ceiling.
-
-    A quantization / dtype change moves the theoretical ceiling, so the two
-    sides' ``within_roofline_pct`` have different denominators and their
-    difference is not a change in saturation. A snapshot with no ceiling at all
-    counts as comparable: nothing was derived from it.
-
-    Args:
-        baseline: The baseline snapshot, or ``None``.
-        latest: The latest snapshot, or ``None``.
-
-    Returns:
-        ``True`` when the ceilings share a unit and agree within
-        :data:`_CEILING_REL_TOL`, or when either side has no ceiling.
-    """
+    """Whether both snapshots were measured against the same modelled ceiling."""
     base_ceiling = _ceiling_of(baseline or {})
     latest_ceiling = _ceiling_of(latest or {})
     if base_ceiling is None or latest_ceiling is None:
@@ -494,19 +344,7 @@ def ceilings_comparable(
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point for building the comparison block from snapshot history).
-
-    Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
-    Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
-
-    Args:
-        snapshots: The append-only snapshot history, or ``None``.
-
-    Returns:
-        The ``roofline_comparison`` block (``mode`` / ``baseline`` / ``latest``
-        and, in before_after mode, a ``delta``), or ``None`` when the history
-        is empty.
-    """
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point for building the comparison block from snapshot history)."""
     snapshots = list(snapshots or [])
     if not snapshots:
         return None
@@ -540,9 +378,8 @@ def build_roofline_comparison_from_history(
                 baseline.get("comm_pct"),
             ),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
-            # Saturation deltas are only meaningful against one shared ceiling;
-            # across a moved ceiling they would report a denominator change as a
-            # saturation change.
+            # Saturation deltas are only meaningful against one shared ceiling; across a moved ceiling they would
+            # report a denominator change as a saturation change.
             "within_roofline_pct": (
                 _num_delta(
                     latest.get("within_roofline_pct"),
@@ -564,14 +401,7 @@ def build_roofline_comparison_from_history(
 
 
 def _fmt_delta(val: float | None) -> str:
-    """Format a signed delta cell with one decimal place.
-
-    Args:
-        val (float | None): The delta value, or ``None``.
-
-    Returns:
-        str: A signed string (e.g. ``"+1.2"``), or ``"—"`` when ``None``.
-    """
+    """Format a signed delta cell with one decimal place."""
     if val is None:
         return "—"
     sign = "+" if val > 0 else ""
@@ -579,20 +409,7 @@ def _fmt_delta(val: float | None) -> str:
 
 
 def _fmt_tput(v: float | None, framework: str = "") -> str:
-    """Format the achieved primary-metric cell for the roofline table.
-
-    Serving frameworks render ``tok/s``; scriptable image frameworks (xDiT)
-    store an img/s value whose meaningful surface is per-image latency, so
-    defer to :func:`framework_registry.format_primary_metric` for the unit.
-
-    Args:
-        v (float | None): The stored primary metric (tok/s for serving, img/s
-            for scriptable xDiT).
-        framework (str): Session framework name; selects the display unit.
-
-    Returns:
-        str: The formatted cell, or ``"—"`` when missing/non-positive.
-    """
+    """Format the achieved primary-metric cell for the roofline table."""
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
     from hyperloom.inference_optimizer import framework_registry
@@ -603,14 +420,7 @@ def _fmt_tput(v: float | None, framework: str = "") -> str:
 
 
 def _fmt_pct_cell(v: float | None) -> str:
-    """Format a percentage cell; ``—`` when missing.
-
-    Args:
-        v (float | None): The percentage value.
-
-    Returns:
-        str: The formatted cell, or ``"—"`` when not numeric.
-    """
+    """Format a percentage cell; ``—`` when missing."""
     if not isinstance(v, (int, float)):
         return "—"
     return f"{float(v):.1f}%"
@@ -624,19 +434,7 @@ _CEILING_LABELS: dict[str, str] = {
 
 
 def _single_ceiling(baseline: dict[str, Any], latest: dict[str, Any]) -> tuple[str, float] | None:
-    """Pick the one ceiling to render when both sides share it.
-
-    Prefers a tok/s ceiling from either side (serving), then the ms ceiling
-    (scriptable/diffusion), matching the order the report has always used.
-
-    Args:
-        baseline: The baseline snapshot.
-        latest: The latest snapshot.
-
-    Returns:
-        The ``(unit, value)`` ceiling to render, or ``None`` when neither side
-        has one.
-    """
+    """Pick the one ceiling to render when both sides share it."""
     for snap in (baseline, latest):
         peak = snap.get("theoretical_peak_tok_per_sec")
         if isinstance(peak, (int, float)) and peak > 0:
@@ -654,20 +452,7 @@ def _ceiling_lines(
     *,
     mode: str,
 ) -> list[str]:
-    """Render the ceiling header above the metrics table.
-
-    One line when both sides were measured against the same ceiling; one line
-    per side plus a caveat when they were not, because then each side's
-    ``within %`` has its own denominator.
-
-    Args:
-        baseline: The baseline snapshot.
-        latest: The latest snapshot.
-        mode: ``single_snapshot`` or ``before_after``.
-
-    Returns:
-        The markdown lines (empty when no ceiling is available).
-    """
+    """Render the ceiling header above the metrics table."""
     base_ceiling = _ceiling_of(baseline)
     latest_ceiling = _ceiling_of(latest)
     if mode == "before_after" and base_ceiling is not None and latest_ceiling is not None:
@@ -699,17 +484,7 @@ _UNCAPPED_KEY = "within_roofline_pct_uncapped"
 
 
 def _ceiling_exceeded(snapshot: dict[str, Any]) -> bool:
-    """Whether a snapshot measured above its own modelled ceiling.
-
-    Reads the persisted flag and falls back to the uncapped ratio, so a snapshot
-    written before the flag existed still reports its overshoot.
-
-    Args:
-        snapshot: A roofline snapshot dict.
-
-    Returns:
-        ``True`` when the measured throughput exceeded the ceiling.
-    """
+    """Whether a snapshot measured above its own modelled ceiling."""
     if snapshot.get("roofline_ceiling_exceeded"):
         return True
     uncapped = snapshot.get(_UNCAPPED_KEY)
@@ -722,21 +497,7 @@ def _ceiling_exceeded_lines(
     *,
     mode: str,
 ) -> list[str]:
-    """Render the warning for a snapshot that measured above its ceiling.
-
-    Capping ``within`` at 100 keeps the gap from going negative, but on its own
-    it hides the reason: the modelled ceiling is understated (a stale dtype /
-    quantization / GPU-spec input), which makes every saturation number on that
-    side unusable. That has to be said in the report, not only in the snapshot.
-
-    Args:
-        baseline: The baseline snapshot.
-        latest: The latest snapshot (``{}`` in single-snapshot mode).
-        mode: ``single_snapshot`` or ``before_after``.
-
-    Returns:
-        The markdown lines, or ``[]`` when neither side overshot.
-    """
+    """Render the warning for a snapshot that measured above its ceiling."""
     sides: list[str] = []
     if _ceiling_exceeded(baseline):
         sides.append("Base" if mode == "before_after" else "this snapshot")
@@ -758,26 +519,10 @@ def _ceiling_exceeded_lines(
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
-
-    Args:
-        cmp: The roofline-comparison dict built by
-            :func:`build_roofline_comparison_from_history`.
-
-    Returns:
-        The markdown table lines; ``single_snapshot`` mode renders a single
-        Metric/Value table while ``before_after`` renders Base/Opt/Δ columns.
-    """
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
 
     def cell(v: float | None) -> str:
-        """Format a percentage value for a table cell.
-
-        Args:
-            v (float | None): The percentage value.
-
-        Returns:
-            str: The formatted cell, or ``"—"`` when not a float.
-        """
+        """Format a percentage value for a table cell."""
         return f"{v:.1f}%" if isinstance(v, float) else "—"
 
     baseline = cmp.get("baseline") or {}
@@ -785,10 +530,9 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
 
-    # The ceiling is usually session-constant, so surface it once above the
-    # table; when the two sides model different ceilings (a dtype /
-    # quantization change) both are reported and the within/gap columns are
-    # flagged as not directly comparable.
+    # The ceiling is usually session-constant, so surface it once above the table; when the two sides model different
+    # ceilings (a dtype / quantization change) both are reported and the within/gap columns are flagged as not
+    # directly comparable.
     ceiling_lines: list[str] = _ceiling_lines(baseline, latest, mode=mode)
 
     lines: list[str] = list(ceiling_lines)
@@ -884,18 +628,7 @@ BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
 
 
 def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
-    """Return ``(direction, pct)`` for the most-saturated direction in one snapshot.
-
-    Reads compute/idle/comm percentages and folds a ``memory`` bound kind in as
-    a tie-breaker; returns ``("", 0.0)`` when no usable numbers are present.
-
-    Args:
-        snapshot: A single roofline snapshot dict, or ``None``.
-
-    Returns:
-        A ``(direction, pct)`` tuple for the most-saturated direction, or
-        ``("", 0.0)`` when no usable numbers are present.
-    """
+    """Return ``(direction, pct)`` for the most-saturated direction in one snapshot."""
     if not isinstance(snapshot, dict):
         return "", 0.0
     candidates: dict[str, float] = {}
@@ -917,13 +650,7 @@ def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
 
 
 def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
-    """Classify whether the latest dominant roofline direction is near ceiling.
-
-    The decision uses the already-computed ``within_roofline_pct`` metric:
-    achieved throughput divided by the relevant roofline ceiling. Missing
-    percentages are treated as not saturated so incomplete TraceLens output never
-    forces convergence.
-    """
+    """Classify whether the latest dominant roofline direction is near ceiling."""
     direction, pct = dominant_direction(snapshot)
     snap = snapshot if isinstance(snapshot, dict) else {}
     within = snap.get("within_roofline_pct")
@@ -949,23 +676,7 @@ def build_profiler_digest(
     *,
     top_n: int = 3,
 ) -> str:
-    """Render a compact, bottleneck-focused profiler block for prompt injection.
-
-    Surfaces the latest saturation mix, its per-direction delta against the
-    previous snapshot, the hottest kernels, a suggested specialist lever for the
-    dominant direction, and the reusable native kernel ids. Returns ``""`` when
-    no profiler data is available; never raises.
-
-    Args:
-        snapshots: The roofline snapshot history, or ``None``.
-        trace_analyze: The latest ``trace_analyze`` payload (hot kernels +
-            reusable kernel ids), or ``None``.
-        top_n: Maximum number of hot kernels to surface.
-
-    Returns:
-        The rendered profiler block, or ``""`` when no profiler data is
-        available.
-    """
+    """Render a compact, bottleneck-focused profiler block for prompt injection."""
     try:
         snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
         ta = trace_analyze if isinstance(trace_analyze, dict) else {}
@@ -974,14 +685,7 @@ def build_profiler_digest(
         latest = snaps[-1] if snaps else {}
 
         def _pct(v: Any) -> str:
-            """Format a value as a one-decimal percentage, or ``—`` when not numeric.
-
-            Args:
-                v (Any): The candidate percentage value.
-
-            Returns:
-                str: The formatted percentage, or ``"—"`` when not numeric.
-            """
+            """Format a value as a one-decimal percentage, or ``—`` when not numeric."""
             return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
 
         bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"

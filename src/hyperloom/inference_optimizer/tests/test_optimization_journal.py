@@ -363,8 +363,7 @@ def test_summarize_change_falls_back_to_task_kind():
 
 # derive_journal_outcome
 def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
-    """A reverted integrate_patch is promotable (status != failed) but must
-    journal as REVERT, not KEEP."""
+    """A reverted integrate_patch is promotable (status != failed) but must journal as REVERT, not KEEP."""
     out = derive_journal_outcome(
         "integrate_patch",
         {"status": "reverted", "delta_pct": -0.44},
@@ -419,11 +418,7 @@ def test_derive_journal_outcome_patch_failures_are_no_promote():
 
 
 def test_derive_journal_outcome_integrate_patch_follows_status():
-    """The patch kind reads the executor's verdict, not the promotable flag.
-
-    ``promotable=True`` on a reverted patch is what the flag says about the
-    task settling cleanly; the status is what says whether the patch stayed.
-    """
+    """The patch kind reads the executor's verdict, not the promotable flag."""
     assert derive_journal_outcome("integrate_patch", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
     assert derive_journal_outcome("integrate_patch", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
     assert (

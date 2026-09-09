@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The wiring gate: a fused module nothing calls is not a fusion.
-
-Taken from a real forge-fuse run on Qwen3-14B-FP8 that reported a 37.16x
-microbench, SNR 52.1 dB and ``SERVING SMOKE OK`` for a patch whose entire
-framework edit was a flag-gated ``# noqa: F401`` import. The fused kernel never
-executed: the harness had timed the entry point directly, and the smoke had
-booted stock code with the flag set.
-"""
+"""The wiring gate: a fused module nothing calls is not a fusion."""
 
 from pathlib import Path
 
@@ -82,12 +75,7 @@ def forward(qkv):
 
 
 def test_a_source_with_no_fused_import_is_not_judged(tmp_path):
-    """No fused import is not evidence of a defect -- a fusion can be inline.
-
-    ``test_smoke_salvage_contract`` builds exactly that shape: the fused call
-    written straight into the framework file with nothing imported. Only a
-    bound-and-unused import is provable, so every other shape fails open.
-    """
+    """No fused import is not evidence of a defect -- a fusion can be inline."""
     wired, reason = evidence(_write(tmp_path, "def forward(x):\n    return fused_norm(x)\n"))
     assert wired is True
     assert "unchecked" in reason

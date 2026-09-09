@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Guard for the ``ci-e2e`` concurrency group.
-
-The workflow answers three triggers (``pull_request`` / ``issue_comment`` /
-``workflow_dispatch``) and cancels in-progress runs that share its group. GitHub
-resolves ``concurrency`` when the run is *created*, before the ``resolve`` job's
-``if`` can decline the work, so a group keyed on the PR number alone lets any
-comment on a PR cancel that PR's in-flight multi-hour GPU run and then skip
-itself.
-
-The fix keys non-``/retest`` comments to a group of their own, which only holds
-while the group expression and ``resolve.if`` agree on what a retest comment is.
-These tests pin that agreement; there is no way to unit-test the cancellation
-itself short of running the workflow.
-"""
+"""Guard for the ``ci-e2e`` concurrency group."""
 
 from __future__ import annotations
 
@@ -75,12 +62,7 @@ def test_the_group_and_the_gate_agree_on_what_a_retest_is(
     concurrency_group: str,
     resolve_condition: str,
 ) -> None:
-    """Drift here silently restores the bug, in one direction or the other.
-
-    A group looking for a command the gate no longer honours lets an ordinary
-    comment cancel a run again; a gate honouring a command the group does not
-    recognise stops a real retest from preempting the run it means to replace.
-    """
+    """Drift here silently restores the bug, in one direction or the other."""
     predicate = f"contains(github.event.comment.body, '{_RETEST_COMMAND}')"
     assert predicate in resolve_condition
     assert predicate in concurrency_group
@@ -96,6 +78,6 @@ def test_every_trigger_still_resolves_to_a_group(concurrency_group: str) -> None
         "github.ref",  # last-resort fallback
     ):
         assert key in concurrency_group
-    # Dispatch used to share refs/heads/main and cancel-in-progress the
-    # previous GPU run. head_sha must win over github.ref.
+    # Dispatch used to share refs/heads/main and cancel-in-progress the previous GPU run. head_sha must win over
+    # github.ref.
     assert concurrency_group.index("inputs.head_sha") < concurrency_group.index("github.ref")

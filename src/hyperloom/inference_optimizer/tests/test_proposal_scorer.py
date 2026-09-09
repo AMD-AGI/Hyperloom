@@ -166,8 +166,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
-    """With ``session_dir`` set, each scoring call records both a token row
-    (component=proposal_scorer) and a full prompt/reply conversation row."""
+    """With ``session_dir`` set, each scoring call records both a token row (component=proposal_scorer) and a full prompt/reply conversation row."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     client = _FakeClient(
@@ -203,13 +202,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_failed_scoring_call_writes_an_error_row(tmp_path: Path):
-    """A model whose call blows up must still land in the ledger.
-
-    ``score()`` folds per-model exceptions into an ``errors`` map via
-    ``gather(return_exceptions=True)``, so without a row written inside
-    ``_score_one_model`` the failure never reaches the ledger or Langfuse — and
-    which model failed is the only thing that survives the fold.
-    """
+    """A model whose call blows up must still land in the ledger."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
 
@@ -587,8 +580,7 @@ async def test_resume_idempotent_on_round_id(tmp_path):
 
 
 class _ScriptedStream:
-    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs
-    forever after them, emulating a proxy that opens the stream then stalls mid-body."""
+    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs forever after them, emulating a proxy that opens the stream then stalls mid-body."""
 
     def __init__(self, chunks: list[Any], *, stall: bool = False):
         self._chunks = chunks

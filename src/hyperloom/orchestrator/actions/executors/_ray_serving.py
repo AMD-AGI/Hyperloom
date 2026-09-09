@@ -19,41 +19,26 @@ from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
 log = logging.getLogger(__name__)
 
-# Ray-side sentinel returncodes, allocated out of the same space as
-# ``_subprocess_kill``'s -- read the note there before claiming a new one. Both
-# of these leave ``_grid_runner._run_magpie`` through the very return channel
-# that carries ``AGENTX_PREFLIGHT_RETURNCODE``, so an overlap would have an
-# actor timeout recorded as a failed AgentX preflight.
+# Ray-side sentinel returncodes, allocated out of the same space as ``_subprocess_kill``'s -- read the note there
+# before claiming a new one.
 _ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
 
-# How often the submitter of a round looks up from ``ray.wait`` to see whether
-# the action it belongs to has been cancelled. Short enough that the hop through
-# Ray costs the cancel almost nothing on top of what stopping the round costs
-# anyway, long enough not to spin.
+# How often the submitter of a round looks up from ``ray.wait`` to see whether the action it belongs to has been
+# cancelled.
 _CANCEL_POLL_SEC: float = 0.25
 
-# How long the submitter waits for a cancelled round to come back on its own
-# before killing the actor out from under it. The round in the actor stops itself
-# exactly the way a local child does, so this is that cost plus the poll the
-# answer is seen at -- derived, not picked, because a grace even slightly short of
-# the reap expires every single time and throws away the sentinel the round was
-# about to hand back. The kill is what a wedged actor gets, not what a working one
-# gets for being ordinary.
+# How long the submitter waits for a cancelled round to come back on its own before killing the actor out from under
+# it.
 CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
 
-# How long releasing a lease waits for the actor to reap its served process
-# before killing the actor anyway. Sized on what that reap costs -- SIGTERM, the
-# grace, SIGKILL -- and deliberately short: teardown often runs inside the
-# closing window, which is reserved for the report, not for waiting on a server.
+# How long releasing a lease waits for the actor to reap its served process before killing the actor anyway.
 CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 
-# Method slots the serving actor runs at once: the round, plus room for the
-# cancel that has to reach it. A single-slot actor would queue the cancel behind
-# the very round it is meant to stop.
+# Method slots the serving actor runs at once: the round, plus room for the cancel that has to reach it.
 _SERVING_ACTOR_CONCURRENCY: int = 2
 
 #: The masks Ray owns for its serving children. Single definition lives in
@@ -66,11 +51,7 @@ class RayInfeasibleError(RuntimeError):
 
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
-    """Raise :exc:`RayInfeasibleError` when the cluster cannot satisfy the request.
-
-    Reads ``ray.cluster_resources()`` (totals, not available) so legitimate
-    contention still queues — only permanently infeasible configurations fail fast.
-    """
+    """Raise :exc:`RayInfeasibleError` when the cluster cannot satisfy the request."""
     import ray  # noqa: PLC0415
 
     totals = ray.cluster_resources()
@@ -87,12 +68,7 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
 
 
 def _pdeathsig_preexec() -> None:
-    """Best-effort: ask the OS to SIGKILL this child if its parent dies.
-
-    Linux-only (``PR_SET_PDEATHSIG``). Combined with an explicit ``stop()`` this
-    guarantees no detached GPU process survives its owning Ray actor. A no-op
-    where prctl is unavailable.
-    """
+    """Best-effort: ask the OS to SIGKILL this child if its parent dies."""
     try:
         import ctypes  # noqa: PLC0415
 
@@ -105,12 +81,7 @@ def _pdeathsig_preexec() -> None:
 
 @dataclass
 class ManagedServerProcess:
-    """Supervise a single GPU/serving subprocess tied to this object's lifetime.
-
-    The process is launched in a new POSIX session (distinct pgid) so the whole
-    tree can be reaped atomically, and PR_SET_PDEATHSIG is armed so an
-    unexpected owner death still kills it.
-    """
+    """Supervise a single GPU/serving subprocess tied to this object's lifetime."""
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
@@ -123,23 +94,7 @@ class ManagedServerProcess:
         log_path: str | None = None,
         stdin_path: str | None = None,
     ) -> int:
-        """Launch the subprocess and return its pid.
-
-        Args:
-            cmd: Command to launch.
-            env: Environment (Ray-set ``*_VISIBLE_DEVICES`` already present in
-                the actor's ``os.environ``; pass a merged env if overlaying).
-            cwd: Working directory.
-            log_path: Optional path to redirect stdout/stderr.
-            stdin_path: Optional read-only file to use as stdin. Defaults to
-                ``subprocess.DEVNULL`` so actor stdin is never inherited.
-
-        Returns:
-            The launched process pid.
-
-        Raises:
-            RuntimeError: If a process is already running under this supervisor.
-        """
+        """Launch the subprocess and return its pid."""
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
         stdin: Any = subprocess.DEVNULL
@@ -155,8 +110,8 @@ class ManagedServerProcess:
                 stdout_fh = open(log_path, "w", encoding="utf-8")
                 stdout = stdout_fh
             if os.name == "posix":
-                # New session (distinct pgid) so the whole tree reaps atomically;
-                # PR_SET_PDEATHSIG so an unexpected owner death still kills the child.
+                # New session (distinct pgid) so the whole tree reaps atomically; PR_SET_PDEATHSIG so an unexpected
+                # owner death still kills the child.
                 self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
                     cmd,
                     env=env,
@@ -177,9 +132,7 @@ class ManagedServerProcess:
                     stderr=subprocess.STDOUT,
                 )
         finally:
-            # Popen has transferred the descriptors to the child before it
-            # returns. Close the parent's copies immediately, including when
-            # spawning fails, so neither long-running actors nor retries leak fds.
+            # Popen has transferred the descriptors to the child before it returns.
             for fh in (stdin_fh, stdout_fh):
                 if fh is not None:
                     try:
@@ -189,39 +142,23 @@ class ManagedServerProcess:
         return self._proc.pid
 
     def pid(self) -> int | None:
-        """Return the running pid, or ``None`` when not running.
-
-        Returns:
-            The pid, or ``None`` when no live process is supervised.
-        """
+        """Return the running pid, or ``None`` when not running."""
         if self._proc is None or self._proc.poll() is not None:
             return None
         return self._proc.pid
 
     def is_alive(self) -> bool:
-        """Return whether the supervised process is still running.
-
-        Returns:
-            ``True`` when the process is live.
-        """
+        """Return whether the supervised process is still running."""
         return self._proc is not None and self._proc.poll() is None
 
     def exit_code(self) -> int | None:
-        """Return the process exit code, or ``None`` while running / never started.
-
-        Returns:
-            The exit code once the process has terminated, else ``None``.
-        """
+        """Return the process exit code, or ``None`` while running / never started."""
         if self._proc is None:
             return None
         return self._proc.poll()
 
     def stop(self, *, grace_seconds: float = 5.0) -> None:
-        """Reap the whole process tree (SIGTERM → grace → SIGKILL). Idempotent.
-
-        Args:
-            grace_seconds: Seconds to wait after SIGTERM before SIGKILL.
-        """
+        """Reap the whole process tree (SIGTERM → grace → SIGKILL). Idempotent."""
         from ._subprocess_kill import kill_my_spawned_server
 
         kill_my_spawned_server(self._proc, grace_seconds=grace_seconds)
@@ -229,27 +166,16 @@ class ManagedServerProcess:
 
 
 def _serving_actor_body() -> Any:
-    """Build the ServingActor class (imports ray lazily so import is cheap).
-
-    Returns:
-        A ``ray.remote``-decorated actor class holding a serving process.
-    """
+    """Build the ServingActor class (imports ray lazily so import is cheap)."""
     import ray  # noqa: PLC0415
 
     @ray.remote
     class ServingActor:
-        """Ray actor owning one serving process for its whole lifetime.
-
-        Holds ``num_gpus`` (+ optional ``serving_slot``) via the ``.options()``
-        the submitter sets. The server lives exactly as long as the actor.
-        """
+        """Ray actor owning one serving process for its whole lifetime."""
 
         def __init__(self) -> None:
             self._mgr = ManagedServerProcess()
-            # The cancel scope of the round currently in flight, if any. The
-            # dispatcher's scope is a ContextVar in the submitter's process and
-            # cannot cross into this one, so the actor keeps its own and
-            # :meth:`cancel_round` is the wire between them.
+            # The cancel scope of the round currently in flight, if any.
             self._round_scope: Any = None
 
         def start(
@@ -263,16 +189,7 @@ def _serving_actor_body() -> Any:
             env_mode="merge",
             stdin_path=None,
         ) -> int:
-            """Launch the serving subprocess; Ray has set visible devices.
-
-            GPU specialist actors retain control-plane credentials by default;
-            benchmark serving ranks opt into scrubbing at their call site.
-            Specialists may request ``env_mode="replace"`` to start from their
-            filtered mapping without reintroducing actor credentials.
-
-            Returns:
-                The launched pid.
-            """
+            """Launch the serving subprocess; Ray has set visible devices."""
             if env_mode == "merge":
                 child_env = dict(os.environ)
                 for key, value in (env or {}).items():
@@ -309,17 +226,7 @@ def _serving_actor_body() -> Any:
             server_already_ready=False,
             session_remaining_sec=None,
         ):
-            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``.
-
-            ``session_remaining_sec`` is a duration, not the submitter's absolute
-            session deadline: this actor is a separate process with its own
-            ``time.monotonic()`` origin, so only a duration survives the trip.
-
-            The round runs under a cancel scope published in this process, which
-            is what gives :meth:`cancel_round` something to raise: the reaper
-            inside ``run_with_session_kill`` then stops the tree and names the
-            stop exactly as it does on the local path.
-            """
+            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
             import subprocess as _sp  # noqa: PLC0415
 
             from ..cancel_channel import CancelScope, use_cancel_scope  # noqa: PLC0415
@@ -345,21 +252,7 @@ def _serving_actor_body() -> Any:
                 self._round_scope = None
 
         def cancel_round(self, reason: str) -> bool:
-            """Ask the round in flight to stop itself; return whether there was one.
-
-            Runs in a second method slot (see ``_SERVING_ACTOR_CONCURRENCY``) so
-            it is not queued behind the round it is cancelling. Returns as soon
-            as the flag is raised: the round is what decides how to stop, and the
-            submitter waits for it to come back.
-
-            Args:
-                reason: Short cause from the canceller, carried into the stopped
-                    round's message.
-
-            Returns:
-                ``True`` when a round was asked to stop, ``False`` when the actor
-                was idle -- which the submitter reads as "nothing to wait for".
-            """
+            """Ask the round in flight to stop itself; return whether there was one."""
             scope = self._round_scope
             if scope is None:
                 return False
@@ -367,27 +260,15 @@ def _serving_actor_body() -> Any:
             return True
 
         def is_alive(self) -> bool:
-            """Return whether the serving process is still up.
-
-            Returns:
-                ``True`` when alive.
-            """
+            """Return whether the serving process is still up."""
             return self._mgr.is_alive()
 
         def pid(self) -> int | None:
-            """Return the serving pid, or ``None``.
-
-            Returns:
-                The pid or ``None``.
-            """
+            """Return the serving pid, or ``None``."""
             return self._mgr.pid()
 
         def exit_code(self) -> int | None:
-            """Return the supervised process exit code, or ``None`` while running.
-
-            Returns:
-                The exit code once the process has terminated, else ``None``.
-            """
+            """Return the supervised process exit code, or ``None`` while running."""
             return self._mgr.exit_code()
 
         def stop(self) -> None:
@@ -405,12 +286,7 @@ def _serving_actor_body() -> Any:
 
 
 def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
-    """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``).
-
-    Given more than one method slot so ``cancel_round`` can reach a round that is
-    already running; with the default single slot it would wait for the round to
-    finish, which is the one thing a cancel cannot do.
-    """
+    """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
     actor_cls: Any = _serving_actor_body()
     resources = {"serving_slot": 1} if serving_slot else None
     return actor_cls.options(
@@ -428,12 +304,7 @@ def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
 
 
 class ServingLease:
-    """A held Ray GPU lease spanning every round that shares one server.
-
-    Wraps a long-lived :class:`ServingActor` holding ``num_gpus`` (+ optional
-    ``serving_slot`` whole-machine mutex). The actor is created on first use and
-    stays alive until :meth:`close`. Single-node only.
-    """
+    """A held Ray GPU lease spanning every round that shares one server."""
 
     def __init__(
         self,
@@ -448,11 +319,7 @@ class ServingLease:
         self._actor: Any = None
 
     def ensure(self) -> None:
-        """Ensure the Ray cluster is up and the serving actor is created.
-
-        Idempotent — a second call is a no-op once the actor exists.
-        Raises :exc:`RayInfeasibleError` when the cluster cannot satisfy the lease.
-        """
+        """Ensure the Ray cluster is up and the serving actor is created."""
         if self._actor is not None:
             return
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
@@ -473,34 +340,7 @@ class ServingLease:
         server_already_ready: bool = False,
         session_remaining_sec: float | None = None,
     ) -> tuple[int, str, str]:
-        """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``.
-
-        Drop-in for ``run_with_session_kill``; re-raises ``subprocess.TimeoutExpired``
-        on hard timeout. Cluster-ensure failures and Ray worker errors degrade to
-        a benchmark failure (rc=1) rather than crashing the session.
-
-        The cancel scope published by the dispatcher is watched for as long as
-        the round is in flight, the same as on the local path -- the difference
-        is that the round is in another process, so the scope cannot be read
-        there and the cancel is forwarded to the actor instead.
-
-        Args:
-            cmd: The benchmark command to run inside the actor.
-            env: Caller env for the subprocess.
-            cwd: Working directory for the subprocess.
-            timeout: Hard timeout in seconds.
-            soft_deadline_sec: Overtime soft deadline.
-            server_log_path: Path to the server log for the watchdogs.
-            server_already_ready: Warm reuse round (soft clock from spawn).
-            session_remaining_sec: Seconds left on the session budget, as
-                produced by ``session_deadline_to_remaining_sec``. The absolute
-                deadline the local path uses cannot cross into the actor: it is
-                a ``time.monotonic()`` instant, and the actor's clock has its own
-                origin. The actor re-anchors this duration onto its own clock.
-
-        Returns:
-            ``(returncode, stdout, stderr)`` from the round.
-        """
+        """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener  # noqa: PLC0415
 
         try:
@@ -508,9 +348,8 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
-        # Registered before the round is submitted, so a cancel that arrives
-        # while Ray is still scheduling it is one this call is counted as able
-        # to hear -- the same window the local path opens around its spawn.
+        # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
+        # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             ref = self._actor.run_blocking.remote(
                 cmd,
@@ -532,30 +371,12 @@ class ServingLease:
         timeout: int | float | None,
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
-        """Wait for a submitted round, forwarding a cancel to the actor if one comes.
-
-        Args:
-            ref: The ``ObjectRef`` for the round in flight.
-            cmd: The round's command, for the ``TimeoutExpired`` it may raise.
-            timeout: The round's hard timeout, for the same reason.
-            cancel_scope: The scope to watch, or ``None`` when the caller is not
-                running under one, in which case this is a plain blocking wait.
-
-        Returns:
-            ``(returncode, stdout, stderr)`` from the round.
-
-        Raises:
-            subprocess.TimeoutExpired: When the actor reports a hard timeout.
-        """
+        """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
         import subprocess as _sp  # noqa: PLC0415
 
         import ray  # noqa: PLC0415
 
-        # Resolve Ray's exception classes defensively. Real ray always exposes
-        # both, but this is a failure hot-path: a partial test double or a future
-        # ray rename must never turn a benchmark failure into an AttributeError
-        # *while handling* the original error. An empty-tuple fallback simply
-        # catches nothing, so an unknown error still propagates unchanged.
+        # Resolve Ray's exception classes defensively.
         _ray_exc = getattr(ray, "exceptions", None)
         _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
         _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
@@ -565,13 +386,7 @@ class ServingLease:
             else:
                 rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
         except _actor_err as exc:  # type: ignore[misc]
-            # The actor (worker) itself died — e.g. its server OOM-killed the
-            # worker, or raylet reaped it. Drop the dead handle so the NEXT round
-            # / variant re-creates a fresh actor via ``ensure()``, and surface
-            # this round as a benchmark failure (rc=1) instead of letting the
-            # actor error propagate and crash the session. Matters now that one
-            # lease is reused across a whole round: a mid-round actor death must
-            # self-heal rather than cascade to every remaining variant.
+            # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it.
             log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
             self._actor = None
             try:
@@ -582,8 +397,8 @@ class ServingLease:
                 pass
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:  # type: ignore[misc]
-            # Worker crash / unexpected error: surface as a benchmark failure so
-            # the caller's existing rc!=0 handling runs, not a session crash.
+            # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling
+            # runs, not a session crash.
             log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
             return 1, "", f"ray_worker_error: {exc}"[:2000]
         if rc == _ACTOR_TIMEOUT_RC:
@@ -591,24 +406,7 @@ class ServingLease:
         return rc, out, err
 
     def _await_or_cancel(self, ref: Any, *, cancel_scope: Any) -> tuple[int, str, str]:
-        """Block on a round, asking the actor to stop it if the scope is cancelled.
-
-        The round attributes its own stop, exactly as the local path does, so
-        the sentinel this returns is the actor's whenever the actor answers.
-        Only a wedged actor -- one that has not come back within
-        ``CANCEL_ROUND_GRACE_SEC`` of being asked -- is killed, and only then
-        does the submitter attribute the stop on its behalf, because otherwise
-        an unattributed failure is what the ledger would read.
-
-        Args:
-            ref: The ``ObjectRef`` for the round in flight.
-            cancel_scope: The scope this call is listening on.
-
-        Returns:
-            ``(returncode, stdout, stderr)`` from the round, or an
-            ``ORCHESTRATOR_CANCELLED_RETURNCODE`` triple when the actor had to
-            be killed.
-        """
+        """Block on a round, asking the actor to stop it if the scope is cancelled."""
         import ray  # noqa: PLC0415
 
         from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE  # noqa: PLC0415
@@ -628,9 +426,7 @@ class ServingLease:
                     reason,
                 )
                 if not self._ask_actor_to_cancel(reason):
-                    # The actor never took the round, or cannot be reached to be
-                    # told about it. Either way nothing in there will stop on its
-                    # own, so go straight to the kill.
+                    # The actor never took the round, or cannot be reached to be told about it.
                     asked_at -= CANCEL_ROUND_GRACE_SEC
             elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
                 log.warning(
@@ -638,9 +434,8 @@ class ServingLease:
                     "killing it to release the lease",
                     CANCEL_ROUND_GRACE_SEC,
                 )
-                # Straight to the kill: an actor that has not answered is not
-                # going to answer a graceful stop either, and waiting for one
-                # would spend the rest of the window the caller is owed.
+                # Straight to the kill: an actor that has not answered is not going to answer a graceful stop either,
+                # and waiting for one would spend the rest of the window the caller is owed.
                 self._kill_actor()
                 return (
                     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -650,14 +445,7 @@ class ServingLease:
                 )
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
-        """Tell the actor to stop the round it is running. Never raises.
-
-        Args:
-            reason: Short cause, carried into the stopped round's message.
-
-        Returns:
-            ``True`` when the actor confirmed it had a round to stop.
-        """
+        """Tell the actor to stop the round it is running. Never raises."""
         import ray  # noqa: PLC0415
 
         actor = self._actor
@@ -670,14 +458,7 @@ class ServingLease:
             return False
 
     def close(self) -> None:
-        """Release the GPU lease: stop the server, then kill the actor. Idempotent.
-
-        The stop comes first because ``ray.kill`` skips ``__ray_terminate__``,
-        so the actor's own reaper never runs on that path; the served process is
-        deliberately in its own POSIX session, which is exactly what a
-        process-group teardown does not reach. Never raises, and the kill still
-        happens when the stop does not.
-        """
+        """Release the GPU lease: stop the server, then kill the actor. Idempotent."""
         if self._actor is None:
             return
         try:
@@ -701,20 +482,12 @@ class ServingLease:
         self._actor = None
 
     def __enter__(self) -> ServingLease:
-        """Ensure the lease on context entry.
-
-        Returns:
-            This lease.
-        """
+        """Ensure the lease on context entry."""
         self.ensure()
         return self
 
     def __exit__(self, *exc: Any) -> bool:
-        """Release the lease on context exit.
-
-        Returns:
-            ``False`` so exceptions propagate.
-        """
+        """Release the lease on context exit."""
         self.close()
         return False
 
@@ -725,29 +498,7 @@ def maybe_serving_lease(
     serving_slot: bool = True,
     ensure_log_path: Any = None,
 ) -> ServingLease | None:
-    """Return a :class:`ServingLease` when single-node Ray execution is active.
-
-    The single seam executors use to opt a benchmark unit onto Ray: it returns
-    a (not-yet-ensured) lease only when the Ray backend is explicitly enabled
-    for a single-node run, else ``None`` (default local path, multi-node,
-    ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, or the pytest default). Callers pass
-    the result straight into
-    ``run_grid(..., serving_lease=lease)`` / ``run_session_kill`` — ``None``
-    transparently keeps the existing local-subprocess path — and MUST
-    :meth:`ServingLease.close` a non-``None`` lease (typically in a ``finally``)
-    to release the GPU lease.
-
-    Args:
-        num_gpus: GPUs the lease holds (typically the serving ``TP``).
-        serving_slot: Whether to also hold the whole-machine ``serving_slot``
-            resource. Defaults ``True`` — every serving-family caller
-            (baseline / conc_sweep / sweep / explore) is mutually exclusive on
-            the node (§12 T6).
-        ensure_log_path: Optional path forwarded to the cluster ensure.
-
-    Returns:
-        A lease to route benchmark rounds through, or ``None`` to run locally.
-    """
+    """Return a :class:`ServingLease` when single-node Ray execution is active."""
     from ._multi_node_env import is_multi_node  # noqa: PLC0415
     from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
 
@@ -761,15 +512,7 @@ def maybe_serving_lease(
 
 
 class GpuSpecialistLease:
-    """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess.
-
-    Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``. The
-    specialist's entire subprocess runs inside the actor so all GPU commands land
-    within Ray's assigned visible devices. Exposes ``start_async`` /
-    ``poll_started`` / ``is_alive`` / ``exit_code`` / ``stop`` / ``close``
-    (mirroring Popen for the reap loop).
-    Single-node only.
-    """
+    """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess."""
 
     def __init__(
         self,
@@ -783,8 +526,7 @@ class GpuSpecialistLease:
         self._ensure_log_path = ensure_log_path
         self._actor: Any = None
         self._pid: int | None = None
-        # §3.3 non-blocking start: the pending ObjectRef for the actor's
-        # ``start`` remote call.
+        # §3.3 non-blocking start: the pending ObjectRef for the actor's ``start`` remote call.
         self._start_ref: Any = None
 
     def start_async(
@@ -797,21 +539,7 @@ class GpuSpecialistLease:
         env_mode: str = "merge",
         stdin_path: str | None = None,
     ) -> None:
-        """Create the actor and SUBMIT the subprocess launch without blocking.
-
-        Stores the pending ObjectRef; the caller must poll :meth:`poll_started`
-        until it returns a pid (non-``None``). This is the §3.3 non-blocking
-        start: Ray scheduling time is neither charged to the specialist's wall
-        budget nor allowed to block the Coordinator's event loop.
-
-        ``env_mode="merge"`` preserves the existing actor-environment overlay
-        behavior. ``env_mode="replace"`` uses the supplied filtered environment
-        plus Ray's actor-assigned visible-device variables. ``stdin_path`` is
-        forwarded as file-backed stdin; when omitted, stdin is ``DEVNULL``.
-
-        Raises :exc:`RayInfeasibleError` for a permanently-unschedulable request
-        (caller turns this into a structured task failure).
-        """
+        """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
@@ -827,13 +555,7 @@ class GpuSpecialistLease:
         )
 
     def poll_started(self) -> int | None:
-        """Non-blocking poll for the launched pid.
-
-        Returns the pid once Ray has scheduled the actor and the subprocess has
-        launched, else ``None`` while still pending. Never blocks (uses
-        ``ray.wait(..., timeout=0)``), so a caller can interleave it with
-        ``asyncio.sleep`` and keep the event loop responsive (§3.3).
-        """
+        """Non-blocking poll for the launched pid."""
         if self._pid is not None:
             return self._pid
         if self._start_ref is None:
@@ -848,19 +570,11 @@ class GpuSpecialistLease:
         return self._pid
 
     def pid(self) -> int | None:
-        """Return the launched pid, or ``None`` before it has been resolved.
-
-        Returns:
-            The pid, or ``None``.
-        """
+        """Return the launched pid, or ``None`` before it has been resolved."""
         return self._pid
 
     def is_alive(self) -> bool:
-        """Return whether the specialist subprocess is still running.
-
-        Returns ``False`` when the actor is unreachable or the probe times out
-        (treated as transient; caller retries on the next poll tick).
-        """
+        """Return whether the specialist subprocess is still running."""
         if self._actor is None:
             return False
         import ray  # noqa: PLC0415
@@ -913,25 +627,7 @@ def maybe_gpu_specialist_lease(
     serving_slot: bool = False,
     ensure_log_path: Any = None,
 ) -> GpuSpecialistLease | None:
-    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active.
-
-    Mirrors :func:`maybe_serving_lease`: the single seam the dispatcher uses to
-    route a ``needs_gpu`` specialist's whole subprocess into a Ray ``num_gpus``
-    actor (§12 T4). Returns ``None`` (keep the legacy SQLite-gpu-id device path)
-    for multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, the pytest default, or
-    a non-positive ``num_gpus``.
-
-    Args:
-        num_gpus: GPUs the specialist would lease.
-        serving_slot: Whether the specialist also holds the whole-machine
-            ``serving_slot`` (whole-machine / bench-capable ``gpu_research_lane``
-            specialists — mutually exclusive with serving, §12 T6). ``False``
-            (default) for the serving-disjoint pool.
-        ensure_log_path: Optional path forwarded to the cluster ensure.
-
-    Returns:
-        A lease to run the specialist subprocess through, or ``None`` (local).
-    """
+    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active."""
     if num_gpus <= 0:
         return None
     from ._multi_node_env import is_multi_node  # noqa: PLC0415
@@ -946,19 +642,12 @@ def maybe_gpu_specialist_lease(
     )
 
 
-# ── P4 (skeleton) — multi-node serving via placement group + rank actors ──────
-# Gated OFF by default; wired in only when INFERENCE_OPTIMIZER_RAY_MN_SERVING is set.
+# ── P4 (skeleton) — multi-node serving via placement group + rank actors ────── Gated OFF by default; wired in only
+# when INFERENCE_OPTIMIZER_RAY_MN_SERVING is set.
 
 
 def _mn_serving_ray_enabled() -> bool:
-    """Return whether the P4 Ray multi-node serving skeleton is opted into.
-
-    Off by default: multi-node is deferred (decisions 4/5). ``True`` only when
-    ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is explicitly truthy.
-
-    Returns:
-        ``True`` when the multi-node Ray serving path is enabled.
-    """
+    """Return whether the P4 Ray multi-node serving skeleton is opted into."""
     return os.environ.get("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "").strip().lower() in {
         "1",
         "true",
@@ -968,23 +657,7 @@ def _mn_serving_ray_enabled() -> bool:
 
 
 def _make_serving_placement_group(nodes: int, gpus_per_node: float, *, serving_slot: bool):
-    """Reserve one whole-node bundle per serving rank (STRICT_SPREAD).
-
-    Each bundle asks for ``gpus_per_node`` GPUs (+ optional ``serving_slot``) and
-    STRICT_SPREAD forces one bundle per distinct node, so the rank actors below
-    land one-per-node and collectively hold every serving card until the group
-    is torn down. Blocks until the group is scheduled.
-
-    Args:
-        nodes: Number of serving nodes (bundles).
-        gpus_per_node: GPUs each node's rank holds.
-        serving_slot: Whether each bundle also reserves the node's
-            ``serving_slot`` (declared on GPU worker pods by the multi-node
-            maintainer, §4.5).
-
-    Returns:
-        The ready Ray ``PlacementGroup``.
-    """
+    """Reserve one whole-node bundle per serving rank (STRICT_SPREAD)."""
     import ray  # noqa: PLC0415
     from ray.util.placement_group import placement_group  # noqa: PLC0415
 
@@ -997,28 +670,14 @@ def _make_serving_placement_group(nodes: int, gpus_per_node: float, *, serving_s
 
 
 def _remove_serving_placement_group(pg: Any) -> None:
-    """Release a serving placement group's reserved bundles.
-
-    Args:
-        pg: The placement group to remove.
-    """
+    """Release a serving placement group's reserved bundles."""
     from ray.util.placement_group import remove_placement_group  # noqa: PLC0415
 
     remove_placement_group(pg)
 
 
 def _make_rank_actor(pg: Any, bundle_index: int, num_gpus: float, *, serving_slot: bool):
-    """Create one serving rank actor pinned to ``pg``'s ``bundle_index``.
-
-    Args:
-        pg: The serving placement group.
-        bundle_index: Bundle (node) this rank is pinned to.
-        num_gpus: GPUs this rank holds.
-        serving_slot: Whether the rank also holds ``serving_slot``.
-
-    Returns:
-        A Ray actor handle for the rank (a ServingActor pinned to the bundle).
-    """
+    """Create one serving rank actor pinned to ``pg``'s ``bundle_index``."""
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy  # noqa: PLC0415
 
     actor_cls: Any = _serving_actor_body()
@@ -1034,12 +693,7 @@ def _make_rank_actor(pg: Any, bundle_index: int, num_gpus: float, *, serving_slo
 
 
 class ServingGroupManager:
-    """Multi-node serving held by a Ray placement group + per-node rank actors.
-
-    **P4 SKELETON — gated OFF by default.** Reserves a STRICT_SPREAD placement
-    group and launches one :class:`ServingActor` rank per bundle. Interface
-    mirrors :class:`ServingLease` for eventual single-node parity.
-    """
+    """Multi-node serving held by a Ray placement group + per-node rank actors."""
 
     def __init__(
         self,
@@ -1065,20 +719,7 @@ class ServingGroupManager:
         cwds: list[str | None] | None = None,
         log_paths: list[str | None] | None = None,
     ) -> list[int]:
-        """Reserve the placement group and launch one server rank per node.
-
-        Args:
-            rank_cmds: One command per rank (``len == nodes``).
-            envs: Optional per-rank env overlays.
-            cwds: Optional per-rank working directories.
-            log_paths: Optional per-rank stdout/stderr log paths.
-
-        Returns:
-            The launched rank pids (one per node).
-
-        Raises:
-            ValueError: If ``len(rank_cmds)`` does not match ``nodes``.
-        """
+        """Reserve the placement group and launch one server rank per node."""
         if len(rank_cmds) != self._nodes:
             raise ValueError(f"expected {self._nodes} rank_cmds, got {len(rank_cmds)}")
         import ray  # noqa: PLC0415
@@ -1107,19 +748,11 @@ class ServingGroupManager:
         return list(self._pids)
 
     def pids(self) -> list[int]:
-        """Return the launched rank pids.
-
-        Returns:
-            The per-node rank pids.
-        """
+        """Return the launched rank pids."""
         return list(self._pids)
 
     def ranks_alive(self) -> list[bool]:
-        """Return per-rank liveness (``False`` for a rank whose actor is gone).
-
-        Returns:
-            One bool per rank.
-        """
+        """Return per-rank liveness (``False`` for a rank whose actor is gone)."""
         if not self._ranks:
             return []
         import ray  # noqa: PLC0415
@@ -1133,11 +766,7 @@ class ServingGroupManager:
         return out
 
     def is_alive(self) -> bool:
-        """Return whether every rank server is still running.
-
-        Returns:
-            ``True`` when all ranks are alive (and at least one exists).
-        """
+        """Return whether every rank server is still running."""
         alive = self.ranks_alive()
         return bool(alive) and all(alive)
 
@@ -1179,22 +808,7 @@ def maybe_serving_group_manager(
     serving_slot: bool = True,
     ensure_log_path: Any = None,
 ) -> ServingGroupManager | None:
-    """Return a :class:`ServingGroupManager` when the P4 MN-serving path is opted in.
-
-    **Off by default (decisions 4/5).** Returns ``None`` unless the run is
-    multi-node AND ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is set — so the live
-    detached ``restart_server_for_round`` path is completely unaffected until a
-    multi-node maintainer opts in and wires it.
-
-    Args:
-        nodes: Number of serving nodes.
-        gpus_per_node: GPUs each rank holds.
-        serving_slot: Whether each rank reserves the node ``serving_slot``.
-        ensure_log_path: Optional path forwarded to the cluster ensure.
-
-    Returns:
-        A group manager to start rank servers through, or ``None`` (legacy path).
-    """
+    """Return a :class:`ServingGroupManager` when the P4 MN-serving path is opted in."""
     if nodes <= 0 or gpus_per_node <= 0:
         return None
     from ._multi_node_env import is_multi_node  # noqa: PLC0415

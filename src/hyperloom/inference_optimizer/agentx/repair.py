@@ -35,6 +35,8 @@ import subprocess
 from pathlib import Path
 from typing import Mapping, Optional
 
+from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError, _aiperf_state_dir
+
 log = logging.getLogger(__name__)
 
 #: Entry point ``install.sh`` exposes for "run ensure_aiperf and nothing else".
@@ -118,15 +120,12 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
     # the installer's own log says why it ran, and so a future refactor that
     # re-routes this through the ordinary gate keeps working.
     child_env["INSTALL_AIPERF"] = "1"
-    # The installer runs under ``set -u`` and expands ``${HOME}`` for its state
-    # dir. The benchmark child env this inherits does not always carry HOME, and
-    # the resulting "HOME: unbound variable" reads like a packaging bug rather
-    # than a missing variable, so supply this process's own.
+    # Freeze the preflight's destination before supplying a HOME for subprocesses.
+    try:
+        child_env["HYPERLOOM_STATE_DIR"] = str(_aiperf_state_dir(child_env))
+    except (AgentXPreflightError, KeyError, OSError, RuntimeError) as exc:
+        return f"could not resolve the aiperf state directory: {exc}"
     if not child_env.get("HOME"):
-        # setdefault would leave an empty-string HOME in place, and the
-        # installer expands ${HOME}/.hyperloom into an unwritable
-        # /.hyperloom -- the stamp write then fails and every later
-        # provision redoes the install this one was supposed to record.
         child_env["HOME"] = os.path.expanduser("~")
 
     log.warning(

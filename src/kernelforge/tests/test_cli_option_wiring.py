@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Every value-carrying click option must have a matching callback parameter.
-
-click passes each option to the command callback as a keyword argument, so an
-option whose name is absent from the callback signature raises TypeError the
-moment the command actually runs. `--help` does NOT catch this: it renders the
-option list without ever invoking the callback, so a mismatch stays invisible
-until a real run fails at startup.
-
-An option declared `expose_value=False` is exempt: click keeps it out of the
-callback arguments entirely, so there is no keyword for the signature to accept.
-"""
+"""Every value-carrying click option must have a matching callback parameter."""
 
 from __future__ import annotations
 
@@ -40,9 +30,8 @@ def test_every_option_is_accepted_by_its_callback():
         if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
             continue
         for param in cmd.params:
-            # An expose_value=False option is never passed to the callback, so
-            # it needs no parameter there: it is the --help / --version pattern
-            # of an eager flag whose own callback does the work and exits.
+            # An expose_value=False option is never passed to the callback, so it needs no parameter there: it is the
+            # --help / --version pattern of an eager flag whose own callback does the work and exits.
             if not param.expose_value:
                 continue
             if param.name not in sig.parameters:
@@ -51,11 +40,7 @@ def test_every_option_is_accepted_by_its_callback():
 
 
 def test_callbacks_have_no_required_parameter_click_never_supplies():
-    """The inverse gap: a required parameter with no option and no default.
-
-    click supplies only what its params declare, so such a callback also fails
-    at invocation time rather than at --help time.
-    """
+    """The inverse gap: a required parameter with no option and no default."""
     unfilled: list[str] = []
     for name, cmd in _walk(main):
         if cmd.callback is None:
@@ -70,17 +55,7 @@ def test_callbacks_have_no_required_parameter_click_never_supplies():
 
 
 def test_no_command_absorbs_an_undeclared_option():
-    """An option no command declares must cost an exit code, never a default.
-
-    ``forge-loop`` and ``forge-rewrite-by-flydsl`` used to be exempt: they
-    dropped unknown options with a warning so a consumer in a separate
-    repository could ship ahead of the installed producer. Vendoring put
-    producer and consumer in one tree, and what the tolerance actually absorbed
-    was typos -- seven shipped examples kept passing the retired spelling of
-    ``--kernel-backend`` and ran an inferred backend, exiting 0 every time (see
-    ``test_rename_completeness``). This pins the exemption shut for every
-    command, including ones added later.
-    """
+    """An option no command declares must cost an exit code, never a default."""
     tolerant: list[str] = []
     for name, cmd in _walk(main):
         settings = cmd.context_settings or {}

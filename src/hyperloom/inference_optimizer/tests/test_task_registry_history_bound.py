@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a long task's progress trail is allowed to cost its own row.
-
-Every note rewrites the whole ``history`` blob inside a transaction on the one
-shared connection, so an unbounded trail charges a session for its own length —
-and the sessions this heartbeat exists for are the long ones. These tests pin
-the bound and the thing the bound must not break: the state transitions
-consumers read positionally.
-"""
+"""What a long task's progress trail is allowed to cost its own row."""
 
 from __future__ import annotations
 
@@ -52,12 +45,7 @@ def _notes(history: list[dict]) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_the_progress_trail_stops_growing_at_the_bound(tmp_path):
-    """A 12-hour session at the 60s tick would otherwise leave a 160 KB blob.
-
-    The newest notes are the ones a consumer reads, so the oldest are dropped,
-    and once the bound is reached each further note costs what one note costs
-    rather than what the session's whole trail costs.
-    """
+    """A 12-hour session at the 60s tick would otherwise leave a 160 KB blob."""
     over = _MAX_PROGRESS_NOTES + 40
     registry, task_id = await _running_task(tmp_path, "bounded")
     try:
@@ -74,20 +62,15 @@ async def test_the_progress_trail_stops_growing_at_the_bound(tmp_path):
     assert len(notes) == _MAX_PROGRESS_NOTES
     assert notes[0]["index"] == over + 40 - _MAX_PROGRESS_NOTES
     assert notes[-1]["index"] == over + 39
-    # 40 more notes of this shape add ~4 KB to an uncapped blob; at the bound
-    # they only shift which ones are held, so the size is steady.
+    # 40 more notes of this shape add ~4 KB to an uncapped blob; at the bound they only shift which ones are held, so
+    # the size is steady.
     assert later - at_bound < 512
     assert at_bound < 32 * 1024
 
 
 @pytest.mark.asyncio
 async def test_no_number_of_notes_can_bury_a_state_transition(tmp_path):
-    """Consumers read transitions positionally; dropping one would make them lie.
-
-    The dispatcher's policy-denied lookup scans for the newest
-    ``queued -> cancelled`` entry, and the enablement path reads a failure class
-    off the last one, so the cap must only ever retire progress notes.
-    """
+    """Consumers read transitions positionally; dropping one would make them lie."""
     registry, task_id = await _running_task(tmp_path, "transitions")
     try:
         await _report(registry, task_id, range(_MAX_PROGRESS_NOTES + 5))

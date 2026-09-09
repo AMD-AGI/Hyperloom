@@ -16,12 +16,7 @@ _EMPTY_UNSET = object()
 
 
 def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
-    """Yield every top-level JSON object in *text* in document order.
-
-    Uses the balanced-bracket scanner from :func:`extract_last_json_with_key`
-    to locate object spans, then decodes each one. String literals containing
-    braces are tracked so they do not produce false span boundaries.
-    """
+    """Yield every top-level JSON object in *text* in document order."""
     spans: list[tuple[int, int]] = []
     stack: list[tuple[str, int]] = []
     in_string = False
@@ -64,29 +59,7 @@ def read_json(
     on_error: Callable[[BaseException], None] | None = None,
     empty_value: Any = _EMPTY_UNSET,
 ) -> Any:
-    """Parse JSON from *path*.
-
-    Tolerant by default: returns *default* on ``OSError`` / ``JSONDecodeError``
-    (or when *require_dict* is set and the payload is not a dict). When *strict*
-    is ``True`` the underlying ``OSError`` / ``JSONDecodeError`` propagate (and a
-    *require_dict* violation raises ``ValueError``), letting callers wrap them in
-    a domain-specific error.
-
-    Args:
-        path: JSON file to read.
-        default: Value returned on failure in tolerant mode.
-        require_dict: Require the top-level payload to be a dict.
-        strict: Raise instead of returning *default* on any failure.
-        on_error: Optional callback invoked with the swallowed exception in
-            tolerant mode.
-        empty_value: Optional value returned for an empty/blank file before
-            JSON parsing. When unset, blank content follows normal JSON parse
-            handling (default in tolerant mode, ``JSONDecodeError`` in strict
-            mode).
-
-    Returns:
-        The decoded JSON value, or *default* in tolerant mode.
-    """
+    """Parse JSON from *path*."""
     try:
         text = path.read_text(encoding="utf-8")
         if empty_value is not _EMPTY_UNSET and not text.strip():
@@ -118,23 +91,7 @@ def read_jsonl(
     skip_non_dict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
 ) -> list[Any]:
-    """Parse a JSONL file.
-
-    Args:
-        path: JSONL file to read.
-        default: Value returned when the file cannot be read. ``None`` is
-            normalised to an empty list.
-        require_dict: Keep only object rows. Non-object rows raise
-            ``ValueError`` unless *skip_malformed* is set.
-        skip_malformed: When ``True``, malformed or wrong-shaped rows are
-            reported to *on_error* and skipped.
-        skip_non_dict: When ``True`` with *require_dict*, non-object rows are
-            skipped without treating them as malformed JSON.
-        on_error: Optional callback for swallowed file/line errors.
-
-    Returns:
-        Parsed rows in file order, or *default* for unreadable files.
-    """
+    """Parse a JSONL file."""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
@@ -164,15 +121,7 @@ def read_jsonl(
 
 
 def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return a dict value or load one from a JSON path.
-
-    Args:
-        value: A dict, a filesystem path, or ``None``.
-        default: Returned for ``None`` / unreadable / non-object inputs.
-
-    Returns:
-        The input dict, a decoded JSON object, or *default* (``{}`` by default).
-    """
+    """Return a dict value or load one from a JSON path."""
     fallback = {} if default is None else default
     if value is None:
         return fallback
@@ -197,25 +146,7 @@ def extract_first_json_with_key(
     *,
     last: bool = False,
 ) -> dict[str, Any] | None:
-    """Pull a JSON object out of a model reply.
-
-    Prefers fenced ```json / ``` blocks in document order, scanning each
-    block's content with :func:`json.JSONDecoder.raw_decode` so nested braces
-    and trailing prose inside the fence do not cause false negatives.  Falls
-    back to the bare top-level object matched by *bare_re*.
-
-    Args:
-        text: Raw model reply that may contain a fenced or bare JSON object.
-        required_key: Top-level key the returned dict must contain. When
-            ``None``, any parsed JSON object qualifies.
-        bare_re: Compiled regex whose ``group(1)`` captures a bare JSON
-            candidate. When ``None``, only fenced blocks are considered.
-        last: When ``True``, return the *last* qualifying object instead of the
-            first (useful when a reply ends with its final answer).
-
-    Returns:
-        The first (or last) qualifying dict, or ``None`` when none parses.
-    """
+    """Pull a JSON object out of a model reply."""
     if not text:
         return None
 
@@ -243,21 +174,7 @@ def extract_last_json_with_key(
     text: str,
     required_key: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the last JSON object in *text* (by start offset) that qualifies.
-
-    Uses one balanced-bracket scan to locate JSON object spans, then checks them
-    from the latest start offset backwards. Objects whose first field is not
-    *required_key* (e.g. ``{"meta": ..., "scores": ...}``) still qualify when
-    the key is present.
-
-    Args:
-        text: Raw model reply that may contain fenced or bare JSON objects.
-        required_key: Top-level key the returned dict must contain. When
-            ``None``, any parsed JSON object qualifies.
-
-    Returns:
-        The last qualifying dict by start offset, or ``None`` when none parses.
-    """
+    """Return the last JSON object in *text* (by start offset) that qualifies."""
     if not text:
         return None
 
@@ -276,27 +193,7 @@ def extract_last_json_with_key(
 
 
 def iter_sse_objects(raw: str) -> Iterator[Any]:
-    """Yield JSON objects decoded from an MCP HTTP response body.
-
-    Handles the three framings the gbrain ``/mcp`` endpoint uses:
-
-    * A plain JSON body (the whole payload is one object).
-    * A single ``text/event-stream`` event whose ``data`` field is split
-      across multiple ``data:`` lines (joined with ``\\n`` per the SSE spec,
-      one optional leading space after the colon stripped).
-    * Multiple SSE events in one response (e.g. a heartbeat before the result
-      event). Each event is decoded independently so a non-result event can
-      never corrupt the result parse.
-
-    Malformed / incomplete events are skipped, so this is safe to call on a
-    partially-read buffer.
-
-    Args:
-        raw (str): The raw response body.
-
-    Yields:
-        Any: Each successfully decoded JSON value, in body order.
-    """
+    """Yield JSON objects decoded from an MCP HTTP response body."""
     text = raw.lstrip()
     if text.startswith("{") or text.startswith("["):
         try:

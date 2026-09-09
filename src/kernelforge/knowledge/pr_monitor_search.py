@@ -104,8 +104,8 @@ def _numbers_from(items: list[dict], *, repo: str = "") -> list[int]:
         row = item
         if "number" not in row and isinstance(item.get("summary"), dict):
             row = item["summary"]
-        # A search may be issued without a repo filter; drop foreign rows so a
-        # candidate can never come from a repository the caller did not ask for.
+        # A search may be issued without a repo filter; drop foreign rows so a candidate can never come from a
+        # repository the caller did not ask for.
         if repo and row.get("repo_name") not in (None, repo):
             continue
         try:
@@ -129,8 +129,8 @@ def _candidate_requests(
             )
         )
     for phrase in context.keywords[:MAX_KEYWORD_QUERIES]:
-        # One request per phrase: the server ILIKEs the whole query string, so
-        # joining phrases would drive the hit count to zero.
+        # One request per phrase: the server ILIKEs the whole query string, so joining phrases would drive the hit
+        # count to zero.
         requests.append(
             (
                 "/search/prs",
@@ -171,10 +171,8 @@ def _collect_candidates(
             if failure and (failure == REASON_CONTRACT_ERROR or not failure_reason):
                 failure_reason = failure
             if not failure and outcome.payload is not None and seen == 0:
-                # A query that provably returned nothing is stable for a fixed
-                # target, so record it for the negative cache instead of
-                # re-issuing it on every refresh. A query that merely re-hit
-                # known candidates is not empty and must not be recorded.
+                # A query that provably returned nothing is stable for a fixed target, so record it for the negative
+                # cache instead of re-issuing it on every refresh.
                 stats.setdefault("empty_queries", []).append(
                     (kind, str(params.get("file_path") or params.get("q") or ""))
                 )
@@ -182,8 +180,7 @@ def _collect_candidates(
     if not candidates:
         remaining = remaining_sec(deadline)
         if remaining <= 0:
-            # The fallback is the least precise stage; it never gets to spend
-            # time the caller no longer has.
+            # The fallback is the least precise stage; it never gets to spend time the caller no longer has.
             return candidates, failure_reason or REASON_SKIPPED_DEADLINE
         stats["fallback_used"] = True
         try:
@@ -356,11 +353,7 @@ def discover(
     budget_sec: float = 0.0,
     deadline: float | None = None,
 ) -> SearchOutcome:
-    """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings.
-
-    ``deadline`` is the caller's absolute end-to-end cutoff and outranks
-    ``budget_sec``, which only seeds one when discovery is the whole operation.
-    """
+    """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings."""
     if context.reason:
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
     top_k = top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
@@ -382,8 +375,7 @@ def discover(
 
     remaining = remaining_sec(deadline)
     if remaining <= 0:
-        # Enrichment without time returns nothing but still costs the caller
-        # its finalization reserve.
+        # Enrichment without time returns nothing but still costs the caller its finalization reserve.
         stats["degraded_reason"] = REASON_SKIPPED_DEADLINE
         return SearchOutcome(reason=REASON_SKIPPED_DEADLINE, stats=stats)
     outcomes = client.get_many(

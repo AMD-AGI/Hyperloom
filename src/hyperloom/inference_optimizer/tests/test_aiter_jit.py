@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the shared aiter JIT lock-cleanup helpers (``_aiter_jit``).
-
-Covers the liveness-gated sweep that reaps orphaned JIT locks before a cold
-start: compiler-process detection, live/dead/unknown branching, and the
-``_resolve_timeout`` integration that only sweeps on the COLD path.
-"""
+"""Tests for the shared aiter JIT lock-cleanup helpers (``_aiter_jit``)."""
 
 import os
 import time
@@ -22,14 +17,12 @@ from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline
 
 
-# Only tests that drive psutil directly require it; sweep / _resolve_timeout
-# tests monkeypatch ``_any_live_compiler`` and run regardless.
+# Only tests that drive psutil directly require it; sweep / _resolve_timeout tests monkeypatch ``_any_live_compiler``
+# and run regardless.
 requires_psutil = pytest.mark.skipif(psutil is None, reason="psutil not installed (optional runtime dependency)")
 
 
-# ---------------------------------------------------------------------------
 # fixtures / helpers
-# ---------------------------------------------------------------------------
 def _make_aiter_tree(root):
     """Build a jit/build/ layout with a stale + a fresh lock."""
     stale_mtime = time.time() - 30 * 60
@@ -72,9 +65,7 @@ def _patch_process_iter(monkeypatch, procs):
     )
 
 
-# ---------------------------------------------------------------------------
 # _any_live_compiler
-# ---------------------------------------------------------------------------
 @requires_psutil
 def test_any_live_compiler_true_on_name_match(monkeypatch):
     _patch_process_iter(
@@ -131,9 +122,7 @@ def test_any_live_compiler_skips_dead_procs(monkeypatch):
     assert _aiter_jit._any_live_compiler() is True
 
 
-# ---------------------------------------------------------------------------
 # sweep_stale_aiter_locks_if_dead
-# ---------------------------------------------------------------------------
 def test_sweep_skips_when_compiler_alive(monkeypatch, tmp_path):
     layout = _make_aiter_tree(tmp_path)
     monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda *_args: True)
@@ -170,9 +159,7 @@ def test_sweep_unknown_falls_back_to_mtime_gate(monkeypatch, tmp_path):
     assert layout["fresh_lock"].exists()
 
 
-# ---------------------------------------------------------------------------
 # _resolve_timeout integration
-# ---------------------------------------------------------------------------
 def _cold_probe(*_a, **_k):
     return {
         "path": "/fake/jit",

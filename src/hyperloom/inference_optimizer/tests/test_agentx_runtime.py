@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the AgentX execution-boundary helper maybe_prepare_agentx.
-
-The in-place _run_magpie hook self-disables under pytest, so the deploy +
-preflight logic is factored here and tested directly.
-"""
+"""Tests for the AgentX execution-boundary helper maybe_prepare_agentx."""
 
 from __future__ import annotations
 

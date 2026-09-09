@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework Agent CLI entry point.
-
-Subcommands:
-
-* ``fa schema``     - placeholder schema summary.
-* ``fa candidates`` - enumerate PR/ref candidates from the configured
-  sources (pr_monitor + github).
-* ``fa explore``    - run the full exploration pipeline; defaults to
-  ``--plan`` mode (drop audit material only); ``--execute`` adds
-  worktree + venv + build/benchmark/accuracy commands.
-* ``fa kb``         - knowledge-base operations: ``list``, ``show``,
-  ``search``, ``contribute``, ``synthesize``. Defaults to pure-Python
-  digest; ``synthesize --with-llm`` lazy-imports ``claude_agent_sdk``.
-"""
+"""Framework Agent CLI entry point."""
 
 from __future__ import annotations
 
@@ -34,18 +21,7 @@ if TYPE_CHECKING:
 
 
 def _load_request(path: str) -> "ExploreRequest":
-    """Load and parse a JSON request file into an ExploreRequest.
-
-    Args:
-        path (str): Path to the JSON request file.
-
-    Returns:
-        ExploreRequest: The parsed request.
-
-    Raises:
-        RuntimeAdapterError: If the file is missing, not valid JSON, or its root
-            is not a JSON object.
-    """
+    """Load and parse a JSON request file into an ExploreRequest."""
     from ..models import ExploreRequest
 
     req_path = Path(path).expanduser()
@@ -61,11 +37,7 @@ def _load_request(path: str) -> "ExploreRequest":
 
 
 def _cmd_schema(args: argparse.Namespace) -> None:
-    """Print the ExploreRequest schema summary.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (unused).
-    """
+    """Print the ExploreRequest schema summary."""
     del args
     emit_json(
         {
@@ -91,12 +63,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
 
 
 def _cmd_explore(args: argparse.Namespace) -> None:
-    """Run the full exploration; plan by default, build/bench when --execute.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args with ``request``,
-            ``execute``, and ``out``.
-    """
+    """Run the full exploration; plan by default, build/bench when --execute."""
     from ..explorer import explore
 
     request = _load_request(args.request)
@@ -105,11 +72,7 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
-    """Enumerate candidates per request.search_modes and emit JSON.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
-    """
+    """Enumerate candidates per request.search_modes and emit JSON."""
     from ..sources import enumerate_candidates
 
     request = _load_request(args.request)
@@ -127,16 +90,7 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
-    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args carrying ``kb_op`` and the
-            op-specific options (``domain``, ``query``, ``body``, etc.).
-
-    Raises:
-        RuntimeAdapterError: On an unknown op, a missing domain/body, or an
-            invalid ``--findings`` file.
-    """
+    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper."""
     from .. import kb as kb_mod
     from ..models import Finding
 
@@ -231,12 +185,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Construct the top-level argparse parser for framework-agent CLI.
-
-    Returns:
-        argparse.ArgumentParser: The configured parser with all subcommands and
-            global logging flags registered.
-    """
+    """Construct the top-level argparse parser for framework-agent CLI."""
     parser = argparse.ArgumentParser(
         prog="framework-agent",
         description="Explore serving frameworks/refs in isolated worktrees.",
@@ -371,16 +320,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point invoked by both `framework-agent` and `fa` scripts.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse; ``None`` uses
-            ``sys.argv``.
-
-    Returns:
-        int: Process exit code: ``0`` on success, ``2`` on a handled or
-            unexpected error.
-    """
+    """Entry point invoked by both `framework-agent` and `fa` scripts."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     from ..logging_setup import configure_logging, get_logger
@@ -393,8 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     log = get_logger("cli")
     log.debug("fa cli start cmd=%s argv=%r", args.cmd, argv)
 
-    # `fa` runs standalone, so it cannot rely on the inference_optimizer
-    # preflight that covers the orchestrator. The call cannot raise.
+    # `fa` runs standalone, so it cannot rely on the inference_optimizer preflight that covers the orchestrator.
     from ..kb import prepare_kb_environment
 
     prepare_kb_environment()

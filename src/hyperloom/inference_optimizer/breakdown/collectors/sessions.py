@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -38,8 +32,6 @@ log = logging.getLogger(__name__)
 
 
 # Invocation-record env filter (allowlist + secret-pattern denylist).
-# Only surface workload-influencing knobs; everything else (secrets, host
-# fingerprints, shell aliases) is dropped from the breakdown JSON.
 _ENV_ALLOWLIST_EXACT: frozenset[str] = frozenset(
     {
         "TP",
@@ -77,11 +69,6 @@ _ENV_DENY_PATTERN = re.compile(
 
 
 # Non-secret keys kept verbatim even when the deny pattern matches a substring.
-# ``MAGPIE_EVAL_TOKENIZED_REQUESTS`` records the accuracy eval's prompt wire
-# format (``false`` => string prompts, forced on PD so the sglang_router does
-# not 422; absent => lm_eval's default token-id prompts). Recording it lets a
-# reader tell a PD run's accuracy from an aggregated one's -- but "TOKENIZED"
-# contains "TOKEN", so the credential denylist would otherwise drop it.
 _ENV_ALLOWLIST_FORCE: frozenset[str] = frozenset(
     {
         "MAGPIE_EVAL_TOKENIZED_REQUESTS",
@@ -90,16 +77,7 @@ _ENV_ALLOWLIST_FORCE: frozenset[str] = frozenset(
 
 
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
-    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` with stringified values.
-
-    Args:
-        envs (dict[str, Any] | None): Raw environment mapping to filter, or
-            ``None``.
-
-    Returns:
-        dict[str, str]: The allowlisted, secret-stripped subset with every
-        value coerced to ``str``. Empty when ``envs`` is not a dict.
-    """
+    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` with stringified values."""
     if not isinstance(envs, dict):
         return {}
     out: dict[str, str] = {}
@@ -110,8 +88,8 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
         keep = forced or (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
         if not keep:
             continue
-        # Force-listed keys are known non-secret; skip the substring denylist
-        # (it would otherwise strip e.g. TOKENIZED for containing "TOKEN").
+        # Force-listed keys are known non-secret; skip the substring denylist (it would otherwise strip e.g. TOKENIZED
+        # for containing "TOKEN").
         if not forced and _ENV_DENY_PATTERN.search(k):
             continue
         out[k] = "" if v is None else str(v)
@@ -119,8 +97,6 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
 
 
 # framework-args extraction patterns.
-# Pass-0 ("log_non_default_args"): vllm/sglang's ``non-default args: {...}``
-# echo of the resolved parsed argv dict — the most authoritative source.
 _FRAMEWORK_ARGS_NON_DEFAULT_RE = re.compile(
     r"non[-_]default args:\s*(\{.+\})\s*$",
     re.IGNORECASE,
@@ -146,8 +122,8 @@ _FRAMEWORK_ARGS_LAUNCH_RE = re.compile(
 )
 
 
-# Pass-2 ("log_python_cmd"): a literal python/vllm/sglang command in
-# server.log, accepted after stripping the vllm/sglang log prefix.
+# Pass-2 ("log_python_cmd"): a literal python/vllm/sglang command in server.log, accepted after stripping the
+# vllm/sglang log prefix.
 _LOG_PREFIX_RE = re.compile(
     r"^\s*(?:\([^)]*\)\s+)?(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s+"
     r"\d[\d:\-\s]*\[[^\]]+\]\s*",
@@ -186,15 +162,7 @@ def _eg(state: dict, name: str, default: Any = None) -> Any:
 
 
 def _strip_log_prefix(line: str) -> str:
-    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line.
-
-    Args:
-        line (str): A single raw log line.
-
-    Returns:
-        str: The line with any recognized timestamp / level prefix removed
-        and surrounding whitespace stripped.
-    """
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line."""
     s = line
     s = _LOG_PREFIX_RE.sub("", s)
     s = _LOG_TIMESTAMP_RE.sub("", s)
@@ -202,19 +170,7 @@ def _strip_log_prefix(line: str) -> str:
 
 
 def _starts_with_python_prefix(text: str) -> bool:
-    """Report whether ``text`` begins with a known launch-command prefix.
-
-    A prefix in :data:`_PYTHON_CMD_PREFIXES` counts only when it is a whole
-    token — i.e. immediately followed by end-of-string, whitespace, ``-`` or
-    ``.`` — so ``pythonic`` does not match ``python``.
-
-    Args:
-        text (str): Candidate command line (already stripped of any log
-            prefix by the caller).
-
-    Returns:
-        bool: ``True`` when ``text`` starts with a recognized command token.
-    """
+    """Report whether ``text`` begins with a known launch-command prefix."""
     head = text.lstrip()
     for prefix in _PYTHON_CMD_PREFIXES:
         if head.startswith(prefix):
@@ -225,17 +181,7 @@ def _starts_with_python_prefix(text: str) -> bool:
 
 
 def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
-    """Parse ``config_yaml`` to its top-level dict, or ``None`` on miss/failure. Never raises.
-
-    Shared by both yaml passes so the file is read at most once.
-
-    Args:
-        config_yaml (Path): The YAML file to parse.
-
-    Returns:
-        dict | None: The decoded top-level mapping, or ``None`` when the file
-        fails to read/parse, or the document is not a dict.
-    """
+    """Parse ``config_yaml`` to its top-level dict, or ``None`` on miss/failure. Never raises."""
     import yaml
 
     try:
@@ -248,15 +194,7 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
 
 
 def _yaml_cmd_from_dict(data: dict) -> str:
-    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``""`` on miss.
-
-    Args:
-        data (dict): The parsed YAML config mapping.
-
-    Returns:
-        str: The first non-empty command string found, or ``""`` when none of
-        the recognized fields hold one.
-    """
+    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``\"\"`` on miss."""
     for key in ("cmd", "command", "launch"):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
@@ -271,19 +209,7 @@ def _yaml_cmd_from_dict(data: dict) -> str:
 
 
 def _yaml_benchmark_synthesis(data: dict) -> str:
-    """Synthesize a readable arg string from a magpie ``benchmark.*`` dict (not a literal cmdline).
-
-    Returns ``""`` unless both ``benchmark.framework`` and
-    ``benchmark.model`` are non-empty.
-
-    Args:
-        data (dict): The parsed YAML config mapping.
-
-    Returns:
-        str: A space-joined ``key=value`` summary (framework / model plus any
-        present precision / tp / gpu / envs), or ``""`` when framework or model
-        is missing.
-    """
+    """Synthesize a readable arg string from a magpie ``benchmark.*`` dict (not a literal cmdline)."""
     bench = data.get("benchmark")
     if not isinstance(bench, dict):
         return ""
@@ -321,23 +247,7 @@ def _extract_framework_args(
     server_log: Path | None,
     config_yaml: Path | None = None,
 ) -> tuple[str, str]:
-    """Best-effort extract the launch command for a benchmark variant; never raises.
-
-    Returns ``(args_string, source)`` where ``source`` is one of, in
-    priority order: ``log_non_default_args`` / ``log_args_line`` /
-    ``log_python_cmd`` / ``yaml_cmd`` / ``yaml_benchmark`` (synthesized,
-    not a literal cmdline) / ``unknown`` (empty args).
-
-    Args:
-        server_log (Path | None): The ``server.log`` to scan, or ``None``.
-        config_yaml (Path | None): The variant config YAML used as a fallback
-            source, or ``None``. Defaults to ``None``.
-
-    Returns:
-        tuple[str, str]: ``(args_string, source)`` — the extracted launch args
-        and a provenance label, with ``("", "unknown")`` when no source yields
-        anything.
-    """
+    """Best-effort extract the launch command for a benchmark variant; never raises."""
     chunk: str = ""
     if server_log is not None:
         try:
@@ -349,8 +259,7 @@ def _extract_framework_args(
 
     lines = chunk.splitlines() if chunk else []
 
-    # Pass 0: ``non-default args: {...}`` echo, parsed via ast.literal_eval;
-    # a failed eval is treated as a miss.
+    # Pass 0: ``non-default args: {...}`` echo, parsed via ast.literal_eval; a failed eval is treated as a miss.
     for line in lines:
         m = _FRAMEWORK_ARGS_NON_DEFAULT_RE.search(line)
         if not m:
@@ -412,16 +321,7 @@ def _extract_framework_args(
 
 
 def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
-    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises.
-
-    Args:
-        config_path (Path | None): The variant config YAML to read, or
-            ``None``.
-
-    Returns:
-        dict[str, str]: The allowlisted, secret-stripped env subset. Empty when
-        the path is missing or parsing fails.
-    """
+    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises."""
     if config_path is None:
         return {}
     try:
@@ -447,23 +347,7 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
 
 
 def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
-    """Resolve the container image for ``collect_session``.
-
-    Prefers the manifest field (the spawn-time image), then falls back to the
-    env / mount-point chain the manifest helper uses. Kept separate from
-    :func:`manifest._detect_image` to avoid an import cycle.
-
-    Resolution order: manifest ``image`` field → ``HYPERLOOM_IMAGE`` /
-    ``CONTAINER_IMAGE`` / ``IMAGE`` env vars → known image marker files →
-    a ``unknown@<short-cgroup-id>`` derived from ``/proc/1/cgroup``.
-
-    Args:
-        manifest (dict[str, Any]): The parsed ``manifest.json`` dict.
-
-    Returns:
-        str | None: The resolved container image reference, or ``None`` when
-        no source yields a value.
-    """
+    """Resolve the container image for ``collect_session``."""
     manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
     if isinstance(manifest_image, str) and manifest_image.strip():
         return manifest_image.strip()
@@ -496,22 +380,7 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
 
 
 def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
-    """When the session's current run leg began.
-
-    ``start_ts`` alone does not answer this. A resume re-anchors it only after
-    a crash or a stop with a reason; a resume after a clean stop deliberately
-    keeps it, so that ``--max-hours`` still counts from the original start.
-    ``state.resumed_ts`` is stamped by every resume, so the later of the two is
-    the boundary on both paths.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        start_ts (str): The session's resolved start (see
-            :func:`collect_session`).
-
-    Returns:
-        str: The later of the two timestamps, or whichever one is parseable.
-    """
+    """When the session's current run leg began."""
     resumed_ts = str(state.get("resumed_ts") or "")
     dated = [(to_unix(ts), ts) for ts in (start_ts, resumed_ts)]
     parseable = [(at, ts) for at, ts in dated if at is not None]
@@ -521,30 +390,7 @@ def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
 
 
 def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tuple[str, str]:
-    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored).
-
-    A resume clears ``state.stop_reason`` and ``stop_ts`` but cannot clear the
-    previous leg's CLOSE row, and that row is not evidence about the leg
-    running now: honouring it reports a live session as having stopped, for
-    the reason it stopped last time. A row from before the leg boundary is
-    skipped whole -- reason and timestamp -- because the timestamp is stamped
-    as the session's end even when the reason itself is not adopted, and the
-    scan carries on so a history written out of order can still be answered
-    from a row that does belong to this leg.
-
-    A row is only disqualified on comparable evidence. When either timestamp
-    is missing or unparseable the row stands, since the whole point of the
-    fallback is a session whose reason never reached the state file.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        leg_start_ts (str): Start of the current leg (see
-            :func:`_leg_start_ts`); ``""`` when the session recorded none.
-
-    Returns:
-        tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
-        transition of the current leg, or ``("", "")`` when there is none.
-    """
+    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored)."""
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
@@ -564,19 +410,7 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
 
 
 def _first_recorded_end(*candidates: Any) -> str:
-    """The first candidate that reads as a timestamp, canonicalised to ``...Z``.
-
-    A value that does not parse is no more an end time than a missing one:
-    passed through it lands in ``ended_at_utc`` verbatim and collapses the
-    measured duration to zero, where the next candidate (or the export clock)
-    still answers.
-
-    Args:
-        *candidates (Any): Recorded end timestamps, best evidence first.
-
-    Returns:
-        str: The first parseable candidate, or ``""`` when none is.
-    """
+    """The first candidate that reads as a timestamp, canonicalised to ``...Z``."""
     for value in candidates:
         if to_unix(value) is not None:
             return iso_z(value)
@@ -584,35 +418,12 @@ def _first_recorded_end(*candidates: Any) -> str:
 
 
 def _session_has_ended(stop_reason: Any) -> bool:
-    """Whether a stop reason marks the session as no longer running.
-
-    Args:
-        stop_reason (Any): Raw ``stop_reason`` from a state or session section.
-
-    Returns:
-        bool: ``True`` once a non-blank stop reason has been recorded.
-    """
+    """Whether a stop reason marks the session as no longer running."""
     return bool(str(stop_reason or "").strip())
 
 
 def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: Any) -> int | None:
-    """Seconds the session ran, or ``None`` when no window can be established.
-
-    A finished session is measured to its recorded end; only one still running
-    may be measured up to now, since extrapolating a finished session grows its
-    duration on every re-export and reads as a plausible number rather than as
-    missing evidence.
-
-    Args:
-        start_ts (Any): Start of the window (see :func:`collect_session` for
-            which start that is across a resume).
-        ended_at_utc (Any): Recorded end of the window, if any.
-        stop_reason (Any): Terminal reason; a non-blank one means the session
-            is no longer running.
-
-    Returns:
-        int | None: Whole seconds between start and end, or ``None``.
-    """
+    """Seconds the session ran, or ``None`` when no window can be established."""
     start = to_unix(start_ts)
     if start is None:
         return None
@@ -625,20 +436,7 @@ def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: An
 
 
 def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
-    """Wall-clock minutes of the leg described by a resolved ``session`` section.
-
-    Derived from the section's own timestamps rather than stored, so a section
-    assembled from the live recorder's snapshot reports the same elapsed time
-    as one built by :func:`collect_session`. ``session_meta`` measures the same
-    window from the same fields; the two agree because both producers of the
-    section carry those timestamps, not because either reads the other.
-
-    Args:
-        session_section (dict[str, Any]): A ``session`` section.
-
-    Returns:
-        float: Minutes elapsed, or ``0.0`` when no window can be established.
-    """
+    """Wall-clock minutes of the leg described by a resolved ``session`` section."""
     duration_s = _measured_duration_seconds(
         session_section.get("start_ts") or session_section.get("created_at_utc"),
         session_section.get("ended_at_utc"),
@@ -648,17 +446,7 @@ def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
 
 
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
-    """Decide whether the CLOSE-phase stop reason should override the session's.
-
-    Args:
-        stop_reason: The session-level stop reason.
-        close_stop_reason: The CLOSE-phase stop reason.
-
-    Returns:
-        ``True`` when the close reason is more specific — i.e. it is set and the
-        session reason is empty, or the session merely timed out while the close
-        reason did not.
-    """
+    """Decide whether the CLOSE-phase stop reason should override the session's."""
     if not close_stop_reason:
         return False
     if not stop_reason:
@@ -668,18 +456,7 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 
 # Session metadata
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
-    """Project SharedState's crash / interruption / resume signals.
-
-    Folds crash / degraded-mode / pending-revalidation signals into the
-    ``session.recovery`` block so a resumed run is not read as a clean monotonic
-    one. Pure / best-effort: unparseable fields are skipped, never raised.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
-
-    Returns:
-        dict[str, Any]: The ``recovery`` block (see schema ``Recovery``).
-    """
+    """Project SharedState's crash / interruption / resume signals."""
     crash_count = _to_int(state.get("crash_count")) or 0
     crash_ts_iso: list[str] = []
     raw_ts = state.get("crash_timestamps")
@@ -722,35 +499,7 @@ def collect_session(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the session-identification + lifecycle section.
-
-    Merges identifiers and timing from ``state`` and ``manifest`` (state
-    taking precedence on overlapping fields), resolves the container image,
-    and stamps ``ended_at_utc`` from the recorded stop timestamp only once a
-    ``stop_reason`` is present -- one the state file carries, or one recovered
-    from a CLOSE transition belonging to the current leg (see
-    :func:`_close_phase_stop_reason`). When no image can be detected a warning
-    is appended.
-
-    ``elapsed_minutes`` runs from ``state.start_ts``, the same anchor
-    ``--max-hours`` is counted against, to the recorded end (or to now while
-    the run is still going), so the two stay comparable. A resume re-anchors
-    ``start_ts`` only when the previous leg crashed or stopped for a recorded
-    reason; after a clean stop it keeps the original start, and the elapsed
-    time then spans the gap between the legs -- as the budget does. The
-    manifest's ``created_at_utc`` names the first launch either way, and is
-    the fallback start only for a session that never recorded one.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The session section (ids, timestamps, stop reason,
-        elapsed minutes, host, image, code revision, pid, tick count, etc.).
-    """
+    """Collect the session-identification + lifecycle section."""
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
@@ -758,9 +507,8 @@ def collect_session(
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if _session_has_ended(stop_reason):
-        # ``stop_ts`` is stamped once, when the reason is written, so a re-export
-        # of a finished session keeps reporting the same end. The CLOSE
-        # transition and the export clock are only next-best guesses.
+        # ``stop_ts`` is stamped once, when the reason is written, so a re-export of a finished session keeps
+        # reporting the same end.
         ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
     image = _detect_image_for_session(manifest)
     if image is None:
@@ -780,8 +528,7 @@ def collect_session(
         "code_revision": str(manifest.get("code_revision") or ""),
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
-        # USER_DATA_PATH root (the operator-chosen workspace base). Manifest is
-        # snapshotted at session start; env is the in-process fallback.
+        # USER_DATA_PATH root (the operator-chosen workspace base).
         "user_data_path": str(
             manifest.get("user_data_path") or state.get("user_data_path") or os.environ.get("USER_DATA_PATH") or ""
         ),
@@ -797,20 +544,7 @@ def _session_duration_seconds(
     session_section: dict[str, Any],
     manifest: dict[str, Any],
 ) -> int:
-    """How long the session ran, in whole seconds.
-
-    Measures the same window as ``session.elapsed_minutes`` (see
-    :func:`collect_session`) so the machine field and the human-readable one
-    cannot disagree, then falls back to ``elapsed_minutes`` for callers that
-    supply it and no usable timestamps.
-
-    Args:
-        session_section (dict[str, Any]): The resolved ``session`` dict.
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-
-    Returns:
-        int: The duration, or ``0`` when it cannot be established.
-    """
+    """How long the session ran, in whole seconds."""
     duration_s = _measured_duration_seconds(
         session_section.get("start_ts") or session_section.get("created_at_utc") or manifest.get("created_at_utc"),
         session_section.get("ended_at_utc"),
@@ -830,26 +564,7 @@ def collect_session_meta(
     session_section: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the ``session_meta`` enrichment block.
-
-    Emitted straight from the manifest + resolved ``session`` section; the CI
-    step only gap-fills fields the sandbox could not know (e.g. ``category``).
-
-    The duration is measured from the session's own timestamps rather than
-    read from a sibling key. Two producers fill the ``session`` section -- the
-    live recorder's snapshot and this module's collector -- and only the
-    collector writes ``elapsed_minutes``, so a run recorded live reported a
-    session that lasted zero seconds.
-
-    Args:
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        session_section (dict[str, Any]): The already-built ``session`` dict.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: ``{code_revision, image, image_id,
-        session_duration_seconds}``.
-    """
+    """Collect the ``session_meta`` enrichment block."""
     image = session_section.get("image")
     image_str = image if isinstance(image, str) and image.strip() else ""
     duration_s = _session_duration_seconds(session_section, manifest)
@@ -867,23 +582,7 @@ def collect_workload(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the workload-description section.
-
-    Merges framework name / model / GPU / parallelism fields from ``state`` and
-    ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
-    / ``osl`` / ``max_model_len`` / ``precision``) nested under
-    ``manifest.workload``, and the optimization objective.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        manifest (dict[str, Any]): Parsed ``manifest.json``.
-        warnings (list[str]): Shared warnings list (unused here but kept for a
-            uniform collector signature).
-
-    Returns:
-        dict[str, Any]: The workload section with coerced numeric knobs and a
-        defaulted ``objective`` mapping.
-    """
+    """Collect the workload-description section."""
     wl = manifest.get("workload") or {}
     return {
         "framework_name": str(state.get("framework") or manifest.get("framework") or ""),
@@ -907,23 +606,7 @@ def collect_model_info(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the ``model_info`` section (state.model_info passthrough).
-
-    The summary is computed once at launch (``cli_bootstrap`` →
-    ``summarize_model_config``) and persisted on ``state.model_info``, so the
-    breakdown just mirrors it verbatim. Returns ``{}`` when the field is absent
-    (sessions whose state predates it) or empty (non-transformers models such
-    as diffusion checkpoints, where the config.json could not be parsed); the
-    frontend treats an empty object as "model info unavailable".
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (unused here but kept for a
-            uniform collector signature).
-
-    Returns:
-        dict[str, Any]: The model_info object, or ``{}`` when unavailable.
-    """
+    """Collect the ``model_info`` section (state.model_info passthrough)."""
     info = state.get("model_info")
     return dict(info) if isinstance(info, dict) else {}
 
@@ -934,26 +617,7 @@ def collect_baseline(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the baseline-measurement section.
-
-    Resolves the baseline workspace (re-rooting container-style paths under
-    ``session_dir``), reads ttft / e2el from its ``benchmark_report.json``,
-    and — when state didn't resolve — falls back to a disk walk of
-    ``runs/baseline/``. Reconstructs an attempts history from disk when
-    ``state.baseline_attempts`` is empty, and extracts the launch invocation
-    (framework args + envs) from the matching server.log / config yaml. Each
-    fallback or extraction miss is recorded in ``warnings``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The baseline section including throughput, accuracy,
-        ttft / e2el (with a ``ttft_e2el_source`` provenance label), the
-        attempts history, failure streak, and the launch ``invocation``.
-    """
+    """Collect the baseline-measurement section."""
     last_b = state.get("last_baseline") or {}
     workspace_str = last_b.get("workspace") or ""
     # Re-root container-style paths under the on-disk session_dir.
@@ -1024,8 +688,8 @@ def collect_baseline(
             }
         )
 
-    # Disk-walking fallback when state.baseline_attempts is empty; each
-    # reconstructed entry is marked ``status="reconstructed"``.
+    # Disk-walking fallback when state.baseline_attempts is empty; each reconstructed entry is marked
+    # ``status="reconstructed"``.
     if not history:
         reconstructed = _reconstruct_baseline_attempts(session_dir, warnings)
         if reconstructed:
@@ -1038,8 +702,7 @@ def collect_baseline(
     config_path_raw = state.get("baseline_config_path") or None
     config_resolved = _resolve_under_session(session_dir, config_path_raw) if config_path_raw else None
     server_log_path: Path | None = None
-    # Prefer the already-located report so the invocation matches ttft/e2el;
-    # else fall back to the resolved workspace.
+    # Prefer the already-located report so the invocation matches ttft/e2el; else fall back to the resolved workspace.
     if report_path is not None:
         candidate_log = report_path.parent / "server.log"
         if candidate_log.exists():
@@ -1053,8 +716,8 @@ def collect_baseline(
         if bench_dirs:
             server_log_path = bench_dirs[0]
 
-    # When disk-walked, the matching config yaml usually sits near the report;
-    # prefer it when state.baseline_config_path didn't resolve.
+    # When disk-walked, the matching config yaml usually sits near the report; prefer it when
+    # state.baseline_config_path didn't resolve.
     if config_resolved is None and report_path is not None:
         for candidate in (
             report_path.parent / "baseline_config.with_envs.yaml",
@@ -1112,23 +775,7 @@ def _reconstruct_baseline_attempts(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Walk ``<sd>/runs/baseline/<hash>/**/benchmark_report.json`` and
-    synthesize :class:`BaselineAttemptSummary` rows for each.
-
-    Used when ``state.baseline_attempts`` is empty but the on-disk
-    runs/baseline/ tree shows that baseline ran (one or many times).
-    Reads only what we can be certain of; everything else stays empty.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place when a
-            report fails to parse).
-
-    Returns:
-        list[dict[str, Any]]: One reconstructed attempt row per discovered
-        report (each marked ``status="reconstructed"``), ordered by mtime.
-        Empty when no ``runs/baseline/`` tree exists.
-    """
+    """Walk ``<sd>/runs/baseline/<hash>/**/benchmark_report.json`` and synthesize :class:`BaselineAttemptSummary` rows for each."""
     root = session_dir / "runs" / "baseline"
     if not root.exists():
         return []
@@ -1191,25 +838,7 @@ def collect_final(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the final (validated) configuration section.
-
-    Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
-    builds the ordered ``action_path`` from ``optimization_stack``, and — when
-    ``current_best`` lacks ttft / e2el — reconstructs them from disk
-    (``current_best``'s own workspace, then the top stack entry's report),
-    recording the provenance in ``ttft_e2el_source`` and a ``warnings`` note.
-    Also assembles the replayable launch ``invocation``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The final section (throughput, validated cumulative
-        gain, stack-length bookkeeping, action path, ttft / e2el, invocation,
-        and closing-phase markers).
-    """
+    """Collect the final (validated) configuration section."""
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
     stack_len = len(stack) if isinstance(stack, list) else 0
@@ -1283,9 +912,8 @@ def collect_final(
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
-        # A GEAK e2e candidate whose self-reported win is not yet confirmed by a
-        # main-flow rebench; surfaced as an audit-only note and EXCLUDED from the
-        # headline gain. Empty on native/validated sessions.
+        # A GEAK e2e candidate whose self-reported win is not yet confirmed by a main-flow rebench; surfaced as an
+        # audit-only note and EXCLUDED from the headline gain.
         "geak_pending": (dict(state.get("geak_pending") or {}) if isinstance(state.get("geak_pending"), dict) else {}),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
@@ -1307,16 +935,7 @@ def _find_current_best_report(
     session_dir: Path,
     state: dict[str, Any],
 ) -> Path | None:
-    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        Path | None: The matched report, or ``None`` when ``current_best`` is
-        missing or no report resolves.
-    """
+    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match)."""
     cb = state.get("current_best") or {}
     if not isinstance(cb, dict):
         return None
@@ -1332,17 +951,7 @@ def _find_stack_top_report(
     session_dir: Path,
     state: dict[str, Any],
 ) -> Path | None:
-    """Last optimization_stack entry's benchmark_report.json (next-best fallback).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        Path | None: The top stack entry's report (via workspace or
-        action/variant/tput match), or ``None`` when the stack is empty or
-        nothing resolves.
-    """
+    """Last optimization_stack entry's benchmark_report.json (next-best fallback)."""
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
     if not stack and isinstance(cb, dict):
@@ -1368,17 +977,7 @@ def _find_matching_action_report(
     session_dir: Path,
     entry: dict[str, Any],
 ) -> Path | None:
-    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        entry (dict[str, Any]): A stack / current_best entry carrying
-            ``action``, ``variant_name``, and ``tput``.
-
-    Returns:
-        Path | None: The best-scoring matching report, or ``None`` when the
-        action is missing or no candidate matches.
-    """
+    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped)."""
     action = str(entry.get("action") or "").strip()
     if not action:
         return None
@@ -1417,20 +1016,7 @@ def _build_final_invocation(
     benchmark_report: Path | None,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        benchmark_report (Path | None): The resolved final benchmark report
-            whose siblings supply the config / server log, or ``None``.
-        warnings (list[str]): Shared warnings list (mutated in place when args
-            extraction fails).
-
-    Returns:
-        dict[str, Any]: The invocation dict (framework args + source, extra
-        envs, and relative config / server-log paths).
-    """
+    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling)."""
     config_path: Path | None = None
     server_log_path: Path | None = None
     if benchmark_report is not None:
@@ -1531,21 +1117,7 @@ def collect_enablement(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the enablement observability section.
-
-    Covers the whole subsystem, not just the artifacts it happens to leave
-    behind: the admitted lane, the round lifecycle (dispatch / attempts / stall /
-    outcome), the boot- or eval-origin trigger, the patches and stack actions it
-    landed, the attempt runtimes it provisioned, and the targeted builds it ran.
-
-    A boot-origin round repaired by a plain source patch provisions no runtime
-    and builds nothing, so gating emission on those artifacts alone made the most
-    common kind of enablement invisible. Emission is therefore keyed on the lane
-    having done something, or on it having been explicitly turned off — with
-    ``all`` the default, "armed but never needed" is the uninteresting case and
-    stays hidden, while "opted out" explains why nothing tried to repair a run
-    that failed to establish a baseline.
-    """
+    """Collect the enablement observability section."""
     active_runtime_raw = _eg(state, "active_runtime")
     attempt_runtimes_raw = _eg(state, "attempt_runtimes")
     failure_kind = str(_eg(state, "failure_kind", "") or "")
@@ -1555,11 +1127,11 @@ def collect_enablement(
     kept_stack_action_raw = _eg(state, "kept_stack_action")
 
     origin = str(_eg(state, "origin", "") or "")
-    # eval_kind is NOT cleared on success, so it can identify an eval-origin
-    # enablement even after the run succeeds and origin is reset to "".
+    # eval_kind is NOT cleared on success, so it can identify an eval-origin enablement even after the run succeeds
+    # and origin is reset to "".
     eval_kind = str(_eg(state, "baseline_eval_kind", "") or "")
-    # Sessions predating the flag load with the SharedState default, so that is
-    # also the right value to report for them.
+    # Sessions predating the flag load with the SharedState default, so that is also the right value to report for
+    # them.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
     attempts = _as_int(_eg(state, "attempts"))
     dispatched = bool(_eg(state, "inflight_task_id"))
@@ -1597,8 +1169,7 @@ def collect_enablement(
     reval_tid = str(_eg(state, "revalidation_task_id", "") or "")
     if reval_tid:
         out["revalidation_task_id"] = reval_tid
-    # The boot-origin trigger evidence: without it a launch-failure round shows
-    # no reason for having run at all.
+    # The boot-origin trigger evidence: without it a launch-failure round shows no reason for having run at all.
     launch_log = str(_eg(state, "launch_log", "") or "")
     if launch_log:
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]

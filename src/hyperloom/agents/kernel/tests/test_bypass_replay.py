@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Replay test: run the bypass CLI against a real profiler trace.
-
-Skipped unless a trace path is provided via ``HYPERLOOM_BYPASS_REPLAY_TRACE``
-(or the known local dev path exists). When it runs it asserts the downstream
-artifact contract and the golden ranking (attention/SDPA is the top GPU-time
-kernel for the reference vLLM Llama session).
-"""
+"""Replay test: run the bypass CLI against a real profiler trace."""
 
 from __future__ import annotations
 

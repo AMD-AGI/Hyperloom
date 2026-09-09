@@ -169,18 +169,16 @@ def test_multiple_inbox_sections_are_treated_independently():
 
 
 def test_try_parse_payload_typeerror_returns_none():
-    # ast.literal_eval raises TypeError (not ValueError/SyntaxError)
-    # when a payload constructs an unhashable container; the parser must swallow
-    # it and return None instead of crashing prepare-review.
+    # ast.literal_eval raises TypeError (not ValueError/SyntaxError) when a payload constructs an unhashable
+    # container; the parser must swallow it and return None instead of crashing prepare-review.
     from hyperloom.agents.critic.runtime.inbox_parser import _try_parse_payload
 
     assert _try_parse_payload("{[1]: 2}") is None
 
 
 def test_inbox_row_with_typeerror_payload_is_malformed_not_crash():
-    # a proposal row carrying a TypeError-triggering payload must
-    # not crash parsing; the row is kept with payload=None and excluded from
-    # proposals so the Critic never reviews an unparseable proposal.
+    # a proposal row carrying a TypeError-triggering payload must not crash parsing; the row is kept with payload=None
+    # and excluded from proposals so the Critic never reviews an unparseable proposal.
     text = _build_prompt(
         shared="model=qwen",
         inbox_title="Inbox for critic",

@@ -310,7 +310,6 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "kernel_id": "k_abc",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -369,7 +368,6 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -426,7 +424,6 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -481,7 +478,6 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -520,7 +516,6 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "kernel_id": "k_warn",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -549,7 +544,6 @@ async def test_integrate_handler_rejects_rebaseline_that_exited_nonzero(session_
         "kernel_id": "k_nonzero",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -582,7 +576,6 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "kernel_id": "k_bad",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -599,7 +592,6 @@ def _accuracy_payload(base_yaml: Path, target: Path, patch_file: Path, kernel_id
         "kernel_id": kernel_id,
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
 
@@ -645,11 +637,7 @@ async def test_integrate_handler_keeps_when_accuracy_holds(session_dir, tmp_path
 
 @pytest.mark.asyncio
 async def test_integrate_handler_reverts_on_accuracy_regression(session_dir, tmp_path):
-    """A throughput win that loses accuracy beyond tolerance must REVERT.
-
-    This is the gate the kernel path was missing: the patch is faster, so the
-    throughput-only decision would have KEEPed it.
-    """
+    """A throughput win that loses accuracy beyond tolerance must REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     _seed_baseline_accuracy(session_dir, 0.80)
@@ -1052,12 +1040,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     session_dir,
     tmp_path,
 ):
-    """A failed re-baseline must route through the fault retry budget.
-
-    An invalid re-baseline yields ``status=failed`` + ``decision=REVERT`` with a
-    top-level fault ``error_class``; ``record_kernel_integrate_result`` must mark
-    it retryable rather than discarding it as a genuine REVERT.
-    """
+    """A failed re-baseline must route through the fault retry budget."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
@@ -1080,14 +1063,12 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
         "kernel_id": "k_fault",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    # error_class here is deliberately NOT in the fault whitelist, proving the
-    # status-based check saves the patch.
+    # error_class here is deliberately NOT in the fault whitelist, proving the status-based check saves the patch.
     assert res["status"] == "failed"
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
@@ -1135,7 +1116,6 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "kernel_id": "k_bad",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1188,7 +1168,6 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "base_tput": 800.0,
         "config_path": str(base_yaml),
         "kernel_id": "k006",
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1301,7 +1280,6 @@ async def test_integrate_handler_rejects_text_patch_artifact(session_dir, tmp_pa
         "kernel_id": "k_text",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     res = await krh.integrate_handler(payload, session_dir=session_dir)
@@ -1338,7 +1316,6 @@ async def test_integrate_handler_rejects_incompatible_standalone_cpp(
         "kernel_id": "k_standalone",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     res = await krh.integrate_handler(payload, session_dir=session_dir)
@@ -1379,7 +1356,6 @@ async def test_integrate_handler_injects_extra_server_args(
         "extra_server_args": "--cuda-graph-max-bs 8",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1419,7 +1395,6 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "kernel_id": "k_review",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1482,7 +1457,6 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
                             "kernel_id": "k1",
                             "patch_path": str(patch_file),
                             "target_file": str(target),
-                            "allow_unknown_target": True,
                             "skip_rebuild": True,
                         },
                     },
@@ -1515,8 +1489,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     tmp_path,
     monkeypatch,
 ):
-    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts)
-    # by opting out of the honest-E2E path, which widens the cap.
+    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts) by opting out of the honest-E2E
+    # path, which widens the cap.
     monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -1554,7 +1528,6 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "kernel_id": "k_repeat",
                 "patch_path": str(patch_file),
                 "target_file": str(target),
-                "allow_unknown_target": True,
                 "skip_rebuild": True,
             },
         }
@@ -1623,8 +1596,8 @@ async def test_report_executor_writes_md_and_json(session_dir):
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore
-        # requires baseline_tput > 0 (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
+        # (execution_order) to be proposable next.
         c.shared_state.baseline_tput = 800.0
         await c._handle_intent(
             "orchestration",

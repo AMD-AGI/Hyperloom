@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Backup isolation between two applies that share a kernel id and a target.
-
-The fusion lane passes a constant ``kernel_id`` and an integrate request may
-carry none at all, so neither the id nor the target path separates one attempt
-from the next. Without a per-attempt directory the second apply overwrites the
-first's pristine copy and its manifest, and a later revert restores the patch it
-was supposed to undo while reporting success.
-"""
+"""Backup isolation between two applies that share a kernel id and a target."""
 
 from __future__ import annotations
 
@@ -30,7 +23,6 @@ def _apply(tmp_path: Path, target: Path, marker: str, kernel_id: str) -> dict:
         backup_root=tmp_path / "backup",
         kernel_id=kernel_id,
         skip_rebuild=True,
-        allow_unknown_target=True,
     )
 
 

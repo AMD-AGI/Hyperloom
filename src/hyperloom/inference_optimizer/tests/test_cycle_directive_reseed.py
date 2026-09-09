@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for per-macro-cycle orchestration-prompt reseeding.
-
-Covers the deterministic fallback render and _reseed_orch_prompt_for_cycle:
-LLM directive wins when present, deterministic fallback otherwise, the
-cycle_directive_history ring appends/caps, and a user --orch-prompt is never
-clobbered. All offline; the prompt rebuild is stubbed.
-"""
+"""Unit tests for per-macro-cycle orchestration-prompt reseeding."""
 
 from __future__ import annotations
 
@@ -26,12 +20,7 @@ def _explore_with_stub_coordinator(
     user_supplied: bool = False,
     plan_focus: dict | None = None,
 ) -> tuple[ExplorePhase, SimpleNamespace, list[dict]]:
-    """Build an ExplorePhase over a minimal coordinator stub.
-
-    Returns (phase, coord, rebuild_calls) where rebuild_calls records the kwargs
-    passed to the stubbed prompt rebuilder. ``session_dir`` is required by the
-    tests that reseed, which snapshot the scope they install.
-    """
+    """Build an ExplorePhase over a minimal coordinator stub."""
     st = SharedState(session_id="t", macro_cycle=macro_cycle)
     st.orchestration_memory = {"next_cycle_directive": next_cycle_directive}
     rebuild_calls: list[dict] = []

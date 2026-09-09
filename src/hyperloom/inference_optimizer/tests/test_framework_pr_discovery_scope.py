@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A scriptable workload does not query the serving frameworks' PRs.
-
-``_framework_agent_discover_repo_urls`` already refuses to hand serving/infra
-PRs to a scriptable model repo, because they cannot be git-applied there. The
-guard requires both a repo URL and scriptability, which leaves out exactly the
-framework that most needs it: an operator-supplied workload has no upstream repo
-by construction, so it fell through to querying all of PR_QUERY_REPOS.
-
-A 24h run spent about ten authoring rounds on sglang pull requests that way, and
-the orchestration model wrote its own verdict into the session learnings: "any
-serve-flag or cross-framework sglang PR is dead on arrival".
-"""
+"""A scriptable workload does not query the serving frameworks' PRs."""
 
 from __future__ import annotations
 
@@ -40,11 +29,7 @@ def test_operator_supplied_workload_queries_no_serving_repos():
 
 
 def test_every_scriptable_framework_without_a_repo_map_is_also_scoped():
-    """The same hole applies to any scriptable framework with no repo URL.
-
-    Derived from the registry rather than named, so a future entry is covered
-    the moment it is added.
-    """
+    """The same hole applies to any scriptable framework with no repo URL."""
     from hyperloom.inference_optimizer import framework_registry as fr
 
     candidates = [name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SCRIPTABLE and not spec.repo_url]

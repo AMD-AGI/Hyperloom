@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""DB retention / pruning for multi-day single-session runs.
-
-The ``events`` and ``tasks`` tables are otherwise append-only and would grow
-without bound over a multi-day run (no process restart clears them). These
-helpers bound them while preserving the two correctness invariants:
-
-* **Resume safety** — ``replay_for_resume`` rebuilds the undecided proposals
-  from the event log, so an event is deletable only once it falls outside the
-  ``keep_recent`` window AND is not a proposal still awaiting a
-  ``review_verdict`` on its ``msg_id``.
-* **In-flight safety** — ``tasks`` pruning never touches ``queued`` / ``running``
-  / ``failed`` rows; only truly-done (``succeeded`` / ``cancelled``) rows beyond
-  a keep-recent count are removed.
-"""
+"""DB retention / pruning for multi-day single-session runs."""
 
 from __future__ import annotations
 
@@ -23,14 +10,12 @@ from dataclasses import dataclass
 from .storage.connection import SqliteConnection
 
 
-# Keep at least this many most-recent events so a recently-emitted reply is
-# still resolvable by ``lookup_by_id``.
+# Keep at least this many most-recent events so a recently-emitted reply is still resolvable by ``lookup_by_id``.
 DEFAULT_EVENTS_KEEP_RECENT: int = 5000
 # Keep at least this many most-recent done tasks (succeeded/cancelled).
 DEFAULT_TASKS_KEEP_DONE: int = 2000
 
-# Only these task states are safe to prune: truly done, never retried, and not
-# pending manual attention.
+# Only these task states are safe to prune: truly done, never retried, and not pending manual attention.
 _PRUNABLE_TASK_STATES: tuple[str, ...] = ("succeeded", "cancelled")
 
 
@@ -41,20 +26,12 @@ class RetentionResult:
 
     @property
     def total(self) -> int:
-        """Total rows deleted across the events and tasks retention passes.
-
-        Returns:
-            The sum of ``events_deleted`` and ``tasks_deleted``.
-        """
+        """Total rows deleted across the events and tasks retention passes."""
         return self.events_deleted + self.tasks_deleted
 
 
-# A ``proposal`` event is semantically pending until a ``review_verdict`` targets
-# its ``msg_id``; pruning a pending proposal's row would lose the only durable
-# record a post-resume late verdict can attach to. Canonical form of that set;
-# ``prune_events`` inlines a copy — keep both in lockstep with ``replay_for_resume``.
-# The inner SELECT must exclude NULL/empty targets, else ``msg_id NOT IN (..,
-# NULL)`` evaluates to NULL and every proposal would wrongly look decided.
+# A ``proposal`` event is semantically pending until a ``review_verdict`` targets its ``msg_id``; pruning a pending
+# proposal's row would lose the only durable record a post-resume late verdict can attach to.
 _PENDING_PROPOSAL_SEQS_SQL = """
     SELECT seq FROM events
     WHERE topic = 'proposal'
@@ -73,17 +50,7 @@ async def prune_events(
     *,
     keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
 ) -> int:
-    """Delete old events outside the recent window, protecting pending proposals.
-
-    Returns the number of rows deleted.
-
-    Args:
-        db: Open SQLite connection to prune the ``events`` table on.
-        keep_recent: Minimum number of most-recent events to retain.
-
-    Returns:
-        The number of event rows deleted.
-    """
+    """Delete old events outside the recent window, protecting pending proposals."""
     row = await db.fetchone("SELECT MAX(seq) AS m FROM events")
     max_seq = int(row["m"]) if row and row["m"] is not None else 0
     if max_seq <= 0:
@@ -91,8 +58,7 @@ async def prune_events(
     delete_below = max_seq - max(0, int(keep_recent))
     if delete_below <= 0:
         return 0
-    # Never prune a ``proposal`` row still semantically pending; the anti-join
-    # mirrors ``replay_for_resume``.
+    # Never prune a ``proposal`` row still semantically pending; the anti-join mirrors ``replay_for_resume``.
     async with db.transaction() as cur:
         cur.execute(
             """
@@ -121,18 +87,7 @@ async def prune_tasks(
     *,
     keep_done: int = DEFAULT_TASKS_KEEP_DONE,
 ) -> int:
-    """Delete old done (succeeded/cancelled) tasks beyond ``keep_done``.
-
-    Never touches queued/running/failed rows. Returns the number of rows
-    deleted.
-
-    Args:
-        db: Open SQLite connection to prune the ``tasks`` table on.
-        keep_done: Minimum number of most-recent done tasks to retain.
-
-    Returns:
-        The number of task rows deleted.
-    """
+    """Delete old done (succeeded/cancelled) tasks beyond ``keep_done``."""
     keep_done = max(0, int(keep_done))
     placeholders = ",".join("?" * len(_PRUNABLE_TASK_STATES))
     async with db.transaction() as cur:
@@ -154,16 +109,7 @@ async def run_db_retention(
     events_keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
     tasks_keep_done: int = DEFAULT_TASKS_KEEP_DONE,
 ) -> RetentionResult:
-    """Run all DB retention passes; safe to call periodically from the reaper.
-
-    Args:
-        db: Open SQLite connection to run retention on.
-        events_keep_recent: Minimum number of most-recent events to retain.
-        tasks_keep_done: Minimum number of most-recent done tasks to retain.
-
-    Returns:
-        A :class:`RetentionResult` with the per-table deletion counts.
-    """
+    """Run all DB retention passes; safe to call periodically from the reaper."""
     events_deleted = await prune_events(
         db,
         keep_recent=events_keep_recent,

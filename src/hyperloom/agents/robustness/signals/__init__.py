@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Signal rules.
-
-Each rule consumes :class:`ReactorContext` plus :class:`SourceData` and
-yields zero or more :class:`Symptom` records; the classifier composes
-the rules and de-duplicates by ``(name, subject_key)``.
-"""
+"""Signal rules."""
 
 from .aiter_jit import (
     AiterJitConfig,

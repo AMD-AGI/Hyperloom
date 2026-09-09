@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the Ray-managed GPU execution backend.
-
-Covers the flag gate and execution-route seam, the visible-device merge
-invariant and YAML device stripping, the ManagedServerProcess reap invariant,
-the ServingLease / GpuSpecialistLease / ServingGroupManager lifecycles, and the
-infeasible-cluster and dead-actor robustness paths. Fake ray modules plus a real
-subprocess; no Ray cluster required.
-"""
+"""Unit tests for the Ray-managed GPU execution backend."""
 
 from __future__ import annotations
 
@@ -478,13 +471,7 @@ def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.M
 
 
 def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pytest.MonkeyPatch):
-    """A dead actor degrades to a benchmark failure AND drops the handle.
-
-    Round-level lease reuse means one actor spans every variant in a round, so a
-    mid-round actor death must self-heal: the handle is reset to ``None`` so the
-    next round/variant re-creates a fresh actor via ``ensure()``, rather than
-    cascading the failure to every remaining variant or crashing the session.
-    """
+    """A dead actor degrades to a benchmark failure AND drops the handle."""
     fake = _LeaseFakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = ServingLease(num_gpus=1)
@@ -606,14 +593,7 @@ def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monk
 
 # ── the session budget across the Ray process boundary ───────────────────────
 class TestTheSessionBudgetReachesTheRayWorker:
-    """Production takes the Ray path on a single node; the local path is the test default.
-
-    So the session reaper has to be carried across the boundary explicitly, and
-    as a duration: the absolute deadline is a ``time.monotonic()`` instant, and
-    the worker is another process whose clock starts somewhere else. Without it
-    the hard timeout is the only thing left, and a run that ran out of time gets
-    recorded as a variant that timed out.
-    """
+    """Production takes the Ray path on a single node; the local path is the test default."""
 
     def test_run_magpie_converts_the_deadline_before_handing_it_over(
         self,
@@ -878,8 +858,7 @@ def test_ray_serving_priority_enabled_default_and_off(monkeypatch: pytest.Monkey
 
 
 def test_serving_slot_busy_off_ray_path_is_false(monkeypatch: pytest.MonkeyPatch):
-    """Off the single-node Ray path (pytest default), serving_slot_busy never
-    probes Ray and returns False (no serving-priority pause)."""
+    """Off the single-node Ray path (pytest default), serving_slot_busy never probes Ray and returns False (no serving-priority pause)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     assert rb.serving_slot_busy() is False
 
@@ -927,9 +906,7 @@ def test_gpu_specialist_lease_is_alive_false_before_start():
 
 
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
-    """§3.3 non-blocking start: start_async submits without blocking, and
-    poll_started returns None while pending (ray.wait empty) and the pid once
-    ready."""
+    """§3.3 non-blocking start: start_async submits without blocking, and poll_started returns None while pending (ray.wait empty) and the pid once ready."""
 
     class _FakeRayWait(_FakeRayP2):
         def __init__(self):
@@ -948,8 +925,7 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     lease = rs.GpuSpecialistLease(num_gpus=2)
     lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
 
-    # Pending: no pid yet, positive pending time, remote call submitted (ref
-    # stored) without blocking on a result.
+    # Pending: no pid yet, positive pending time, remote call submitted (ref stored) without blocking on a result.
     assert lease._start_ref is not None
     assert lease.poll_started() is None
     assert lease.pid() is None
@@ -1247,13 +1223,7 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
 
 # ── coverage: ServingGroupManager empty + exception branches ─────────────────
 def test_serving_group_manager_empty_before_start(monkeypatch: pytest.MonkeyPatch):
-    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op.
-
-    ``close()`` does ``import ray`` before its (empty) rank loop, so a fake ray
-    is injected to keep the test self-contained: without it the test only passed
-    by accident when another test's ``sys.modules['ray']`` leaked into the same
-    process, which breaks under xdist where tests run in separate workers.
-    """
+    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op."""
     monkeypatch.setitem(sys.modules, "ray", _FakeRay())
     sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
     assert sgm.pids() == []
@@ -1293,9 +1263,7 @@ def test_managed_process_pid_exit_code_before_start():
 
 # ── coverage: ServingActor class body via a pass-through fake ray.remote ─────
 class _PassthroughRay:
-    """Fake ray whose @remote is an identity decorator, so the ServingActor
-    class body runs as plain Python (no cluster) for coverage of start /
-    run_blocking / is_alive / pid / exit_code / stop."""
+    """Fake ray whose @remote is an identity decorator, so the ServingActor class body runs as plain Python (no cluster) for coverage of start / run_blocking / is_alive / pid / exit_code / stop."""
 
     def remote(self, *dargs, **dkw):
         # Support both @ray.remote and @ray.remote(...) forms.
@@ -1309,8 +1277,7 @@ class _PassthroughRay:
 
 
 def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.MonkeyPatch):
-    """Instantiate the ServingActor class directly and drive its lifecycle on a
-    real short-lived subprocess (covers _serving_actor_body's method bodies)."""
+    """Instantiate the ServingActor class directly and drive its lifecycle on a real short-lived subprocess (covers _serving_actor_body's method bodies)."""
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
     actor_cls = rs._serving_actor_body()
     actor = actor_cls()  # plain instance (identity-decorated)
@@ -1511,8 +1478,8 @@ def test_make_serving_placement_group_and_rank_actor(monkeypatch: pytest.MonkeyP
     assert seen["bundles"][0] == {"GPU": 8.0, "serving_slot": 1}
     assert len(seen["bundles"]) == 2
 
-    # rank actor: options()(...).remote() — the ServingActor class is identity
-    # under _FakePassRay.remote, so .options must exist. Wrap it.
+    # rank actor: options()(...).remote() — the ServingActor class is identity under _FakePassRay.remote, so .options
+    # must exist.
     actor_cls = rs._serving_actor_body()
 
     class _Opts:
@@ -1531,9 +1498,8 @@ def test_make_serving_placement_group_and_rank_actor(monkeypatch: pytest.MonkeyP
 
     rs._remove_serving_placement_group(pg)
     assert seen["removed"] is pg
-    # Defensive: drop the injected fake ray.util.* submodules so a later test's
-    # lazy ``import ray`` never sees this test's fakes (belt-and-suspenders on
-    # top of monkeypatch's own setitem teardown).
+    # Defensive: drop the injected fake ray.util.* submodules so a later test's lazy ``import ray`` never sees this
+    # test's fakes (belt-and-suspenders on top of monkeypatch's own setitem teardown).
     for mod in ("ray.util.scheduling_strategies", "ray.util.placement_group"):
         sys.modules.pop(mod, None)
 
@@ -1645,12 +1611,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
 
 
 def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_double):
-    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first.
-
-    The served process is deliberately started in its own POSIX session, which
-    is exactly what a process-group teardown does not reach, so a lease released
-    without asking can leave a GPU held by a process nothing owns any more.
-    """
+    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first."""
     lease = serving_lease_on_a_ray_double
     lease.ensure()
     pid = lease._actor.start.remote(["sleep", "60"]).result(timeout=10)

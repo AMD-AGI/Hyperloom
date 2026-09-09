@@ -331,11 +331,7 @@ def test_file_patch_requires_the_documented_field(monkeypatch):
 
 
 def _backend_like_env() -> dict[str, str]:
-    """Mimic a backend-spawned stdio server with a minimal PATH.
-
-    Keep interpreter/runtime vars (e.g. LD_LIBRARY_PATH from setup-python) so the
-    subprocess can actually start on self-hosted CI runners.
-    """
+    """Mimic a backend-spawned stdio server with a minimal PATH."""
     env = os.environ.copy()
     env["PATH"] = "/usr/bin:/bin"
     src = str(SRC_ROOT)
@@ -347,7 +343,7 @@ def _backend_like_env() -> dict[str, str]:
 def _feed_stdin(monkeypatch, lines: list[str]) -> None:
     """Install a fake stdin buffer yielding the given JSON-RPC lines."""
     stream = io.BytesIO("".join(lines).encode())
-    monkeypatch.setattr(server.sys, "stdin", type("_Stdin", (), {"buffer": stream})())
+    monkeypatch.setattr(sys, "stdin", type("_Stdin", (), {"buffer": stream})())
 
 
 def test_write_message_emits_one_compact_json_line(capsys):

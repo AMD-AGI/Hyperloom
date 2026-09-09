@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-domain specialist prompt templates.
-
-Pins that every domain has a focus template, each rendered prompt mentions
-its signature techniques, and the active set covers all domains.
-"""
+"""Per-domain specialist prompt templates."""
 
 from __future__ import annotations
 
@@ -46,12 +42,7 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domain_keys_covers_all_active_domains():
-    """The active key set is exactly the catalogue, with no duplicate keys.
-
-    Asserted as a property rather than a count: a hard-coded total has to be
-    edited every time a domain is added, which makes the edit routine and stops
-    it from signalling anything.
-    """
+    """The active key set is exactly the catalogue, with no duplicate keys."""
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
     assert len(SPECIALIST_DOMAIN_KEYS) == len(SPECIALIST_DOMAINS)
 
@@ -246,12 +237,7 @@ def test_enablement_book_lives_in_user_not_system_prompt():
 
 
 def test_enablement_mandate_carries_the_dispatch_evidence():
-    """Source context and ranked refs discovered by the Coordinator reach the mandate.
-
-    The Coordinator computes both before dispatch; a mandate rendered without them
-    tells the agent to find a bridge while withholding the candidates already found
-    for it, and drops the checkpoint weight inventory a weight-init retry needs.
-    """
+    """Source context and ranked refs discovered by the Coordinator reach the mandate."""
     domain = get_domain("enablement_specialist")
     assert domain is not None
     weights = "CHECKPOINT WEIGHTS: model.layers.0.mlp.gate_up_proj.weight [8192, 4096]"
@@ -523,12 +509,7 @@ def _valid_done_payload(
 
 # 1. specialist_domains catalogue
 def test_specialist_domains_catalogue_is_well_formed():
-    """Every catalogue entry is complete and uniquely keyed.
-
-    Guards what actually breaks a dispatch — a blank key, a missing KB anchor
-    PolicyGate validates against, or a duplicate key that shadows an earlier
-    entry — rather than the entry count.
-    """
+    """Every catalogue entry is complete and uniquely keyed."""
     assert SPECIALIST_DOMAINS
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
     assert len(SPECIALIST_DOMAIN_KEYS) == len(SPECIALIST_DOMAINS)
@@ -1070,15 +1051,13 @@ def test_research_lane_capacity_is_core_state_field():
     assert "last_specialist" in CORE_STATE_FIELDS
 
 
-# --------------------------------------------------------------------------- #
-# Read-only specialists never receive the patch-authoring contract
-# --------------------------------------------------------------------------- #
-# Derived from the property under test: a research-mode domain is exactly one
-# the registry declares as such, so a new one is covered without an edit here.
+# --------------------------------------------------------------------------- # Read-only specialists never receive
+# the patch-authoring contract --------------------------------------------------------------------------- # Derived
+# from the property under test: a research-mode domain is exactly one the registry declares as such, so a new one is
+# covered without an edit here.
 READONLY_DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS if d.default_mode == "research"))
 
-# Every phrase that promises patch authoring, a worktree, or a GPU. A
-# research-mode dispatch is leased none of them.
+# Every phrase that promises patch authoring, a worktree, or a GPU.
 PATCH_CAPABILITY_PHRASES = (
     "author source patches",
     "optionally author patches",
@@ -1090,8 +1069,7 @@ PATCH_CAPABILITY_PHRASES = (
 
 
 def test_readonly_domains_never_grant_patch_authoring():
-    """Read-only domains must not be told they may author patches anywhere in
-    the prompt — identity, iron rules, and output protocol alike."""
+    """Read-only domains must not be told they may author patches anywhere in the prompt — identity, iron rules, and output protocol alike."""
     for key in READONLY_DOMAIN_KEYS:
         system, user = build_specialist_prompts(
             SpecialistPromptInputs(
@@ -1124,8 +1102,7 @@ def test_readonly_dispatch_states_the_read_only_boundary():
 
 
 def test_cross_domain_research_dispatch_drops_patch_deliverable():
-    """Mode outranks scope: a read-only `domains` dispatch must not be promised
-    the coupled cross-domain patch."""
+    """Mode outranks scope: a read-only `domains` dispatch must not be promised the coupled cross-domain patch."""
     _, user = build_specialist_prompts(
         SpecialistPromptInputs(
             task_id="task-domains-ro",
@@ -1142,8 +1119,7 @@ def test_cross_domain_research_dispatch_drops_patch_deliverable():
 
 
 def test_freeform_research_dispatch_drops_patch_deliverable():
-    """A bare freeform dispatch resolves to research mode, so its mandate must
-    not promise a patch deliverable."""
+    """A bare freeform dispatch resolves to research mode, so its mandate must not promise a patch deliverable."""
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
             task_id="task-ff",
@@ -1185,8 +1161,7 @@ def test_patch_mode_keeps_full_authoring_contract():
 
 
 def test_patch_mode_without_gpu_keeps_the_authoring_clause():
-    """The no-GPU iron rule still offers patch authoring in patch mode; only
-    research mode drops it."""
+    """The no-GPU iron rule still offers patch authoring in patch mode; only research mode drops it."""
     kwargs = dict(
         task_id="task-patch-cpu",
         domain=get_domain("serving_specialist"),
@@ -1200,12 +1175,10 @@ def test_patch_mode_without_gpu_keeps_the_authoring_clause():
     assert "optionally author patches" not in research_system
 
 
-# --------------------------------------------------------------------------- #
-# Stage-2 guard: mandate section carries run-status when available
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Stage-2 guard: mandate section carries
+# run-status when available --------------------------------------------------------------------------- #
 def test_mandate_section_renders_run_status():
-    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold
-    when those fields are non-zero."""
+    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold when those fields are non-zero."""
     domain = get_domain("serving_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(
@@ -1228,9 +1201,8 @@ def test_mandate_section_renders_run_status():
     assert "--kv-cache-dtype fp8_e4m3" in user
 
 
-# --------------------------------------------------------------------------- #
-# Stage-3 guard: enablement ladder book appears exactly once
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Stage-3 guard: enablement ladder book
+# appears exactly once --------------------------------------------------------------------------- #
 def test_enablement_ladder_rendered_exactly_once():
     """ENABLEMENT METHODOLOGY must appear only in §1b, not also in §10."""
     domain = get_domain("enablement_specialist")
@@ -1251,9 +1223,8 @@ def test_enablement_ladder_rendered_exactly_once():
     assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
 
 
-# --------------------------------------------------------------------------- #
-# Stage-4 guard: KB-write iron rule is gone
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Stage-4 guard: KB-write iron rule is
+# gone --------------------------------------------------------------------------- #
 def test_kb_write_iron_rule_absent():
     """Rule 3 (KB writes) is dead text — confirm it no longer appears."""
     domain = get_domain("serving_specialist")

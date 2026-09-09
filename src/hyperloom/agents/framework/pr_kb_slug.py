@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR KB slug helpers (consumer side).
-
-Byte-for-byte parity with the writer at
-``Primus-Claw/pr-kb/pr_kb/slug.py``: a mismatch makes every ``get_page`` miss.
-
-Prefix root defaults to ``pr-kb`` (= ``PR_KB_SLUG_PREFIX``). Files/index
-helpers use ``<prefix>-files/`` and ``<prefix>-index/``; discovery filters
-``<prefix>-meta/`` prefixes directly.
-"""
+"""PR KB slug helpers (consumer side)."""
 
 from __future__ import annotations
 
@@ -28,17 +20,7 @@ def slug_prefix() -> str:
 
 
 def normalise_repo(repo: str) -> str:
-    """Normalize a repo string to ``owner/name``.
-
-    Accepts ``owner/name`` or a URL (``https://github.com/ROCm/vllm.git``);
-    strips scheme/host and a trailing ``.git``.
-
-    Args:
-        repo: Repo full name or URL.
-
-    Returns:
-        The ``owner/name`` form (best-effort; original when unparseable).
-    """
+    """Normalize a repo string to ``owner/name``."""
     r = (repo or "").strip()
     if not r:
         return ""
@@ -52,16 +34,7 @@ def normalise_repo(repo: str) -> str:
 
 
 def repo_slug(repo_full_name: str) -> str:
-    """Convert ``owner/name`` into a gbrain-safe slug segment.
-
-    Example: ``ROCm/aiter`` -> ``rocm-aiter``. Mirrors the writer.
-
-    Args:
-        repo_full_name: Repo full name (``owner/name``) or URL.
-
-    Returns:
-        The lowercase, hyphen-folded slug segment.
-    """
+    """Convert ``owner/name`` into a gbrain-safe slug segment."""
     lowered = normalise_repo(repo_full_name).lower()
     return _NON_ALNUM.sub("-", lowered).strip("-")
 

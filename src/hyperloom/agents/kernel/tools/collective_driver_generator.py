@@ -5,14 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Generate the torchrun rig used to optimize a traced collective kernel.
-
-The parity gate lives in the same file the optimizing agent edits; its integrity
-depends on forge-loop pinning the driver digest during task preparation, which
-``forge_collective`` asserts stays enabled. Nothing on the Hyperloom side
-re-checks the gate afterwards, so if that upstream behaviour changes this rig
-loses its protection silently.
-"""
+"""Generate the torchrun rig used to optimize a traced collective kernel."""
 
 from __future__ import annotations
 
@@ -103,10 +96,7 @@ def _dtype_of(candidate: dict[str, Any]) -> str:
 
 
 def _collective_op(candidate: dict[str, Any]) -> str:
-    """Validate and return the supported collective operation.
-
-    References reduce with ``SUM``, so an explicit non-sum reduction is refused.
-    """
+    """Validate and return the supported collective operation."""
     contract = candidate.get("kernel_contract")
     if not isinstance(contract, dict) or contract.get("kind") != "collective":
         raise ValueError("candidate kernel_contract.kind must be 'collective'")
@@ -614,8 +604,8 @@ def generate_collective_driver(
     world_size = _world_size(tp)
     shapes = _parse_shapes(candidate)
     if op == "reduce_scatter":
-        # The reference scatters dim 0 across ranks, so an indivisible extent
-        # would compare against a truncated output rather than fail loudly.
+        # The reference scatters dim 0 across ranks, so an indivisible extent would compare against a truncated output
+        # rather than fail loudly.
         ragged = [s for s in shapes if s[0] % world_size]
         if ragged:
             raise ValueError(f"reduce_scatter shapes must divide across {world_size} ranks: {ragged}")

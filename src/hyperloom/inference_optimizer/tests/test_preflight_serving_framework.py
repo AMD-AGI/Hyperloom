@@ -36,16 +36,15 @@ def _clear_env(monkeypatch):
         "INFERENCE_OPTIMIZER_NODES",
         "KUBERNETES_SERVICE_HOST",
         "HYPERLOOM_IMAGE",
-        # The check publishes these; without the reset they leak into every
-        # later test in the session and into provenance lookups.
+        # The check publishes these; without the reset they leak into every later test in the session and into
+        # provenance lookups.
         RESOLVED_FRAMEWORK_PYTHON_ENV,
         RESOLVED_FRAMEWORK_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
     yield
-    # ``delenv`` records no undo for a key that was absent, and the check writes
-    # these through ``os.environ`` rather than the fixture, so monkeypatch never
-    # sees them. Without this they outlive the file.
+    # ``delenv`` records no undo for a key that was absent, and the check writes these through ``os.environ`` rather
+    # than the fixture, so monkeypatch never sees them.
     for key in (RESOLVED_FRAMEWORK_PYTHON_ENV, RESOLVED_FRAMEWORK_ENV):
         os.environ.pop(key, None)
 
@@ -101,11 +100,7 @@ def _refuse_probe(monkeypatch) -> None:
 
 
 def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
-    """A host with no importable serving framework must fail at preflight.
-
-    This is the #1141 case: the run otherwise proceeds and dies much later in
-    an unrelated-looking place, hiding the fact that the framework is absent.
-    """
+    """A host with no importable serving framework must fail at preflight."""
     _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
@@ -114,8 +109,8 @@ def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
-    # Names the framework and both remedies, and disambiguates the two run modes
-    # so nobody repeats the issue author's reading of Magpie's run_mode=local.
+    # Names the framework and both remedies, and disambiguates the two run modes so nobody repeats the issue author's
+    # reading of Magpie's run_mode=local.
     assert "vllm" in err
     assert "--install-framework vllm" in err
     assert "HYPERLOOM_RUN_MODE=docker" in err
@@ -124,12 +119,7 @@ def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
 
 @pytest.mark.parametrize("in_container", [False, True])
 def test_guidance_carries_no_image_tags_or_doc_paths(monkeypatch, capsys, in_container):
-    """Error text must only name things that cannot go stale or go missing.
-
-    An image tag encodes framework, ROCm and GPU-arch versions that all move
-    independently, and no test executes this branch when they bump. A repo doc
-    path is worse: ``pip install`` ships no ``docs/``, so it dangles.
-    """
+    """Error text must only name things that cannot go stale or go missing."""
     _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: in_container)
 
@@ -206,13 +196,7 @@ def test_a_venv_root_without_a_python_is_not_probed(monkeypatch):
 
 
 def test_the_install_mode_flag_does_not_gate_the_probe(isolated_vllm, monkeypatch):
-    """The installer keeps that flag under a name nothing else reads.
-
-    install_baremetal.sh persists it as HYPERLOOM_FRAMEWORK_ENV, and only
-    env_safety mentions it; framework.paths discovers the venv without it. Gating
-    on a plain FRAMEWORK_ENV made this probe dead code and sent a host that had
-    just installed vLLM back to the command it had already run.
-    """
+    """The installer keeps that flag under a name nothing else reads."""
     monkeypatch.delenv("FRAMEWORK_ENV", raising=False)
     monkeypatch.delenv("HYPERLOOM_FRAMEWORK_ENV", raising=False)
 
@@ -250,11 +234,7 @@ def test_framework_falls_back_to_env_then_default(monkeypatch):
 
 
 def test_cuda_build_exits_even_though_importable(monkeypatch, capsys):
-    """``pip install vllm`` from PyPI yields an importable CUDA build.
-
-    Importability alone would wave it through, and it then dies at GPU init
-    with no hint that the wheel is simply the wrong one.
-    """
+    """``pip install vllm`` from PyPI yields an importable CUDA build."""
     _probe_result(monkeypatch, importable=True, rocm=False)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -289,13 +269,7 @@ def test_rocm_build_proceeds_quietly(monkeypatch, capsys):
 
 @pytest.fixture
 def isolated_vllm(monkeypatch, tmp_path):
-    """The shape install_baremetal.sh switches its own probe on, and returns its python.
-
-    $VLLM_VENV_ROOT alone is not it: the installer also requires
-    FRAMEWORK_ENV=isolated and an executable python in that venv. The executable
-    is real rather than a stubbed os.access, which would answer for every other
-    caller in this module too.
-    """
+    """The shape install_baremetal.sh switches its own probe on, and returns its python."""
     venv = tmp_path / "vllm-venv"
     python = venv / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -307,12 +281,7 @@ def isolated_vllm(monkeypatch, tmp_path):
 
 
 def test_isolated_venv_rocm_build_beats_a_stray_cuda_wheel(isolated_vllm, monkeypatch, capsys):
-    """Stopping at the first importable candidate rejects a working host.
-
-    install_baremetal.sh defaults vLLM to an isolated venv, so the ROCm build
-    routinely lives there while the benchmark interpreter may still carry a
-    stray PyPI CUDA wheel. Every candidate has to be considered.
-    """
+    """Stopping at the first importable candidate rejects a working host."""
     _probe_per_interpreter(
         monkeypatch,
         {"/usr/bin/python3": (True, False), isolated_vllm: (True, True)},
@@ -379,22 +348,15 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
     monkeypatch.setattr(preflight.subprocess, "run", _boom)
     assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
-    # Absent torch and a signal death are "cannot answer", not "wrong build":
-    # calling either a CUDA wheel would be a wrong diagnosis.
+    # Absent torch and a signal death are "cannot answer", not "wrong build": calling either a CUDA wheel would be a
+    # wrong diagnosis.
     for rc in (3, -11):
         monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, _rc=rc, **_k: _Proc(_rc))
         assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
 
 def _host_rocm_verdict() -> bool | None:
-    """What this host says about its own torch, resolved out of process.
-
-    Importing torch in the pytest process would put a broken ROCm stack in the
-    session itself, where a signal death on ``import torch`` takes the whole run
-    with it -- the product spawns the probe for exactly that reason. Written
-    independently of the production script so the two can disagree: no output at
-    all, from any cause, reads as "cannot say", which is its rc-3 semantics.
-    """
+    """What this host says about its own torch, resolved out of process."""
     script = (
         "import json, sys\n"
         "try:\n"
@@ -411,21 +373,13 @@ def _host_rocm_verdict() -> bool | None:
 
 
 def test_the_real_probe_agrees_with_this_host():
-    """Runs the probe for real, and derives the expectation from the host.
-
-    The stubbed tri-state test covers the return codes but never spawns an
-    interpreter, and the subprocess path is where absent torch was once read as
-    a CUDA wheel. A fixed verdict here would only hold where torch happens to be
-    missing: green on a CI runner, red on every ROCm host the product targets.
-    """
+    """Runs the probe for real, and derives the expectation from the host."""
     probe = preflight._probe_rocm_build("sglang", sys.executable)
 
     assert probe.verdict is _host_rocm_verdict()
 
 
-# ---------------------------------------------------------------------------
 # probe diagnostics
-# ---------------------------------------------------------------------------
 def _dying_rocm_probe(monkeypatch, stderr: str, *, returncode: int = -11) -> None:
     """Importable framework whose ROCm probe dies, leaving only stderr behind."""
 
@@ -464,11 +418,7 @@ def test_probe_stderr_tail_is_bounded():
 
 
 def test_a_remote_server_is_pointed_at_benchmark_base_url(monkeypatch, capsys):
-    """A server that lives elsewhere is configured, not waved through.
-
-    BENCHMARK_BASE_URL is an exemption in this very function, so steering that
-    user into disabling the check hides the supported path.
-    """
+    """A server that lives elsewhere is configured, not waved through."""
     _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
@@ -486,11 +436,7 @@ def test_a_remote_server_is_pointed_at_benchmark_base_url(monkeypatch, capsys):
     [("vllm", "vllm platform"), ("sglang", "torch.version.hip")],
 )
 def test_the_rocm_verdict_names_its_evidence(monkeypatch, capsys, framework, evidence):
-    """Only vLLM reports its own platform; elsewhere torch's tag is all there is.
-
-    Claiming the framework itself is a ROCm build would wave a CUDA sglang
-    sitting beside a ROCm torch straight through.
-    """
+    """Only vLLM reports its own platform; elsewhere torch's tag is all there is."""
     _probe_result(monkeypatch, importable=True, rocm=True)
 
     preflight._check_serving_framework(_args(framework), "/usr/bin/python3")
@@ -532,11 +478,7 @@ def _timing_out_probe(monkeypatch, *, importable: bool) -> list[float]:
 
 @pytest.mark.parametrize("importable", [False, True])
 def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importable):
-    """Paying a timeout per candidate turned preflight into a 12-minute wait.
-
-    A host slow enough to blow one budget will blow the next two as well, and a
-    timeout proves nothing, so the scan stops and the run proceeds unverified.
-    """
+    """Paying a timeout per candidate turned preflight into a 12-minute wait."""
 
     budget = _timing_out_probe(monkeypatch, importable=importable)
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
@@ -545,20 +487,13 @@ def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importa
     assert "timed out" in capsys.readouterr().out
 
 
-# ---------------------------------------------------------------------------
 # _in_container signals
-# ---------------------------------------------------------------------------
-# A systemd host puts PID 1 in a named scope; a container with a private cgroup
-# namespace sees the namespace root instead.
 _HOST_CGROUP_V2 = "0::/init.scope\n"
 _CONTAINER_CGROUP_V2 = "0::/\n"
 
 
 def _fake_container_fs(monkeypatch, *, present=(), cgroup=_HOST_CGROUP_V2):
-    """Fake every file _in_container reads; only ``present`` paths exist.
-
-    ``cgroup=None`` makes ``/proc/1/cgroup`` unreadable.
-    """
+    """Fake every file _in_container reads; only ``present`` paths exist."""
 
     class _Node:
         def __init__(self, path):
@@ -577,11 +512,7 @@ def _fake_container_fs(monkeypatch, *, present=(), cgroup=_HOST_CGROUP_V2):
 
 
 def test_in_container_detects_a_cgroup_v2_namespace_root(monkeypatch):
-    """Under cgroup v2 the runtime name is gone: /proc/1/cgroup is just "0::/".
-
-    Missing it tells a container user to start a container, the reversal of the
-    advice #1141 exists to fix.
-    """
+    """Under cgroup v2 the runtime name is gone: /proc/1/cgroup is just \"0::/\"."""
     _fake_container_fs(monkeypatch, cgroup=_CONTAINER_CGROUP_V2)
 
     assert preflight._in_container() is True
@@ -636,12 +567,7 @@ _SETUP_INSTALLER = "inference_optimizer/assets/install_baremetal.sh"
 
 
 def test_a_framework_setup_cannot_install_is_not_blocked(monkeypatch, capsys):
-    """atom is a serving framework with no installer path.
-
-    install_baremetal.sh takes only none|sglang|vllm and exits 2 on anything
-    else, and never probes atom at all, so blocking the run and naming
-    ``--install-framework atom`` walks the reader into a second wall.
-    """
+    """atom is a serving framework with no installer path."""
     _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
@@ -653,8 +579,7 @@ def test_a_framework_setup_cannot_install_is_not_blocked(monkeypatch, capsys):
 
 
 def test_the_installable_set_matches_the_installer():
-    """Two lists that must agree, in different languages, with nothing else
-    tying them together."""
+    """Two lists that must agree, in different languages, with nothing else tying them together."""
     from pathlib import Path
 
     import hyperloom
@@ -670,11 +595,7 @@ def test_the_installable_set_matches_the_installer():
 
 
 def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch, capsys):
-    """The refuted branch is the other way into the same dead end.
-
-    A CUDA torch with an atom checkout on PYTHONPATH is uncommon, but it lands on
-    exactly the remedy that cannot work, which is what the exemption exists for.
-    """
+    """The refuted branch is the other way into the same dead end."""
     _probe_result(monkeypatch, importable=True, rocm=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
@@ -684,12 +605,9 @@ def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch,
     assert "--install-framework atom" not in combined.out + combined.err
 
 
-# ---------------------------------------------------------------------------
 # Wiring: nothing above proves _preflight still calls the gate
-# ---------------------------------------------------------------------------
 def test_preflight_still_invokes_the_gate():
-    """Every other test calls the gate directly, so deleting the one line that
-    reaches it from _preflight would leave them all green."""
+    """Every other test calls the gate directly, so deleting the one line that reaches it from _preflight would leave them all green."""
     import ast
     from pathlib import Path as _Path
 
@@ -705,12 +623,7 @@ def test_preflight_still_invokes_the_gate():
 
 @pytest.mark.parametrize("framework", sorted(preflight._SETUP_INSTALLABLE_FRAMEWORKS))
 def test_the_remedy_matches_the_documented_setup_invocation(framework):
-    """Printing a command promises it runs.
-
-    The skill's form carries PYTHONPATH and --yes, and vLLM needs the isolated
-    env; a remedy missing any of them fails or hangs on a prompt -- the same
-    shape of dead end as naming a framework setup cannot install.
-    """
+    """Printing a command promises it runs."""
     from pathlib import Path as _Path
 
     import hyperloom
@@ -730,12 +643,7 @@ def test_the_remedy_matches_the_documented_setup_invocation(framework):
 
 
 def test_a_resolved_interpreter_is_published_with_its_framework(monkeypatch):
-    """provenance reads the pair; an unlabelled interpreter is unusable.
-
-    The scan answers for one framework, and ``sglang`` is the default, so the
-    name has to travel with the path or a vLLM lookup would read an SGLang
-    interpreter as its own answer.
-    """
+    """provenance reads the pair; an unlabelled interpreter is unusable."""
     _probe_result(monkeypatch, importable=True)
 
     preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
@@ -745,11 +653,7 @@ def test_a_resolved_interpreter_is_published_with_its_framework(monkeypatch):
 
 
 def test_a_refuted_build_is_not_published(monkeypatch):
-    """A candidate proven to be the wrong build must not become the answer.
-
-    The check exits on a refuted build; the point here is that nothing was
-    published on the way out.
-    """
+    """A candidate proven to be the wrong build must not become the answer."""
     _probe_result(monkeypatch, importable=True, rocm=False)
     monkeypatch.setattr(preflight, "_in_container", lambda: False)
 
@@ -761,13 +665,7 @@ def test_a_refuted_build_is_not_published(monkeypatch):
 
 
 def test_a_rocm_probe_timeout_still_publishes(monkeypatch):
-    """The timeout is in the ROCm verdict, not in importability.
-
-    ``_resolve_framework_build`` proves the candidate importable before probing
-    the build at all, and the check keeps serving with it after a warning.
-    Withholding it here would send provenance back to this process and record
-    the orchestrator's own version for a run served by the isolated venv.
-    """
+    """The timeout is in the ROCm verdict, not in importability."""
     calls: list[list[str]] = []
 
     class _Proc:
@@ -814,17 +712,7 @@ def test_an_exempt_path_publishes_nothing(monkeypatch, setup):
 
 
 def test_a_non_venv_interpreter_does_not_force_unknown(monkeypatch, tmp_path):
-    """A system prefix keeps packages in ``dist-packages``, not ``site-packages``.
-
-    Deriving ``<prefix>/lib/python*/site-packages`` finds nothing there, and
-    treating that as an authoritative empty answer would record "unknown" for a
-    framework this process can see -- the failure mode this whole path exists to
-    remove. Bare-metal Debian/Ubuntu without a venv is a supported layout.
-
-    The prefix is built here rather than probing the host's own ``/usr``: RHEL
-    and several ROCm images do keep ``lib/python*/site-packages`` under it, so
-    asserting against the real one would pass or fail by runner.
-    """
+    """A system prefix keeps packages in ``dist-packages``, not ``site-packages``."""
     (tmp_path / "lib" / "python3.12" / "dist-packages").mkdir(parents=True)
     (tmp_path / "bin").mkdir()
     interpreter = tmp_path / "bin" / "python3"

@@ -20,10 +20,8 @@ from kernelforge.loop.path_ownership import (
     RUNTIME_FILE_SUFFIXES,
 )
 
-# A driver bundle is a handful of sources beside a kernel cache the driver
-# rewrites on every compile -- observed: 3 payload files against 693 cache files
-# / 382 MB. Staging those costs two copies and three hashes per attempt, and a
-# compile mid-attempt makes publish() reject a driver that was fine.
+# A driver bundle is a handful of sources beside a kernel cache the driver rewrites on every compile -- observed: 3
+# payload files against 693 cache files / 382 MB.
 _IGNORED_DIRECTORY_NAMES = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
 _IGNORED_FILE_SUFFIXES = RUNTIME_FILE_SUFFIXES
 
@@ -54,16 +52,7 @@ class _FileEntry:
 
 
 class ExternalArtifactTransaction:
-    """Stage an external driver tree and publish it only after validation.
-
-    The task-preparer agent writes to ``stage_root``, never directly to the
-    caller-owned artifact directory. The original tree is mirrored separately so
-    a partial publish can restore only this transaction's paths. Out-of-band
-    changes are treated as conflicts and are never overwritten.
-    Kernel workspaces and audit directories can be excluded from the artifact
-    transaction; a nested kernel workspace is exposed in staging through a
-    passthrough symlink so existing relative driver imports continue to work.
-    """
+    """Stage an external driver tree and publish it only after validation."""
 
     def __init__(
         self,
@@ -105,8 +94,8 @@ class ExternalArtifactTransaction:
 
             excluded = [p.expanduser().resolve(strict=False) for p in excluded_paths or []]
             passthrough = [p.expanduser().resolve(strict=False) for p in passthrough_paths or []]
-            # Avoid recursively copying the transaction itself when the external
-            # root is a broad temporary directory such as /tmp.
+            # Avoid recursively copying the transaction itself when the external root is a broad temporary directory
+            # such as /tmp.
             excluded.extend(
                 [
                     baseline_temporary_root.resolve(),

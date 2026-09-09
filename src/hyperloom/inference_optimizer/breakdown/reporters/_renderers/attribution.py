@@ -16,21 +16,7 @@ _NOISE_PP = 0.01
 
 @register_renderer("attribution")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the source-attribution section: gain split across sources.
-
-    The shares are taken against what the session actually moved, so a source
-    that claims half the gain reads as half. That denominator is larger than
-    the sum of the claims whenever the workload moved between adopted steps,
-    and the difference gets its own row: dropping it would leave shares that
-    silently fail to reach 100% with nothing to say why.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered section, marked skipped when there is no
-            per-source split to show.
-    """
+    """Render the source-attribution section: gain split across sources."""
     optimizations = breakdown.get("optimizations") or {}
     validation = optimizations.get("validation") or {}
     notes = validation.get("notes") or []
@@ -78,8 +64,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     decisions: list[Decision] = []
     for src, pct, _share in rows:
-        # The unattributed row is a residue, not a contributor; crediting it as
-        # a decision would put "nobody" on the leaderboard.
+        # The unattributed row is a residue, not a contributor; crediting it as a decision would put "nobody" on the
+        # leaderboard.
         if pct and pct > 0 and not src.startswith("unattributed"):
             decisions.append(
                 Decision(

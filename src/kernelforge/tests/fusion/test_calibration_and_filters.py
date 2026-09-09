@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the predicted-gain calibration, the min-gain gate, source-hint
-confirmation, already-fused detection, and the newly added patterns."""
+"""Tests for the predicted-gain calibration, the min-gain gate, source-hint confirmation, already-fused detection, and the newly added patterns."""
 
 from __future__ import annotations
 
@@ -46,10 +45,8 @@ class TestCalibration:
 
 class TestPredictedGainGate:
     def test_low_predicted_gain_is_annotated_not_vetoed(self):
-        # Calibration finding: the share-derived predicted gain is unreliable
-        # (under-predicts low-share/high-gain MoE), so it is annotated + surfaced in
-        # the reason but does NOT veto a dispatch-bound candidate. The downstream
-        # validate/loop measures the real speedup and is the true 3% filter.
+        # Calibration finding: the share-derived predicted gain is unreliable (under-predicts low-share/high-gain
+        # MoE), so it is annotated + surfaced in the reason but does NOT veto a dispatch-bound candidate.
         shares = {"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12}  # lb=0.30
         ok = _candidate_diag(shares)
         assert ok.is_candidate
@@ -137,8 +134,8 @@ class TestSourceFilteringInLocate:
 # ───────────────────────── Deliverable 1: memory channel ─────────────────────
 class TestMemoryChannelCalibration:
     def test_mem_share_grounds_gain_not_the_flat_discount(self):
-        # With a measured memory share the prediction is grounded in bytes saved
-        # (mem_share * MEM_SAVED_FRACTION), NOT the flat 0.13 launch-share discount.
+        # With a measured memory share the prediction is grounded in bytes saved (mem_share * MEM_SAVED_FRACTION), NOT
+        # the flat 0.13 launch-share discount.
         g = cal.predict_cuda_graph_on_gain(0.30, decode_batch=16, mem_share=0.20)
         assert abs(g - 0.20 * cal.DEFAULT_MEM_SAVED_FRACTION) < 1e-9
         legacy = cal.predict_cuda_graph_on_gain(0.30, decode_batch=16)  # discount route
@@ -254,12 +251,7 @@ class TestCompilePassHelper:
 
 
 def _pass_enabled(flag: str) -> PassState:
-    """Probe stub: the matched compile pass IS switched on in the target install.
-
-    Injected so these tests describe the gate rather than whatever vLLM happens to
-    be importable; a pass that exists but is OFF is covered in
-    ``test_compile_pass_enable.py``.
-    """
+    """Probe stub: the matched compile pass IS switched on in the target install."""
     return PassState(flag=flag, present=True, enabled=True, config_file="/fw/vllm/config/compilation.py")
 
 

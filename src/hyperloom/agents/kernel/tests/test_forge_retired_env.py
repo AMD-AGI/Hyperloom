@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The pre-rename opt-out variable must not fail silently.
-
-``FORGE_DISABLE_COMPILED_FELLOWS`` was renamed to
-``FORGE_DISABLE_COMPILED_KERNEL_BACKENDS``. Deleting the old name outright is not
-enough: ``FORGE_`` is on env_safety's dotenv prefix allowlist, so an operator's
-stale value is still forwarded into the run and then ignored -- and the thing it
-used to switch off (the compiled kernel backends) comes back on with no signal.
-That is the failure mode this module pins.
-"""
+"""The pre-rename opt-out variable must not fail silently."""
 
 from __future__ import annotations
 

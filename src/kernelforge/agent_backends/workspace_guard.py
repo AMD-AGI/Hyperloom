@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Workspace integrity around one agent session.
-
-An implementer session is allowed to edit the files it was pointed at and
-nothing else. This snapshots what the session must not disturb -- the target
-files, HEAD and the active branch, the protected measurement set, and on a
-dirty baseline the index and refs -- then reports what deviated and puts back
-what it can.
-
-The distinction the whole thing turns on is a verdict about the session versus
-the guard failing at its own bookkeeping; see :class:`WorkspaceSafetyError`.
-"""
+"""Workspace integrity around one agent session."""
 
 from __future__ import annotations
 
@@ -41,29 +31,14 @@ def _nul_paths(output: str) -> list[str]:
 
 
 def _summarize_paths(entries: list[str], limit: int = 10) -> str:
-    """Name the first few blocking paths and count the rest.
-
-    A workspace can inherit hundreds of them from the loop's own bookkeeping,
-    and a refusal nobody can read through is worth little more than one that
-    names nothing at all.
-    """
+    """Name the first few blocking paths and count the rest."""
     if len(entries) <= limit:
         return ", ".join(entries)
     return ", ".join(entries[:limit]) + f", and {len(entries) - limit} more"
 
 
 class WorkspaceSafetyError(AgentProviderError):
-    """Report a workspace-integrity violation by an agent session.
-
-    ``agent_safety_rejection`` says whether this instance is a VERDICT about what
-    the session did -- a violation, a moved HEAD, an unsupported path type -- and
-    is therefore identical on every retry. The same class also carries the guard's
-    own bookkeeping failures (a snapshot it could not read, a Git query that timed
-    out, a restore that did not finish), which say nothing about the session and
-    do recover on their own; those pass ``rejection=False``. Callers read the
-    attribute rather than the class name, so a stalled ``git ls-files`` on NFS no
-    longer abandons the work a real rejection is meant to abandon.
-    """
+    """Report a workspace-integrity violation by an agent session."""
 
     def __init__(self, *args: Any, rejection: bool = True) -> None:
         super().__init__(*args)
@@ -114,24 +89,7 @@ class WorkspaceGuard:
 
     @staticmethod
     def is_read_only_session(spec: AgentRunSpec) -> bool:
-        """Whether this session cannot write, so the guard has nothing to protect.
-
-        Most of what follows exists to roll a run back: it demands a git
-        worktree, refuses a dirty one, snapshots the files an implementer may touch,
-        and pins HEAD so a bad turn can be reset away. A session that cannot
-        write has nothing to roll back, and the clean-worktree rule would
-        additionally refuse to run for a caller holding unrelated uncommitted
-        work -- which is the normal state once a loop is under way.
-
-        Skipping also gives up the after-the-fact checks in :meth:`verify`, so
-        this stays deliberately narrow. Any route to the filesystem -- a
-        writable session, declared target files, a driver script, or a tool
-        policy still granting write or shell -- keeps the full guard.
-
-        ``read_only_resume`` is excluded even though it is read-only: its whole
-        purpose is the :meth:`verify` check that the caller's dirty state came
-        back untouched, which is exactly what skipping would drop.
-        """
+        """Whether this session cannot write, so the guard has nothing to protect."""
         policy = spec.tool_policy
         return (
             not spec.writable
@@ -155,21 +113,7 @@ class WorkspaceGuard:
         return path.resolve()
 
     def _target_exempt(self) -> set[Path]:
-        """Declared targets that the default name globs must not reclaim.
-
-        ``target_files`` is the caller's own per-turn allowlist, so a path on it
-        is by definition permitted to change -- yet ``PROTECTED_GLOBS`` still
-        match it by name. That is right for an implementer turn, whose targets
-        are framework sources and whose harness is off-limits; it is wrong for
-        the turn whose sole deliverable *is* the harness, where the caller lists
-        one ``.forge_fusion/kernel_harness_*.py`` target and the guard then
-        rejects the very file the agent was told to write.
-
-        Explicit protection still wins: ``protected_paths`` and the driver are
-        never exempted, so a caller cannot launder a protected path by also
-        naming it a target. Rollback is unaffected -- every path dropped here is
-        covered by ``_restore_target_snapshots``.
-        """
+        """Declared targets that the default name globs must not reclaim."""
         explicit = {self._resolve_path(path) for path in self.spec.protected_paths if path}
         if self.driver_path is not None:
             explicit.add(Path(self.driver_path).resolve())
@@ -239,9 +183,8 @@ class WorkspaceGuard:
                     "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
                 )
         elif self._guards_dirty_baseline():
-            # Nothing to validate up front: this state was inherited, not produced
-            # by the turn, and refusing it here would make the phase unrunnable in
-            # the only worktrees it ever runs in. verify() judges the deviations.
+            # Nothing to validate up front: this state was inherited, not produced by the turn, and refusing it here
+            # would make the phase unrunnable in the only worktrees it ever runs in. verify() judges the deviations.
             pass
         elif self.spec.allow_dirty_targets:
             unexpected = [
@@ -263,10 +206,9 @@ class WorkspaceGuard:
                 *(f"staged: {relative}" for relative in staged),
                 *(f"modified: {relative}" for relative in unstaged),
             ]
-            # The caller owns whether untracked state is expected here, exactly
-            # as it does in the resume branch above: the loop writes its own
-            # experiment ledger into the workspace it hands the implementer, so
-            # every iteration would otherwise be refused for the caller's files.
+            # The caller owns whether untracked state is expected here, exactly as it does in the resume branch above:
+            # the loop writes its own experiment ledger into the workspace it hands the implementer, so every
+            # iteration would otherwise be refused for the caller's files.
             if not self.spec.allow_untracked:
                 blocking.extend(f"untracked: {relative}" for relative in untracked)
             if blocking:
@@ -293,22 +235,7 @@ class WorkspaceGuard:
         self.prepared = True
 
     def _drop_ignored_untracked(self, untracked: list[str]) -> list[str]:
-        """Drop untracked paths the caller declared as a tool's own droppings.
-
-        Applied once, in :meth:`_current_changes` -- the single place the
-        untracked set is produced -- so all seven readers of it (:meth:`prepare`,
-        :meth:`_baseline_deviations`, :meth:`_restore_baseline` twice,
-        :meth:`_read_only_state`, :meth:`rollback` and :meth:`verify`) see one
-        list rather than seven chances to disagree. Filtering anywhere else is
-        redundant; keep this the only call site so that stays true.
-
-        Deliberately narrower than ``allow_untracked``. Profilers write into the
-        working directory because the working directory is what they are handed:
-        ``rocprofv3`` drops ``.rocprofv3/<pid>-<pid>-counter_values.dat`` and a
-        ``<pid>_results.db`` next to it, and a session was failed for those
-        rather than for anything it did. Naming them keeps the guard's answer to
-        every path nobody declared unchanged.
-        """
+        """Drop untracked paths the caller declared as a tool's own droppings."""
         patterns = list(self.spec.ignored_untracked_globs)
         if not patterns:
             return untracked
@@ -493,27 +420,14 @@ class WorkspaceGuard:
     def _baseline_deviations(
         self,
     ) -> tuple[list[str], list[str], list[str], list[str]]:
-        """Reduce the current dirty sets to the paths this turn itself changed.
-
-        The fourth element is reported separately on purpose. Every other element
-        names the bucket a path occupies now, and each bucket has its own rule --
-        ``allow_untracked`` forgives untracked paths, for one. An index record the
-        turn changed has to be judged before that: unstaging a file the caller had
-        staged moves it into the untracked bucket, where the forgiving rule would
-        accept the caller's work being undone.
-        """
+        """Reduce the current dirty sets to the paths this turn itself changed."""
         unstaged, staged, untracked = self._current_changes()
         post_entries = self._index_entries()
 
         def deviated(relative: str) -> bool:
             return self._deviates_from_baseline(relative, post_entries)
 
-        # Undoing an inherited change leaves the path clean, so it disappears from
-        # every current dirty list. Silently accepting that would let a turn revert
-        # the caller's own work — including a protected measurement file — unseen.
-        # ``untracked`` arrives dropping-filtered from _current_changes, so a
-        # declared dropping never subtracts from this difference. Move that filter
-        # to the verdict sites and this set silently changes meaning.
+        # Undoing an inherited change leaves the path clean, so it disappears from every current dirty list.
         reverted = sorted(
             relative
             for relative in self.baseline_dirty_paths.difference(unstaged, staged, untracked)
@@ -630,10 +544,8 @@ class WorkspaceGuard:
         for path, snapshot in self.snapshots.items():
             if self._filesystem_snapshot(path) != snapshot:
                 self._restore_filesystem_snapshot(path, snapshot)
-        # A target may be Git-ignored, in which case none of the Git-visible
-        # recovery above ever names it; its own snapshot is the only record. This
-        # runs on the path whose caller turns a failure into a raised rejection,
-        # so it must not suppress one.
+        # A target may be Git-ignored, in which case none of the Git-visible recovery above ever names it; its own
+        # snapshot is the only record.
         self._restore_target_snapshots(strict=True)
 
     def _read_only_violations(self) -> list[str]:
@@ -718,18 +630,14 @@ class WorkspaceGuard:
                 "the read-only session changed the workspace; restored the pre-run Git-visible state"
             )
         if self.allow_dirty_baseline:
-            # Resetting to HEAD here would delete the caller's inherited dirty
-            # state, which is exactly the state this mode exists to carry through a
-            # rejection, so recover the snapshot instead. A failed recovery is a
-            # worse outcome than the rejection that triggered it and must not be
-            # swallowed the way the clean-baseline path below can afford to.
+            # Resetting to HEAD here would delete the caller's inherited dirty state, which is exactly the state this
+            # mode exists to carry through a rejection, so recover the snapshot instead.
             try:
                 self._restore_baseline()
             except Exception as exc:
-                # Not a verdict: rollback also runs on the way out of a timeout or
-                # a transport failure, so marking this one a rejection reported an
-                # expired clock as a deterministic safety stop and abandoned work
-                # a retry could have finished.
+                # Not a verdict: rollback also runs on the way out of a timeout or a transport failure, so marking
+                # this one a rejection reported an expired clock as a deterministic safety stop and abandoned work a
+                # retry could have finished.
                 raise WorkspaceSafetyError(
                     f"the session ended and the inherited workspace state could not be restored: {exc}",
                     rejection=False,
@@ -770,17 +678,7 @@ class WorkspaceGuard:
                     self._restore_filesystem_snapshot(path, snapshot)
 
     def _restore_target_snapshots(self, *, strict: bool = False) -> None:
-        """Put every allowlisted target back to the state the turn started from.
-
-        Args:
-            strict: When ``True``, let an ``OSError`` propagate. The
-                ``allow_dirty_baseline`` recovery is the only caller that must
-                prove the restoration happened -- a Git-ignored target is
-                recorded nowhere but this snapshot, so a suppressed write would
-                leave a rejected turn's edit on disk while the rejection reports
-                a clean rollback. Everything reachable from the best-effort tail
-                of :meth:`rollback` keeps the suppressing default.
-        """
+        """Put every allowlisted target back to the state the turn started from."""
         for path, (existed, content, mode) in self.target_snapshots.items():
             with contextlib.nullcontext() if strict else contextlib.suppress(OSError):
                 if existed:
@@ -832,9 +730,8 @@ class WorkspaceGuard:
 
         violations: list[str] = []
         if index_changed:
-            # Judged before the buckets below, which each carry their own rule: a
-            # path unstaged by the turn lands among the untracked, where
-            # allow_untracked would forgive the caller's staging being undone.
+            # Judged before the buckets below, which each carry their own rule: a path unstaged by the turn lands
+            # among the untracked, where allow_untracked would forgive the caller's staging being undone.
             violations.append(f"git index entries changed: {', '.join(index_changed)}")
         if staged:
             violations.append(f"staged git changes: {', '.join(staged)}")

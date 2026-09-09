@@ -1,12 +1,4 @@
-"""The provider-neutral run specification is an API other packages build against.
-
-``AgentRunSpec`` is constructed by every stage in this repository and by any
-third-party backend registered through the ``kernelforge.agent_providers``
-entry-point group. Its field order is therefore part of the contract: a new flag
-inserted in the middle silently re-binds every positional argument after it, and
-a caller passing a tool policy positionally would hand it to the new flag
-instead. New fields go at the end.
-"""
+"""The provider-neutral run specification is an API other packages build against."""
 
 from __future__ import annotations
 
@@ -79,16 +71,7 @@ def test_a_positional_caller_still_binds_its_tool_policy() -> None:
 
 
 def test_the_safety_verdict_marker_is_declared_where_providers_can_find_it():
-    """Publish the marker beside the provider base classes that must set it.
-
-    Consumers stopped recognizing a workspace-safety verdict by matching
-    ``*SafetyError`` on the class name, because a backend raises that same class
-    for its own bookkeeping failures too -- a snapshot it could not read, a Git
-    query that timed out -- and matching by name made a stalled call abandon a
-    recipe. The verdict is now marked with an attribute instead. A provider
-    outside this repository has no way to learn that from the consumer package,
-    so the name lives with the contract it belongs to.
-    """
+    """Publish the marker beside the provider base classes that must set it."""
     assert AGENT_SAFETY_REJECTION_ATTR == "agent_safety_rejection"
     assert "AGENT_SAFETY_REJECTION_ATTR" in (AgentProviderError.__doc__ or "")
 
@@ -101,11 +84,7 @@ def test_the_consumer_reads_the_published_marker():
 
 
 def test_an_unmarked_provider_error_is_not_a_verdict():
-    """Treat an unmarked error as retryable, which is the recoverable mistake.
-
-    Retrying a genuine rejection costs one more attempt; abandoning a recipe over
-    a transient failure discards work that would have finished.
-    """
+    """Treat an unmarked error as retryable, which is the recoverable mistake."""
     from kernelforge.fusion.llm_failure import is_agent_safety_error
 
     assert is_agent_safety_error(AgentProviderError("something went wrong")) is False
