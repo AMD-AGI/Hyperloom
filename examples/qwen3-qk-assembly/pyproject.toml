@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-qwen3-assembly-example"
+version = "0.1.0"
+description = "Experimental gfx950 Qwen3 Q/K normalization and RoPE assembly plugin"
+requires-python = ">=3.10"
+
+[project.entry-points."vllm.general_plugins"]
+forge_qwen3_assembly = "forge_qwen3_assembly:register"
+
+[tool.setuptools.package-data]
+forge_qwen3_assembly = ["*.s"]

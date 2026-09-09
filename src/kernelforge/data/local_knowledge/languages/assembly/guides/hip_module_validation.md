@@ -40,6 +40,19 @@ an actual supported FlyDSL compiled callable; it cannot accept this wrapper
 as if it were one. The [assembler helper](../INDEX.md) can build the source,
 but launcher integration is a separate step.
 
+## Available Forge loader
+
+`kernelforge.assembly.hip.HipKernel` provides fresh byte-based module loading,
+explicit typed arguments (`ptr`, signed/unsigned 32/64-bit integers, FP32/FP64),
+device binding, stream forwarding, error propagation, and explicit unloading.
+The caller must match metadata and validate the tensor/launch contract below.
+The Qwen3 example demonstrates this route; it does not make the pinned AttnRes
+kernel safe without its separately described numerical/address corrections.
+
+Create modules before capture, rebuild after source edits, and retain them
+until captured graphs are retired. `close()` requires completed GPU work;
+there is no destructor that could unexpectedly invalidate a graph.
+
 ## What must hold at the driver boundary
 
 | Boundary | Observation in the pinned source | Requirement for a Forge candidate |
