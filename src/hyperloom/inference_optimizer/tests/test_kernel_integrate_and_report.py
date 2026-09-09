@@ -363,6 +363,7 @@ async def test_integrate_handler_materializes_recipe_controls(
     payload = {
         "kernel_id": "gemm_recipe",
         "source": "forge_gemm_tuning",
+        "mode": "env_only",
         "extra_server_args": "",
         "extra_envs": {"CANDIDATE_ONLY": "1", "SHARED": "candidate", "REENABLE": "candidate"},
     }
@@ -406,6 +407,7 @@ async def test_integrate_handler_explicit_empty_controls_keep_inherited_recipe(s
         {
             "kernel_id": "gemm_empty_controls",
             "source": "forge_gemm_tuning",
+            "mode": "env_only",
             "extra_envs": {"CANDIDATE_ONLY": "1"},
             "remove_args": [],
             "unset_envs": [],
@@ -441,6 +443,7 @@ async def test_integrate_handler_requested_unset_removes_current_env_and_reenabl
         {
             "kernel_id": "gemm_unset_current_env",
             "source": "forge_gemm_tuning",
+            "mode": "env_only",
             "unset_envs": ["CURRENT_ONLY", "REENABLE"],
             "extra_envs": {"REENABLE": "candidate", "CANDIDATE_ONLY": "1"},
         },
@@ -474,6 +477,7 @@ async def test_integrate_handler_unsetting_last_current_env_still_materializes_r
         {
             "kernel_id": "gemm_unset_last_env",
             "source": "forge_gemm_tuning",
+            "mode": "env_only",
             "unset_envs": ["CURRENT_ONLY"],
         },
         session_dir=session_dir,
@@ -484,7 +488,7 @@ async def test_integrate_handler_unsetting_last_current_env_still_materializes_r
     assert "CURRENT_ONLY" not in benchmarks[0]["envs"]
     assert result["new_tput"] == 110.0
     assert result["extra_envs"] == {}
-    assert result["apply_result"]["reason"] == "env_only_validation"
+    assert result["apply_result"]["reason"] == "env_only_no_patch_applied"
 
 
 @pytest.mark.asyncio

@@ -6626,25 +6626,28 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    # Env-only is a property of the request, not of who sent it: a payload that
-    # carries a runtime bundle and names no artifact has nothing to apply, so it
-    # is graded on the bundle alone. Deciding by shape also keeps such a request
-    # away from _resolve_integrate_payload, which would otherwise back-fill
-    # patch_path/target_file from the last kernel optimization and silently
-    # measure an unrelated patch.
-    _has_artifact = bool(str(payload.get("patch_path") or "").strip()) or bool(
-        str(payload.get("target_file") or payload.get("source_file") or "").strip()
-    )
+    # Coordinator-internal: config-only measurements opt in explicitly; agent
+    # integrate requests retain main's patch-resolution contract.
+    mode = str(payload.get("mode") or "patch").strip().lower()
     paired_measurement = payload.get("source") == "forge_gemm_paired"
-    if paired_measurement and (_has_artifact or payload.get("snapshot_dir") or payload.get("preapplied_apply_result")):
+    if paired_measurement and any(
+        payload.get(key)
+        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
+    ):
         raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
-    env_only_validation = not _has_artifact and (
-        paired_measurement
-        or bool(payload.get("extra_envs"))
-        or bool(str(payload.get("extra_server_args") or "").strip())
-        or requested_controls
-    )
-    if not env_only_validation:
+    if mode == "env_only":
+        if not (
+            payload.get("extra_envs")
+            or str(payload.get("extra_server_args") or "").strip()
+            or requested_controls
+            or paired_measurement
+        ):
+            return {
+                "status": "failed",
+                "error_class": "env_only_missing_envs",
+                "error": "env_only integrate requires runtime configuration or an explicit paired reference",
+            }
+    else:
         payload, missing_inputs = _resolve_integrate_payload(
             payload,
             session_dir=session_dir,
@@ -6682,10 +6685,10 @@ async def integrate_handler(
         str(payload.get("apply_checkpoint_path") or ""),
         apply_result,
     )
-    if apply_result.get("status") == "skipped" and env_only_validation:
+    if mode == "env_only" and apply_result.get("status") == "skipped":
         apply_result = {
             "status": "ok",
-            "reason": "env_only_validation",
+            "reason": "env_only_no_patch_applied",
             "kernel_id": kernel_id,
         }
     log.info("integrate_handler: apply_result=%s", apply_result)
@@ -7075,6 +7078,10 @@ async def integrate_handler(
     if str(payload.get("source") or "") == "forge_fusion":
         result["source"] = "forge_fusion"
         result["action_label"] = str(payload.get("action_label") or "fusion")
+    if mode == "env_only":
+        result["advisory"] = (
+            "env_only mode: the E2E benchmark measured the configuration change only, not a code patch."
+        )
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")

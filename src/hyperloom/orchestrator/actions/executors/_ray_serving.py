@@ -68,20 +68,32 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
 
 
 def _pdeathsig_preexec() -> None:
-    """Best-effort: ask the OS to SIGKILL this child if its parent dies."""
+    """Ask the OS to SIGTERM this child if its parent dies (Linux ``PR_SET_PDEATHSIG``).
+
+    The signal must be trappable. This child is the benchmark wrapper, and the wrapper -- not us -- owns the server:
+    the server is ``setsid``'d into its own process group, so the only in-band teardown that can reach it is the
+    wrapper's own ``trap cleanup EXIT INT TERM``. SIGKILL cannot be trapped, so arming it here killed the one process
+    that knew how to stop the server and orphaned a multi-GPU vLLM tree. A no-op where prctl is unavailable, and no
+    guarantee either way -- the durable backstop is the pidfile scanned by
+    :func:`._server_lifecycle.reap_orphaned_servers`.
+    """
     try:
         import ctypes  # noqa: PLC0415
 
         # PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(1, signal.SIGKILL)
+        libc.prctl(1, signal.SIGTERM)
     except Exception:  # noqa: BLE001 — best-effort hardening only
         pass
 
 
 @dataclass
 class ManagedServerProcess:
-    """Supervise a single GPU/serving subprocess tied to this object's lifetime."""
+    """Supervise a single GPU/serving subprocess tied to this object's lifetime.
+
+    Launched in a new POSIX session (distinct pgid) so the tree can be reaped atomically; PR_SET_PDEATHSIG is armed so
+    an unexpected owner death still triggers the child's own cleanup (see :func:`_pdeathsig_preexec`).
+    """
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
@@ -386,8 +398,15 @@ class ServingLease:
             else:
                 rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
         except _actor_err as exc:  # type: ignore[misc]
-            # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it.
-            log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
+            # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
+            # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
+            # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
+            # here can still reach the server tree the dead actor spawned; the shutdown pidfile reap frees those GPUs.
+            log.warning(
+                "ServingLease.run_session_kill: ray actor died: %r; its server tree (if any) "
+                "is left to the pidfile reaper",
+                exc,
+            )
             self._actor = None
             try:
                 from ._ray_backend import mark_ray_backend_unhealthy  # noqa: PLC0415
@@ -609,9 +628,16 @@ class GpuSpecialistLease:
             pass
 
     def close(self) -> None:
-        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        """Stop the specialist, then kill the actor to release the GPU lease.
+
+        The stop comes first for the same reason it does in
+        :meth:`ServingLease.close`: ``ray.kill`` skips ``__ray_terminate__``,
+        so killing the actor first leaves the specialist's process tree with no
+        one to reap it. Idempotent, never raises.
+        """
         if self._actor is None:
             return
+        self.stop()
         try:
             import ray  # noqa: PLC0415
 
@@ -642,196 +668,13 @@ def maybe_gpu_specialist_lease(
     )
 
 
-# ── P4 (skeleton) — multi-node serving via placement group + rank actors ────── Gated OFF by default; wired in only
-# when INFERENCE_OPTIMIZER_RAY_MN_SERVING is set.
-
-
-def _mn_serving_ray_enabled() -> bool:
-    """Return whether the P4 Ray multi-node serving skeleton is opted into."""
-    return os.environ.get("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _make_serving_placement_group(nodes: int, gpus_per_node: float, *, serving_slot: bool):
-    """Reserve one whole-node bundle per serving rank (STRICT_SPREAD)."""
-    import ray  # noqa: PLC0415
-    from ray.util.placement_group import placement_group  # noqa: PLC0415
-
-    bundle: dict[str, float] = {"GPU": float(gpus_per_node)}
-    if serving_slot:
-        bundle["serving_slot"] = 1
-    pg = placement_group([dict(bundle) for _ in range(int(nodes))], strategy="STRICT_SPREAD")
-    ray.get(pg.ready())
-    return pg
-
-
-def _remove_serving_placement_group(pg: Any) -> None:
-    """Release a serving placement group's reserved bundles."""
-    from ray.util.placement_group import remove_placement_group  # noqa: PLC0415
-
-    remove_placement_group(pg)
-
-
-def _make_rank_actor(pg: Any, bundle_index: int, num_gpus: float, *, serving_slot: bool):
-    """Create one serving rank actor pinned to ``pg``'s ``bundle_index``."""
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy  # noqa: PLC0415
-
-    actor_cls: Any = _serving_actor_body()
-    resources = {"serving_slot": 1} if serving_slot else None
-    return actor_cls.options(
-        num_gpus=num_gpus,
-        resources=resources,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg,
-            placement_group_bundle_index=int(bundle_index),
-        ),
-    ).remote()
-
-
-class ServingGroupManager:
-    """Multi-node serving held by a Ray placement group + per-node rank actors."""
-
-    def __init__(
-        self,
-        *,
-        nodes: int,
-        gpus_per_node: float,
-        serving_slot: bool = True,
-        ensure_log_path: Any = None,
-    ) -> None:
-        self._nodes = int(nodes)
-        self._gpus_per_node = float(gpus_per_node)
-        self._serving_slot = bool(serving_slot)
-        self._ensure_log_path = ensure_log_path
-        self._pg: Any = None
-        self._ranks: list[Any] = []
-        self._pids: list[int] = []
-
-    def start(
-        self,
-        rank_cmds: list[list[str]],
-        *,
-        envs: list[dict[str, str] | None] | None = None,
-        cwds: list[str | None] | None = None,
-        log_paths: list[str | None] | None = None,
-    ) -> list[int]:
-        """Reserve the placement group and launch one server rank per node."""
-        if len(rank_cmds) != self._nodes:
-            raise ValueError(f"expected {self._nodes} rank_cmds, got {len(rank_cmds)}")
-        import ray  # noqa: PLC0415
-
-        from ._ray_backend import get_ray_backend  # noqa: PLC0415
-
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        self._pg = _make_serving_placement_group(self._nodes, self._gpus_per_node, serving_slot=self._serving_slot)
-        self._ranks = []
-        self._pids = []
-        for i, cmd in enumerate(rank_cmds):
-            actor = _make_rank_actor(self._pg, i, self._gpus_per_node, serving_slot=self._serving_slot)
-            self._ranks.append(actor)
-            pid = int(
-                ray.get(
-                    actor.start.remote(
-                        cmd,
-                        env=(envs[i] if envs else None),
-                        cwd=(cwds[i] if cwds else None),
-                        log_path=(log_paths[i] if log_paths else None),
-                        scrub_benchmark_env=True,
-                    )
-                )
-            )
-            self._pids.append(pid)
-        return list(self._pids)
-
-    def pids(self) -> list[int]:
-        """Return the launched rank pids."""
-        return list(self._pids)
-
-    def ranks_alive(self) -> list[bool]:
-        """Return per-rank liveness (``False`` for a rank whose actor is gone)."""
-        if not self._ranks:
-            return []
-        import ray  # noqa: PLC0415
-
-        out: list[bool] = []
-        for actor in self._ranks:
-            try:
-                out.append(bool(ray.get(actor.is_alive.remote())))
-            except Exception:  # noqa: BLE001 — a dead rank reads as not-alive
-                out.append(False)
-        return out
-
-    def is_alive(self) -> bool:
-        """Return whether every rank server is still running."""
-        alive = self.ranks_alive()
-        return bool(alive) and all(alive)
-
-    def stop(self) -> None:
-        """Reap every rank's server subprocess tree (keeps actors/PG alive)."""
-        if not self._ranks:
-            return
-        import ray  # noqa: PLC0415
-
-        for actor in self._ranks:
-            try:
-                ray.get(actor.stop.remote())
-            except Exception:  # noqa: BLE001 — teardown must not raise
-                pass
-
-    def close(self) -> None:
-        """Kill all rank actors and remove the placement group. Idempotent."""
-        import ray  # noqa: PLC0415
-
-        for actor in self._ranks:
-            try:
-                ray.kill(actor)
-            except Exception:  # noqa: BLE001 — teardown must not raise
-                pass
-        self._ranks = []
-        self._pids = []
-        if self._pg is not None:
-            try:
-                _remove_serving_placement_group(self._pg)
-            except Exception:  # noqa: BLE001 — teardown must not raise
-                pass
-            self._pg = None
-
-
-def maybe_serving_group_manager(
-    *,
-    nodes: int,
-    gpus_per_node: float,
-    serving_slot: bool = True,
-    ensure_log_path: Any = None,
-) -> ServingGroupManager | None:
-    """Return a :class:`ServingGroupManager` when the P4 MN-serving path is opted in."""
-    if nodes <= 0 or gpus_per_node <= 0:
-        return None
-    from ._multi_node_env import is_multi_node  # noqa: PLC0415
-
-    if not is_multi_node() or not _mn_serving_ray_enabled():
-        return None
-    return ServingGroupManager(
-        nodes=nodes,
-        gpus_per_node=gpus_per_node,
-        serving_slot=serving_slot,
-        ensure_log_path=ensure_log_path,
-    )
-
-
 __all__ = [
     "GpuSpecialistLease",
     "ManagedServerProcess",
     "RayInfeasibleError",
-    "ServingGroupManager",
     "ServingLease",
     "make_gpu_specialist_actor",
     "make_serving_actor",
     "maybe_gpu_specialist_lease",
-    "maybe_serving_group_manager",
     "maybe_serving_lease",
 ]

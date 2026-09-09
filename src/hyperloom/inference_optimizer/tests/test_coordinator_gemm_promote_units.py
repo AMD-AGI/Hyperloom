@@ -2940,6 +2940,7 @@ class TestKernelE2EMeasurementPromotion:
         state.save(coord.session_dir)
         return {
             "source": "forge_gemm_paired",
+            "mode": "env_only",
             "kernel_id": "gemm_paired_A0",
             "paired_reference": {"tput": 110.0, "extra_envs": {}},
             "config_path": "/entry/base.yaml",
@@ -3110,7 +3111,12 @@ class TestKernelE2EMeasurementPromotion:
                 await paired_handler(incomplete, session_dir=coord.session_dir)
         with pytest.raises(AssertionError, match="must not resolve"):
             await paired_handler(
-                {**paired_empty_recipe, "source": "arbitrary_source", "patch_path": "/unrelated.patch"},
+                {
+                    **paired_empty_recipe,
+                    "source": "arbitrary_source",
+                    "mode": "patch",
+                    "patch_path": "/unrelated.patch",
+                },
                 session_dir=coord.session_dir,
             )
         assert len(measured) == 1

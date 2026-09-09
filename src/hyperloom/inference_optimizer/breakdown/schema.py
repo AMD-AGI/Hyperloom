@@ -610,16 +610,13 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop."""
+    """Orchestration turn count for this session.
 
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
+    Attributes:
+        tick_count (int): Coordinator ticks executed.
+    """
+
     tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
 
 
 class Telemetry(TypedDict, total=False):
@@ -633,7 +630,6 @@ class Telemetry(TypedDict, total=False):
     gpu_monitor_aggregate: GpuMonitorAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
-    # SEED/DELTA census + compaction rate for the orchestration conversation.
     orchestration_context: OrchestrationContext
 
 

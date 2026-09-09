@@ -292,40 +292,37 @@ The close path must be idempotent because sessions can end through a
 normal phase transition, a wall-clock deadline, an operator interrupt, or
 a resumed run.
 
-## Orchestration conversation model
+## Orchestration prompt model
 
-The Orchestration role runs as a single persistent multi-turn
-conversation that continues across ticks, rather than a fresh
-stateless call each tick. The agent's plan and reasoning live in the
-conversation, so reasoning continuity is preserved between ticks.
+Every Orchestration turn is stateless: the Coordinator composes one
+unconditional full state projection (mission, `SharedState`, gaps,
+warm-start, scores, and the inbox events since the last turn), so the
+turn never depends on what an earlier turn happened to remember.
 
-- **Delta prompts**: The first turn of a (re)started conversation gets a
-  full state seed; later turns get only a delta (current phase, mission
-  progress, time budget, and new inbox events). The agent pulls anything
-  else it needs on demand using read-only context tools
-  (`get_shared_state`, `get_gaps`, `get_warm_start`,
-  `get_proposal_scores`, `get_intervention_mix`, `why_denied`,
-  `show_analysis_md`, `get_inbox`) instead of receiving a full state
-  dump every tick.
-- **Checkpoint / compaction**: Periodically (phase boundaries and a
-  tick/time/size cadence) the Coordinator asks the agent to summarize its
-  working memory, persists it to `state.json`
-  (`orchestration_memory`), then resets and re-seeds the conversation
-  from that compacted memory so context stays bounded on long runs.
-- **Resume**: On resume the conversation is rebuilt from
+- **Working memory**: At each macro-cycle boundary the Coordinator asks
+  the agent for a one-turn handoff summary and persists it to
+  `state.json` (`orchestration_memory`). Later projections paste it back,
+  and it feeds `next_cycle_directive`; when the agent produces nothing
+  usable, a deterministic fallback directive is derived from state.
+- **Context tools**: A read-only MCP surface lets the agent pull what the
+  projection leaves out — finished outcomes (`get_recent_outcomes`),
+  in-flight work (`get_running_tasks`), failure packets (`get_failure` /
+  `get_variant_failures`), reference docs (`read_reference`), the raw
+  `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
+  `run_action_now` for a whitelist of cheap synchronous actions.
+  Transports without MCP tools get the projection only.
+- **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
-- **Write path unchanged**: All write actions still flow through
-  `emit_intent` → the Coordinator's intent handler, so Critic review,
-  the accuracy gate, Robustness escalation, and PolicyGate's real
-  invariants (path sandbox, resource leases, phase ordering, data
-  dependencies, single-writer rules) apply exactly as before. Only the
-  compensatory anti-amnesia guards (for example, the baseline same-fingerprint
-  self-loop deny) were removed, since a conversational agent remembers
-  its own prior attempts. Robustness additionally surfaces a
-  conversation no-progress signal as an external circuit-breaker.
+- **Write path**: All write actions flow through `emit_intent` → the
+  Coordinator's intent handler, so Critic review, the accuracy gate,
+  Robustness escalation, and PolicyGate's invariants (path sandbox,
+  resource leases, phase ordering, data dependencies, single-writer
+  rules) apply to every turn. Repetition is checked against state — the
+  tested-variant ledger and the action-failure log — not against agent
+  recall.
 
-The other two roles (Critic, Robustness) remain reactive and stateless per tick.
+Critic and Robustness are likewise reactive and stateless per tick.
 
 ## Feedback loops
 

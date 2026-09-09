@@ -2457,7 +2457,7 @@ class WritebackCollaborator:
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
-        is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
+        is_empty = len(proposals) == 0
 
         round_entry = self._build_specialist_round_entry(
             task=task,
@@ -2536,7 +2536,6 @@ class WritebackCollaborator:
                     "gap_canonical_id": str(
                         done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
                     ),
-                    "empty": is_empty,
                     "proposals_total": len(proposals),
                     "confidence": done_payload.get("confidence"),
                     "summary": str(done_payload.get("summary") or "")[:480],
@@ -2559,22 +2558,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Routed via ``_coord`` so a test / caller that overrides
-        # ``coordinator._record_observation`` still wins (bare-name delegation
-        # resolves it back onto this class otherwise).
-        await self._coord._record_observation(
-            source or "coordinator",
-            "observation",
-            {
-                "kind": "specialist_done_recorded",
-                "task_id": task.task_id,
-                "domain": domain,
-                "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                "proposals_total": len(proposals),
-                "empty": is_empty,
-            },
-        )
-
         # Multi-node only: auto-materialise the proposal_set into a
         # benchmarked explore task. No-op single-node (LLM drives explore
         # directly there) and no-op when the proposal_set is empty / has
@@ -2591,13 +2574,13 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
-        if domain == "research_scout_specialist":
+        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain. Fail-soft.
+        if done_payload.get("new_findings"):
             try:
-                await self._coord._harvest_research_scout(done_payload)
+                await self._coord._harvest_specialist_findings(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "research-scout harvest failed for task=%s",
+                    "specialist findings harvest failed for task=%s",
                     task.task_id,
                 )
 
@@ -2718,16 +2701,16 @@ class WritebackCollaborator:
                 added,
             )
 
-    async def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist top-level scout output and re-seed Orchestration.
+    async def _harvest_specialist_findings(self, done_payload: dict[str, Any]) -> None:
+        """Persist top-level specialist findings and re-seed Orchestration.
 
-        The scout is a text-hints-only collector. Any ``competitor_target``
-        numbers it emits are intentionally ignored here: measured competitor
-        baselines are sourced from InferenceX, not authored by the scout, so
-        LLM-written numbers must never be persisted as a consumable target.
+        Any ``competitor_target`` numbers emitted are intentionally ignored here:
+        measured competitor baselines are sourced from InferenceX, not authored
+        by specialists, so LLM-written numbers must never be persisted as a
+        consumable target.
 
         Args:
-            done_payload: The completed research-scout task payload.
+            done_payload: The completed specialist task payload.
         """
         from ..knowledge import research_hints as _research_hints
 
@@ -2769,15 +2752,9 @@ class WritebackCollaborator:
         try:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: gap seeding failed")
-        compacted = await self._coord._maybe_checkpoint_orchestration(
-            tick=int(getattr(self.shared_state, "tick", 0) or 0),
-            force=True,
-        )
-        if not compacted:
-            self._coord._reset_orchestration_conversation()
+            log.exception("specialist findings: gap seeding failed")
         log.info(
-            "research-scout harvested: hints_added=%d seen_pr_ids=%d",
+            "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
             added,
             len(self.shared_state.research_scout_seen_pr_ids or []),
         )
@@ -4394,6 +4371,9 @@ class WritebackCollaborator:
             self.shared_state.note_explore_outcome(promoted=promoted)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
+        # A round with no measured variant is not a data point for the plateau window.
+        if not is_revalidation_task and (winners or result.get("losers")):
+            self.shared_state.gain_gated_action_count += 1
         if last_lifted_winner is not None:
             # The last successful lift owns every axis of the validated measurement.
             if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(
@@ -4577,6 +4557,9 @@ class WritebackCollaborator:
             audit_decision = "kept_inert"
         else:
             audit_decision = "discarded"
+        # A measured integrate counts either way; KEEP/REVERT is a later judgement.
+        if new_tput is not None:
+            self.shared_state.gain_gated_action_count += 1
         audit_extras = {
             **audit_extras,
             "status": status,

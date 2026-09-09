@@ -591,7 +591,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         session_dir,
         monkeypatch,
     ):
-        """GEMM tuning validation has no patch; it must still run E2E with envs."""
+        """GEMM tuning validation has no patch; mode=env_only must still run E2E."""
         _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
         captured: dict[str, object] = {}
 
@@ -613,6 +613,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         result = await krh.integrate_handler(
             {
                 "source": "forge_gemm_tuning",
+                "mode": "env_only",
                 "kernel_id": "gemm_tune_fmoe_ck",
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
@@ -630,6 +631,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
         assert captured["params"]["defer_accuracy_until_after_measure"] is True
         assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
+        assert "env_only" in result["advisory"]
 
 
 @pytest.mark.asyncio
@@ -666,14 +668,14 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
 
     result = await krh.integrate_handler(
-        {"kernel_id": "gemm_controls_only", "source": "forge_gemm_tuning", **controls},
+        {"kernel_id": "gemm_controls_only", "source": "forge_gemm_tuning", "mode": "env_only", **controls},
         session_dir=session_dir,
     )
 
     resolve.assert_not_called()
     assert result["status"] == "ok", result
     assert result["new_tput"] == 1100.0
-    assert result["apply_result"]["reason"] == "env_only_validation"
+    assert result["apply_result"]["reason"] == "env_only_no_patch_applied"
     assert captured["extra_envs"] == {}
     assert captured["extra_server_args"] == ""
     assert {key: captured[key] for key in controls} == controls
@@ -727,7 +729,7 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
     resolve.assert_called_once()
     assert result["status"] == "ok", result
     assert result["apply_result"]["status"] == "ok"
-    assert result["apply_result"].get("reason") != "env_only_validation"
+    assert result["apply_result"].get("reason") != "env_only_no_patch_applied"
     assert result["patch_path"] == str(artifact)
     assert captured["source_during_measurement"] == artifact.read_text(encoding="utf-8")
     assert captured["params"]["remove_args"] == ["--disable-cuda-graph"]

@@ -2186,6 +2186,7 @@ class KernelPhase(PhaseHandler):
                         # would be noise promoted to a decision.
                         "keep_threshold_pct": 100.0,
                         "budget_minutes": budget_minutes,
+                        "mode": "env_only",
                     },
                     session_dir=self.session_dir,
                 )
@@ -3069,6 +3070,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": test_envs,
                 "keep_threshold_pct": 3.0,
                 "budget_minutes": per_tuner_budget_minutes,
+                "mode": "env_only",
             }
             # The native handler reloads both the recipe and grading anchor from disk.
             self.shared_state.save(self.session_dir)

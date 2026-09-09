@@ -23,8 +23,16 @@ log = logging.getLogger(__name__)
 _SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang serve",
+    "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
+    "atom.entrypoints",
+    # The launcher's own cmdline is what the pidfile records, but the processes
+    # still holding VRAM once that launcher exits are the engine/worker ranks,
+    # and they carry none of the names above -- so the dead-leader-live-group
+    # branch below needs them too.
+    "EngineCore",
+    "VLLM::Worker",
     "launch_server",
 )
 
@@ -266,7 +274,12 @@ def _process_group_looks_like_server(pgid: int) -> bool:
 
 
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
-    """Reap serving processes orphaned by a prior monitor-process death."""
+    """Reap serving processes orphaned by a prior monitor-process death, or by a run that simply ended with a server up.
+
+    Scans only the current session's ``runs/`` pidfiles and reaps each pid whose cmdline still matches a serving
+    process (SIGTERM -> grace -> SIGKILL on the group), so a co-located session's server and a recycled pid are never
+    touched.
+    """
     if os.name != "posix":
         return []
     runs_dir = Path(session_dir) / "runs"
