@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+from ..evidence import MOE_KEY_FIELDS, MOE_TABLE
 
 log = logging.getLogger(__name__)
 
@@ -20,8 +25,39 @@ CORRECTNESS_TRIALS = 8
 # Bound the aggregate referee error metric, not an element-wise relative ratio.
 MAX_RELATIVE_ERROR = 5e-2
 
-# Tables this module knows how to exercise.
-SUPPORTED_TABLES = ("bf16_tuned_gemm.csv",)
+#: The same limit for fused MoE, on the mean rather than the peak, because on
+#: MoE output the peak measure has no room left. Measured on an MI355X at
+#: gfx950, token=512 of the MiniMax-M3-MXFP4 key, as ``max|d|/mean`` and
+#: ``mean|d|/mean`` against one reference: the same kernel re-run gives 0.04701
+#: and 0.00021, a real tuning run's winner 1.2458 and 0.1445, deliberately
+#: holed scales 4.9008 and 0.5697. The 0.04701 is one bf16 ulp at the largest
+#: output element (``max|d|`` is 8.0 to the bit, twelve runs running) because
+#: stage 2 reduces with atomics and sums in a different order each time -- 6%
+#: of margin against :data:`MAX_RELATIVE_ERROR` on a kernel compared with
+#: itself. The mean measure leaves a factor of 48 below the limit and 14 above
+#: it to the nearest real failure.
+MAX_MOE_MEAN_ERROR = 1e-2
+
+#: The prefix that decides whether a tuned fused-MoE row is honoured at all.
+#: ``fused_moe`` reads the row, logs the pair it read, and only then asks
+#: whether either name starts with this; if neither does, control falls past
+#: the whole tuned branch into the heuristic chain. So the log line proves the
+#: row was read, not that the kernels ran. Measured: a candidate naming
+#: ``nope1``/``nope2`` was logged verbatim, ran the default path, and timed 1.1%
+#: faster than the baseline -- above the referee's 1.01 noise floor. A name that
+#: does start with it and is not real raises instead, and is refused on that.
+FLYDSL_KERNEL_PREFIX = "flydsl_"
+
+#: Fewer trials than :data:`CORRECTNESS_TRIALS`, and they vary less. A trial
+#: costs two ``fused_moe`` calls rather than a GEMM, and the weights cannot be
+#: re-rolled: ``generate_data_2stages`` is deterministic (verified -- two calls
+#: return bit-identical tensors), so only the activations differ between trials.
+#: Stated plainly because it is a weaker check than the dense one.
+MOE_CORRECTNESS_TRIALS = 4
+
+# Tables this module knows how to exercise. Everything else is honestly absent
+# rather than approximated.
+SUPPORTED_TABLES = ("bf16_tuned_gemm.csv", MOE_TABLE)
 
 #: What ``_Bf16DenseAdapter._build`` will accept, backend by backend.
 #:
@@ -54,6 +90,21 @@ DENSE_BF16_BACKENDS: dict[str, str] = {
 }
 
 
+#: What ``_FusedMoeAdapter._build`` will accept. One backend, because there is
+#: one way in: aiter resolves a fused-MoE kernel pair by looking the dispatch
+#: key up in a CSV, so a candidate *is* a row of that CSV and nothing else.
+FUSED_MOE_BACKENDS: dict[str, str] = {
+    "aiter_fmoe": (
+        "`kernelName1=<str>` and `kernelName2=<str>` (both required) -- the stage-1 and stage-2 "
+        "kernels, spelled exactly as aiter spells them. Optional: `block_m=<int>` (default 32), "
+        "`ksplit=<int>` (default 0), `run_1stage`/`xbf16`/`flat` (default 0). A pair that aiter "
+        "does not resolve to is refused rather than timed: the adapter reads back which kernels "
+        "aiter actually chose, and a row it ignored would otherwise be timed as the default path "
+        "and scored as a tie."
+    ),
+}
+
+
 def describe_candidate_protocol(table: str) -> str:
     """How to write a candidate this module can actually dispatch, or "".
 
@@ -61,6 +112,36 @@ def describe_candidate_protocol(table: str) -> str:
     :func:`adapters_for` gives: there is no protocol to describe because
     nothing would re-time the result anyway.
     """
+    if table == MOE_TABLE:
+        fields = ", ".join(f"`{f}`" for f in MOE_KEY_FIELDS)
+        backends = "\n".join(f"- `{name}` -- {detail}" for name, detail in FUSED_MOE_BACKENDS.items())
+        return (
+            "Each candidate is an object with a `backend` and a `config`, and the shape it belongs\n"
+            "to is the key it is filed under. A fused-MoE shape is not `MxNxK`: it is the whole\n"
+            "dispatch key, written as `field=value` pairs joined by `|`, in this order:\n"
+            f"{fields}.\n"
+            "Values are copied verbatim from the same row of the CSV -- including the spelling of\n"
+            "`act_type` (`ActivationType.Swiglu`), the dtypes (`torch.float4_e2m1fn_x2`) and\n"
+            "`q_type` (`QuantType.per_1x32`). For example:\n"
+            '`"token=512|model_dim=6144|inter_dim=384|expert=128|topk=4|'
+            "act_type=ActivationType.Swiglu|dtype=torch.bfloat16|"
+            "q_dtype_a=torch.float4_e2m1fn_x2|q_dtype_w=torch.float4_e2m1fn_x2|"
+            'q_type=QuantType.per_1x32|use_g1u1=1|doweight_stage1=0"`.\n'
+            "`config` is `key=value` pairs joined by `;` (never a comma).\n"
+            "\n" + backends + "\n"
+            "\n"
+            "At least one of `kernelName1` and `kernelName2` must be a FlyDSL kernel (its name\n"
+            f"starts with `{FLYDSL_KERNEL_PREFIX}`). aiter only consults a tuned row when one of\n"
+            "the two is; otherwise it reads the row, ignores it, and runs its heuristic choice --\n"
+            "so a pair without one is refused here rather than timed as a phantom win. The\n"
+            "partner name may be a CK, CKTile or Opus kernel.\n"
+            "\n"
+            "Only the mxfp4 SwiGLU path is re-timable here (`q_type=QuantType.per_1x32`,\n"
+            "`q_dtype_w=torch.float4_e2m1fn_x2`, `act_type=ActivationType.Swiglu`); a candidate\n"
+            "for any other combination is recorded as not dispatchable, because building the\n"
+            "operands for it in the layout its kernels expect is not something this harness knows\n"
+            "how to do yet. Report what you find for those anyway -- it just cannot be promoted."
+        )
     if table != "bf16_tuned_gemm.csv":
         return ""
     backends = "\n".join(f"- `{name}` -- {detail}" for name, detail in DENSE_BF16_BACKENDS.items())
@@ -86,6 +167,8 @@ def adapters_for(table: str) -> Any | None:
     """Return the dispatch adapter for a table, or None if we have none."""
     if table == "bf16_tuned_gemm.csv":
         return _Bf16DenseAdapter()
+    if table == MOE_TABLE:
+        return _FusedMoeAdapter()
     log.info(
         "tier3: no dispatch adapter for %s, so a generated tuner for it could not be re-timed; supported today: %s",
         table,
@@ -122,6 +205,435 @@ def shape_key(shape: str) -> tuple[int, int, int]:
     except ValueError as exc:
         raise ValueError(f"tier3 shape must be MxNxK of integers, got {shape!r}") from exc
     return (m, n, k)
+
+
+def moe_shape_key(shape: str) -> dict[str, str]:
+    """``"token=512|model_dim=6144|..."`` into the dispatch key, as strings.
+
+    Raises ``ValueError`` naming what is missing. Not ``MxNxK`` and not
+    positional: a fused-MoE key carries twelve fields, three of which contain
+    a ``.`` and one of which (``torch.float4_e2m1fn_x2``) contains an ``x``, so
+    any positional encoding built out of the obvious separators is ambiguous
+    against the values it has to carry.
+    """
+    parts = [p for p in str(shape).split("|") if p.strip()]
+    got: dict[str, str] = {}
+    for part in parts:
+        name, sep, value = part.partition("=")
+        if not sep:
+            raise ValueError(f"tier3 fused-MoE shape must be field=value pairs, got {part!r} in {shape!r}")
+        got[name.strip()] = value.strip()
+    missing = [f for f in MOE_KEY_FIELDS if f not in got]
+    if missing:
+        raise ValueError(f"tier3 fused-MoE shape {shape!r} is missing {', '.join(missing)}")
+    return {f: got[f] for f in MOE_KEY_FIELDS}
+
+
+class _FusedMoeAdapter:
+    """Dispatch, baseline and correctness for aiter's fused mxfp4 SwiGLU MoE.
+
+    Unlike the dense adapter this one cannot hand the kernel its arguments. A
+    fused-MoE kernel pair is chosen inside ``aiter.fused_moe`` by looking the
+    dispatch key up in a CSV named by ``AITER_CONFIG_FMOE``, so a candidate is
+    dispatched by writing that CSV and calling the ordinary entry point --
+    which is also aiter's own idiom for re-timing one
+    (``GroupedFmoeTuner._run_candidate``). Four things about that were measured
+    rather than assumed, each of which silently produces a wrong measurement:
+
+    * **The env var alone does not switch anything.** ``get_config_file`` is
+      ``lru_cache``d on a key that does not include the environment variable
+      whose value it reads, so within one process the first resolution wins
+      forever. Three caches have to be cleared together; see :meth:`_point_at`.
+    * **The caller does not choose the activation dtype.** ``fused_moe``
+      derives ``q_dtype_a`` itself from the quant type, the activation, the
+      gate mode and the token count -- for SwiGLU mxfp4 it is bf16 below 256
+      tokens and fp4 at or above. So a demanded key is not necessarily a key
+      this process can be steered to, and the adapter confirms which key was
+      actually served instead of predicting it.
+    * **Operands must match the kernel family's layout.** aiter's generator
+      hands back three pairings (CK-shuffled, unshuffled, FlyDSL-shuffled) and
+      crossing them does not fail -- it returns NaN, or, if the activations are
+      pre-quantized when the path wanted bf16, aborts the queue with
+      ``HSA_STATUS_ERROR_EXCEPTION``.
+    * **A row aiter ignores is timed as the default path.** Which reads as a
+      tie, or, with noise, as a small win for a candidate that did nothing. Two
+      different silences produce that, so there are two guards: a key this
+      process cannot be steered to is caught by reading the resolved kernel
+      names back out of aiter's own log, and a pair aiter discards *after*
+      logging it is caught by :func:`aiter_honours_kernel_pair` before any GPU
+      work happens.
+
+    Scope is the mxfp4 SwiGLU path (``per_1x32``, fp4 weights) because that is
+    where the demand is and where the candidates are: on gfx950 the production
+    MiniMax-M3-MXFP4 key has 834 tunable candidates, every one of them FlyDSL,
+    and zero from the other five generators.
+    """
+
+    #: aiter reads its tuned fused-MoE config from a CSV with exactly these
+    #: columns. The key half is :data:`MOE_KEY_FIELDS` plus the two aiter adds
+    #: itself; the rest is what the tuner records, of which only the kernel
+    #: names and the four flags are read back at dispatch time.
+    _CSV_COLUMNS = (
+        "gfx",
+        "cu_num",
+        *MOE_KEY_FIELDS,
+        "block_m",
+        "ksplit",
+        "us1",
+        "kernelName1",
+        "err1",
+        "us2",
+        "kernelName2",
+        "err2",
+        "us",
+        "run_1stage",
+        "xbf16",
+        "flat",
+        "tflops",
+        "bw",
+    )
+
+    def __init__(self) -> None:
+        self._operands: dict[str, Any] = {}
+        self._in_play: dict[str, dict[str, Any]] = {}
+        self._workdir = Path(tempfile.mkdtemp(prefix="forge_tier3_fmoe_"))
+        self._baseline_csv = self._workdir / "baseline.csv"
+        self._baseline_csv.write_text(",".join(self._CSV_COLUMNS) + "\n", encoding="utf-8")
+        self._restore = os.environ.get("AITER_CONFIG_FMOE")
+
+    # -- torch and aiter are imported lazily so this stays importable off-GPU --
+    @staticmethod
+    def _torch():
+        import torch
+
+        return torch
+
+    @staticmethod
+    def _fused_moe():
+        import aiter.fused_moe as fm
+
+        return fm
+
+    def _point_at(self, path: Path) -> None:
+        """Make the next ``fused_moe`` call read *path*, cache clears included.
+
+        All three clears are load-bearing and were found one at a time by
+        switching configs and watching the resolved kernel not change:
+        ``get_config_file`` caches the resolved path, ``cfg_2stages`` caches the
+        parsed table, and ``get_2stage_cfgs`` caches the row for a key.
+        """
+        from aiter.jit.core import AITER_CONFIGS
+
+        fm = self._fused_moe()
+        os.environ["AITER_CONFIG_FMOE"] = str(path)
+        AITER_CONFIGS.get_config_file.cache_clear()
+        fm.cfg_2stages = None
+        fm.get_2stage_cfgs.cache_clear()
+
+    # ------------------------------------------------------------- operands --
+    def _ops(self, shape: str) -> dict[str, Any] | None:
+        """Weights, scales and routing for one key, or None if we cannot build.
+
+        Built by aiter's own tuning script rather than reimplemented here.
+        Quantizing 128 experts to mxfp4 and pre-shuffling them into the layout
+        the FlyDSL kernels index is exactly the kind of thing a reimplementation
+        gets subtly wrong and then reports as a numerics failure in the
+        candidate. It lives in ``csrc/`` next to the installed package, so a
+        wheel without sources yields None -- an honest "no dispatch here", not
+        an approximation.
+        """
+        if shape in self._operands:
+            return self._operands[shape]
+        key = moe_shape_key(shape)
+        torch = self._torch()
+        try:
+            import aiter
+            from aiter import ActivationType, QuantType
+
+            if key["q_type"] != "QuantType.per_1x32" or key["act_type"] != "ActivationType.Swiglu":
+                log.info("tier3: %s is not the mxfp4 SwiGLU path; no fused-MoE operands for it", shape)
+                self._operands[shape] = None
+                return None
+            codegen = Path(aiter.__file__).resolve().parent.parent / "csrc" / "ck_gemm_moe_2stages_codegen"
+            if not (codegen / "gemm_moe_tune.py").is_file():
+                log.info("tier3: aiter sources are not installed at %s; cannot build fused-MoE operands", codegen)
+                self._operands[shape] = None
+                return None
+            import sys
+
+            if str(codegen) not in sys.path:
+                sys.path.insert(0, str(codegen))
+            import gemm_moe_tune as moe_tune
+
+            dtype = getattr(torch, key["dtype"].removeprefix("torch."))
+            q_dtype_w = getattr(torch, key["q_dtype_w"].removeprefix("torch."))
+            bundle = moe_tune.FmoeTuner.generate_data_2stages(
+                int(key["token"]),
+                int(key["model_dim"]),
+                int(key["inter_dim"]),
+                int(key["expert"]),
+                int(key["topk"]),
+                ActivationType.Swiglu,
+                dtype,
+                q_dtype_w,
+                q_dtype_w,
+                QuantType.per_1x32,
+                key["use_g1u1"] not in ("0", "False", "false", ""),
+                key["doweight_stage1"] not in ("0", "False", "false", ""),
+                # blockM only sizes the pre-sorted buffers the low-level stage
+                # entry points take. Nothing passed to fused_moe depends on it,
+                # so the candidate's own block_m does not force a rebuild.
+                32,
+                1,
+            )
+        except Exception as exc:  # noqa: BLE001 - "cannot build operands" is data
+            log.info("tier3: cannot build fused-MoE operands for %s: %r", shape, exc)
+            self._operands[shape] = None
+            return None
+        self._operands[shape] = bundle
+        return bundle
+
+    def _hidden(self, shape: str, seed: int):
+        torch = self._torch()
+        key = moe_shape_key(shape)
+        gen = torch.Generator(device="cuda").manual_seed(seed)
+        return torch.randn(int(key["token"]), int(key["model_dim"]), device="cuda", dtype=torch.bfloat16, generator=gen)
+
+    def _call(self, shape: str, hidden) -> Callable[[], Any] | None:
+        bundle = self._ops(shape)
+        if bundle is None:
+            return None
+        from aiter import ActivationType, QuantType
+
+        fm = self._fused_moe()
+        torch = self._torch()
+
+        def run():
+            return fm.fused_moe(
+                hidden,
+                bundle["w1_qt_shffle_flydsl"],
+                bundle["w2_qt_shffle_flydsl"],
+                bundle["topk_weights"],
+                bundle["topk_ids"],
+                activation=ActivationType.Swiglu,
+                quant_type=QuantType.per_1x32,
+                w1_scale=bundle["w1_scale_flydsl"],
+                w2_scale=bundle["w2_scale_flydsl"],
+                dtype=torch.bfloat16,
+            )
+
+        return run
+
+    # ------------------------------------------------------- the three hooks --
+    def as_graph(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        return _Bf16DenseAdapter.as_graph(self, fn)  # type: ignore[arg-type]
+
+    def make_baseline(self, shape: str) -> Callable[[], Any]:
+        """The unmodified path: no tuned row for this key, so aiter's heuristic.
+
+        An empty table rather than an unset variable, because unsetting it lets
+        aiter fall back to whatever tuned file happens to be installed -- which
+        on a fleet box is a file we deployed, and timing a candidate against our
+        own previous answer is not what "baseline" means here.
+        """
+        self._point_at(self._baseline_csv)
+        run = self._call(shape, self._hidden(shape, 0))
+        if run is None:
+            # The runner only reaches here for a table this adapter claimed, so
+            # a shape it cannot build is a real failure of the attempt rather
+            # than something to paper over with a no-op.
+            raise ValueError(f"tier3: no fused-MoE baseline could be built for {shape}")
+        return self.as_graph(run)
+
+    def make_dispatch(self, shape: str) -> Callable[[dict[str, Any]], Callable[[], Any] | None]:
+        def dispatch(cand: dict[str, Any]) -> Callable[[], Any] | None:
+            self._in_play[shape] = cand
+            run = self._build(shape, cand)
+            return self.as_graph(run) if run is not None else None
+
+        return dispatch
+
+    def make_correctness(self, shape: str) -> Callable[[Callable[[], Any]], bool]:
+        def check(_dispatched: Callable[[], Any]) -> bool:
+            cand = self._in_play.get(shape)
+            if cand is None:
+                return True
+            return self._is_correct(shape, cand)
+
+        return check
+
+    def sync(self) -> Callable[[], Any]:
+        return self._torch().cuda.synchronize
+
+    # ------------------------------------------------------------ internals --
+    def _candidate_csv(self, shape: str, cand: dict[str, Any]) -> tuple[Path, str, str] | None:
+        """Write the candidate as the one row of a tuned-config file."""
+        if str(cand.get("backend", "")) not in FUSED_MOE_BACKENDS:
+            log.info("tier3: unknown backend %r in a fused-MoE candidate", cand.get("backend"))
+            return None
+        cfg = parse_config(cand.get("config", ""))
+        kn1, kn2 = str(cfg.get("kernelName1", "")), str(cfg.get("kernelName2", ""))
+        if not kn1 or not kn2:
+            log.info("tier3: a fused-MoE candidate named no kernel pair: %r", cand.get("config"))
+            return None
+        if not aiter_honours_kernel_pair(kn1, kn2):
+            log.info(
+                "tier3: aiter would read the row for (%s, %s) and then ignore it -- one of the two "
+                "names has to be FlyDSL's for the tuned branch to be taken at all; refusing",
+                kn1,
+                kn2,
+            )
+            return None
+        key = moe_shape_key(shape)
+        row = {
+            "gfx": self._gfx(),
+            "cu_num": self._cu_num(),
+            **key,
+            "block_m": cfg.get("block_m", 32),
+            "ksplit": cfg.get("ksplit", 0),
+            "us1": 0,
+            "kernelName1": kn1,
+            "err1": "0.0%",
+            "us2": 0,
+            "kernelName2": kn2,
+            "err2": "0.0%",
+            "us": 0,
+            "run_1stage": int(bool(cfg.get("run_1stage", 0))),
+            "xbf16": int(bool(cfg.get("xbf16", 0))),
+            "flat": int(bool(cfg.get("flat", 0))),
+            "tflops": 0,
+            "bw": 0,
+        }
+        path = self._workdir / "candidate.csv"
+        path.write_text(
+            ",".join(self._CSV_COLUMNS) + "\n" + ",".join(str(row[c]) for c in self._CSV_COLUMNS) + "\n",
+            encoding="utf-8",
+        )
+        return path, kn1, kn2
+
+    def _gfx(self) -> str:
+        from aiter.jit.core import get_gfx
+
+        return get_gfx()
+
+    def _cu_num(self) -> int:
+        return int(self._torch().cuda.get_device_properties(0).multi_processor_count)
+
+    def _build(self, shape: str, cand: dict[str, Any]) -> Callable[[], Any] | None:
+        written = self._candidate_csv(shape, cand)
+        if written is None:
+            return None
+        path, kn1, kn2 = written
+        self._point_at(path)
+        run = self._call(shape, self._hidden(shape, 0))
+        if run is None:
+            return None
+        try:
+            resolved = self._resolved_kernels(run)
+        except Exception as exc:  # noqa: BLE001 - a candidate that raises is not dispatchable
+            log.info("tier3: fused-MoE candidate %s/%s raised: %r", kn1, kn2, exc)
+            self._point_at(self._baseline_csv)
+            return None
+        if resolved != (kn1, kn2):
+            # Not a bad candidate necessarily -- more often a key this process
+            # cannot be steered to at all, because fused_moe derives q_dtype_a
+            # from the token count. Either way it must not be timed: what would
+            # run is the default path, and that scores as a tie or, with noise,
+            # as a win for a row that changed nothing.
+            log.info(
+                "tier3: aiter did not take the candidate row for %s -- asked for (%s, %s), served %s; not timing it",
+                shape,
+                kn1,
+                kn2,
+                resolved,
+            )
+            self._point_at(self._baseline_csv)
+            return None
+        return run
+
+    def _resolved_kernels(self, run: Callable[[], Any]) -> tuple[str, str] | None:
+        """Which kernel pair aiter actually chose, read out of its own log.
+
+        Observation rather than prediction. The alternative is to re-derive
+        aiter's dispatch rules here, and those rules are a hundred lines of
+        branching on token count, gate mode and gfx that change release to
+        release -- a copy of them would be wrong quietly.
+        """
+        import re
+
+        records: list[str] = []
+
+        class _Catch(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+
+        aiter_log = logging.getLogger("aiter")
+        handler = _Catch()
+        previous = aiter_log.level
+        aiter_log.addHandler(handler)
+        aiter_log.setLevel(logging.INFO)
+        try:
+            run()
+            self._torch().cuda.synchronize()
+        finally:
+            aiter_log.removeHandler(handler)
+            aiter_log.setLevel(previous)
+        pattern = re.compile(r"kernelName1='([^']*)', kernelName2='([^']*)'")
+        for message in reversed(records):
+            found = pattern.search(message)
+            if found:
+                return (found.group(1), found.group(2))
+        return None
+
+    def _is_correct(self, shape: str, cand: dict[str, Any]) -> bool:
+        """Does the candidate agree with the path production runs today?
+
+        A weaker question than the dense adapter asks, and deliberately. There
+        the reference is an independent fp32 ``matmul``; here aiter's generator
+        hands over weights that are already quantized and pre-shuffled, and
+        there is no unquantized copy to build an independent reference from.
+        So the reference is the unmodified path -- which is the right question
+        for a promotion decision anyway ("would swapping this in change what we
+        serve?"), just not a proof that either side is arithmetically right.
+        """
+        torch = self._torch()
+        written = self._candidate_csv(shape, cand)
+        if written is None:
+            return False
+        hiddens = [self._hidden(shape, 1 + i) for i in range(MOE_CORRECTNESS_TRIALS)]
+        try:
+            self._point_at(self._baseline_csv)
+            refs = []
+            for hidden in hiddens:
+                run = self._call(shape, hidden)
+                if run is None:
+                    return False
+                refs.append(run().float())
+            torch.cuda.synchronize()
+
+            self._point_at(written[0])
+            worst = 0.0
+            for hidden, ref in zip(hiddens, refs, strict=True):
+                run = self._call(shape, hidden)
+                if run is None:
+                    return False
+                got = run()
+                torch.cuda.synchronize()
+                worst = max(worst, mean_error(got, ref))
+        except Exception as exc:  # noqa: BLE001 - a kernel that raises is wrong
+            log.warning("tier3: fused-MoE correctness check raised, rejecting: %r", exc)
+            return False
+
+        if worst > MAX_MOE_MEAN_ERROR:
+            log.error(
+                "tier3: rejecting %s -- worst mean error over %d activation sets was %.4g, above the %.3g limit",
+                str(cand.get("config"))[:80],
+                MOE_CORRECTNESS_TRIALS,
+                worst,
+                MAX_MOE_MEAN_ERROR,
+            )
+            return False
+        return True
 
 
 class _Bf16DenseAdapter:
@@ -374,3 +886,30 @@ class _Bf16DenseAdapter:
 def relative_error(got: Any, ref: Any) -> float:
     """Largest deviation, against the magnitude of the reference as a whole."""
     return float((got.float() - ref).abs().max() / ref.abs().mean())
+
+
+def aiter_honours_kernel_pair(kernel_name_1: str, kernel_name_2: str) -> bool:
+    """Will aiter actually run this pair, or read it and move on?
+
+    The one part of aiter's dispatch this adapter does have to mirror, because
+    it is the part no observation can recover: the tuned row is logged before
+    the decision that discards it, so a pair aiter throws away is
+    indistinguishable in the log from one it keeps. Everything else the adapter
+    confirms by watching; this it has to know.
+
+    A pair is honoured when at least one name is FlyDSL's. Its partner may then
+    be a CK, CKTile or Opus name and is dispatched too -- but only from inside
+    the branch that the FlyDSL name opened. See
+    ``aiter/fused_moe.py``'s ``is_flydsl1 or is_flydsl2`` guard.
+    """
+    return kernel_name_1.startswith(FLYDSL_KERNEL_PREFIX) or kernel_name_2.startswith(FLYDSL_KERNEL_PREFIX)
+
+
+def mean_error(got: Any, ref: Any) -> float:
+    """Average deviation, against the magnitude of the reference as a whole.
+
+    The peak measure above reports one bf16 ulp at the largest element, which
+    for a fused-MoE output is 0.047 for a kernel against itself. See
+    :data:`MAX_MOE_MEAN_ERROR` for the three cases that settled this.
+    """
+    return float((got.float() - ref).abs().mean() / ref.abs().mean())
