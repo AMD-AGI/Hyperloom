@@ -68,6 +68,9 @@ class ControllerIntegrationSummary:
 
 PatchValidator = Callable[[ControllerPatchPublication], Awaitable[dict[str, Any]]]
 
+#: Records one validated KEEP into SharedState.
+KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
+
 
 def _git_output(repo: Path, *args: str) -> str:
     completed = subprocess.run(
@@ -160,6 +163,27 @@ def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult)
     )
 
 
+def _keep_result(
+    publication: ControllerPatchPublication,
+    validation: dict[str, Any],
+    keep_commit: str,
+) -> dict[str, Any]:
+    """Preserve the validated measurement and committed source identity for writeback."""
+    return {
+        **validation,
+        "kernel_id": publication.operator_id,
+        "operator_id": publication.operator_id,
+        "patch_path": str(publication.patch_path),
+        "target_file": str(publication.repo_root / publication.kernel_path),
+        # A Controller KEEP lands as a committed source layer, not a snapshot
+        # overlay; ``scope`` is what the source-layer export keys on.
+        "scope": "source_patch",
+        "base_sha": publication.base_commit,
+        "keep_commit": keep_commit,
+        "source": "kernel_rewrite_controller",
+    }
+
+
 def _record_keep(
     shared_state: Any,
     publication: ControllerPatchPublication,
@@ -242,9 +266,20 @@ async def integrate_controller_patches(
     patches_root: str | Path,
     session_dir: Path,
     shared_state: Any,
+    record_keep: KeepRecorder | None = None,
     validator: PatchValidator | None = None,
 ) -> ControllerIntegrationSummary:
-    """Apply and E2E-validate every complete Controller patch in filename order."""
+    """Apply and E2E-validate every complete Controller patch in filename order.
+
+    Args:
+        patches_root: The Controller's published patch directory.
+        session_dir: The session whose state the KEEPs are recorded into.
+        shared_state: The live session state, read for the admissible patch
+            target roots and persisted after each recorded KEEP.
+        record_keep: Session-owned writeback for AgentX; other workloads use the local recorder.
+        validator: Runs the E2E decision for one publication; defaults to the
+            optimizer's own integrate handler.
+    """
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -487,13 +522,11 @@ async def integrate_controller_patches(
             continue
 
         try:
-            _record_keep(
-                shared_state,
-                publication,
-                validation,
-                keep_commit,
-                Path(session_dir),
-            )
+            if record_keep is None:
+                _record_keep(shared_state, publication, validation, keep_commit, Path(session_dir))
+            else:
+                await record_keep(_keep_result(publication, validation, keep_commit))
+                shared_state.save(Path(session_dir))
         except Exception as error:
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:

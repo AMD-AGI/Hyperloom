@@ -784,6 +784,8 @@ class WritebackCollaborator:
                 # Provenance for a fusion sibling; readers key the stack row on
                 # ``action == "fusion"`` above, this just records the producer.
                 **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
+                # Preserve committed source-layer identity for recipe export.
+                **{key: result[key] for key in ("scope", "operator_id", "base_sha", "keep_commit") if result.get(key)},
             },
         )
         if not lifted:

@@ -4131,6 +4131,7 @@ class KernelPhase(PhaseHandler):
                         patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                         session_dir=self.session_dir,
                         shared_state=self.shared_state,
+                        record_keep=(self._record_integrate_keep if agentx_active(self.shared_state) else None),
                     )
                     result["integration"] = integration.to_dict()
                 except Exception as error:  # noqa: BLE001
