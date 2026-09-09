@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -204,15 +205,13 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
 
 
 def _demand_budget(ctx: TuneContext) -> int:
-    """Shapes the discretionary time budget affords.
+    """Total shapes the time budget affords, decode band included.
 
-    Discretionary is the operative word: this bounds the request-ranked prefill
-    tail only. The decode band is mandatory and is added by
-    :func:`_ensure_decode_m_coverage` after the cut, because a budget derived
-    from wall time must not decide whether the throughput-dominant operating
-    point is tuned at all -- a lane budget of 14 against a 56-bucket demand is
-    exactly how a Qwen3-14B-FP8 arm shipped a prefill-only table that then lost
-    its e2e gate.
+    The caller splits this: the decode band is mandatory and is reserved first,
+    the request-ranked prefill tail claims what is left. Overrunning is not a
+    soft failure -- ``ctx.timeout_s`` is the subprocess deadline, and a dense
+    tuner killed at that deadline returns no candidate at all, so an
+    unaffordable shape list costs the prefill rows too.
     """
     raw = os.environ.get(_DEMAND_MAX_SHAPES_ENV, "").strip()
     try:
@@ -235,15 +234,16 @@ def _demand_input_csv(
 ) -> Path | None:
     """Untuned CSV built from the keys the runtime actually missed.
 
-    The decode band is guaranteed by :func:`_ensure_decode_m_coverage`, the same
-    guard every other recorded shape source gets. Demand used to bypass it,
-    because it short-circuits :func:`_resolve_input_csv` where the guard lives;
-    a demand list is a recorded source and needs it just as much -- more, since
-    its ranking systematically buries that band.
+    The ranking is sound for the prefill tail but structurally cannot see the
+    decode band (see :func:`..evidence.demand_shapes`), so the band comes from
+    the concurrency contract via :func:`_ensure_decode_m_coverage` and is paid
+    for first: the prefill tail claims only the shapes still affordable once
+    the band's rows are reserved.
     """
     path = getattr(ctx, "demand_json", None)
     if not path:
         return None
+    from ..dense_shapes import compute_decode_m_values
     from ..evidence import demand_for_tuner, demand_shapes, load_demand
 
     report = load_demand(path)
@@ -252,12 +252,13 @@ def _demand_input_csv(
     entry = demand_for_tuner(report, tuner_name)
     if entry is None:
         return None
-    budget = _demand_budget(ctx)
     # The a8w8 blockscale, a8w8 quant-type, and a4w4 lookup paths all retry the exact M followed by get_padded_m(...,
     # gl=0) and gl=1, using the same gemm_op_common implementation as a16w16.
-    shapes = demand_shapes(entry, limit=budget)
-    if not shapes:
+    ranked = demand_shapes(entry)
+    if not ranked:
         return None
+    budget = _demand_budget(ctx)
+    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc), budget)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -270,19 +271,54 @@ def _demand_input_csv(
                 row += f",{q_dtype_w}"
             fh.write(row + "\n")
     log.info(
-        "%s: %d padded-M demand shapes (of %d distinct keys, budget %d) -> %s",
+        "%s: %d of %d ranked padded-M demand shapes (of %d distinct keys), leaving the decode band its share of "
+        "the %d-shape budget -> %s",
         tuner_name,
         len(shapes),
+        len(ranked),
         entry.get("distinct_keys", 0),
         budget,
         out,
     )
-    # Applied AFTER the budget cut on purpose. The decode band is mandatory, so
-    # it must not compete for a discretionary budget on a metric that cannot
-    # see it; the guard appends at most one row per (dispatch group, lookup
-    # bucket) it is missing, which is <=3 per group for a decode grid whose
-    # small M all pad into bucket 16.
     return _ensure_decode_m_coverage(out, ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w)
+
+
+def _demand_shapes_within_budget(
+    ranked: list[dict[str, Any]],
+    decode_m: Sequence[int],
+    budget: int,
+) -> list[dict[str, Any]]:
+    """The highest-ranked demand shapes whose decode band ``budget`` can also pay for.
+
+    Walks the ranking and takes a shape while the total -- shapes taken plus
+    the band rows their dispatch groups still lack -- stays inside ``budget``.
+    A shape opening a new group carries that group's whole band with it, so it
+    can be passed over in favour of a lower-ranked shape in a group already
+    paid for.
+
+    Trimming groups rather than the band inside a group is deliberate: a group
+    holding part of its band serves the uncovered decode M with a prefill tile,
+    which is the regression the band exists to prevent, while a group left out
+    entirely keeps whatever the shipped tables already give it.
+    """
+    group_m: dict[tuple[int, int], set[int]] = {}
+    taken: list[dict[str, Any]] = []
+    for shape in ranked:
+        key = (int(shape["N"]), int(shape["K"]))
+        trial = dict(group_m)
+        trial[key] = group_m.get(key, set()) | {int(shape["M"])}
+        band = sum(len(b) for b in _decode_band_buckets([(n, ms) for (n, _k), ms in trial.items()], decode_m))
+        if len(taken) + 1 + band <= budget:
+            group_m = trial
+            taken.append(shape)
+    if taken:
+        return taken
+    log.warning(
+        "the top-ranked dispatch group's decode band alone exceeds the %d-shape budget; tuning it anyway and "
+        "accepting the overrun, because a band with holes is the regression this guarantee exists to prevent",
+        budget,
+    )
+    return ranked[:1]
 
 
 def _resolve_input_csv(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
@@ -343,13 +379,38 @@ def _dispatch_lookup_ms(m: int, n: int) -> set[int]:
     return {int(m), _padded_m_gl0(m), _padded_m_gl1(m, n)}
 
 
+def _decode_band_buckets(
+    groups: Sequence[tuple[int, set[int]]],
+    decode_m: Sequence[int],
+) -> list[list[int]]:
+    """Per group, the padded-M buckets it still needs to cover the decode band.
+
+    ``groups`` is ``(N, tuned M)`` per dispatch group; N alone decides which
+    tuned M a runtime batch can reach, through ``get_padded_m(..., gl=1)``.
+    Sizing the reservation and appending the rows both read this, so the two
+    cannot drift.
+    """
+    plan: list[list[int]] = []
+    for n, tuned in groups:
+        reachable = set(tuned)
+        buckets: list[int] = []
+        for m in decode_m:
+            if reachable & _dispatch_lookup_ms(m, n):
+                continue
+            bucket = _padded_m_gl0(m)
+            reachable.add(bucket)  # also serves the other grid M padding into it
+            buckets.append(bucket)
+        plan.append(buckets)
+    return plan
+
+
 def _ensure_decode_m_coverage(
     csv: Path,
     ctx: TuneContext,
     work_dir: Path,
     needs_q_dtype_w: bool = False,
 ) -> Path:
-    """Guarantee every tuned dispatch group covers the decode-band M (fast mode)."""
+    """Guarantee every tuned dispatch group covers the decode-band M."""
     from ..dense_shapes import compute_decode_m_values
 
     try:
@@ -390,25 +451,19 @@ def _ensure_decode_m_coverage(
         return csv
 
     decode_m = compute_decode_m_values(ctx.conc)
+    plan = _decode_band_buckets([(key[0], group_m[key]) for key in group_order], decode_m)
     additions: list[str] = []
-    uncovered: list[tuple[int, int, str]] = []
-    for key in group_order:
-        n, k, q = key
-        tuned_m = set(group_m[key])
-        added_here = False
-        for m in decode_m:
-            if tuned_m & _dispatch_lookup_ms(m, n):
-                continue  # some tuned row is already reachable from this M
-            bucket = _padded_m_gl0(m)
-            tuned_m.add(bucket)  # also serves the other grid M padding into it
-            added_here = True
+    uncovered = 0
+    for (n, k, q), buckets in zip(group_order, plan):
+        if not buckets:
+            continue
+        uncovered += 1
+        for bucket in buckets:
             row = [""] * len(header)
             row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
             if q_idx is not None:
                 row[q_idx] = q
             additions.append(",".join(row))
-        if added_here:
-            uncovered.append(key)
 
     if not additions:
         return csv
@@ -417,9 +472,9 @@ def _ensure_decode_m_coverage(
     work_dir.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join([lines[0], *body, *additions]) + "\n", encoding="utf-8")
     log.info(
-        "Fast-mode decode coverage: %d of %d dispatch group(s) lacked a decode-band "
+        "Decode coverage: %d of %d dispatch group(s) lacked a decode-band "
         "M (grid %s for conc=%s); appended %d row(s), original %d row(s) untouched",
-        len(uncovered),
+        uncovered,
         len(group_order),
         decode_m,
         ctx.conc,

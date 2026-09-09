@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kernelforge.gemm_tune.dense_shapes import compute_decode_m_values
 from kernelforge.gemm_tune.tuners import _aiter_dense_common as adc
 
@@ -114,7 +116,9 @@ class TestDemandKeepsTheDecodeBand:
     PREFILL_KEYS = [{"M": 1024 + i, "N": 4096, "K": 4096, "requests": 3} for i in range(40)]
 
     def test_decode_band_survives_a_budget_that_only_funds_prefill(self, tmp_path, monkeypatch):
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "1")
+        # Four shapes is one band plus one prefill row; the ranking would have
+        # spent all four on prefill.
+        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "4")
         demand = _write_demand(tmp_path / "demand.json", self.PREFILL_KEYS)
         ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = demand
@@ -140,8 +144,9 @@ class TestDemandKeepsTheDecodeBand:
 
     def test_decode_rows_are_per_dispatch_group(self, tmp_path, monkeypatch):
         # A row at (M, N1, K1) is never consulted for (N2, K2), so the guarantee
-        # has to hold per (N,K) rather than once for the table.
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "2")
+        # has to hold per (N,K) rather than once for the table. Two prefill
+        # shapes plus two bands of three is what that costs.
+        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "8")
         keys = [
             {"M": 2048, "N": 4096, "K": 4096, "requests": 9},
             {"M": 2048, "N": 5120, "K": 17408, "requests": 9},
@@ -161,3 +166,103 @@ class TestDemandKeepsTheDecodeBand:
         for (n, _k), ms in by_group.items():
             for m in compute_decode_m_values(64):
                 assert ms & adc._dispatch_lookup_ms(m, n), (n, m, sorted(ms))
+
+
+class TestTheBandIsPaidForOutOfTheBudget:
+    """The band is reserved out of the budget, never added on top of it.
+
+    ``ctx.timeout_s`` is the tuner subprocess deadline, and a dense tuner killed
+    there returns no candidate at all -- so a shape list the lane cannot finish
+    does not merely lose its tail, it loses the prefill rows that used to
+    complete. The band's cost scales with the dispatch group count, which the
+    budget never saw.
+    """
+
+    #: Enough distinct prefill buckets per group that the budget, not the demand
+    #: report, is what bounds the selection.
+    PREFILL_M = (65, 129, 257, 513, 1_025, 2_049)
+
+    @staticmethod
+    def _demand(path: Path, groups: int, prefill_m: tuple[int, ...] = PREFILL_M) -> Path:
+        keys = [
+            {"M": m, "N": 4_096 + 1_024 * g, "K": 4_096, "requests": len(prefill_m) - i}
+            for g in range(groups)
+            for i, m in enumerate(prefill_m)
+        ]
+        return _write_demand(path, keys)
+
+    @pytest.mark.parametrize("groups", [1, 2, 4, 6, 8])
+    @pytest.mark.parametrize(("timeout_s", "thorough"), [(1_216, False), (3_600, False), (3_600, True)])
+    def test_prefill_plus_band_fits(self, tmp_path, groups, timeout_s, thorough):
+        ctx = _Ctx(timeout_s, thorough=thorough, conc=64)
+        ctx.demand_json = self._demand(tmp_path / "demand.json", groups)
+
+        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+        assert out is not None
+        assert len(_rows(out)) - 1 <= adc._demand_budget(ctx)
+
+    @pytest.mark.parametrize("groups", [1, 2, 4, 6, 8])
+    def test_every_group_it_tunes_gets_a_whole_band(self, tmp_path, groups):
+        # Trimming groups is the concession, never the band inside a group: a
+        # group holding part of its band serves the rest with a prefill tile.
+        ctx = _Ctx(1_216, conc=64)
+        ctx.demand_json = self._demand(tmp_path / "demand.json", groups)
+
+        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+        assert out is not None
+        by_group: dict[int, set[int]] = {}
+        for line in _rows(out)[1:]:
+            m, n = (int(v) for v in line.split(",")[:2])
+            by_group.setdefault(n, set()).add(m)
+        for n, ms in by_group.items():
+            for m in compute_decode_m_values(64):
+                assert ms & adc._dispatch_lookup_ms(m, n), (n, m, sorted(ms))
+
+    def test_the_prefill_tail_pays_for_the_extra_groups(self, tmp_path):
+        # Same budget, more groups: the band costs more, so the discretionary
+        # tail is what gives way.
+        def prefill_rows(groups: int, sub: Path) -> int:
+            sub.mkdir()
+            ctx = _Ctx(1_216, conc=64)
+            ctx.demand_json = self._demand(sub / "demand.json", groups)
+            out = adc._demand_input_csv(ctx, sub, "a8w8_blockscale")
+            assert out is not None
+            return sum(int(line.split(",")[0]) > 64 for line in _rows(out)[1:])
+
+        assert prefill_rows(1, tmp_path / "one") > prefill_rows(4, tmp_path / "four")
+
+    def test_an_unaffordable_group_is_skipped_not_a_stop(self, tmp_path):
+        # The ranking interleaves groups, so the shape that would open a fourth
+        # band is unaffordable while later shapes in the three groups already
+        # paid for still are. Stopping at the first miss would strand budget
+        # the lane can spend.
+        ctx = _Ctx(1_216, conc=64)
+        ctx.demand_json = self._demand(tmp_path / "demand.json", 4, prefill_m=(1_025, 2_049, 4_097))
+
+        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+        assert out is not None
+        rows = _rows(out)[1:]
+        groups = {int(line.split(",")[1]) for line in rows}
+        prefill = [line for line in rows if int(line.split(",")[0]) > 64]
+        assert len(groups) == 3
+        assert len(rows) == adc._demand_budget(ctx)
+        assert len(prefill) > len(groups)
+
+    def test_an_unaffordable_band_is_still_kept_whole(self, tmp_path, monkeypatch, caplog):
+        # Not even one group fits, so there is no group left to trim. Shipping
+        # a partial band would reintroduce the regression; overrun loudly.
+        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "1")
+        ctx = _Ctx(1_216, conc=64)
+        ctx.demand_json = self._demand(tmp_path / "demand.json", 1)
+
+        with caplog.at_level("WARNING"):
+            out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+        assert out is not None
+        tuned_m = {int(line.split(",")[0]) for line in _rows(out)[1:]}
+        for m in compute_decode_m_values(64):
+            assert tuned_m & adc._dispatch_lookup_ms(m, 4_096), (m, sorted(tuned_m))
+        assert any("exceeds the 1-shape budget" in r.message for r in caplog.records)
