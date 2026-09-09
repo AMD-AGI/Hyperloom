@@ -230,7 +230,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
 )
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -247,53 +246,6 @@ def gate() -> PolicyGate:
 # ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any
 # propose/delegate/request that names either action.
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_delegate_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-            "params": {},
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-    assert "Coordinator-managed" in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_propose_action_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_request_with_analysis_kind_is_denied(gate, action_name):
-    """A REQUEST whose ``kind`` names roofline/profile is denied by R1 phase_incompatible."""
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": action_name,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
 
 
 # Supporting infrastructure parity

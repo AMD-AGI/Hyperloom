@@ -18,9 +18,9 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
@@ -102,20 +102,14 @@ def _seed_kernel_opt_state(
     source_file: str = "/p/dummy.py",
     artifact: str = "/tmp/dummy.py",
 ) -> None:
-    """Mimic the streaming-record write path (PR-B) so the integrate gate fires realistically."""
-    coord.shared_state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": kernel_id,
-            "source_file": source_file,
-            "proposal": {"decision": decision, "reasons": []},
-            "verification": {
-                "micro_speedup": micro,
-                "best_artifact_path": artifact,
-                "compile_passed": True,
-                "correctness_passed": True,
-            },
-        }
+    """Queue one KEEP the way its surviving producer does, so the gate fires realistically."""
+    seed_kernel_keep(
+        coord.shared_state,
+        kernel_id,
+        decision=decision,
+        micro=micro,
+        source_file=source_file,
+        artifact=artifact,
     )
 
 
@@ -287,29 +281,6 @@ def test_trace_analyze_request_itself_passes(session_dir):
     assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
-def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
-    """No candidates_path + empty cache → handler returns ``missing_trace_analyze``."""
-    import asyncio
-
-    from hyperloom.orchestrator.kernel.request_handlers import (
-        run_optimization_handler,
-    )
-
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    s.save(session_dir)
-
-    result = asyncio.run(
-        run_optimization_handler({"kernel_id": "k001"}, session_dir=session_dir),
-    )
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_trace_analyze"
-
-
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     """The pre-M4 ``select_kernels`` request kind was removed; ``get_handler`` returns None."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -336,28 +307,3 @@ def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir)
         "candidates_path": "/tmp/cands.json",
     }
     assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
-
-
-def test_closing_phase_denies_non_report_proposals():
-    state = SharedState(closing_phase=True)
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        shared_state=state,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-            ),
-        )
-    assert exc.value.rule == "closing_phase_only_report"
-
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "report", "predicted_gain_pct": 0.0},
-        ),
-    )

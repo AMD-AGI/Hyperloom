@@ -36,6 +36,8 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _capture_shapes import is_capture_dir_name  # noqa: E402
 from _io_utils import safe_float  # noqa: E402
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS  # noqa: E402
+from _literal_utils import safe_literal_eval as _safe_literal_eval  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     build_operator_identity,
     build_task_group_shape_cases,
@@ -393,7 +395,7 @@ Execution context:
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands.
-2. Run the analysis-orchestrator workflow through Step 11.
+2. Run the analysis-orchestrator workflow through Step 12.
 3. If analysis_mode is inference and execution mode is graph_capture, pass the
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
@@ -992,7 +994,8 @@ def _row_to_candidate(
 
     Returns:
         dict[str, Any] | None: The candidate dict, or ``None`` when the row is
-            malformed (cell count mismatch) or names a placeholder operation.
+            malformed (cell count mismatch) or names a placeholder operation
+            with no device kernel symbol to stand in for it.
     """
     if len(cells) != len(headers):
         return None
@@ -1000,9 +1003,17 @@ def _row_to_candidate(
     # Preserve trailing extra columns verbatim for downstream consumers.
     extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
 
+    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
+    # list and use the first for matching. Placeholders normalize to "".
+    device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
+    device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
-        return None
+        if not device_kernel_name:
+            return None
+        # Graph-collapsed trace (HIP/CUDA graph): TraceLens' deterministic
+        # fallback leaves Operation as "—" and the device symbol IS the identity.
+        name = device_kernel_name
     args = record.get("args", "").replace("<br>", "\n").strip()
     shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
     kernel_path = record.get("kernel path", "").strip()
@@ -1010,10 +1021,6 @@ def _row_to_candidate(
     # "Not found" cannot survive as a fake source_file (see the constant).
     if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         kernel_path = ""
-    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
-    # list and use the first for matching. Placeholders normalize to "".
-    device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
-    device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     # Store only the path in source_file; line/function annotations have their
     # own fields and otherwise make extension-based routing see an unknown file.
     resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(kernel_path)
@@ -1326,8 +1333,8 @@ def _launcher_frame_from_dict(obj: dict) -> str | None:
     wrappers = obj.get("wrappers")
     if isinstance(wrappers, str):
         try:
-            wrappers = ast.literal_eval(wrappers)
-        except (ValueError, SyntaxError):
+            wrappers = _safe_literal_eval(wrappers)
+        except _LITERAL_EVAL_ERRORS:
             wrappers = []
     if isinstance(wrappers, (list, tuple)):
         for frame in wrappers:
@@ -1364,8 +1371,8 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
         stripped = kernel_path.strip()
         if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
             try:
-                parsed_obj = ast.literal_eval(stripped)
-            except (ValueError, SyntaxError):
+                parsed_obj = _safe_literal_eval(stripped)
+            except _LITERAL_EVAL_ERRORS:
                 parsed_obj = None
             frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
             if not frame:
@@ -1638,9 +1645,9 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Both TraceLens routes use the same versioned identity builder. Operation
-    # normalization keeps different kernels in one source separate while
-    # template/shape instances of one operator merge.
+    # Versioned identity builder. Operation normalization keeps different
+    # kernels in one source separate while template/shape instances of one
+    # operator merge.
     groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):

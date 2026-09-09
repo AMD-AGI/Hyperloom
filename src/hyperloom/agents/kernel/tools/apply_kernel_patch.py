@@ -103,7 +103,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
 
 
 def known_target_roots() -> tuple[str, ...]:
-    """Resolved framework roots (importlib/glob when orchestrator is importable).
+    """Advisory framework roots used to recognise a reusable patch target.
 
     Resolves once and caches the result. Falls back to
     :data:`_FALLBACK_KNOWN_TARGET_ROOTS` plus the FlyDSL roots when the
@@ -118,10 +118,10 @@ def known_target_roots() -> tuple[str, ...]:
         return _CACHED_KNOWN_TARGET_ROOTS
     try:
         from hyperloom.orchestrator.framework.paths import (
-            resolve_patch_target_roots,
+            resolve_known_source_prefixes,
         )
 
-        _CACHED_KNOWN_TARGET_ROOTS = resolve_patch_target_roots()
+        _CACHED_KNOWN_TARGET_ROOTS = resolve_known_source_prefixes()
     except ImportError:
         _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS + _fallback_flydsl_roots()
     return _CACHED_KNOWN_TARGET_ROOTS
@@ -1446,10 +1446,19 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
         return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
-    build_dir = Path(cache_backup.get("build_dir", ""))
+    build_dir_raw = cache_backup.get("build_dir", "")
     since = float(cache_backup.get("invalidated_unix") or 0.0)
     module_names = list(cache_backup.get("module_names") or [])
-    if not str(build_dir) or not build_dir.exists():
+    # Path("") is Path("."), so an empty/missing build_dir must be rejected
+    # before globbing — otherwise verify walks the process CWD.
+    if not str(build_dir_raw).strip():
+        return {
+            "verified": False,
+            "status": "stale",
+            "reason": f"cpp_itfs build dir absent after re-baseline: {build_dir_raw}",
+        }
+    build_dir = Path(build_dir_raw)
+    if not build_dir.exists():
         return {
             "verified": False,
             "status": "stale",
@@ -1477,7 +1486,7 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
+def _detect_strategy(target_file: Path) -> dict[str, Any]:
     """Determine the rebuild strategy for a patch target.
 
     Matches the target against the known framework roots (aiter / sglang /
@@ -1487,24 +1496,14 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
 
     Args:
         target_file (Path): The file being patched.
-        allow_unknown_target (bool): When ``True``, targets outside the known
-            roots are accepted (rooted at the target's parent) instead of
-            raising.
 
     Returns:
         dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
             (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
             ``artifact_roots`` (list[Path]). Runtime-JIT strategies also carry
             the authoritative ``jit_build_dir``.
-
-    Raises:
-        ValueError: When the target is outside the known roots and
-            ``allow_unknown_target`` is ``False``.
     """
     lower = str(target_file).lower()
-    if not allow_unknown_target and not any(_within_root(target_file, Path(root)) for root in known_target_roots()):
-        raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
-
     suffix = target_file.suffix.lower()
     compiled = suffix in COMPILED_SOURCE_SUFFIXES
     root = None
@@ -1557,9 +1556,9 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
-    elif allow_unknown_target:
-        root = target_file.parent
-        deploy_roots = [root]
+    # An unrecognised layout leaves ``root`` unset: snapshot mode resolves
+    # repo-relative descriptors against it, so a guessed parent writes the
+    # optimized bytes beside the target instead of into it.
 
     if suffix in PYTHON_SOURCE_SUFFIXES and installed_aiter_root is not None and _target_is_in_aiter_csrc(target_file):
         compiled = True
@@ -1988,11 +1987,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     }
 
 
-def _multi_root_strategies(
-    live_paths: Iterable[Path],
-    *,
-    allow_unknown_target: bool,
-) -> list[dict[str, Any]]:
+def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     """Compute the set of distinct rebuild strategies across edited files.
 
     A multi-file patch can touch files in several framework roots (e.g. a
@@ -2002,7 +1997,6 @@ def _multi_root_strategies(
 
     Args:
         live_paths (Iterable[Path]): The live target paths the patch writes.
-        allow_unknown_target (bool): Passed through to :func:`_detect_strategy`.
 
     Returns:
         list[dict[str, Any]]: One strategy dict per distinct root that needs a
@@ -2013,7 +2007,7 @@ def _multi_root_strategies(
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
         try:
-            strat = _detect_strategy(p, allow_unknown_target=allow_unknown_target)
+            strat = _detect_strategy(p)
         except ValueError:
             continue
         if not strat["compiled"]:
@@ -2036,7 +2030,6 @@ def apply_kernel_patch(
     rebuild_command: list[str] | str | None = None,
     rebuild_timeout_sec: int = 1800,
     skip_rebuild: bool = False,
-    allow_unknown_target: bool = False,
     dry_run: bool = False,
     snapshot_dir: str | Path | None = None,
     repo_root: str | Path | None = None,
@@ -2073,7 +2066,6 @@ def apply_kernel_patch(
             with ``error_class='invalid_rebuild_command'``.
         rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
         skip_rebuild (bool): When ``True``, skip the rebuild step.
-        allow_unknown_target (bool): Allow targets outside the known roots.
         dry_run (bool): Prepare backups/manifest only, without applying.
         snapshot_dir (str | Path | None): When set, enables snapshot mode and
             holds byte-exact final contents mirrored at each write path.
@@ -2097,7 +2089,6 @@ def apply_kernel_patch(
             rebuild_command=rebuild_command,
             rebuild_timeout_sec=rebuild_timeout_sec,
             skip_rebuild=skip_rebuild,
-            allow_unknown_target=allow_unknown_target,
             dry_run=dry_run,
             repo_root=repo_root,
             producer_manifest=producer_manifest,
@@ -2110,7 +2101,7 @@ def apply_kernel_patch(
         return {"status": "failed", "error": f"target_file does not exist: {target}"}
 
     try:
-        strategy = _detect_strategy(target, allow_unknown_target=allow_unknown_target)
+        strategy = _detect_strategy(target)
         _validate_patch_source(patch, target)
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "error": str(exc)}
@@ -2365,7 +2356,6 @@ def _apply_kernel_patch_snapshot(
     rebuild_command: list[str] | str | None,
     rebuild_timeout_sec: int,
     skip_rebuild: bool,
-    allow_unknown_target: bool,
     dry_run: bool,
     repo_root: str | Path | None = None,
     producer_manifest: str | Path | None = None,
@@ -2396,7 +2386,7 @@ def _apply_kernel_patch_snapshot(
         return {"status": "failed", "error": "patch has no file operations"}
 
     try:
-        primary_strategy = _detect_strategy(target, allow_unknown_target=allow_unknown_target)
+        primary_strategy = _detect_strategy(target)
     except ValueError as exc:
         return {"status": "failed", "error": str(exc)}
 
@@ -2420,10 +2410,8 @@ def _apply_kernel_patch_snapshot(
     repo_root = Path(resolved_root)
     deploy_roots = [Path(path) for path in primary_strategy.get("deploy_roots") or []]
     if not deploy_roots:
-        return {
-            "status": "failed",
-            "error": (f"snapshot mode requires at least one authorized framework deploy root for target: {target}"),
-        }
+        # A caller-named repo is a declaration, not the guess rejected above.
+        deploy_roots = [repo_root]
     backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
@@ -2442,7 +2430,7 @@ def _apply_kernel_patch_snapshot(
         if desc["op"] == "write":
             write_paths.append(dest)
 
-    rebuild_strategies = _multi_root_strategies(write_paths, allow_unknown_target=allow_unknown_target)
+    rebuild_strategies = _multi_root_strategies(write_paths)
     compiled = bool(rebuild_strategies)
     jit_strategies = [strategy for strategy in rebuild_strategies if strategy.get("jit_build_dir")]
     if len(jit_strategies) > 1:
@@ -2767,7 +2755,6 @@ def main() -> int:
     apply_p.add_argument("--rebuild-command", default="")
     apply_p.add_argument("--rebuild-timeout-sec", type=int, default=1800)
     apply_p.add_argument("--skip-rebuild", action="store_true")
-    apply_p.add_argument("--allow-unknown-target", action="store_true")
     apply_p.add_argument("--dry-run", action="store_true")
 
     revert_p = sub.add_parser("revert")
@@ -2786,7 +2773,6 @@ def main() -> int:
             rebuild_command=args.rebuild_command or None,
             rebuild_timeout_sec=args.rebuild_timeout_sec,
             skip_rebuild=args.skip_rebuild,
-            allow_unknown_target=args.allow_unknown_target,
             dry_run=args.dry_run,
         )
     print(json.dumps(result, indent=2, sort_keys=True))

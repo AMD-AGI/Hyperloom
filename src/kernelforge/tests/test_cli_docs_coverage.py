@@ -18,9 +18,7 @@ subcommand, so walking only the leaves would leave a hole precisely where a
 reader is least able to guess.
 
 It stays one-directional: it demands every declared option be documented, but
-lets the doc name flags this CLI does not own -- the ``--attention-backend``
-inside a ``--bench-extra`` example belongs to ``bench_one_batch``, and the doc
-has to be able to show it.
+lets the doc name flags this CLI does not own in examples and explanatory text.
 """
 
 from __future__ import annotations

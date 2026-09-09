@@ -174,18 +174,16 @@ class MachinePhase(PhaseHandler):
         running, because a task waiting on a resource lane is work the phase is
         committed to, not dead air.
 
-        The kind filter is ``PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`` — the same
-        allowlist the transition path uses to cancel work incompatible with a
-        phase — so any action kind newly admitted to KERNEL is covered without a
-        second list to keep in sync.
+        The kind filter is ``KERNEL_LANE_TASK_KINDS``, not the phase's proposable
+        actions: a Coordinator-owned lane is dispatched without ever being
+        proposable, and its task is every bit as much work in flight. Reusing the
+        proposable set here once made a running kernel_opt invisible to the idle
+        guard the moment that action stopped being model-requestable.
 
         Returns:
             tuple[str, ...]: Sorted ids of in-flight kernel-lane tasks.
         """
-        kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(
-            _phase_state.PHASE_KERNEL_AGENT,
-            frozenset(),
-        )
+        kinds = _phase_state.KERNEL_LANE_TASK_KINDS
         tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
         return tuple(
             sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
@@ -245,7 +243,7 @@ class MachinePhase(PhaseHandler):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
-        Priority order (Inv-8.2): global terminal > exit_terminal > exit_normal, per phase_state.compute_next_phase.
+        Priority order (Inv-8.2): global terminal > closing phase > met target > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
@@ -396,17 +394,19 @@ class MachinePhase(PhaseHandler):
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged only.
         try:
-            await self._on_phase_entered(from_phase=prior or "", to_phase=target)
+            await self._on_phase_entered(from_phase=prior or "", to_phase=target, reason=reason or "")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
-    async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
+    async def _on_phase_entered(self, *, from_phase: str, to_phase: str, reason: str = "") -> None:
         """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done).
 
         Args:
             from_phase: The phase being left.
             to_phase: The phase being entered; selects which per-phase entry
                 hook fires.
+            reason: The transition reason, recorded as the left phase's exit
+                reason when that phase owns a timeline event.
         """
         # Orchestration checkpoint at the phase seam.
         try:
@@ -422,6 +422,17 @@ class MachinePhase(PhaseHandler):
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort
             log.exception("Coordinator: phase-boundary prompt reseed failed")
+
+        # The machine has entry hooks only, so the phase being left closes its
+        # own timeline event here rather than in a hook of its own. A KERNEL
+        # event must span the whole visit -- the entry hook's deterministic
+        # lanes plus the LLM-driven kernel_opt loop that follows -- and the
+        # transition is the first point at which the visit is over.
+        if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
+            try:
+                self._close_kernel_timeline(exit_reason=str(reason or ""))
+            except Exception:  # noqa: BLE001 — observability cannot change the transition
+                log.debug("Coordinator: kernel timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:

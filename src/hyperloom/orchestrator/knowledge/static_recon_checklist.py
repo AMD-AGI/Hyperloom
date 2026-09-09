@@ -239,6 +239,30 @@ def _gpu_family(gpu_type: str) -> str:
     return g
 
 
+def workload_precision(state: object) -> str:
+    """Return the precision the checklist should match against.
+
+    ``SharedState.precision`` mirrors ``$PRECISION``, which an operator sets by
+    hand and which reads ``fp8`` for MXFP8 checkpoints. The model's own
+    ``config.json`` is the ground truth, so ``model_info["quantization"]`` wins
+    where it is present -- matching on the operator's label handed an MXFP8 run
+    the fp8 entries and withheld the mxfp8 ones.
+
+    Args:
+        state: The SharedState (or any object carrying ``model_info`` /
+            ``precision``).
+
+    Returns:
+        str: The resolved precision, lower-cased; ``""`` when neither is set.
+    """
+    model_info = getattr(state, "model_info", None)
+    if isinstance(model_info, dict):
+        quant = str(model_info.get("quantization") or "").strip().lower()
+        if quant:
+            return quant
+    return str(getattr(state, "precision", "") or "").strip().lower()
+
+
 def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
     """Return the checklist entries applicable to a ``(model_class, gpu, precision)``.
 
@@ -363,6 +387,7 @@ def filter_entries_for_model(entries: list[ChecklistEntry], model_info: dict) ->
 __all__ = [
     "ChecklistEntry",
     "entries_for",
+    "workload_precision",
     "filter_entries_for_model",
     "source_hint_directories_for",
     "render_checklist_for_prompt",

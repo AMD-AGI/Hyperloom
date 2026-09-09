@@ -336,8 +336,8 @@ class EnablementParams(CoordinatorCollaborator):
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
 
-        Resolves ``signature.offending_file`` against the framework/ROCm source
-        allowlist, then returns ``window`` lines centred on the first occurrence
+        Resolves ``signature.offending_file`` against the kernel search roots,
+        then returns ``window`` lines centred on the first occurrence
         of ``offending_symbol`` (or the file head when the symbol is absent).
         Fully exception-guarded: any failure returns ``""`` so the mandate
         degrades to the no-context form (G is grounding, never a hard dependency).
@@ -357,9 +357,9 @@ class EnablementParams(CoordinatorCollaborator):
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
         from ..actions.executors._apply_feedback import source_context_for_file
-        from ..framework.paths import resolve_source_file_allowlist
+        from ..framework.paths import resolve_kernel_search_roots
 
-        search_roots = [Path(str(r)) for r in resolve_source_file_allowlist()]
+        search_roots = [Path(str(r)) for r in resolve_kernel_search_roots()]
         return source_context_for_file(
             offending_file,
             symbol=symbol,

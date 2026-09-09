@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.measurement.convergence import (
     assess_convergence,
-    converged_throughput,
 )
 
 # warmup / measure / accuracy from a real session.
@@ -113,12 +112,3 @@ class TestVerdicts:
         assert d["rounds_used"] == [19373.98, 22424.80]
         assert d["converged"] is False
         assert d["spread_pct"] > 15.0
-
-
-class TestConvergedThroughput:
-    def test_returns_none_rather_than_the_last_round(self):
-        # The whole point: no number is better than the climbing one.
-        assert converged_throughput(_RCA_ROUNDS) is None
-
-    def test_returns_value_when_settled(self):
-        assert converged_throughput([50.0, 100.0, 100.5]) == 100.25

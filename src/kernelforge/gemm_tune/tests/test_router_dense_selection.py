@@ -137,7 +137,14 @@ class TestQuantizedModelsStillTuneBf16Dense:
         assert "a4w4_blockscale" in names
         assert "sglang_dense_bf16" not in names
 
-    def test_dense_fp8_with_only_lm_head_excluded_does_not_get_a_bf16_pass(self):
+    def test_dense_fp8_with_only_lm_head_excluded_gets_a_bf16_fallback(self):
+        """No non-lm_head exclusion means the config gives no positive signal for
+        a bf16 dense pass, so it is not selected to run unconditionally. But an
+        fp8 tuning that comes back empty still leaves the excluded projections
+        running in bf16, which is the retry Hyperloom used to launch as a second
+        subprocess. Change 3 pushes it down: the bf16 pass is selected as a
+        ``fallback`` that runs in this same call only if the fp8 tuner produced
+        no candidate, so a winning fp8 run pays nothing for it."""
         profile = _mxfp4_moe_profile(
             is_moe=False,
             num_experts=0,
@@ -154,9 +161,13 @@ class TestQuantizedModelsStillTuneBf16Dense:
             quant_type="blockscale",
             gpu_type="mi300x",
         )
-        names = [s.name for s in specs if s.should_run]
-        assert "a8w8_blockscale" in names
-        assert "sglang_dense_bf16" not in names
+        by_name = {s.name: s for s in specs if s.should_run}
+        assert "a8w8_blockscale" in by_name
+        # Selected, but conditional: it runs only if fp8 tuning is barren.
+        assert "sglang_dense_bf16" in by_name
+        assert by_name["sglang_dense_bf16"].fallback is True
+        # The fp8 dense tuner is a normal, unconditional run.
+        assert by_name["a8w8_blockscale"].fallback is False
 
     def test_dense_fp8_with_attention_excluded_keeps_the_bf16_pass(self):
         profile = _mxfp4_moe_profile(
@@ -175,7 +186,11 @@ class TestQuantizedModelsStillTuneBf16Dense:
             quant_type="blockscale",
             gpu_type="mi300x",
         )
-        assert "sglang_dense_bf16" in [s.name for s in specs if s.should_run]
+        by_name = {s.name: s for s in specs if s.should_run}
+        assert "sglang_dense_bf16" in by_name
+        # A non-lm_head exclusion is positive evidence bf16 dense is dispatched,
+        # so the pass runs unconditionally -- not merely as an fp8-barren fallback.
+        assert by_name["sglang_dense_bf16"].fallback is False
 
     def test_fp32_weights_are_not_handed_to_the_bf16_tuner(self):
         profile = _mxfp4_moe_profile(model_dtype="float32")

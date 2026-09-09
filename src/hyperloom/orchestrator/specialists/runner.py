@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
@@ -109,39 +110,42 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 _now_iso = now_iso
 
 
-_SECRET_ENV_NAMES: tuple[str, ...] = (
-    "ANTHROPIC_API_KEY",
-    "CLAW_API_KEY",
-    "GITHUB_TOKEN",
-    "HF_TOKEN",
-    "HF_TOKEN_2",
-    "HYPERLOOM_GIT_TOKEN",
-    "HYPERLOOM_PR_CI_GH_TOKEN",
-    "LLM_API_KEY",
-    "OPENAI_API_KEY",
-    # Legacy: not consumed anymore, still redacted if present.
-    "SAFE_API_KEY",
+_SECRET_ENV_NAMES: tuple[str, ...] = tuple(
+    sorted(
+        {
+            *BENCHMARK_SECRET_ENV_NAMES,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAW_API_KEY",
+            "GITHUB_TOKEN",
+            "HF_TOKEN",
+            "HF_TOKEN_2",
+            "HYPERLOOM_GIT_TOKEN",
+            "HYPERLOOM_PR_CI_GH_TOKEN",
+            "LLM_API_KEY",
+            "LLM_GATEWAY_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_CUSTOM_HEADERS",
+            "SAFE_API_KEY",
+        }
+    )
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<key>\b(?:"
     + "|".join(re.escape(name) for name in _SECRET_ENV_NAMES)
-    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
+    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?!\[REDACTED\])"
+    + r"(?P<value>[^\s,'\"\]}]+)(?P=quote)",
     re.IGNORECASE,
-)
-_AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
-_BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
-_TOKEN_VALUE_RES = (
-    # Keep in sync with env_safety.redact_secret_values().
-    re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
 )
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted source trees other than ``base``.
+    """Return the configured source trees other than ``base``.
 
     Grounding falls back to these when the worktree base does not hold a
     patch's targets, which is the normal case for a specialist that patches a
@@ -158,7 +162,7 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
         base: The checkout the specialist worktree branched off, if any.
 
     Returns:
-        The remaining roots that exist, in allowlist order.
+        The remaining roots that exist, in discovery order.
     """
     base_resolved = base.resolve() if base else None
     out: list[Path] = []
@@ -242,14 +246,11 @@ def _safe_redact(s: str) -> str:
         str: The line with recognised secret values replaced by
             ``[REDACTED]``.
     """
+    out = redact_secret_values(s)
     out = _SECRET_ASSIGNMENT_RE.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
-        s,
+        out,
     )
-    out = _AUTHORIZATION_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
-    out = _BEARER_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
-    for token_re in _TOKEN_VALUE_RES:
-        out = token_re.sub("[REDACTED]", out)
     return out
 
 
@@ -553,10 +554,7 @@ class SpecialistRunner:
         # domain) still dispatch, just without a per-domain focus block.
         notes: list[str] = []
         if domain.key not in SPECIALIST_DOMAIN_KEYS:
-            notes.append(
-                f"domain={domain.key!r} is outside the domain catalogue "
-                f"(available_in={domain.available_in!r}); using generic prompt template"
-            )
+            notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
         worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
@@ -589,7 +587,9 @@ class SpecialistRunner:
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
+                session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
+                worktree_base=str(worktree_base or ""),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -818,7 +818,7 @@ class SpecialistRunner:
                         "turn": turn,
                         "ts": ts,
                         "tool": str(call.get("tool") or "tool"),
-                        "query": call.get("query"),
+                        "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
         except Exception:  # noqa: BLE001 — trace must never break the run
@@ -1389,21 +1389,11 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
+        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=explicit_root,
-        )
-        # A set dropped for targets no tree holds is a distinct outcome from
-        # "the specialist wrote none", and the next round has to be told which.
-        all_dropped_by_grounding = bool(
-            deduped
-            and not kept
-            and all(
-                d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
-                for d in dropped
-            )
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1412,7 +1402,7 @@ class SpecialistRunner:
         forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
         safety = _patch_safety.PatchSafetyReport(
             kept_patches=kept,
-            dropped=dropped,
+            ungrounded=ungrounded,
             grounding=grounding,
             numeric_warnings=numeric_warnings,
             forbidden_fields=forbidden_fields,
@@ -1421,8 +1411,8 @@ class SpecialistRunner:
         done_payload["patch_grounding"] = grounding
         if collected_roots:
             done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
-        if all_dropped_by_grounding:
-            done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
+        if ungrounded:
+            done_payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
         if spans_roots:
             done_payload["patches_span_multiple_roots"] = True
         if not kept:

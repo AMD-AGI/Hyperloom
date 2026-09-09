@@ -118,9 +118,9 @@ def workspace_root() -> Path:
         The workspace root path.
     """
     global _WARNED_NO_USER_DATA
-    user_data = os.environ.get(ENV_USER_DATA_PATH)
+    user_data = (os.environ.get(ENV_USER_DATA_PATH) or "").strip()
     if user_data:
-        return Path(user_data)
+        return Path(user_data).expanduser()
     if not _WARNED_NO_USER_DATA:
         _WARNED_NO_USER_DATA = True
         log.warning(
@@ -237,15 +237,6 @@ def asset_root() -> Path:
             raise AssetRootNotFound(f"{ENV_OVERRIDE_ASSET_ROOT} points at missing dir: {root}")
         return root
     return PACKAGE_ROOT
-
-
-def asset_actions_dir() -> Path:
-    """Return the directory of shipped action-metadata files.
-
-    Returns:
-        Path: ``<asset_root>/actions``.
-    """
-    return asset_root() / "actions"
 
 
 def asset_system_prompts_dir() -> Path:
@@ -396,7 +387,6 @@ __all__ = [
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
-    "asset_actions_dir",
     "asset_prompt_references_dir",
     "asset_root",
     "asset_system_prompts_dir",

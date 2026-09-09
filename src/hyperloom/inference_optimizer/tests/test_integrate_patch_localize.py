@@ -74,8 +74,6 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
-    # Allow the touched path under a broad allowlist so the gate passes.
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/",), raising=False)
     ctx = _ctx()
     out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is None, out
@@ -112,62 +110,3 @@ async def test_fetch_failure_reverts(_executor, monkeypatch):
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "localization_fetch_failed"
-
-
-# ---------------------------------------------------------------------------
-# allowlist gate: path outside allowlist -> reverted (no global env mutation)
-# ---------------------------------------------------------------------------
-
-
-async def test_path_outside_allowlist_reverts(_executor, monkeypatch):
-    import hyperloom.agents.framework.sources.github as gh
-
-    outside_diff = "diff --git a/etc/passwd b/etc/passwd\n--- a/etc/passwd\n+++ b/etc/passwd\n@@ -1 +1 @@\n-a\n+b\n"
-    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: outside_diff)
-    # A narrow allowlist that does NOT contain /etc, and no framework root.
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/sgl-workspace/vllm/",), raising=False)
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *a, **k: None, raising=False)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
-    assert out is not None
-    assert out["error_class"] == "localization_outside_allowlist"
-
-
-async def test_attempt_root_added_to_allowlist_only(_executor, monkeypatch, tmp_path):
-    """A path under the attempt root is allowed even when outside the global allowlist."""
-    import hyperloom.agents.framework.sources.github as gh
-
-    attempt_venv = tmp_path / "attempt" / "venv"
-    attempt_venv.mkdir(parents=True, exist_ok=True)
-    localized = "attempt/localized.py"  # relative to framework_root = attempt dir parent
-    diff = f"diff --git a/{localized} b/{localized}\n--- a/{localized}\n+++ b/{localized}\n@@ -1 +1 @@\n-a\n+b\n"
-    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: diff)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/sgl-workspace/vllm/",), raising=False)
-    # framework_root under tmp_path so the localized path resolves within it.
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *a, **k: tmp_path, raising=False)
-    ctx = _ctx()
-    ctx._ip_attempt_venv_root = str(attempt_venv)
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
-    assert out is None, out
-    assert len(ctx._ip_localization_patches) == 1
-
-
-def test_empty_allowlist_fail_closed():
-    """No trusted write root: every non-empty path is out of bounds."""
-    outside = ip._localization_paths_outside_allowlist(
-        ["a/b.py", "/etc/passwd", "", "  "],
-        None,
-        [],
-    )
-    assert outside == ["a/b.py", "/etc/passwd"]
-
-
-def test_empty_allowlist_still_uses_framework_root(tmp_path):
-    """framework_root alone is a trusted root even when allow_roots is empty."""
-    outside = ip._localization_paths_outside_allowlist(
-        ["ok.py", "/etc/passwd"],
-        tmp_path,
-        [],
-    )
-    assert "ok.py" not in outside
-    assert "/etc/passwd" in outside

@@ -36,6 +36,7 @@ def test_safe_redact():
     assert "GITHUB_TOKEN=[REDACTED]" in out
     assert "redact_me" not in out
     assert "redact_me_too" not in out
+    assert "[REDACTED]]" not in out
     assert sr._safe_redact("plain line") == "plain line"
 
 
@@ -54,6 +55,19 @@ def test_safe_redact_bare_gateway_token_shapes():
     assert "pk-lf-98765" not in out
     assert "sk-zyx987" not in out
     assert out.count("[REDACTED]") == 3
+
+
+def test_safe_redact_aws_and_custom_headers():
+    line = (
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY "
+        "AWS_SESSION_TOKEN=FwoGZXIvYXdzEHsaDNEXAMPLETOKEN "
+        "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
+    )
+    out = sr._safe_redact(line)
+    assert "wJalrXUtnFEMI" not in out
+    assert "FwoGZXIvYXdzEHsaDNEXAMPLETOKEN" not in out
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_extra_focus_tags(monkeypatch):
@@ -305,11 +319,11 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
     """A framework specialist must get a worktree of the framework it patches.
 
-    ``framework_source_roots`` is the source-file allowlist, and its order is
-    arbitrary with respect to the session: on a pod that ships aiter as a git
+    ``framework_source_roots`` lists the framework search roots, and its order
+    is arbitrary with respect to the session: on a pod that ships aiter as a git
     checkout, aiter sorts first. A WorldPlay session then handed its specialist
     an aiter worktree, the specialist authored correct patches against
-    ``hyvideo/`` paths that are absent from it, and patch-safety dropped every
+    ``hyvideo/`` paths that are absent from it, and patch-safety flagged every
     one as ``missing_target`` — leaving an env-only proposal that toggled a
     switch with no code behind it and measured 0.0% five rounds running.
     """

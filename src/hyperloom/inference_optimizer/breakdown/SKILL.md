@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v5.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v6.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -175,12 +175,16 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
   fields, changed semantics).
-- New exports carry `hyperloom.session_breakdown.v5.0`. V5 is a breaking
-  cutover for optimization results: `optimizations` is reshaped, and the
-  `optimization_stack`, `attribution`, `geak_invocations`,
+- New exports carry `hyperloom.session_breakdown.v6.0`. V6 is a breaking
+  cutover for the timeline: the actions record their own events as they run,
+  so an event's `start_time` is when the work began rather than when its
+  artefacts were written, and the KERNEL and BASELINE projections are gone.
+  Consumers that sorted around the old collapsed windows need to be rechecked.
+- V5 was the preceding cutover, for optimization results: `optimizations` is
+  reshaped, and the `optimization_stack`, `attribution`, `geak_invocations`,
   `forge_invocations`, and `gemm_tuning` projections are gone. Consumers
   MUST match on the `vN` major prefix, never on exact-string equality, and
-  archived V2/V3/V4 documents need a migration before a V5 reader sees them.
+  archived V2/V3/V4/V5 documents need a migration before a V6 reader sees them.
 - `optimizations` carries its own `schema_version` (currently `5`),
   independent of the envelope's.
 - Adding optional fields is **never** a breaking change.

@@ -307,7 +307,7 @@ def _enqueue_self(**state_kw):
     fake = types.SimpleNamespace(
         shared_state=state,
         tasks=_FakeTasks(),
-        session_dir="/tmp/session",
+        session_dir=state_kw.get("session_dir", "/tmp/session"),
         _run_deadline=state_kw.get("run_deadline", None),
         _warm_specialist_params=_warm,
         _record_observation=_record_obs,
@@ -729,6 +729,48 @@ async def test_rearm_kept_stores_accepted_config():
         }
     )
     assert fake.shared_state.enablement.accepted_config == effective
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
+    """The path the round reports is under runs/, which never reaches the archive."""
+    cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "integrate_patch.with_envs.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("tp: 8\n", encoding="utf-8")
+    fake = _enqueue_self(session_dir=tmp_path, enablement_inflight_task_id="spec-1")
+    # Read by the setting-script write that shares the rearm's archive block.
+    fake.shared_state.model_path = "/models/M"
+    fake.shared_state.reference_model = ""
+    fake.shared_state.tp = 8
+    fake.shared_state.max_model_len = 0
+    fake._maybe_rearm_enablement(
+        {
+            "status": "kept",
+            "enablement": True,
+            "specialist_task_id": "abc123",
+            "enablement_accepted_config_path": str(cfg),
+        }
+    )
+    archived = tmp_path / "reports" / "enablement" / "abc123" / "launch_config.yaml"
+    assert archived.is_file()
+    # Absolute: the revalidation baseline opens this file directly.
+    assert fake.shared_state.enablement.accepted_config_path == str(archived)
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_holds_the_source_path_when_the_copy_does_not_land(tmp_path):
+    """With no copy there is no archive path to record, so the live one stands."""
+    fake = _enqueue_self(session_dir=tmp_path, enablement_inflight_task_id="spec-1")
+    fake._maybe_rearm_enablement(
+        {
+            "status": "kept",
+            "enablement": True,
+            "specialist_task_id": "abc123",
+            "enablement_accepted_config_path": "/runs/integrate_patch/t1/vanished.yaml",
+        }
+    )
+    assert not (tmp_path / "reports" / "enablement" / "abc123" / "launch_config.yaml").exists()
+    assert fake.shared_state.enablement.accepted_config_path == "/runs/integrate_patch/t1/vanished.yaml"
 
 
 @pytest.mark.asyncio

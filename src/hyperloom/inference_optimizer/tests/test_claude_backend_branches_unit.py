@@ -446,6 +446,14 @@ async def test_emit_intent_handler_ok():
 
 
 @pytest.mark.asyncio
+async def test_emit_intent_handler_accepts_unparsed_wrapper():
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
+    res = await mei._emit_intent_handler({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
+    assert res["content"][0]["text"] == "ok"
+    assert "is_error" not in res
+
+
+@pytest.mark.asyncio
 async def test_emit_intent_handler_validation_error_returns_is_error():
     res = await mei._emit_intent_handler({"intent_type": "bogus", "payload": {}})
     assert res["is_error"] is True

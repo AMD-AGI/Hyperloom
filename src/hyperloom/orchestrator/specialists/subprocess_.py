@@ -47,9 +47,11 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
+    redact_file_in_place,
     scrub_child_process_env,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
@@ -193,15 +195,17 @@ _CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
     {
         *_SPECIALIST_ENV_ALLOWLIST,
         *_SPECIALIST_SECRET_ENV_ALLOWLIST,
+        # Every mask spelling, not the three canonical ones: the reason a mask
+        # is reserved is that setting it re-pins the specialist's cards, and a
+        # guard that names only the modern spellings is bypassed by the legacy
+        # ones it honours just as well.
+        *GPU_MASK_ENV_NAMES,
         "API_TIMEOUT_MS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "CODEX_HOME",
-        "CUDA_VISIBLE_DEVICES",
         "DISABLE_AUTOUPDATER",
-        "HIP_VISIBLE_DEVICES",
         "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS",
         "IS_SANDBOX",
-        "ROCR_VISIBLE_DEVICES",
     }
 )
 
@@ -659,14 +663,11 @@ def _pick_worktree_base(
     """Return the checkout to branch the specialist's worktree off.
 
     ``preferred`` wins whenever it is a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: that is the
-    source-file *allowlist*, a permission set whose order says nothing about the
-    session. Selecting by position worked only while exactly one trusted root
-    happened to be a git checkout. When a pod started shipping aiter as one it
-    sorted first, so WorldPlay specialists were handed an aiter worktree; the
-    patches they wrote against ``hyvideo/`` paths could not be grounded against
-    it and patch-safety dropped every one as ``missing_target``, leaving the
-    session to bench switches with no code behind them.
+    session is actually optimising, which ``roots`` cannot express: their order
+    records only how they were discovered. Selecting by position worked while
+    exactly one root happened to be a git checkout; when a pod started shipping
+    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
+    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
 
     Falls back to None when nothing qualifies — the runner then runs the
     specialist without an isolated worktree.
@@ -928,7 +929,6 @@ class SpecialistSubprocessDispatcher:
                 prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
                 cmd, launch_env_additions = self._build_codex_launch(
-                    prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     system_prompt=system_prompt,
@@ -942,7 +942,6 @@ class SpecialistSubprocessDispatcher:
                 cmd = self._build_claude_cmd(
                     system_prompt_file=prompt_file.parent / "system_prompt.md",
                     system_prompt=system_prompt,
-                    user_prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     disallowed_tools=frozenset(disallowed_tools),
@@ -971,7 +970,7 @@ class SpecialistSubprocessDispatcher:
             # override Ray's card assignment). ``gpu_ids`` here is the logical
             # 0..N-1 view the specialist sees under Ray's mask — kept only as the
             # informational count env for specialist tooling.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
             if gpu_ids:
                 env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in gpu_ids)
@@ -983,7 +982,7 @@ class SpecialistSubprocessDispatcher:
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
             # CPU specialists must not inherit serving GPU visibility.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
 
         log_fh: Any = None
@@ -1055,6 +1054,12 @@ class SpecialistSubprocessDispatcher:
         else:
             proc_started = time.monotonic()
             log_fh = process_log.open("w", encoding="utf-8")
+            try:
+                process_log.chmod(0o600)
+            except OSError:
+                # Tightening the mode is advisory; the run continues on filesystems
+                # that reject chmod.
+                pass
             stdin_fh: Any = None
             try:
                 stdin_fh = prompt_file.open("rb")
@@ -1106,7 +1111,10 @@ class SpecialistSubprocessDispatcher:
         finally:
             if log_fh is not None:
                 log_fh.close()
-            clear_wall_budget_extension(task_id)
+            try:
+                await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
+            finally:
+                clear_wall_budget_extension(task_id)
 
         # Patches: harvest from the worktree via git diff first; fall back to disk scan.
         patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)
@@ -1197,7 +1205,8 @@ class SpecialistSubprocessDispatcher:
         """Return the dirs an agent CLI may write, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands), then each distinct framework source root.
+        ``specialist_done.json`` lands). The framework source trees are absent:
+        ``integrate_patch`` is their only writer. Reads are unaffected.
 
         Args:
             workspace (Path): Task workspace.
@@ -1210,34 +1219,11 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
-        for root in self.config.framework_source_roots:
-            if root and Path(root).is_dir() and root not in dirs:
-                dirs.append(root)
         return dirs
-
-    def _build_codex_cmd(
-        self,
-        *,
-        prompt_file: Path,
-        workspace: Path,
-        worktree: Path | None,
-        system_prompt: str = "",
-    ) -> list[str]:
-        """Assemble a test/introspection Codex argv without running the probe."""
-        cmd, _env_additions = self._build_codex_launch(
-            prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            system_prompt=system_prompt,
-            base_env=_build_specialist_env(),
-            probe_sandbox=False,
-        )
-        return cmd
 
     def _build_codex_launch(
         self,
         *,
-        prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         system_prompt: str,
@@ -1338,7 +1324,6 @@ class SpecialistSubprocessDispatcher:
         *,
         system_prompt_file: Path,
         system_prompt: str,
-        user_prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
@@ -1352,7 +1337,6 @@ class SpecialistSubprocessDispatcher:
             system_prompt_file (Path): Destination for the written system prompt;
                 passed to ``--system-prompt-file``.
             system_prompt (str): The system prompt text to write.
-            user_prompt_file (Path): Pre-written user prompt file fed to stdin.
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.

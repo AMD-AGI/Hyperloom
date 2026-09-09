@@ -184,6 +184,47 @@ def test_parse_tool_use_block_valid_and_invalid() -> None:
     assert b._parse_tool_use_block(bad) is None
 
 
+def test_parse_tool_use_block_prefers_native_intent_type() -> None:
+    b = _backend()
+    block = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={
+            "intent_type": "send_message",
+            "payload": {"topic": "heartbeat", "body_md": "native"},
+            "__unparsedToolInput": {
+                "raw": '{"intent_type": "alert", "payload": {"severity": "high", "summary": "x"}}',
+                "len": 1,
+            },
+        },
+    )
+    intent = b._parse_tool_use_block(block)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["body_md"] == "native"
+
+
+def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
+    b = _backend()
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": raw, "len": len(raw)}},
+    )
+    intent = b._parse_tool_use_block(wrapped)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["topic"] == "heartbeat"
+
+
+def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
+    b = _backend()
+    bad = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": "{not-json", "len": 9}},
+    )
+    assert b._parse_tool_use_block(bad) is None
+
+
 def test_extract_text_shapes() -> None:
     assert ClaudeBackend._extract_text(TextBlock("hello")) == "hello"
     assert ClaudeBackend._extract_text({"type": "text", "text": "d"}) == "d"

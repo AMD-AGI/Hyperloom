@@ -26,22 +26,6 @@ from .symptom import Symptom, SymptomSeverity
 
 # Per-family payload projection: dotted keys that define the fingerprint.
 _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
-    "validate_stack": (
-        "params.optimization_stack",
-        "params.config_path",
-        "params.benchmark_script",
-        "params.result_dir",
-    ),
-    "backends": (
-        "params.grid",
-        "params.extra_envs",
-        "params.config_path",
-    ),
-    "params": (
-        "params.grid",
-        "params.extra_envs",
-        "params.config_path",
-    ),
     "sweep": (
         "params.grid",
         "params.extra_envs",

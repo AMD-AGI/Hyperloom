@@ -55,11 +55,6 @@ def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
             yield data
 
 
-def _first_json_object(text: str) -> dict[str, Any] | None:
-    """Return the first JSON object in *text*, or ``None``."""
-    return next(_iter_json_objects(text), None)
-
-
 def read_json(
     path: Path,
     default: Any = None,

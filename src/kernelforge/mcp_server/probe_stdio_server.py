@@ -37,11 +37,18 @@ import logging
 import math
 import os
 from pathlib import Path
-import sys
 import time
 from typing import Any
 
+from kernelforge.mcp_server import stdio_transport
+
 log = logging.getLogger(__name__)
+
+#: Re-exported so the two servers stay one import away from the shared wire
+#: format; both spellings name the same objects.
+InvalidParamsError = stdio_transport.InvalidParamsError
+_write_message = stdio_transport.write_message
+_write_error = stdio_transport.write_error
 
 SERVER_NAME = "kernelforge-specialist-probe"
 # Agents see these as mcp__specialist_probe__<name>.
@@ -114,10 +121,6 @@ DEVICE_LOCK_POLL_SEC = 1.0
 # bounds a session that keeps calling a tool which refuses it, and the parent
 # reads this file back in full. See ``_append_line``.
 MAX_LEDGER_RECORDS = 200
-
-
-class InvalidParamsError(ValueError):
-    """Invalid agent-supplied MCP tool arguments."""
 
 
 class ProbeSandboxError(RuntimeError):
@@ -976,83 +979,18 @@ class ProbeServer:
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one supported MCP request and return its result object."""
-        if method == "initialize":
-            return {
-                "protocolVersion": params.get("protocolVersion") or "2024-11-05",
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": SERVER_NAME, "version": "0.1.0"},
-            }
-        if method == "ping":
-            return {}
-        if method == "tools/list":
-            return {"tools": TOOL_DEFINITIONS}
-        if method == "tools/call":
-            arguments = params.get("arguments")
-            if arguments is None:
-                arguments = {}
-            if not isinstance(arguments, dict):
-                raise InvalidParamsError("tools/call arguments must be an object")
-            return await self.handle_tool_call(str(params.get("name") or ""), arguments)
-        if method in {"resources/list", "prompts/list"}:
-            return {"resources": []} if method == "resources/list" else {"prompts": []}
-        if method in {"logging/setLevel", "shutdown"}:
-            return {}
-        raise NotImplementedError(f"unsupported MCP method: {method}")
-
-
-def _write_message(payload: dict[str, Any]) -> None:
-    """Write one newline-delimited JSON-RPC message to stdout."""
-    sys.stdout.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
-    sys.stdout.flush()
-
-
-def _write_error(request_id: Any, code: int, message: str) -> None:
-    """Write one JSON-RPC error response."""
-    _write_message(
-        {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": code, "message": message},
-        }
-    )
+        return await stdio_transport.dispatch_envelope(
+            method,
+            params,
+            server_name=SERVER_NAME,
+            tool_definitions=TOOL_DEFINITIONS,
+            handle_tool_call=self.handle_tool_call,
+        )
 
 
 async def _serve() -> None:
     """Serve JSON-RPC requests until stdin closes or an exit notification arrives."""
-    server = ProbeServer()
-    while True:
-        raw = await asyncio.to_thread(sys.stdin.buffer.readline)
-        if not raw:
-            return
-        try:
-            message = json.loads(raw.decode())
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            _write_error(None, -32700, "Parse error")
-            continue
-        if not isinstance(message, dict):
-            _write_error(None, -32600, "Invalid Request")
-            continue
-        method = str(message.get("method") or "")
-        request_id = message.get("id")
-        if method == "exit":
-            return
-        if request_id is None:
-            continue
-        params = message.get("params")
-        if params is None:
-            params = {}
-        if not isinstance(params, dict):
-            _write_error(request_id, -32602, "params must be an object")
-            continue
-        try:
-            result = await server.dispatch(method, params)
-            _write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
-        except NotImplementedError as exc:
-            _write_error(request_id, -32601, str(exc))
-        except InvalidParamsError as exc:
-            _write_error(request_id, -32602, str(exc))
-        except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
-            _write_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
+    await stdio_transport.serve(ProbeServer().dispatch)
 
 
 def main() -> None:

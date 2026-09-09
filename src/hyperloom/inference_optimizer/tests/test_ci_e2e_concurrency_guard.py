@@ -91,6 +91,11 @@ def test_every_trigger_still_resolves_to_a_group(concurrency_group: str) -> None
     for key in (
         "github.event.pull_request.number",  # pull_request
         "github.event.issue.number",  # issue_comment (/retest)
-        "github.ref",  # workflow_dispatch
+        "inputs.head_sha",  # workflow_dispatch (fork PR smoke)
+        "inputs.head_ref",
+        "github.ref",  # last-resort fallback
     ):
         assert key in concurrency_group
+    # Dispatch used to share refs/heads/main and cancel-in-progress the
+    # previous GPU run. head_sha must win over github.ref.
+    assert concurrency_group.index("inputs.head_sha") < concurrency_group.index("github.ref")

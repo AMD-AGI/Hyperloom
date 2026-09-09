@@ -103,7 +103,7 @@ _SCAN_ROOTS: tuple[str, ...] = (
     "scripts",
     "docs",
     "examples",
-    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
+    "OOB",  # optional component; not always present in a clone
 )
 
 # Directory names that never hold first-party sources: build output, caches,
@@ -345,6 +345,14 @@ def _ratchet_problems(
 # ---------------------------------------------------------------------------
 # The guard
 # ---------------------------------------------------------------------------
+
+
+def test_scan_reaches_the_source_tree() -> None:
+    """A scan that parses nothing reports the same green as a clean one."""
+    assert _REPO_ROOT is not None
+    roots = [_REPO_ROOT / name for name in _SCAN_ROOTS]
+    count = sum(1 for root in roots if root.is_dir() for _ in root.rglob("*.py"))
+    assert count >= 900, f"_SCAN_ROOTS reached only {count} files; an entry is missing or misspelled"
 
 
 def test_no_unsanctioned_llm_provider_access() -> None:

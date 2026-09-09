@@ -22,6 +22,7 @@ factory overrides for tests. The SDK rewrites the tool name to
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Iterable
 
@@ -198,11 +199,23 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 f"{constraints_sentence(IntentType)}"
             ),
         },
+        "__unparsedToolInput": {
+            "type": "object",
+            "description": (
+                "Internal fallback produced by the Claude Code streaming parser. Never emit this deliberately."
+            ),
+        },
     },
-    "required": ["intent_type", "payload"],
+    "anyOf": [
+        {"required": ["intent_type", "payload"]},
+        {"required": ["__unparsedToolInput"]},
+    ],
     "additionalProperties": False,
 }
 
+# The fallback branch lets the MCP handler acknowledge parser-generated
+# wrappers instead of returning an error the model cannot repair. Native
+# ``intent_type`` + ``payload`` remains the canonical and preferred contract.
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
@@ -211,13 +224,67 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
     "intents in a single turn, call this tool multiple times."
 )
 
+# Exception-only: Claude Code stores a tool JSON string the streaming parser
+# did not promote to an object. Canonical input remains ``intent_type`` +
+# ``payload`` and is never rewritten when that shape is already present.
+_UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
+_EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
+
+
+def decode_emit_intent_input(raw_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Decode a parser fallback and report why decoding failed.
+
+    Canonical input always wins when ``intent_type`` is present. The fallback
+    is inspected only when canonical input is absent.
+    """
+    if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
+        return raw_input, None
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    if not isinstance(wrapped, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY} must be an object"
+    raw = wrapped.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON"
+    if not isinstance(parsed, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object"
+    return parsed, None
+
+
+def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
+    """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object."""
+    if not isinstance(raw_input, dict):
+        return False
+    if "intent_type" in raw_input:
+        return False
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
+
+
+def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
+    """Return native emit_intent input, decoding the wrapper only as fallback.
+
+    Canonical ``{intent_type, payload}`` is returned unchanged. The
+    ``__unparsedToolInput.raw`` object is decoded only when that native shape
+    is absent. Malformed JSON leaves the original dict so validation still
+    fails.
+    """
+    if not isinstance(raw_input, dict):
+        return {}
+    coerced, _ = decode_emit_intent_input(raw_input)
+    return coerced
+
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """Eager single-intent validation (mirrors :func:`validate_envelope`).
 
-    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
-    both present), that ``intent_type`` is a known :class:`IntentType`, and
-    that the inner payload carries every required field for that type.
+    Canonical input is ``intent_type`` + ``payload``. A Claude Code
+    ``__unparsedToolInput`` wrapper is decoded first only when that native
+    shape is missing, then the same checks apply: only those two top-level
+    keys, a known :class:`IntentType`, and every required payload field.
 
     Args:
         payload (dict[str, Any]): The raw ``emit_intent`` tool input to
@@ -230,16 +297,22 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
-    extra = set(payload.keys()) - {"intent_type", "payload"}
+    original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
+    if original_extra:
+        raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
+    coerced, decode_error = decode_emit_intent_input(payload)
+    if decode_error is not None:
+        raise IntentValidationError(f"emit_intent: {decode_error}")
+    extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
-    if "intent_type" not in payload or "payload" not in payload:
+    if "intent_type" not in coerced or "payload" not in coerced:
         raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
-        intent_type = IntentType(payload["intent_type"])
+        intent_type = IntentType(coerced["intent_type"])
     except ValueError as exc:
-        raise IntentValidationError(f"emit_intent: unknown intent_type {payload['intent_type']!r}") from exc
-    inner = payload["payload"]
+        raise IntentValidationError(f"emit_intent: unknown intent_type {coerced['intent_type']!r}") from exc
+    inner = coerced["payload"]
     if not isinstance(inner, dict):
         raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
     required = _PAYLOAD_REQUIRED.get(intent_type, ())
@@ -329,6 +402,9 @@ __all__ = [
     "MCP_SERVER_NAME",
     "build_emit_intent_server",
     "build_intent_envelope_schema",
+    "coerce_emit_intent_input",
+    "decode_emit_intent_input",
+    "is_unparsed_tool_wrapper",
     "payload_contract",
     "validate_emit_intent_input",
 ]

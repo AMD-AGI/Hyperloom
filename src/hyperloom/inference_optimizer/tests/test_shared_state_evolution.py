@@ -174,32 +174,6 @@ def test_v2_kernel_keep_populates_stable_task_and_pending_patch():
     assert pending[0]["artifact_path"] == "/artifacts/operator.py"
 
 
-def test_v2_ungrouped_kernel_record_opt_accumulates():
-    state = SharedState()
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k001",
-            "source_file": "/repo/operator.py",
-            "proposal": {"decision": "PARTIAL"},
-            "verification": {"micro_speedup": 1.0},
-            "attempts": [],
-        }
-    )
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k001",
-            "source_file": "/repo/operator.py",
-            "proposal": {"decision": "PARTIAL"},
-            "verification": {"micro_speedup": 1.1},
-            "attempts": [],
-        }
-    )
-
-    assert len(state.kernel_opt_task_attempts) == 1
-
-
 # 4. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
     """``--reset-state`` renames state.json so the next load starts blank."""
@@ -368,71 +342,6 @@ def test_enablement_accepted_config_path_roundtrips(tmp_path):
     assert loaded.enablement.active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
 
 
-# 7. EnablementRound v3→v4 migration
-def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
-    """A v3 state.json with flat enablement_* keys loads into a populated EnablementRound."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    v3_state = {
-        "schema_version": 3,
-        "enablement_launch_log": "RuntimeError: Engine core initialization failed.",
-        "enablement_attempts": 2,
-        "enablement_stall_streak": 1,
-        "enablement_kept_patches": ["/p/001.patch"],
-        "enablement_succeeded": False,
-        "enablement_inflight_task_id": "spec-v3",
-        "enablement_mode": "launch",
-    }
-    (sd / "state.json").write_text(json.dumps(v3_state))
-    loaded = SharedState.load_or_init(sd)
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
-    assert loaded.enablement.launch_log == "RuntimeError: Engine core initialization failed."
-    assert loaded.enablement.attempts == 2
-    assert loaded.enablement.stall_streak == 1
-    assert loaded.enablement.kept_patches == ["/p/001.patch"]
-    assert loaded.enablement.succeeded is False
-    assert loaded.enablement.inflight_task_id == "spec-v3"
-    # session-scoped field stays top-level
-    assert loaded.enablement_mode == "launch"
-
-
-# 8. FRAMEWORK field rename v4→v5 migration
-def test_v4_legacy_framework_fields_migrate_to_current_names(tmp_path):
-    """A state written before the framework_agent rename keeps its progress.
-
-    Without the migration these keys are not dataclass fields, so the
-    unknown-key filter drops them and the phase restarts from scratch: already
-    benchmarked PRs are re-run and a persisted --no-framework-agent flips back
-    on. Nothing raises, which is why it went unnoticed.
-    """
-    sd = tmp_path / "session"
-    sd.mkdir()
-    legacy = {
-        "schema_version": 4,
-        "framework_phase_enabled": False,
-        "framework_pr_phase_progress": [{"candidate_id": "PR:1", "status": "kept"}],
-        "framework_pr_batches": [{"batch_id": "b1", "candidates": []}],
-        "framework_pr_phase_done": True,
-        "framework_pr_discover_failures": 2,
-        "framework_pr_consecutive_empty_discoveries": 3,
-        "framework_pr_authoring_enabled": False,
-        "framework_pr_specialist_candidate_map": {"spec-1": "PR:1"},
-    }
-    (sd / "state.json").write_text(json.dumps(legacy))
-
-    loaded = SharedState.load_or_init(sd)
-
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
-    assert loaded.framework_agent_phase_enabled is False
-    assert loaded.framework_agent_phase_progress == [{"candidate_id": "PR:1", "status": "kept"}]
-    assert loaded.framework_agent_batches == [{"batch_id": "b1", "candidates": []}]
-    assert loaded.framework_agent_phase_done is True
-    assert loaded.framework_agent_discover_failures == 2
-    assert loaded.framework_consecutive_empty_discoveries == 3
-    assert loaded.framework_agent_authoring_enabled is False
-    assert loaded.framework_agent_specialist_candidate_map == {"spec-1": "PR:1"}
-
-
 def test_v5_migration_prefers_the_current_spelling(tmp_path):
     """A half-migrated state carrying both spellings keeps the current one."""
     sd = tmp_path / "session"
@@ -448,61 +357,6 @@ def test_v5_migration_prefers_the_current_spelling(tmp_path):
     )
 
     assert SharedState.load_or_init(sd).framework_agent_discover_failures == 1
-
-
-def test_v5_migration_strips_the_promote_prefix_from_stacked_framework_keeps(tmp_path):
-    """An in-flight session's already-stacked KEEPs must reconcile after the upgrade.
-
-    Renaming the fields alone leaves ``variant_name`` spelled the promote-side
-    way. Resume reconciliation keys on the bare candidate key, so those entries
-    keep reporting as orphaned KEEPs, and the ``(action, variant_name)`` dedup
-    that stops a second append for the same PR no longer matches either.
-    """
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 4,
-                "optimization_stack": [
-                    {"action": "framework", "variant_name": "framework:PR-1", "tput": 1.0},
-                    {"action": "framework", "variant_name": "PR-2", "tput": 2.0},
-                    {"action": "explore", "variant_name": "framework:not-mine", "tput": 3.0},
-                ],
-            }
-        )
-    )
-
-    stack = SharedState.load_or_init(sd).optimization_stack
-
-    assert stack[0]["variant_name"] == "PR-1"
-    assert stack[1]["variant_name"] == "PR-2"
-    # Only the framework family carried that prefix; explore names are its own.
-    assert stack[2]["variant_name"] == "framework:not-mine"
-
-
-def test_v5_stack_action_label_matches_the_writeback_constant():
-    """The migration hardcodes the stack label; writeback owns the real one."""
-    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
-    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_STACK_ACTION_V5
-
-    assert _FRAMEWORK_STACK_ACTION_V5 == _FRAMEWORK_STACK_ACTION
-
-
-def test_v5_rename_table_targets_are_real_fields():
-    """Every rename target must still exist, or the migration drops the data.
-
-    The table is the only thing standing between an old state.json and the
-    unknown-key filter, and a target that no longer exists fails the same
-    silent way the missing migration did.
-    """
-    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_FIELD_RENAMES_V5
-
-    fields = set(SharedState.__dataclass_fields__)
-    missing = sorted(t for t in _FRAMEWORK_FIELD_RENAMES_V5.values() if t not in fields)
-    assert not missing, f"rename targets that are no longer fields: {missing}"
-    stale = sorted(legacy for legacy in _FRAMEWORK_FIELD_RENAMES_V5 if legacy in fields)
-    assert not stale, f"legacy names that are somehow still fields: {stale}"
 
 
 def test_class_constants_are_not_persisted_fields():
@@ -539,46 +393,6 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     loaded = SharedState.load_or_init(sd)
     assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS)
     assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
-
-
-def test_v6_rename_table_targets_are_real_fields():
-    """Same contract as the v5 table: targets exist, legacy names do not."""
-    from hyperloom.orchestrator.state.shared_state import _KERNEL_OPT_FIELD_RENAMES_V6
-
-    fields = set(SharedState.__dataclass_fields__)
-    missing = sorted(t for t in _KERNEL_OPT_FIELD_RENAMES_V6.values() if t not in fields)
-    assert not missing, f"rename targets that are no longer fields: {missing}"
-    stale = sorted(legacy for legacy in _KERNEL_OPT_FIELD_RENAMES_V6 if legacy in fields)
-    assert not stale, f"legacy names that are somehow still fields: {stale}"
-
-
-def test_v6_carries_the_pre_rename_kernel_opt_optout(tmp_path):
-    """A resumed opt-out keeps opting out instead of reverting to the default."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False}))
-
-    loaded = SharedState.load_or_init(sd)
-
-    assert loaded.auto_kernel_opt_enabled is False
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
-
-
-def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):
-    """A mid-migration state holding both keys resolves to the current one."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 5,
-                "continue_kernel_after_gemm": False,
-                "auto_kernel_opt_enabled": True,
-            }
-        )
-    )
-
-    assert SharedState.load_or_init(sd).auto_kernel_opt_enabled is True
 
 
 def test_v4_nested_enablement_roundtrips(tmp_path):
@@ -651,50 +465,49 @@ def _applyback_evidence():
     }
 
 
-def _record_applyback_keep(state, **verification_overrides):
-    verification = {
-        "micro_speedup": 1.6,
-        "compile_passed": True,
-        "correctness_passed": True,
-        "correctness_source": "forge_rewrite_reference",
-        "integration_validation_status": "pending",
-        "framework_applyback": _applyback_evidence(),
-        "best_backend": "forge",
-        "best_artifact_path": "/artifacts/flydsl_kernel.py",
-        "deploy_patch_path": "/artifacts/forge.patch",
-        "deploy_repo_root": "/repo",
-        "deploy_snapshot_dir": "/artifacts/snapshot",
-    }
-    verification.update(verification_overrides)
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k007",
-            "source_file": "/repo/fused_gemm.py",
-            "task_group_id": "tg001",
-            "task_group_key": "tg-fused-gemm",
-            "proposal": {
-                "decision": "KEEP",
-                "reasons": ["framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"],
-            },
-            "verification": verification,
-        }
+def _record_applyback_keep(state, **overrides):
+    """Queue one apply-back KEEP the way its surviving producer does.
+
+    The handler whose result envelope used to carry this provenance into the
+    ledger is gone, so the attempt row is written directly and queued through
+    the helper both remaining producers share.
+    """
+    from hyperloom.orchestrator.kernel._kernel_decisions import (
+        _queue_kernel_keep,
+        _stable_kernel_task_key,
     )
+
+    entry = {
+        "current_kernel_id": "k007",
+        "task_group_key": "tg-fused-gemm",
+        "last_decision": "KEEP",
+        "last_status": "ok",
+        "last_micro_speedup": 1.6,
+        "last_source_file": "/repo/fused_gemm.py",
+        "last_correctness_source": "forge_rewrite_reference",
+        "last_integration_validation_status": "pending",
+        "last_framework_applyback": _applyback_evidence(),
+        "last_artifact_path": "/artifacts/flydsl_kernel.py",
+        "last_deploy_patch_path": "/artifacts/forge.patch",
+        "last_deploy_repo_root": "/repo",
+        "last_snapshot_dir": "/artifacts/snapshot",
+        "attempts": 1,
+    }
+    for key, value in overrides.items():
+        entry[f"last_{key}"] = value
+    task_key = _stable_kernel_task_key(
+        task_group_key="tg-fused-gemm",
+        kernel_id="k007",
+        source_file="/repo/fused_gemm.py",
+    )
+    state.kernel_opt_task_attempts[task_key] = entry
+    _queue_kernel_keep(state, task_key=task_key, kernel_id="k007", entry=entry)
 
 
 def test_reference_verified_applyback_queues_with_its_provenance():
     state = SharedState()
 
     _record_applyback_keep(state)
-
-    attempt = state.kernel_opt_attempts["k007"]
-    assert attempt["last_correctness_source"] == "forge_rewrite_reference"
-    assert attempt["last_integration_validation_status"] == "pending"
-    assert attempt["last_framework_applyback"] == _applyback_evidence()
-
-    assert state.last_kernel_opt["correctness_source"] == "forge_rewrite_reference"
-    assert state.last_kernel_opt["integration_validation_status"] == "pending"
-    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == ("refs/hyperloom/applyback/attempt-1")
 
     pending = state.pending_kernel_integration_records()
     assert len(pending) == 1

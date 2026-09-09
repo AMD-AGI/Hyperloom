@@ -180,11 +180,6 @@ def match_vendor_operator_playbook(candidate: dict[str, Any]) -> dict[str, Any] 
     return None
 
 
-def playbook_group_id(playbook: dict[str, Any]) -> str:
-    """Return the stable group id a playbook's sibling roles share."""
-    return str(playbook.get("id") or "")
-
-
 def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     """Return a stand-in ``source_file`` path for a vendor-playbook candidate.
 

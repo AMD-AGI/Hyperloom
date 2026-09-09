@@ -217,21 +217,34 @@ def _detect_image() -> str | None:
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
     """Mirror cli._run_optimize's objective derivation, without importing it.
 
+    ``kind`` / ``value`` keep naming one target because every consumer reads
+    that pair. A run with a roofline target alongside it carries the full set in
+    ``objectives`` as well.
+
     Args:
         args (argparse.Namespace): Parsed CLI args; checked for
-            ``target_gain``, ``target_tput``, and ``target_baseline_dir``.
+            ``target_gain``, ``target_tput``, ``target_baseline_dir``, and
+            ``target_roofline``.
 
     Returns:
         dict[str, Any]: Objective mapping with ``kind`` (one of ``gain_pct``,
-        ``tput``, ``baseline``, ``time_only``) and an associated ``value``.
+        ``tput``, ``baseline``, ``roofline_pct``, ``time_only``), an associated
+        ``value``, and ``objectives`` when more than one target is set.
     """
+    targets: list[dict[str, Any]] = []
     if getattr(args, "target_gain", None):
-        return {"kind": "gain_pct", "value": float(args.target_gain)}
-    if getattr(args, "target_tput", None):
-        return {"kind": "tput", "value": float(args.target_tput)}
-    if getattr(args, "target_baseline_dir", None):
-        return {"kind": "baseline", "value": str(args.target_baseline_dir)}
-    return {"kind": "time_only", "value": None}
+        targets.append({"kind": "gain_pct", "value": float(args.target_gain)})
+    elif getattr(args, "target_tput", None):
+        targets.append({"kind": "tput", "value": float(args.target_tput)})
+    elif getattr(args, "target_baseline_dir", None):
+        targets.append({"kind": "baseline", "value": str(args.target_baseline_dir)})
+    if getattr(args, "target_roofline", None):
+        targets.append({"kind": "roofline_pct", "value": float(args.target_roofline)})
+    if not targets:
+        return {"kind": "time_only", "value": None}
+    if len(targets) == 1:
+        return targets[0]
+    return {**targets[0], "objectives": targets}
 
 
 def build_session_id(model_name: str = "") -> str:

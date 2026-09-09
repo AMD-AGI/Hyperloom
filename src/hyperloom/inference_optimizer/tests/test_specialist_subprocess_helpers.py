@@ -91,11 +91,9 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     sys_file = ws / "system_prompt.md"
-    user_file = tmp_path / "p.txt"
     cmd = d._build_claude_cmd(
         system_prompt_file=sys_file,
         system_prompt="SYS",
-        user_prompt_file=user_file,
         workspace=ws,
         worktree=wt,
         disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
@@ -108,7 +106,9 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied and "SlashCommand" in denied
-    assert str(wt) in cmd and str(ws) in cmd and str(fw) in cmd
+    # --add-dir grants writes; integrate_patch is the only writer of source.
+    assert str(wt) in cmd and str(ws) in cmd
+    assert str(fw) not in cmd
     assert cmd[-2:] == ["--foo", "bar"]
 
 
@@ -120,7 +120,6 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
     cmd = d._build_claude_cmd(
         system_prompt_file=sys_file,
         system_prompt="SYS",
-        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
     )
@@ -142,7 +141,6 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     cmd = d._build_claude_cmd(
         system_prompt_file=sys_file,
         system_prompt="SYS",
-        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
     )

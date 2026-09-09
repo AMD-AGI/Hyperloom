@@ -50,7 +50,6 @@ class AgentProvider:
     name: str
     factory: Callable[[AgentRuntimeConfig], AgentBackend]
     default_model: str
-    fallback_model: str = ""
     capabilities: AgentCapabilities = AgentCapabilities()
     availability: Callable[[], bool] = _always_available
     owns_model: Callable[[str], bool] = _owns_no_model
@@ -237,11 +236,6 @@ def resolve_agent_runtime(
     return AgentRuntimeConfig(
         provider=registration.name,
         model=model.strip() or registration.default_model,
-        fallback_model=(
-            registration.fallback_model
-            if (model.strip() or registration.default_model) != registration.fallback_model
-            else ""
-        ),
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or "high",
@@ -259,11 +253,11 @@ def create_registered_backend(
     probe_cwd: str = "",
     usage=None,
 ) -> AgentBackend:
-    """Construct, probe, and generically fall back one provider backend."""
+    """Construct and probe one provider backend, with optional provider fallback."""
     registration = get_agent_provider(runtime.provider)
     should_preflight = runtime.precheck if preflight is None else preflight
     try:
-        backend = _prepare_with_model_fallback(
+        return _prepare_backend(
             registration,
             runtime,
             preflight=should_preflight,
@@ -271,6 +265,12 @@ def create_registered_backend(
             usage=usage,
         )
     except AgentProviderUnavailableError as exc:
+        log.warning(
+            "agent provider unavailable provider=%s model=%s: %s",
+            registration.name,
+            runtime.model,
+            exc,
+        )
         if not runtime.fallback_provider:
             raise
         fallback_registration = get_agent_provider(runtime.fallback_provider)
@@ -278,13 +278,12 @@ def create_registered_backend(
             runtime,
             provider=fallback_registration.name,
             model=fallback_registration.default_model,
-            fallback_model=fallback_registration.fallback_model,
             executable="",
             fallback_provider="",
             options={},
         )
         try:
-            fallback = _prepare_with_model_fallback(
+            fallback = _prepare_backend(
                 fallback_registration,
                 fallback_runtime,
                 preflight=should_preflight,
@@ -298,54 +297,6 @@ def create_registered_backend(
             ) from fallback_exc
         setattr(fallback, "fallback_reason", str(exc))
         return fallback
-    return backend
-
-
-def _prepare_with_model_fallback(
-    registration: AgentProvider,
-    runtime: AgentRuntimeConfig,
-    *,
-    preflight: bool,
-    probe_cwd: str,
-    usage,
-) -> AgentBackend:
-    """Probe the requested model, then retry the provider's safe fallback."""
-    try:
-        return _prepare_backend(
-            registration,
-            runtime,
-            preflight=preflight,
-            probe_cwd=probe_cwd,
-            usage=usage,
-        )
-    except AgentProviderUnavailableError as primary_error:
-        fallback_model = (runtime.fallback_model or registration.fallback_model).strip()
-        if not fallback_model or fallback_model == runtime.model:
-            raise
-        fallback_runtime = replace(
-            runtime,
-            model=fallback_model,
-            fallback_model="",
-        )
-        try:
-            backend = _prepare_backend(
-                registration,
-                fallback_runtime,
-                preflight=preflight,
-                probe_cwd=probe_cwd,
-                usage=usage,
-            )
-        except AgentProviderUnavailableError as fallback_error:
-            add_note = getattr(primary_error, "add_note", None)
-            if callable(add_note):
-                add_note(f"fallback model {fallback_model!r} also unavailable: {fallback_error}")
-            raise primary_error from fallback_error
-        setattr(
-            backend,
-            "model_fallback_reason",
-            f"{runtime.model}: {primary_error}",
-        )
-        return backend
 
 
 def _prepare_backend(
@@ -413,7 +364,6 @@ register_agent_provider(
         name="claude",
         factory=_create_claude_backend,
         default_model="claude-opus-5",
-        fallback_model="claude-opus-4-8",
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,
@@ -436,7 +386,6 @@ register_agent_provider(
         name="codex",
         factory=_create_codex_backend,
         default_model="gpt-5.6",
-        fallback_model="gpt-5.5",
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,

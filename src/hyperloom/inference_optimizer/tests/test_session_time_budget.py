@@ -68,9 +68,9 @@ from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
-# An action costing an hour at p50, so a short budget cannot fit it.
-_EXPENSIVE_ACTION = "kernel_opt"
-_EXPENSIVE_COST_MIN = 60.0
+# The costliest action the catalogue prices, so a short budget cannot fit it.
+_EXPENSIVE_ACTION = "conc_sweep"
+_EXPENSIVE_COST_MIN = 30.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
 # An action the catalogue prices at five minutes, and what one of the two
@@ -153,7 +153,7 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
             ACTION_CATALOGUE[_EXPENSIVE_ACTION],
-            measured_baseline_sec=_MEASURED_BASELINE_SEC,
+            measured_baseline_sec=10 * 60.0,
         )
         assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
 
@@ -360,7 +360,7 @@ class TestTimeBudgetGate:
     def test_the_budget_shrinks_the_gate_as_the_session_runs(self, coord: Coordinator):
         _set_budget(coord, minutes=120, elapsed_min=0.0)
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
-        _set_budget(coord, minutes=120, elapsed_min=70.0)
+        _set_budget(coord, minutes=120, elapsed_min=105.0)
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
 
 

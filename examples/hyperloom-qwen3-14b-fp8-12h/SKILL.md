@@ -115,7 +115,6 @@ else:
     snapshot_download(
         repo_id="Qwen/Qwen3-14B-FP8",
         local_dir=str(target),
-        local_dir_use_symlinks=False,
     )
 print(target.resolve())
 PY

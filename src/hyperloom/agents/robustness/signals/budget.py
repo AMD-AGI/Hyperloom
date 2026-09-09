@@ -195,7 +195,7 @@ def _burn_no_gain_symptom(
         },
         subject={},
         source="local",
-        suggestion=("escalate_strategy_change to switch from exploration to validate_stack / report"),
+        suggestion=("escalate_strategy_change to wind down exploration and report"),
     )
 
 
@@ -286,7 +286,7 @@ def _deadline_warning_symptom(
         suggestion=(
             "propose report to finalize at the last validated gain"
             if severity is SymptomSeverity.HIGH
-            else "escalate_strategy_change: do not propose kernel_opt or new explore; validate_stack and report only"
+            else "escalate_strategy_change: wind down; do not propose kernel_opt or new explore"
         ),
     )
 

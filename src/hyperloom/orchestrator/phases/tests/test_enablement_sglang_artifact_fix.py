@@ -50,16 +50,16 @@ def test_patch_grounds_against_a_candidate_root(tmp_path):
     assert res.verdict == _ps.GROUND_APPLIES
 
 
-def test_patch_absent_from_every_root_is_dropped(tmp_path):
+def test_patch_absent_from_every_root_is_reported_not_dropped(tmp_path):
     aiter = _checkout(tmp_path / "aiter", "aiter_file.py")
     sglang = _checkout(tmp_path / "sglang", "sglang_file.py")
 
     res = _ps.ground_patch_text(_diff("ghost.py"), base_checkout=aiter, candidate_roots=(sglang,))
     assert res.verdict == _ps.GROUND_MISSING_TARGET
-    assert res.is_garbage
+    assert not res.is_garbage
 
 
-def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
+def test_duplicate_matching_roots_are_reported_as_ambiguous(tmp_path):
     base = _checkout(tmp_path / "base", "f.py")
     other = _checkout(tmp_path / "other", "f.py")
     (base / "f.py").write_text("drifted\n", encoding="utf-8")
@@ -68,7 +68,7 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     res = _ps.ground_patch_text(_diff("f.py"), base_checkout=base, candidate_roots=(other,))
     assert res.verdict == _ps.GROUND_AMBIGUOUS_ROOT
     assert res.detail.startswith("ambiguous_root:")
-    assert res.is_garbage
+    assert not res.is_garbage
 
 
 def test_basename_does_not_create_false_ambiguity(tmp_path):
@@ -126,14 +126,14 @@ def test_pure_create_lands_in_the_worktree_base(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(patch)],
         base_checkout=base,
         candidate_roots=(other,),
     )
 
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert not spans_roots
 
 
@@ -160,11 +160,11 @@ def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("sglang_file.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(patch)], base_checkout=aiter, candidate_roots=(sglang,)
     )
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
     assert not spans_roots
 
@@ -181,14 +181,14 @@ def test_vet_patches_resolves_the_complete_set_once(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=complete,
         candidate_roots=(),
     )
 
     assert kept == patches
-    assert dropped == []
+    assert ungrounded == []
     assert set(grounding.values()) == {_ps.GROUND_APPLIES}
     assert not spans_roots
 
@@ -203,14 +203,14 @@ def test_vet_patches_keeps_a_set_split_across_roots_and_reports_it(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=first,
         candidate_roots=(second,),
     )
 
     assert set(kept) == set(patches)
-    assert dropped == []
+    assert ungrounded == []
     assert spans_roots
 
 
@@ -224,7 +224,7 @@ def test_cross_tree_set_reaches_root_resolution_as_a_miss(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, _dropped, _grounding, spans_roots = _ps.vet_patches(
+    kept, _ungrounded, _grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=first,
         candidate_roots=(second,),
@@ -240,21 +240,22 @@ def test_cross_tree_set_reaches_root_resolution_as_a_miss(tmp_path):
     assert whole_set.reason == "no_matching_root"
 
 
-def test_vet_patches_absent_from_every_root_is_dropped(tmp_path):
-    """A patch whose target exists in no root is still dropped."""
+def test_vet_patches_absent_from_every_root_is_kept_and_recorded(tmp_path):
+    """A patch whose target exists in no root is kept, with the miss recorded."""
     first = _checkout(tmp_path / "first", "first.py")
     second = _checkout(tmp_path / "second", "second.py")
     ghost = tmp_path / "ghost.patch"
     ghost.write_text(_diff("ghost.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(ghost)],
         base_checkout=first,
         candidate_roots=(second,),
     )
 
-    assert kept == []
-    assert len(dropped) == 1
+    assert kept == [str(ghost)]
+    assert len(ungrounded) == 1
+    assert ungrounded[0]["verdict"] == _ps.GROUND_MISSING_TARGET
     assert grounding[str(ghost)] == _ps.GROUND_MISSING_TARGET
     assert not spans_roots
 
@@ -280,7 +281,9 @@ def test_patch_grounds_against_a_non_git_tree(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("installed.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(plain,))
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
+        [str(patch)], base_checkout=base, candidate_roots=(plain,)
+    )
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
@@ -292,10 +295,10 @@ def test_no_tree_to_ground_against_keeps_the_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("anything.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
     assert not spans_roots
 
@@ -304,7 +307,7 @@ def test_no_tree_to_ground_against_keeps_a_create_only_patch(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED

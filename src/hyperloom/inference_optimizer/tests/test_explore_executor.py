@@ -52,9 +52,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.inference_optimizer.breakdown.collectors import (
-    collect_capability_summary,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -1202,6 +1199,63 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_explore_no_eval_disables_magpie_warmup_and_decision(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Session ``--no-eval`` turns Magpie RUN_EVAL off for every explore round."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.eval_disabled = True
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-session-noeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "session_noeval",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-session-noeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert seen
+    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
+    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+
+
+@pytest.mark.asyncio
 async def test_explore_cold_decision_keeps_eval(
     sub_agent_runner,
     tmp_path,
@@ -1893,32 +1947,6 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
-
-
-def test_capability_summary_has_explore_row_with_legacy_aliases():
-    state = {
-        "explore_search": {
-            "tested": {"aabbccdd11223344": {"name": "v1", "outcome": "KEEP"}},
-            "accepted": [{"name": "v1", "gain_pct": 4.2, "fingerprint": "aabbccdd11223344"}],
-            "rejected": [{"name": "v2", "reason": "stack_unstable", "fingerprint": "deadbeefdeadbeef"}],
-            "winners_history": [{"round_id": "explore-001"}],
-        },
-        "optimization_stack": [
-            {"action": "explore", "variant_name": "v1"},
-        ],
-    }
-    cap = collect_capability_summary(state, [], [], [])
-    assert "explore" in cap
-    assert cap["explore"]["status"] == "kept"
-    assert cap["explore"]["best_gain_pct"] == 4.2
-    assert cap["explore"]["keep_unstable_count"] == 1
-    assert cap["explore"]["winners_history"] == 1
-    # Legacy compat rows stay emitted so archived sessions render.
-    assert "backends" in cap
-    assert "params" in cap
-    assert "validate_stack" in cap
-    assert cap["backends"]["status"] == "not_attempted"
-    assert cap["params"]["status"] == "not_attempted"
 
 
 def _names(variants):

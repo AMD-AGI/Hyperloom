@@ -103,7 +103,7 @@ def find_benchmark_files(op_name: str, source_file: str, *, max_files: int = 10)
         for kw in keywords:
             try:
                 proc = subprocess.run(
-                    [grep, "-rlnI", "--include=*.py", kw, str(subp)],
+                    [grep, "-rlnI", "--include=*.py", "--", kw, str(subp)],
                     text=True,
                     capture_output=True,
                     timeout=15,

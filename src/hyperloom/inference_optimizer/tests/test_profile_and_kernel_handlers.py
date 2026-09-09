@@ -19,6 +19,8 @@ from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
+
+from .conftest import seed_kernel_keep
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _default_baseline_config,
@@ -2338,6 +2340,67 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
+def _capture_trace_dir(tmp_path, *, cpu_ops: int, with_input_dims: int) -> object:
+    """Write a capture file carrying a chosen number of cpu_op events."""
+    import gzip
+    import json as _json
+
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
+    events = [{"name": "cpu_op", "cat": "cpu_op"} for _ in range(cpu_ops)]
+    for index in range(with_input_dims):
+        events[index]["args"] = {"Input Dims": [[1, 2]]}
+    if not cpu_ops:
+        # ROCm/SGLang logs the same work under its own event names.
+        events = [{"name": "sglang_profiler::forward", "cat": "cpu_instant_event"}]
+    with gzip.open(capture / "rank0.pt.trace.json.gz", "wt", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"traceEvents": events}))
+    return capture
+
+
+def _check_row(health: dict, check_id: str) -> dict:
+    return next(row for row in health["checks"] if row["check_id"] == check_id)
+
+
+def test_zero_cpu_op_is_not_a_failed_input_dims_check(tmp_path):
+    """The structured check must not contradict the advisory beside it.
+
+    The prose branch says zero ``cpu_op`` on ROCm/SGLang is an event-naming
+    difference rather than a capture regression, while the check row called it
+    ``failed`` -- and the row is the copy consumers query by id.
+    """
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=0, with_input_dims=0)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    row = _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)
+    assert row["status"] == "skipped"
+    assert row["skip_reason"]
+    assert row["detail"]["input_dims_fraction"] is None
+    assert row["detail"]["cpu_op_count"] == 0
+    # The advisory still fires, so the condition is not silently dropped.
+    assert any("no literal" in issue and "cpu_op" in issue for issue in health["issues"])
+
+
+def test_a_thin_input_dims_fraction_still_fails_the_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=1)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "failed"
+
+
+def test_a_healthy_input_dims_fraction_passes_the_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=10)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
+
+
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
@@ -2364,12 +2427,11 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session_dir):
-    """A non-string analysis_route (e.g. bool/list from an LLM payload) must not
-    crash cmd construction with AttributeError; it is coerced and ignored."""
+async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_dir):
+    """A non-string route is coerced into a structured validation error."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
-    for bad_route in (True, ["deterministic"], {"route": "agent"}, 1):
+    for bad_route in (True, ["bypass"], {"route": "agent"}, 1):
         payload = {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
@@ -2380,8 +2442,9 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
             "analysis_route": bad_route,
         }
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-        # Must return a structured result, never raise AttributeError.
-        assert res["status"] in ("ok", "succeeded", "failed")
+        assert res["status"] == "failed"
+        assert res["error_class"] == "invalid_analysis_route"
+        assert res["requested_route"] == str(bad_route).strip().lower()
 
 
 @pytest.mark.asyncio
@@ -2414,7 +2477,6 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     cmd = captured["cmd"]
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
-    assert "--analysis-route" in cmd and "agent" in cmd
     assert "--tracelens-root" in cmd
     assert "--skip-split" in cmd
 
@@ -2595,40 +2657,56 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     cmd = captured["cmd"]
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
-    assert "--analysis-route" in cmd and "agent" in cmd
 
 
+@pytest.mark.parametrize(
+    ("payload_route", "env_route", "requested_route"),
+    [
+        ("foobar", "bypass", "foobar"),
+        ("deterministic", "bypass", "deterministic"),
+        (False, "bypass", "false"),
+        (0, "bypass", "0"),
+        (None, "deterministic", "deterministic"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_dir, monkeypatch):
-    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route;
-    it falls back to the default TraceLens ``agent`` route and surfaces a warning."""
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
+    session_dir,
+    monkeypatch,
+    payload_route,
+    env_route,
+    requested_route,
+):
+    """An explicit invalid route must fail before resolving TraceLens or spending LLM."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", env_route)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
-    captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+    def fail_resolve_tracelens_root():
+        pytest.fail("invalid route must not resolve TraceLens")
 
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    async def fail_run_subprocess(cmd, *, timeout_sec):
+        pytest.fail("invalid route must not launch a subprocess")
+
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(krh, "_run_subprocess", fail_run_subprocess)
+    payload = {
+        "trace_input": str(fake_trace),
+        "session_id": session_dir.name,
+        "framework": "sglang",
+    }
+    if payload_route is not None:
+        payload["analysis_route"] = payload_route
+
     res = await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "analysis_route": "foobar",
-            "top_k": 5,
-        },
+        payload,
         session_dir=session_dir,
     )
-    cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert "--analysis-route" in cmd and "agent" in cmd
-    codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
-    assert "invalid_analysis_route" in codes
+    assert res["status"] == "failed"
+    assert res["error_class"] == "invalid_analysis_route"
+    assert res["requested_route"] == requested_route
+    assert res["valid_routes"] == ["agent", "bypass"]
+    assert "no-LLM" in res["error"]
 
 
 @pytest.mark.asyncio
@@ -2661,8 +2739,8 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
     assert any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--skip-split" not in cmd
     assert "--num-denoise-steps" in cmd and "20" in cmd
-    # TraceLens (deterministic) route: both flags present.
-    await krh.trace_analyze_handler({**base, "analysis_route": "deterministic"}, session_dir=session_dir)
+    # TraceLens (agent) route: both flags present.
+    await krh.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
     cmd = captured["cmd"]
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert "--skip-split" in cmd
@@ -2670,75 +2748,12 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_text_gen_deterministic_escapes_to_tracelens(session_dir, monkeypatch):
-    """TraceLens stays reachable as an explicit escape hatch: text-gen with
-    analysis_route=deterministic runs the TraceLens tool, not bypass."""
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "analysis_route": "deterministic",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
-    cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert "--tracelens-root" in cmd
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_xdit_explicit_route_overrides_bypass(session_dir, monkeypatch):
-    """An explicit route wins over the xDiT bypass default (e.g. forcing the
-    TraceLens deterministic route)."""
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "deterministic", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "xdit",
-            "analysis_route": "deterministic",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
-    cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert "--analysis-route" in cmd and "deterministic" in cmd
-
-
-@pytest.mark.asyncio
 async def test_trace_analyze_handler_records_bypass_discovery_success(
     session_dir,
     monkeypatch,
 ):
-    """Deterministic route surfaces a kernel_journey discovery run labelled
-    source="bypass" (with the real hot kernels), while version provenance stays
-    under the tracelens toolchain (no junk versions["bypass"])."""
+    """The bypass route surfaces a kernel_journey discovery run labelled
+    source="bypass", carrying the real hot kernels."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2750,7 +2765,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
-            "orchestrator_mode": "deterministic",
+            "orchestrator_mode": "bypass",
             "hot_kernels": [
                 {
                     "kernel_id": "k001",
@@ -2770,15 +2785,14 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "deterministic",
+            "analysis_route": "bypass",
             "top_k": 5,
         },
         session_dir=session_dir,
     )
     assert res["status"] == "ok"
-    # The deterministic route flag is forwarded to the tool.
-    assert "--analysis-route" in captured["cmd"]
-    assert "deterministic" in captured["cmd"]
+    # The bypass route dispatches its own tool, never TraceLens.
+    assert any("bypass_trace_analysis.py" in c for c in captured["cmd"])
 
     out = assemble_parts(session_dir)
     runs = out["kernel_journey"]["discovery_runs"]
@@ -2789,8 +2803,6 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     assert run["hot_kernel_count"] == 2
     assert {k["name"] for k in run["hot_kernels"]} == {"fused_moe", "rms_norm"}
     assert run["scan"]["analysis_route"] == "bypass"
-    # Underlying toolchain is still tracelens; no empty versions["bypass"].
-    assert "bypass" not in out.get("versions", {})
 
 
 @pytest.mark.asyncio
@@ -2814,7 +2826,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "deterministic",
+            "analysis_route": "bypass",
         },
         session_dir=session_dir,
     )
@@ -2845,7 +2857,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "deterministic",
+            "analysis_route": "bypass",
             "top_k": 20,
         },
         session_dir=session_dir,
@@ -2859,7 +2871,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     session_dir,
     monkeypatch,
 ):
-    """Fail-loud deterministic pipeline -> discovery run status=failed with the
+    """Fail-loud bypass pipeline -> discovery run status=failed with the
     error text and an empty hot-kernel list, still labelled source="bypass"."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
@@ -2869,8 +2881,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "failed",
-            "orchestrator_mode": "deterministic",
-            "error": "deterministic: category script for gemm exited rc=1",
+            "orchestrator_mode": "bypass",
+            "error": "bypass: trace reader found no GPU kernel events",
             "hot_kernels": [],
         }
         return 1, json.dumps(payload), "boom"
@@ -2880,7 +2892,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "deterministic",
+            "analysis_route": "bypass",
         },
         session_dir=session_dir,
     )
@@ -2909,7 +2921,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
-            "orchestrator_mode": "deterministic",
+            "orchestrator_mode": "bypass",
             "hot_kernels": [],
             "trace_health_warnings": [
                 {"code": "high_gpu_idle", "severity": "warning"},
@@ -2922,7 +2934,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
-            "analysis_route": "deterministic",
+            "analysis_route": "bypass",
         },
         session_dir=session_dir,
     )
@@ -2941,7 +2953,14 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     monkeypatch,
 ):
     """The LLM/agent route keeps source="tracelens" (regression guard for the
-    bypass relabel)."""
+    bypass relabel), while the scan still names the route the caller asked for.
+
+    ``source`` is the toolchain label the dashboard groups by, so ``agent``
+    reports as ``tracelens``. ``scan["analysis_route"]`` is the route id, which
+    has to stay in the ``agent`` / ``bypass`` vocabulary the handler accepts --
+    recording ``tracelens`` there put a value in the field that no caller could
+    ever pass.
+    """
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2970,7 +2989,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     out = assemble_parts(session_dir)
     run = out["kernel_journey"]["discovery_runs"][0]
     assert run["source"] == "tracelens"
-    assert run["scan"]["analysis_route"] == "tracelens"
+    assert run["scan"]["analysis_route"] == "agent"
 
 
 @pytest.mark.asyncio
@@ -3490,27 +3509,22 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
     )
     assert state.last_trace_analyze.get("task_groups") == groups
     # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    state.record_kernel_opt(
-        {
-            "status": "failed",
-            "kernel_id": "k002",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-            "error_class": "subtask_exception",
-        }
+    seed_kernel_keep(
+        state,
+        "k002",
+        decision="REVERT",
+        micro=0.0,
+        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        task_group_key="k002",
     )
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k004",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-            "proposal": {"decision": "KEEP", "reasons": []},
-            "verification": {
-                "micro_speedup": 1.17,
-                "compile_passed": True,
-                "correctness_passed": True,
-                "best_artifact_path": "/tmp/k004.py",
-            },
-        }
+    seed_kernel_keep(
+        state,
+        "k004",
+        decision="KEEP",
+        micro=1.17,
+        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        artifact="/tmp/k004.py",
+        task_group_key="k004",
     )
     assert state.untried_hot_reusable_kernels() == [], (
         "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
@@ -3798,127 +3812,11 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-@pytest.mark.asyncio
-async def test_run_optimization_handler_missing_kernel_id(session_dir):
-    # ``source_file`` short-circuits the ``missing_trace_analyze`` guard so the legacy missing-kernel_id path is exercised.
-    res = await krh.run_optimization_handler(
-        {"source_file": "/tmp/dummy.py"},
-        session_dir=session_dir,
-    )
-    assert res["status"] == "failed"
-    assert "kernel_id" in res["error"]
-
-
-@pytest.mark.asyncio
-async def test_run_optimization_handler_empty_queue_skips_cleanly(session_dir, tmp_path):
-    # Empty eligible queue (all candidates non-reusable) with no specific kernel
-    # named (the post-GEMM auto pass shape) must finish as a clean skip, not a
-    # "missing 'kernel_id'" GEAK failure.
-    candidates_path = _write_candidates_json(
-        tmp_path,
-        {
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "name": "fused_moe",
-                    "source_file": "/sgl-workspace/aiter/moe.py",
-                    "reusable_native_kernel": False,
-                    "duration_us": 100.0,
-                    "gpu_pct": 12.0,
-                },
-            ],
-        },
-    )
-    assert krh._batch_kernel_candidates({"candidates_path": str(candidates_path)}) == []
-    res = await krh.run_optimization_handler(
-        {"candidates_path": str(candidates_path), "session_id": session_dir.name},
-        session_dir=session_dir,
-    )
-    assert res["status"] == "skipped"
-    assert res["reason"] == "no_eligible_kernels"
-    assert res.get("error_class") is None
-    assert res["kernels_considered"] == 1
-
-
-@pytest.mark.asyncio
-async def test_run_optimization_handler_dry_run(session_dir):
-    payload = {
-        "kernel_id": "fake_kernel_1",
-        "session_id": session_dir.name,
-        "dry_run": True,
-        "budget_minutes": 1,
-    }
-    res = await krh.run_optimization_handler(payload, session_dir=session_dir)
-    assert res.get("status") in ("ok", "succeeded", "failed")  # dry-run may still fail validation
-
-
-@pytest.mark.asyncio
-async def test_run_optimization_handler_forwards_extra_server_args(session_dir):
-    captured: dict[str, object] = {}
-
-    async def fake_run(cmd, *, timeout_sec):
-        captured["cmd"] = cmd
-        captured["timeout_sec"] = timeout_sec
-        return 0, '{"status": "ok"}', ""
-
-    payload = {
-        "kernel_id": "fake_kernel_1",
-        "session_id": session_dir.name,
-        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "extra_server_args": "--kv-cache-dtype fp8 --page-size 16",
-        "dry_run": True,
-        "_single_kernel": True,
-    }
-    with (
-        patch.object(krh, "_validate_reusable_native_kernel", return_value=None),
-        patch.object(krh, "_run_subprocess", side_effect=fake_run),
-    ):
-        res = await krh.run_optimization_handler(payload, session_dir=session_dir)
-
-    assert res["status"] == "ok"
-    cmd = captured["cmd"]
-    assert "--extra-sglang-args" in cmd
-    assert cmd[cmd.index("--extra-sglang-args") + 1] == "--kv-cache-dtype fp8 --page-size 16"
-
-
-def test_run_optimization_handler_backfills_target_platform_from_state(session_dir):
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.gpu_type = "mi325x"
-    state.save(session_dir)
-    captured: dict[str, object] = {}
-
-    async def fake_run(cmd, *, timeout_sec):
-        captured["cmd"] = cmd
-        return 0, '{"status": "ok"}', ""
-
-    payload = {
-        "kernel_id": "fake_kernel_1",
-        "session_id": session_dir.name,
-        "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "dry_run": True,
-        "_single_kernel": True,
-    }
-    with (
-        patch.object(krh, "_validate_reusable_native_kernel", return_value=None),
-        patch.object(krh, "_run_subprocess", side_effect=fake_run),
-    ):
-        res = asyncio.run(
-            krh.run_optimization_handler(payload, session_dir=session_dir),
-        )
-
-    assert res["status"] == "ok"
-    cmd = captured["cmd"]
-    assert "--target-platform" in cmd
-    assert cmd[cmd.index("--target-platform") + 1] == "mi325x"
-
-
 def test_handlers_dispatch_table():
-    """Dispatch table includes trace_analyze / run_gemm_tuning / run_optimization, not unknown kinds."""
+    """Dispatch table includes trace_analyze / run_gemm_tuning, not run_optimization or unknown kinds."""
     assert krh.has_handler("trace_analyze")
     assert krh.has_handler("run_gemm_tuning")
-    assert krh.has_handler("run_optimization")
+    assert not krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
 
@@ -3927,143 +3825,6 @@ def _write_candidates_json(tmp_path, payload):
     p = tmp_path / "kernel_candidates.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
     return p
-
-
-def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
-    """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
-    # Rows must carry gpu_pct >= 10.0 to pass the default hot-kernel gate. Both
-    # group members are above it on purpose: the collapse must be what drops
-    # k002, not the gate.
-    candidates_path = _write_candidates_json(
-        tmp_path,
-        {
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "name": "rms_norm_prefill",
-                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                    "reusable_native_kernel": True,
-                    "duration_us": 100.0,
-                    "gpu_pct": 12.0,
-                },
-                {
-                    "kernel_id": "k002",
-                    "name": "rms_norm_decode",
-                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                    "reusable_native_kernel": True,
-                    "duration_us": 50.0,
-                    "gpu_pct": 11.0,
-                },
-                {
-                    "kernel_id": "k003",
-                    "name": "other_kernel",
-                    "source_file": "/sgl-workspace/aiter/other.py",
-                    "reusable_native_kernel": True,
-                    "duration_us": 30.0,
-                    "gpu_pct": 10.5,
-                },
-            ],
-            "task_groups": [
-                {
-                    "task_group_id": "tg001",
-                    "function_name": "rms_norm",
-                    "source_path": "/sgl-workspace/aiter/rmsnorm.py",
-                    "definition_line": 10,
-                    "primary_kernel_id": "k001",
-                    "kernel_ids": ["k001", "k002"],
-                    "rows": [
-                        {"kernel_id": "k001", "name": "rms_norm_prefill"},
-                        {"kernel_id": "k002", "name": "rms_norm_decode"},
-                    ],
-                    "aggregate_duration_us": 150.0,
-                },
-            ],
-        },
-    )
-    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
-    # k001 (primary) + k003 (ungrouped) = 2 dispatches, not 3.
-    kernel_ids = [c.get("kernel_id") for c in selected]
-    assert kernel_ids == ["k001", "k003"]
-    # The primary carries the full group dict so build_prompt can render
-    # both rows as benchmark cases.
-    assert selected[0]["task_group"]["task_group_id"] == "tg001"
-    assert set(selected[0]["task_group"]["kernel_ids"]) == {"k001", "k002"}
-    # The ungrouped kernel has no task_group attached.
-    assert "task_group" not in selected[1]
-
-
-def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
-    """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
-    # Rows must carry gpu_pct >= 10.0 to be retained by the dispatcher, so the
-    # fallback member is above the gate and can only be dropped by the rejection.
-    candidates_path = _write_candidates_json(
-        tmp_path,
-        {
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "name": "rocblas_sgemm_call",
-                    "source_file": "/sgl-workspace/aiter/foo.py",
-                    "reusable_native_kernel": False,  # primary rejected
-                    "duration_us": 200.0,
-                    "gpu_pct": 22.0,
-                },
-                {
-                    "kernel_id": "k002",
-                    "name": "rms_norm_call",
-                    "source_file": "/sgl-workspace/aiter/foo.py",
-                    "reusable_native_kernel": True,
-                    "duration_us": 50.0,
-                    "gpu_pct": 12.5,
-                },
-            ],
-            "task_groups": [
-                {
-                    "task_group_id": "tg001",
-                    "function_name": "foo",
-                    "primary_kernel_id": "k001",
-                    "kernel_ids": ["k001", "k002"],
-                    "rows": [
-                        {"kernel_id": "k001"},
-                        {"kernel_id": "k002"},
-                    ],
-                },
-            ],
-        },
-    )
-    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
-    # k002 (the only reusable member) replaces the rejected primary.
-    assert [c["kernel_id"] for c in selected] == ["k002"]
-    assert selected[0]["task_group"]["task_group_id"] == "tg001"
-
-
-def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
-    """With no task_groups[] (legacy runs), the candidate list matches pre-PR-B behaviour."""
-    # Legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001.
-    candidates_path = _write_candidates_json(
-        tmp_path,
-        {
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "name": "rms_norm",
-                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                    "reusable_native_kernel": True,
-                    "gpu_pct": 11.0,
-                },
-                {
-                    "kernel_id": "k002",
-                    "name": "vendor",
-                    "source_file": "/sgl-workspace/aiter/vendor.py",
-                    "reusable_native_kernel": False,
-                    "gpu_pct": 9.0,
-                },
-            ],
-        },
-    )
-    selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
-    assert [c["kernel_id"] for c in selected] == ["k001"]
-    assert "task_group" not in selected[0]
 
 
 # Coordinator — REQUEST programmatic handler integration
@@ -4205,361 +3966,7 @@ def test_default_kernel_batch_parallel_matches_full_node():
     assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
-@pytest.mark.asyncio
-async def test_coordinator_injects_candidates_path_for_run_optimization(
-    session_dir,
-):
-    """When the LLM emits ``run_optimization`` without ``candidates_path``,
-    the Coordinator must pull it from ``state.last_trace_analyze`` and
-    inject it into the handler payload so ``_run_optimization_batch``
-    fires instead of silently collapsing to ``_run_optimization_single``
-    (which would waste 7 idle GPUs on an 8-GPU node)."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
-    # last_profile_trace set; simulate the post-baseline + post-profile state.
-    c.shared_state.baseline_tput = 1234.5
-    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
-    cached_path = "/path/cached/kernel_candidates.json"
-    c.shared_state.last_trace_analyze = {
-        "trace_input": "/path/trace/x.json.gz",
-        "candidates_path": cached_path,
-    }
-    # The gate also consults ``last_select_kernels``; seed it with the same trace.
-    c.shared_state.last_select_kernels = {
-        "trace_input": "/path/trace/x.json.gz",
-        "candidates_path": cached_path,
-    }
-    explicit = "/path/operator/override_candidates.json"
-
-    captured: dict = {}
-
-    async def fake_handler(payload, *, session_dir, **kwargs):
-        captured["payload"] = dict(payload)
-        captured["kwargs"] = kwargs
-        return {"status": "ok"}
-
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"run_optimization": fake_handler}):
-        try:
-            await c._handle_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.REQUEST,
-                    payload={
-                        "target_agent": "kernel_agent",
-                        "kind": "run_optimization",
-                        "params": {
-                            "kernel_id": "k001",
-                            "candidates_path": explicit,
-                        },
-                    },
-                ),
-            )
-            assert captured["payload"].get("candidates_path") == explicit
-        finally:
-            await c.stop()
-
-
 # Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
-@pytest.mark.asyncio
-async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
-    session_dir,
-):
-    """Each batch sub-attempt's result must flow through record_partial the
-    moment _run_kernel_backend_sequence returns, NOT only after
-    asyncio.gather() wait-all releases, so one slow GEAK sibling doesn't
-    delay integrate-queue visibility for the fast KEEPs."""
-    candidates = [
-        {"kernel_id": "kA", "source_file": "/p/a.py", "reusable_native_kernel": True},
-        {"kernel_id": "kB", "source_file": "/p/b.py", "reusable_native_kernel": True},
-        {"kernel_id": "kC", "source_file": "/p/c.py", "reusable_native_kernel": True},
-    ]
-
-    completion_log: list[str] = []
-    recorded: list[dict] = []
-
-    # Deterministic completion order kB -> kC -> kA via an explicit gate chain
-    # instead of real sleeps, so the assertion never depends on wall-clock
-    # timing (which is flaky under a loaded parallel test run).
-    _gates = {kid: asyncio.Event() for kid in ("kA", "kB", "kC")}
-    _release_after = {"kB": "kC", "kC": "kA"}  # kB done -> release kC -> release kA
-
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
-        kid = str(candidate.get("kernel_id"))
-        if kid != "kB":
-            # kC and kA wait until their predecessor signals completion.
-            await _gates[kid].wait()
-        completion_log.append(kid)
-        nxt = _release_after.get(kid)
-        if nxt:
-            _gates[nxt].set()
-        return {
-            "status": "ok",
-            "kernel_id": kid,
-            "source_file": candidate["source_file"],
-            "proposal": {"decision": "KEEP" if kid in ("kB", "kC") else "REVERT"},
-            "verification": {"micro_speedup": 1.5 if kid == "kB" else 2.0},
-        }
-
-    def record_partial(result: dict) -> None:
-        recorded.append(
-            {
-                "kernel_id": result.get("kernel_id"),
-                "decision": (result.get("proposal") or {}).get("decision"),
-            }
-        )
-
-    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
-        await krh._run_optimization_batch(
-            payload={
-                "candidates_path": "/dummy",
-                # Synthetic order avoids the forge batch serialization path; the
-                # monkeypatched sequence below is what this test exercises.
-                "backend_order": "synthetic",
-                "max_parallel": 3,
-                "parallel_backends": False,
-            },
-            candidates=candidates,
-            session_dir=session_dir,
-            record_partial=record_partial,
-        )
-
-    # Callback must have fired for every candidate, in completion order
-    # (NOT input order). kB runs ungated first, then releases kC, then kA.
-    assert [r["kernel_id"] for r in recorded] == ["kB", "kC", "kA"], recorded
-    assert completion_log == ["kB", "kC", "kA"]
-
-
-@pytest.mark.asyncio
-async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
-    """When forge already KEEPs, the ladder short-circuits."""
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    calls: list[str] = []
-
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
-        backend = child["backends"]
-        calls.append(backend)
-        if backend == "forge":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {
-                    "micro_speedup": 1.50,
-                    "correctness_passed": True,
-                    "best_artifact_path": "/tmp/forge.py",
-                },
-            }
-        raise AssertionError(f"ladder must NOT run {backend!r} after forge KEEP")
-
-    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
-        best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
-            session_dir=session_dir,
-        )
-
-    assert calls == ["forge"]
-    assert (best.get("proposal") or {}).get("decision") == "KEEP"
-    assert (best.get("verification") or {}).get("micro_speedup") == 1.50
-
-
-@pytest.mark.asyncio
-async def test_backend_sequence_forge_keep_short_circuits(session_dir, monkeypatch):
-    """Forge runs first and a KEEP short-circuits before GEAK fallback.
-
-    Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
-    the short-circuit must inspect the KEEP slot instead of comparing the tuple
-    directly to int 0.
-    """
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    calls: list[str] = []
-
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
-        backend = child["backends"]
-        calls.append(backend)
-        if backend == "forge":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.05, "best_artifact_path": "/tmp/forge.py"},
-            }
-        raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
-
-    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
-        best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
-            session_dir=session_dir,
-            parallel_backends=True,
-        )
-
-    assert calls == ["forge"]
-    assert (best.get("proposal") or {}).get("decision") == "KEEP"
-    assert best["batch_kernel_id"] == "k004"
-    assert {a["backend"] for a in best["backend_fallback_attempts"]} == {"forge"}
-
-
-@pytest.mark.asyncio
-async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
-    """Forge in-place editing is repo-global, so batch concurrency is capped at 1.
-
-    Even when GPU-rich mode says parallel backends are available, multiple
-    kernels must not race forge against other backends in the same live repo.
-    """
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    active = 0
-    max_active = 0
-    seen_flags: list[bool] = []
-
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
-        nonlocal active, max_active
-        seen_flags.append(parallel_backends)
-        active += 1
-        max_active = max(max_active, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        return {
-            "status": "ok",
-            "kernel_id": candidate["kernel_id"],
-            "proposal": {"decision": "REVERT", "reasons": []},
-            "verification": {"micro_speedup": 1.0},
-        }
-
-    monkeypatch.setattr(krh, "_should_parallelize_backends", lambda payload, n: True)
-    monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
-
-    out = await krh._run_optimization_batch(
-        {"candidates_path": "/dummy", "backend_order": "forge", "max_parallel": 8},
-        [
-            {"kernel_id": "k001", "source_file": "/p/a.py"},
-            {"kernel_id": "k002", "source_file": "/p/b.py"},
-        ],
-        session_dir=session_dir,
-    )
-
-    assert max_active == 1
-    assert seen_flags == [True, True]
-    assert out["parallel_backends"] is True
-
-
-@pytest.mark.asyncio
-async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
-    """``_run_optimization_batch`` computes the GPU-rich decision once,
-    threads it into every ``_run_kernel_backend_sequence`` call, and
-    surfaces it on the aggregate result for observability."""
-    seen_flags: list[bool] = []
-
-    async def fake_sequence(
-        base_payload,
-        candidate,
-        *,
-        session_dir,
-        parallel_backends=False,
-    ):
-        seen_flags.append(parallel_backends)
-        return {
-            "status": "ok",
-            "kernel_id": candidate["kernel_id"],
-            "source_file": candidate.get("source_file"),
-            "proposal": {"decision": "KEEP"},
-            "verification": {"micro_speedup": 1.3},
-        }
-
-    candidates = [
-        {"kernel_id": "k1", "source_file": "/p/a.py", "reusable_native_kernel": True},
-        {"kernel_id": "k2", "source_file": "/p/b.py", "reusable_native_kernel": True},
-    ]
-    # Force the decision deterministically (no real GPUs under CI); the
-    # env override short-circuits the torch/GPU math in
-    # ``_should_parallelize_backends``.
-    monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
-    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
-        out = await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 2},
-            candidates=candidates,
-            session_dir=session_dir,
-        )
-
-    assert seen_flags == [True, True], seen_flags
-    assert out["parallel_backends"] is True
-
-
-@pytest.mark.asyncio
-async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
-    session_dir,
-):
-    """Sub-task exceptions surface as structured ``failed`` results so ``gather`` stays true wait-all and doesn't unblock the Coordinator mid-batch."""
-    candidates = [
-        {"kernel_id": "kFast", "source_file": "/p/fast.py", "reusable_native_kernel": True},
-        {"kernel_id": "kCrash", "source_file": "/p/crash.py", "reusable_native_kernel": True},
-        {"kernel_id": "kSlow", "source_file": "/p/slow.py", "reusable_native_kernel": True},
-    ]
-
-    recorded: list[dict] = []
-    completion_order: list[str] = []
-
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
-        kid = str(candidate.get("kernel_id"))
-        if kid == "kFast":
-            await asyncio.sleep(0.01)
-            completion_order.append(kid)
-            return {
-                "status": "ok",
-                "kernel_id": kid,
-                "source_file": candidate["source_file"],
-                "proposal": {"decision": "KEEP"},
-                "verification": {"micro_speedup": 1.6},
-            }
-        if kid == "kCrash":
-            await asyncio.sleep(0.02)
-            completion_order.append(kid)
-            raise RuntimeError("simulated GEAK crash mid-batch")
-        # kSlow finishes last; gather must wait for it.
-        await asyncio.sleep(0.06)
-        completion_order.append(kid)
-        return {
-            "status": "ok",
-            "kernel_id": kid,
-            "source_file": candidate["source_file"],
-            "proposal": {"decision": "REVERT"},
-            "verification": {"micro_speedup": 0.9},
-        }
-
-    def record_partial(result: dict) -> None:
-        recorded.append(
-            {
-                "kernel_id": result.get("kernel_id"),
-                "status": result.get("status"),
-                "decision": (result.get("proposal") or {}).get("decision"),
-                "error_class": result.get("error_class"),
-            }
-        )
-
-    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
-        result = await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy"},
-            candidates=candidates,
-            session_dir=session_dir,
-            record_partial=record_partial,
-        )
-
-    # Gather MUST have waited for all three (kSlow finishes last).
-    assert completion_order == ["kFast", "kCrash", "kSlow"], completion_order
-
-    # record_partial got one call per candidate; the crash surfaced as a structured failed with kernel_id preserved.
-    assert [r["kernel_id"] for r in recorded] == ["kFast", "kCrash", "kSlow"]
-    crash_record = next(r for r in recorded if r["kernel_id"] == "kCrash")
-    assert crash_record["status"] == "failed"
-    assert crash_record["error_class"] == "subtask_exception"
-
-    # Batch handler still returns the best KEEP (kFast) and tags
-    # batch_mode so Coordinator's post-gather record_kernel_opt dedups.
-    assert isinstance(result, dict)
-    assert result.get("batch_mode") is True
-    assert result.get("kernel_id") == "kFast"
-
-
 @pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(
     session_dir,
@@ -4677,268 +4084,6 @@ def _candidates_factory(tmp_path):
         return str(path)
 
     return _make
-
-
-def test_batch_candidates_filters_rejected_kernel_ids(
-    session_dir,
-    _candidates_factory,
-):
-    """A kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    cpath = _candidates_factory(
-        [
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ]
-    )
-    state = SharedState.load_or_init(session_dir)
-    state.rejected_kernel_ids = ["k001"]
-    state.save(session_dir)
-
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    out_ids = sorted(c.get("kernel_id") for c in out)
-    assert out_ids == ["k002"]
-
-
-def test_batch_candidates_filters_kernels_with_recorded_attempts(
-    session_dir,
-    _candidates_factory,
-):
-    """max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    cpath = _candidates_factory(
-        [
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ]
-    )
-    state = SharedState.load_or_init(session_dir)
-    # k001 has an attempt recorded but is not yet on the rejected list (PARTIAL below max_partial).
-    state.kernel_opt_attempts = {
-        "k001": {"attempts": 1, "partial_count": 1, "last_decision": "PARTIAL"},
-    }
-    state.save(session_dir)
-
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    assert [c.get("kernel_id") for c in out] == ["k002"]
-
-
-def test_batch_candidates_task_group_falls_back_to_live_member(
-    session_dir,
-    _candidates_factory,
-):
-    """When the primary (k002) is rejected, the task_group still dispatches via the next live member (k001)."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    cpath = _candidates_factory(
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    state = SharedState.load_or_init(session_dir)
-    state.rejected_kernel_ids = ["k002"]
-    state.save(session_dir)
-
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    # Group dispatches as k001 with the original task_group attached.
-    assert len(out) == 1
-    assert out[0]["kernel_id"] == "k001"
-    assert out[0].get("task_group", {}).get("primary_kernel_id") == "k002"
-
-
-def test_batch_candidates_skips_group_when_all_members_rejected(
-    session_dir,
-    _candidates_factory,
-):
-    """If every member of a task_group is unusable, the group skips cleanly."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    cpath = _candidates_factory(
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k009", "gpu_pct": 10.0, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    state = SharedState.load_or_init(session_dir)
-    state.rejected_kernel_ids = ["k001", "k002"]
-    state.save(session_dir)
-
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    out_ids = sorted(c.get("kernel_id") for c in out)
-    # moe_op.py group fully retired; only k009 remains.
-    assert out_ids == ["k009"]
-
-
-def test_batch_candidates_skips_in_flight_kernels(
-    session_dir,
-    _candidates_factory,
-):
-    """In-flight defense: a status/ko-*.json with state=running for k004 keeps it out of the next batch."""
-    cpath = _candidates_factory(
-        [
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-        ]
-    )
-    # Plant a running status file for k004.
-    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
-    status_dir.mkdir(parents=True, exist_ok=True)
-    (status_dir / "ko-deadbeef.json").write_text(
-        json.dumps(
-            {
-                "state": "running",
-                "current_step": "run_backends",
-                "pid": 123456,
-                "last_lines": ["kernel_id=k004", "selected_backends=forge"],
-            }
-        )
-    )
-
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    out_ids = sorted(c.get("kernel_id") for c in out)
-    assert out_ids == ["k001"]
-
-
-def test_batch_candidates_below_min_gpu_pct_skipped(
-    session_dir,
-    _candidates_factory,
-    monkeypatch,
-):
-    """min_gpu_pct env=5.0 keeps tiny rmsnorm kernels out of the batch."""
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "5.0")
-    cpath = _candidates_factory(
-        [
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k005", "gpu_pct": 2.8, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-        ]
-    )
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
-    )
-    out_ids = sorted(c.get("kernel_id") for c in out)
-    assert out_ids == ["k001"]
-
-
-def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
-    session_dir,
-    _candidates_factory,
-):
-    """The dispatch batch and the phase-advance gate must apply the same GPU floor.
-
-    ``_batch_kernel_candidates`` decides what a dispatch actually runs;
-    ``SharedState.untried_hot_reusable_kernels`` decides whether KERNEL still
-    owes work and what the report calls unattempted. Drift either way is a live
-    defect: a lower batch floor advances the phase past kernels it would still
-    dispatch, a lower state floor holds the phase open on kernels no dispatch
-    will ever pick up. So assert the two selections are equal, not merely that
-    each contains what this test expected.
-
-    The straddling pair is derived from the shipped default instead of written
-    in. Hardcoding it is what let this test go on asserting a 10% boundary at a
-    5% default, and pinning the default's own value is already
-    ``test_untried_hot_kernels_returns_only_reusable_above_threshold``'s job.
-
-    Every candidate gets its own source file. When two share one, the batch
-    side's op-fanout dedup merges the weaker away and the exclusion passes for a
-    reason the floor had no part in -- which is how the 10% assertion above kept
-    passing at a 5% default.
-    """
-    from hyperloom.orchestrator.state.kernel_decision_settings import (
-        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT as floor,
-    )
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    margin = 0.13
-    assert floor - margin > 0, f"floor {floor} too small to straddle by {margin}"
-    hot_kernels = [
-        {
-            "kernel_id": "k001",
-            "gpu_pct": round(floor + 30.0, 2),
-            "reusable_native_kernel": True,
-            "source_file": "/p/moe_op.py",
-        },
-        {
-            "kernel_id": "k006",
-            "gpu_pct": round(floor - margin, 2),
-            "reusable_native_kernel": True,
-            "source_file": "/p/rmsnorm.py",
-        },
-        {
-            "kernel_id": "k008",
-            "gpu_pct": round(floor + margin, 2),
-            "reusable_native_kernel": True,
-            "source_file": "/p/silu_and_mul.py",
-        },
-    ]
-    cpath = _candidates_factory(hot_kernels)
-
-    state = SharedState.load_or_init(session_dir)
-    state.last_trace_analyze = {"hot_kernels": hot_kernels, "task_groups": []}
-    state.save(session_dir)
-
-    skipped: dict[str, str] = {}
-    batch_ids = sorted(
-        c.get("kernel_id")
-        for c in krh._batch_kernel_candidates(
-            {"candidates_path": cpath},
-            session_dir=session_dir,
-            skipped_out=skipped,
-        )
-    )
-
-    assert batch_ids == ["k001", "k008"], (batch_ids, skipped)
-    # The floor, not the dedup, has to be what dropped the sub-threshold row.
-    assert "below_min_gpu_pct" in skipped.get("k006", ""), skipped
-    assert sorted(state.untried_hot_reusable_kernels()) == batch_ids
-
-
-def test_in_flight_kernel_ids_returns_running_only(session_dir):
-    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
-    status_dir.mkdir(parents=True, exist_ok=True)
-    (status_dir / "ko-aaa.json").write_text(
-        json.dumps(
-            {
-                "state": "running",
-                "last_lines": ["kernel_id=k001"],
-            }
-        )
-    )
-    (status_dir / "ko-bbb.json").write_text(
-        json.dumps(
-            {
-                "state": "succeeded",
-                "last_lines": ["kernel_id=k002"],
-            }
-        )
-    )
-    out = krh._in_flight_kernel_ids(session_dir)
-    assert out == {"k001"}
 
 
 def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(

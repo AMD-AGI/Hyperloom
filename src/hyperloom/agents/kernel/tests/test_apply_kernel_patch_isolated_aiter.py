@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -78,7 +79,7 @@ def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tm
     )
 
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is True
     assert strat["root"] == str(site)
@@ -97,7 +98,7 @@ def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_pa
     )
 
     target = aiter_pkg / "ops" / "triton" / "k.py"
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is False
     assert strat["rebuild_mode"] == "none"
@@ -123,7 +124,7 @@ def test_installed_aiter_strategy_preserves_symlinked_site_packages(
     )
     target = linked_site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
 
-    strategy = akp._detect_strategy(target, allow_unknown_target=False)
+    strategy = akp._detect_strategy(target)
 
     assert strategy["root"] == str(linked_site.absolute())
     assert strategy["rebuild_mode"] == "runtime_jit"
@@ -139,7 +140,7 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     )
 
     target = Path("/sgl-workspace/aiter/csrc/kernels/foo.cu")
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is True
     assert strat["root"] == "/sgl-workspace/aiter"
@@ -255,10 +256,7 @@ def test_editable_aiter_csrc_python_keeps_source_only_strategy(
         ("/sgl-workspace/aiter/",),
     )
 
-    strategy = akp._detect_strategy(
-        Path("/sgl-workspace/aiter") / relative,
-        allow_unknown_target=False,
-    )
+    strategy = akp._detect_strategy(Path("/sgl-workspace/aiter") / relative)
 
     assert strategy["compiled"] is False
     assert strategy["root"] == "/sgl-workspace/aiter"
@@ -316,10 +314,7 @@ def test_unknown_snapshot_layout_keeps_fail_fast_root(
         "_CACHED_KNOWN_TARGET_ROOTS",
         (str(framework_root) + "/",),
     )
-    strategy = akp._detect_strategy(
-        target,
-        allow_unknown_target=False,
-    )
+    strategy = akp._detect_strategy(target)
     assert strategy["root"] == ""
     assert strategy["deploy_roots"] == []
     patch = tmp_path / "forge.patch"
@@ -1059,3 +1054,89 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
     assert result["jit_build_backup"]["status"] == "remote"
     assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
     assert local_stale.is_file()
+
+
+def _cpp_itfs_backup(build_dir, *, invalidated_unix=1_700_000_000.0, module_names=None, is_cpp_itfs=True):
+    return {
+        "is_cpp_itfs": is_cpp_itfs,
+        "build_dir": "" if build_dir is None else str(build_dir),
+        "invalidated_unix": invalidated_unix,
+        "module_names": list(module_names or []),
+    }
+
+
+def _write_lib_so(path: Path, *, mtime: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"so")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_verify_cpp_itfs_rebuilt_skips_non_cpp_itfs_targets(akp, tmp_path):
+    got = akp.verify_cpp_itfs_rebuilt(_cpp_itfs_backup(tmp_path, is_cpp_itfs=False))
+    assert got == {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
+    assert akp.verify_cpp_itfs_rebuilt("not-a-dict")["status"] == "skipped"
+
+
+def test_verify_cpp_itfs_rebuilt_rejects_absent_and_empty_build_dir(akp, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    unrelated = _write_lib_so(tmp_path / "unrelated" / "lib.so", mtime=1_700_000_000)
+
+    empty = akp.verify_cpp_itfs_rebuilt(_cpp_itfs_backup(None, module_names=[]))
+    assert empty["verified"] is False
+    assert empty["status"] == "stale"
+    assert "absent" in empty["reason"]
+
+    missing = akp.verify_cpp_itfs_rebuilt(_cpp_itfs_backup(tmp_path / "gone"))
+    assert missing["verified"] is False
+    assert missing["status"] == "stale"
+    assert "absent" in missing["reason"]
+    assert str(unrelated) not in missing.get("fresh_lib_so", [])
+
+
+def test_verify_cpp_itfs_rebuilt_mtime_slack_and_module_glob(akp, tmp_path):
+    build_dir = tmp_path / "cpp_itfs_build"
+    mtime = 1_700_000_000
+    scoped = _write_lib_so(build_dir / "attn_abc" / "lib.so", mtime=mtime)
+    other = _write_lib_so(build_dir / "other_xyz" / "lib.so", mtime=mtime)
+
+    stale = akp.verify_cpp_itfs_rebuilt(
+        _cpp_itfs_backup(build_dir, invalidated_unix=mtime + 2.0, module_names=["attn"])
+    )
+    assert stale["verified"] is False
+    assert stale["status"] == "stale"
+    assert "no freshly-built" in stale["reason"]
+
+    slack = akp.verify_cpp_itfs_rebuilt(
+        _cpp_itfs_backup(build_dir, invalidated_unix=mtime + 1.0, module_names=["attn"])
+    )
+    assert slack["verified"] is True
+    assert slack["status"] == "ok"
+    assert slack["fresh_lib_so"] == [str(scoped)]
+    assert str(other) not in slack["fresh_lib_so"]
+
+    fallback = akp.verify_cpp_itfs_rebuilt(_cpp_itfs_backup(build_dir, invalidated_unix=mtime, module_names=[]))
+    assert fallback["verified"] is True
+    assert set(fallback["fresh_lib_so"]) == {str(scoped), str(other)}
+
+
+def test_verify_cpp_itfs_rebuilt_uses_invalidation_record(akp, tmp_path):
+    target = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "kernel.cu"
+    target.parent.mkdir(parents=True)
+    target.write_text("kernel", encoding="utf-8")
+    build_dir = tmp_path / "cpp_itfs_build"
+    backup = tmp_path / "backup"
+    backup.mkdir()
+
+    record = akp._invalidate_aiter_cpp_itfs_cache(target, backup, build_dir_override=build_dir)
+    assert record["is_cpp_itfs"] is True
+    absent = akp.verify_cpp_itfs_rebuilt(record)
+    assert absent["verified"] is False
+    assert "absent" in absent["reason"]
+
+    _write_lib_so(build_dir / "fresh_mod" / "lib.so", mtime=2_000_000_000)
+    record["invalidated_unix"] = 1_700_000_000.0
+    record["module_names"] = []
+    fresh = akp.verify_cpp_itfs_rebuilt(record)
+    assert fresh["verified"] is True
+    assert fresh["status"] == "ok"

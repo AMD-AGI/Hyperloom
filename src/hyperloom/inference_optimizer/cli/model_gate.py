@@ -1883,10 +1883,10 @@ def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[
 
 
 def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import record_write_warning, write_timeline_event
+    from ..session.sbd_v6 import record_write_warning, write_timeline_event_at
 
     try:
-        write_timeline_event(session_dir, event)
+        write_timeline_event_at(session_dir, event)
     except Exception as exc:  # noqa: BLE001 — observability must never change gate behavior
         log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
         if not record_write_warning(session_dir, component="model_gate.event", exc=exc):

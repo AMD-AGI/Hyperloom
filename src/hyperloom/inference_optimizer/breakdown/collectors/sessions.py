@@ -26,7 +26,6 @@ from ._common import (
     _benchmark_report_candidates,
     _benchmark_report_metrics,
     _find_benchmark_report,
-    _latest_benchmark_report,
     _load_json_safe,
     _rel,
     _resolve_under_session,
@@ -1089,6 +1088,7 @@ def collect_baseline(
     from ... import framework_registry
 
     return {
+        # Whole-server total; the key name is a wire-contract misnomer.
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
         # Framework-dependent unit (serving = tok/s, scriptable xDiT = img/s).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
@@ -1195,9 +1195,8 @@ def collect_final(
 
     Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
     builds the ordered ``action_path`` from ``optimization_stack``, and — when
-    ``current_best`` lacks ttft / e2el — reconstructs them from disk (latest
-    ``validate_stack`` report first, then ``current_best``'s own workspace,
-    then the top stack entry's report),
+    ``current_best`` lacks ttft / e2el — reconstructs them from disk
+    (``current_best``'s own workspace, then the top stack entry's report),
     recording the provenance in ``ttft_e2el_source`` and a ``warnings`` note.
     Also assembles the replayable launch ``invocation``.
 
@@ -1228,22 +1227,16 @@ def collect_final(
     e2el = _to_float(cb.get("e2el_mean_ms"))
     ttft_e2el_source = "current_best" if (ttft is not None or e2el is not None) else "unavailable"
 
-    # Disk-walk reconstruction when a latency metric is unset: validate_stack
-    # first (authoritative), then current_best, then stack top. Gate on EITHER
-    # metric so xDiT diffusion (ttft meaningless, e2el meaningful) is covered.
+    # Disk-walk reconstruction when a latency metric is unset.
     reconstructed_report: Path | None = None
     if ttft is None or e2el is None:
-        reconstructed_report = _find_latest_validate_stack_report(session_dir)
+        reconstructed_report = _find_current_best_report(session_dir, state)
         if reconstructed_report is not None:
-            ttft_e2el_source = "validate_stack_disk"
+            ttft_e2el_source = "current_best_disk"
         else:
-            reconstructed_report = _find_current_best_report(session_dir, state)
+            reconstructed_report = _find_stack_top_report(session_dir, state)
             if reconstructed_report is not None:
-                ttft_e2el_source = "current_best_disk"
-            else:
-                reconstructed_report = _find_stack_top_report(session_dir, state)
-                if reconstructed_report is not None:
-                    ttft_e2el_source = "stack_top_disk"
+                ttft_e2el_source = "stack_top_disk"
     if reconstructed_report is not None:
         report = _load_json_safe(reconstructed_report, warnings)
         if isinstance(report, dict):
@@ -1282,6 +1275,7 @@ def collect_final(
     from ... import framework_registry
 
     return {
+        # Whole-server total; the key name is a wire-contract misnomer.
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
         # True throughput unit (tok/s vs img/s for scriptable xDiT).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
@@ -1307,24 +1301,6 @@ def collect_final(
         "closing_started_unix": float(state.get("closing_started_unix") or 0.0),
         "closing_report_task_id": str(state.get("closing_report_task_id") or ""),
     }
-
-
-def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
-    """Most-recent validate_stack benchmark_report.json (authoritative for the final stack's clock).
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        Path | None: The newest ``benchmark_report.json`` under
-        ``runs/validate_stack/``, or ``None`` when none exist.
-    """
-    root = session_dir / "runs" / "validate_stack"
-    if not root.exists():
-        return None
-    return _latest_benchmark_report(
-        p for task_dir in root.iterdir() if task_dir.is_dir() for p in _benchmark_report_candidates(task_dir)
-    )
 
 
 def _find_current_best_report(
@@ -1356,7 +1332,7 @@ def _find_stack_top_report(
     session_dir: Path,
     state: dict[str, Any],
 ) -> Path | None:
-    """Last optimization_stack entry's benchmark_report.json (next-best when no validate_stack run exists).
+    """Last optimization_stack entry's benchmark_report.json (next-best fallback).
 
     Args:
         session_dir (Path): Absolute session root.

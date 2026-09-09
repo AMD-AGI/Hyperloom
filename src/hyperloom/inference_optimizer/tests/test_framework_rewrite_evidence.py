@@ -317,6 +317,76 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
         assert row["last_s"] >= row["first_s"]
 
 
+def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
+    """Tier 2's ``first_s`` must latch a real timestamp, not sit on its sentinel.
+
+    ``_CallStats.first_s`` starts at ``-1.0`` and the hook latches with
+    ``if stats.first_s < 0``, so a sentinel of ``0.0`` would leave every tier-2
+    row reporting ``first_s == 0.0`` for the process lifetime. The aggregator
+    reads that field as "started at probe init", which is its set-up-work
+    signal, so the mutant silently demotes every hot-path function.
+
+    ``first_s >= 0.0`` cannot see that. Instead the probe's monotonic baseline
+    is shifted back by a known offset, so every timestamp the hook derives is
+    provably past the offset while the sentinel is not.
+    """
+    framework_root = tmp_path / "fake_framework"
+    framework_root.mkdir()
+    module_path = framework_root / "stepper.py"
+    module_path.write_text(
+        "def step(i):\n"
+        "    return (i * 3) % 7\n"
+        "\n"
+        "def run(n):\n"
+        "    total = 0\n"
+        "    for i in range(n):\n"
+        "        total += step(i)\n"
+        "    return total\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("fake_framework_stepper", module_path)
+    assert spec is not None and spec.loader is not None
+    target = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(target)
+
+    probe = probe_module.HostProbe(
+        out_dir=str(tmp_path / "out"),
+        roots=(str(framework_root) + "/",),
+        deep=True,
+    )
+    # ``at_s = perf_counter() - _perf_started`` is the hook's only time base and
+    # perf_counter is monotonic, so shifting the origin back puts every observed
+    # timestamp at or beyond the offset by construction -- no clock patching and
+    # no dependence on the workload taking a measurable amount of time.
+    offset_s = 100.0
+    probe._perf_started -= offset_s
+
+    probe._install_tier2()
+    try:
+        target.run(8)
+    finally:
+        probe.uninstall()
+
+    written = probe.write_report()
+    assert written
+    payload = json.loads(Path(written).read_text(encoding="utf-8"))
+    rows = {row["function"].rsplit(":", 1)[-1]: row for row in payload["framework_calls"]}
+    assert rows["step"]["count"] == 8
+
+    for row in payload["framework_calls"]:
+        # A sentinel the ``< 0`` latch can never replace reports 0.0 and fails here.
+        assert row["first_s"] >= offset_s, row
+        assert row["first_s"] <= offset_s + 60.0, row
+        assert row["last_s"] >= row["first_s"], row
+
+    # The latch kept the FIRST timestamp instead of overwriting it every call.
+    # Read the accumulator, not the report: report() rounds to 3 decimals, which
+    # can collapse two genuinely distinct sub-millisecond timestamps.
+    step_label = next(label for label in probe._calls if label.endswith(":step"))
+    step_stats = probe._calls[step_label]
+    assert step_stats.last_s > step_stats.first_s
+
+
 def test_probe_wraps_the_implicit_conversion_dunders(probe_module, tmp_path):
     """``if scalar_tensor == 0`` syncs, and the probe has to count it as one.
 

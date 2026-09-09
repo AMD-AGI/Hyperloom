@@ -9,7 +9,6 @@ capture directories, and has a dry-run path that works without TraceLens install
 """
 
 import argparse
-import ast
 import asyncio
 import contextlib
 import csv
@@ -32,13 +31,6 @@ from typing import Any
 
 try:
     from hyperloom.orchestrator.framework.paths import (
-        resolve_patch_target_roots as _resolve_patch_target_roots,
-    )
-except ImportError:
-    _resolve_patch_target_roots = None
-
-try:
-    from hyperloom.orchestrator.framework.paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     )
 except ImportError:
@@ -51,9 +43,13 @@ try:
     from hyperloom.orchestrator.framework.paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_known_source_prefixes as _resolve_known_source_prefixes,
+    )
 except ImportError:
     _FRAMEWORK_SOURCE_PACKAGES = None
     _resolve_kernel_search_roots = None
+    _resolve_known_source_prefixes = None
 
 try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
@@ -76,9 +72,6 @@ except Exception:
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from tracelens_skill_runner import (
-    _LAUNCHER_PATH_PLACEHOLDERS,
-    _parse_launcher_path,
-    _resolve_launcher_to_abs_source,
     aggregate_by_source_function,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
@@ -89,7 +82,10 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
+from _bypass_report import partition_kernels
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
 from _nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
@@ -115,10 +111,6 @@ from _roofline_source import (
     ANALYTICAL as _RL_ANALYTICAL,
     PLACEHOLDER as _RL_PLACEHOLDER,
 )
-
-# Shared canonical analysis.md renderer so the deterministic route emits the same
-# section structure + table schemas as the bypass route.
-from _analysis_md import render_report
 
 # Vendor-operator-playbook registry: routes a closed-source vendor op (no
 # rewritable device source) to a validated KernelForge task bundle instead of
@@ -210,7 +202,6 @@ _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
-_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
 # Active-finder resolver: resolve a kernel to its editable source in the
 # *currently installed* framework tree by demangling its device symbol. This is
@@ -336,11 +327,6 @@ class OpResolution:
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
 ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 
-ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
-ANALYSIS_ROUTE_DETERMINISTIC = "deterministic"
-ANALYSIS_ROUTE_AGENT = "agent"
-_VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
-
 
 def _is_safe_litellm_gateway() -> bool:
     """True when the Claude SDK targets a strict LiteLLM-style gateway (#574).
@@ -440,6 +426,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
         import _bypass_trace_reader as _reader
 
         analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        if analyze.get("truncated"):
+            return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
     except Exception:  # noqa: BLE001 - guard is advisory; never block on it
@@ -927,21 +915,6 @@ def _check_selected_chunk_has_gpu_events_quality(
     }
 
 
-KERNEL_HINTS = (
-    "kernel",
-    "triton",
-    "hip",
-    "cuda",
-    "rocblas",
-    "hipblas",
-    "aiter",
-    "fmha",
-    "gemm",
-    "attention",
-    "moe",
-    "rmsnorm",
-    "layernorm",
-)
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
     "hipdevicesynchronize",
@@ -1842,20 +1815,22 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 
 
 @functools.lru_cache(maxsize=1)
-def _framework_patch_roots() -> tuple[str, ...]:
-    """Resolve framework install roots for patch-target matching.
+def _framework_source_roots() -> tuple[str, ...]:
+    """Resolve framework install roots for reusable-source matching.
 
-    Roots come from ``framework_paths.resolve_patch_target_roots``; a
-    lower-case variant of each (e.g. ``/app/ATOM/atom/`` ->
-    ``/app/atom/atom/``) is also emitted for case-insensitive matching.
+    Roots come from ``framework_paths.resolve_known_source_prefixes`` -- a
+    kernel path can name a tree that exists on the serving pod and not here, so
+    matching must not be filtered by what is on this host. A lower-case variant
+    of each (e.g. ``/app/ATOM/atom/`` -> ``/app/atom/atom/``) is also emitted
+    for case-insensitive matching.
 
     Returns:
         The framework install roots, including lower-case variants.
     """
     try:
-        if _resolve_patch_target_roots is None:
+        if _resolve_known_source_prefixes is None:
             raise ImportError
-        roots = _resolve_patch_target_roots()
+        roots = _resolve_known_source_prefixes()
     except ImportError:
         if _known_target_roots is None:
             roots = []
@@ -1916,7 +1891,7 @@ def _reusable_roots() -> tuple[str, ...]:
         tuple[str, ...]: Discovered framework roots plus the aiter csrc root
             and FlyDSL checkout roots, deduplicated.
     """
-    roots = _framework_patch_roots()
+    roots = _framework_source_roots()
     csrc = _aiter_csrc_root()
     if csrc and csrc not in roots:
         roots = roots + (csrc,)
@@ -3332,6 +3307,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                         "--include=*.cuh",
                         "--include=*.hip",
                         "--include=*.sh",
+                        "--",
                         keyword,
                         str(sub_root),
                     ],
@@ -3688,6 +3664,9 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
             "all_gather",
             "allgather",
             "reduce_scatter",
+            "reducescatter",
+            "all_to_all",
+            "alltoall",
             "broadcast",
             "p2p",
             "send_recv",
@@ -4042,9 +4021,9 @@ def _resolve_shapes_from_ops_unique_args_csv(
                 if not row_matches(name):
                     continue
                 try:
-                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
-                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
-                except (ValueError, SyntaxError):
+                    dims = _safe_literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = _safe_literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except _LITERAL_EVAL_ERRORS:
                     continue
                 if not isinstance(dims, (list, tuple)):
                     continue
@@ -4067,9 +4046,9 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
     raw_types = str(row.get("Input type") or "").strip()
     raw_concrete = str(row.get("Concrete Inputs") or "").strip()
     try:
-        dims = ast.literal_eval(raw_dims or "()")
-        dtypes = ast.literal_eval(raw_types or "()")
-    except (ValueError, SyntaxError):
+        dims = _safe_literal_eval(raw_dims or "()")
+        dtypes = _safe_literal_eval(raw_types or "()")
+    except _LITERAL_EVAL_ERRORS:
         return None
     if not isinstance(dims, (list, tuple)):
         return None
@@ -4368,12 +4347,12 @@ def _clean_category_label(raw: str) -> str:
     s = str(raw or "").strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            val = ast.literal_eval(s)
+            val = _safe_literal_eval(s)
             if isinstance(val, (list, tuple)) and val:
                 return str(val[0]).strip()
             if isinstance(val, (list, tuple)):
                 return ""
-        except (ValueError, SyntaxError):
+        except _LITERAL_EVAL_ERRORS:
             s = s.strip("[]")
     return s.strip().strip("'\"").strip()
 
@@ -4860,7 +4839,17 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
-    item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
+    # The nccl-summary lane identifies collectives from TraceLens' own
+    # nccl_summary table plus a resolved device symbol, which outranks a name
+    # guess. Re-deriving over it unresolves rows the lane already resolved:
+    # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1
+    # all carry is_multigpu=True from _nccl_summary_candidates and all read False
+    # by name. That flip also disqualifies them at is_collective_candidate
+    # (_kernel_decisions.py), which gates the lane on candidate_source ==
+    # "nccl_summary" AND is_multigpu -- so the lane refuses its own rows.
+    authoritative = bool(item.get("is_multigpu")) and str(item.get("candidate_source") or "") == "nccl_summary"
+    if not authoritative:
+        item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
     item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
     item["recommended_backends"] = recommend_backends(item)
     item["optimization_notes"] = build_notes(item)
@@ -4916,23 +4905,6 @@ def _runtime_server_args_from_config(config_path: str) -> str:
         for key, value in envs.items()
         if str(key).startswith("EXTRA_") and str(key).endswith("_ARGS") and str(value).strip()
     )
-
-
-def _source_context_block() -> str:
-    """Render the shared runtime context for a model tier, or "" when absent."""
-    try:
-        from _llm_source_context import build_context_block  # noqa: PLC0415
-
-        return build_context_block(
-            model_path=_RUNTIME_CONTEXT.get("model_path") or "",
-            server_args=_RUNTIME_CONTEXT.get("server_args") or "",
-            framework_roots=kernel_search_roots(),
-            framework=_RUNTIME_CONTEXT.get("framework") or "",
-            precision=_RUNTIME_CONTEXT.get("precision") or "",
-        )
-    except Exception as exc:  # noqa: BLE001 - context is an aid, never required
-        log.warning("could not build source-resolution context: %r", exc)
-        return ""
 
 
 def _forward_to_log(message: str) -> None:
@@ -5401,13 +5373,13 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             confidence=item.get("source_resolution_confidence"),
             reason=str(item.get("source_resolution_reason") or ""),
             rejected_value=str(item.get("source_file_rejected") or ""),
-            # The names ``apply_revisions`` actually writes. The
-            # ``source_resolution_previous_*`` spelling read here before has no
-            # producer anywhere in the tree, so the audit's previous-path
-            # columns were empty for every row the review rewrote -- the one
-            # case they exist to record.
-            previous_source_file=str(item.get("previous_source_file") or ""),
-            previous_method=str(item.get("previous_method") or ""),
+            # Classify from the routing gate's own verdict, so the artifact
+            # reports why a kernel is undispatchable rather than only how many.
+            reason_class=_KSC.classify_skip_reason(
+                reusable=item.get("reusable_native_kernel"),
+                skip_reason=item.get("skip_reason"),
+                source_file=item.get("source_file"),
+            ),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -5452,42 +5424,6 @@ _SOURCE_DERIVED_METADATA = (
 )
 
 
-def _is_curated_resolution(item: dict[str, Any]) -> bool:
-    """Whether this candidate's source came from a deterministic, authoritative tier.
-
-    The active finder demangles the device symbol and pins the actual editable
-    source in the installed tree; a model shown a path and forty lines cannot
-    outrank that, so finder resolutions (like the retired curated map before
-    them) are not open to LLM rewriting.
-
-    A vendor-playbook match qualifies on the same grounds and regardless of
-    which tier resolved the path it replaced: the registry states that the
-    operator is tuned through a task bundle, and ``source_file`` holds that
-    bundle's anchor. Leaving it unprotected would let a review proposal point
-    the field back at framework source and route the candidate to a backend
-    that has nothing to rewrite there.
-
-    Unconditional for a playbook match, because a matched playbook always has
-    an anchor: :func:`load_vendor_operator_playbooks` refuses an entry without
-    one. Scoping this on a per-row marker instead is what let a row with no
-    anchor and no path read as protected.
-    """
-    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook":
-        return True
-    status = str(item.get("op_to_source_status") or "").strip()
-    method = str(item.get("source_resolution_method") or "").strip()
-    authoritative = {
-        getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder"),
-        getattr(_KSC, "METHOD_SYMBOL_INDEX", "symbol_index"),
-        getattr(_KSC, "METHOD_CURATED", "op_to_source"),
-    }
-    return method in authoritative and status in {
-        _ROUTABLE_STATUS,
-        "non_rewritable",
-        "no_kernel",
-    }
-
-
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,
@@ -5521,14 +5457,25 @@ def write_source_resolution_artifact(
             return None
         path = Path(out_path)
         atomic_write_json(path, doc)
-        final_entries = doc.get("entries") or []
-        resolved = sum(1 for entry in final_entries if entry.get("source_file"))
-        summary = f"source resolution: {resolved}/{len(final_entries)} kernel(s) located -> {path.name}"
-        log.info("%s", summary)
+        summary = _KSC.summarize_resolution(doc.get("entries") or [])
+        line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
+        # A count alone cannot say whether the unlocated kernels were worth
+        # chasing, so report the GPU share behind each class next to it.
+        if summary["undispatchable_gpu_pct"] > 0.0:
+            line += (
+                f"; {summary['undispatchable_gpu_pct']:.1f}% GPU undispatchable"
+                f" ({summary['recoverable']} recoverable, {summary['unsalvageable']} unsalvageable)"
+            )
+        for reason_class, count in sorted(summary["by_class"].items()):
+            line += f"; {reason_class}={count}"
+        log.info("%s", line)
         if log_path:
-            append_log(log_path, summary)
+            append_log(log_path, line)
         return path
-    except Exception as exc:  # noqa: BLE001 - reporting aid, never fails the run
+    except (OSError, TypeError, ValueError, AttributeError, KeyError) as exc:
+        # Reporting aid: a write or projection failure must not fail the run,
+        # but it is logged with its type so a silent gap is not mistaken for
+        # "every kernel resolved".
         log.warning("could not write source-resolution artifact: %r", exc)
         return None
 
@@ -5577,116 +5524,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     if not candidate.get("reusable_native_kernel", classify_patchability(candidate)[0]):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
-
-
-# ---------------------------------------------------------------------------
-# Deterministic analysis route — runs TraceLens Python toolchain without LLM
-# ---------------------------------------------------------------------------
-
-_CATEGORY_ANALYSIS_ROUTES: dict[str, tuple[str, str | None]] = {
-    "convolution": ("convolution", None),
-    "conv_fwd": ("convolution", "conv_fwd"),
-    "conv_bwd": ("convolution", "conv_bwd"),
-    "customcollective": ("other", "customcollective"),
-    "elementwise": ("elementwise", None),
-    "gemm": ("gemm", None),
-    "groupedgemm_fwd": ("gemm", "groupedgemm_fwd"),
-    "groupedgemm_bwd": ("gemm", "groupedgemm_bwd"),
-    "inferenceattention": ("sdpa", "inferenceattention"),
-    "moe_fused": ("moe", "moe_fused"),
-    "moe_unfused": ("moe", "moe_unfused"),
-    "norm": ("norm", None),
-    "norm_fwd": ("norm", "norm_fwd"),
-    "norm_bwd": ("norm", "norm_bwd"),
-    "other": ("other", "other"),
-    "reduce": ("reduce", None),
-    "rmsnorm": ("norm", "rmsnorm"),
-    "sdpa": ("sdpa", "sdpa_fwd"),
-    "sdpa_fwd": ("sdpa", "sdpa_fwd"),
-    "sdpa_bwd": ("sdpa", "sdpa_bwd"),
-    "triton": ("triton", None),
-}
-_SKIP_DETERMINISTIC_CATEGORIES: set[str] = {
-    "cpu_idle",
-    "kernel_fusion",
-    "multi_kernel",
-}
-
-
-def _category_analysis_command(
-    cat_name: str,
-    tier: str,
-    output_dir: Path,
-) -> list[str] | None:
-    """Return the TraceLens category-analysis command for one manifest category.
-
-    Args:
-        cat_name: The manifest category name (e.g. ``sdpa_fwd`` / ``norm_bwd``).
-        tier: The category tier; only ``compute_kernel`` produces a command.
-        output_dir: The analysis output directory passed to the tool.
-
-    Returns:
-        The TraceLens command argv for the category, or ``None`` when the
-        category is skipped or unroutable.
-    """
-    if tier != "compute_kernel":
-        return None
-    if cat_name in _SKIP_DETERMINISTIC_CATEGORIES:
-        return None
-    route = _CATEGORY_ANALYSIS_ROUTES.get(cat_name)
-    if route is None:
-        return None
-    script_base, category_arg = route
-    if script_base == "gemm" and category_arg is not None:
-        # TraceLens gemm_analysis.py hard-codes category="gemm" and has no
-        # --category flag; reuse its helpers while passing the manifest category.
-        snippet = (
-            "from TraceLens.Agent.Analysis.category_analyses.gemm_analysis "
-            "import classify_gemm_operation, extract_category_specific; "
-            "from TraceLens.Agent.Analysis.category_analyses.analysis_utils "
-            "import run_category_analysis; "
-            "run_category_analysis("
-            f"category={cat_name!r}, "
-            f"output_dir={str(output_dir)!r}, "
-            "config={"
-            "'extra_fields': ['Input Dims', 'Input type', 'has_perf_model'], "
-            "'operation_classifier': classify_gemm_operation"
-            "}, "
-            "extract_fn=extract_category_specific"
-            ")"
-        )
-        return [sys.executable, "-c", snippet]
-    cmd = [
-        sys.executable,
-        "-m",
-        f"TraceLens.Agent.Analysis.category_analyses.{script_base}_analysis",
-        "--output-dir",
-        str(output_dir),
-    ]
-    if category_arg is not None:
-        cmd += ["--category", category_arg]
-    return cmd
-
-
-def _raise_on_failed_deterministic_pipeline(
-    det_rc: int,
-) -> None:
-    """Fail deterministic route on any TraceLens deterministic toolchain error.
-
-    Args:
-        det_rc: Return code from the deterministic TraceLens pipeline.
-
-    Raises:
-        RuntimeError: When ``det_rc`` is non-zero, to avoid returning partial
-            ``hot_kernels[]``.
-    """
-    if det_rc == 0:
-        return
-    raise RuntimeError(
-        "Deterministic TraceLens pipeline failed "
-        f"(rc={det_rc}); refusing to return partial hot_kernels[]. "
-        "Inspect the tracelens/ artifacts and logs."
-    )
 
 
 #: Mirrors of the registry, used only when that package is not importable
@@ -5743,148 +5580,6 @@ def _has_diffusion_ceiling(framework: str | None) -> bool:
         return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
 
 
-def _run_deterministic_tracelens_steps(
-    trace_path: Path,
-    output_dir: Path,
-    tl_root: Path,
-    *,
-    platform: str,
-    analysis_mode: str,
-    framework: str,
-    capture_folder: Path | None,
-    log_path: Path,
-    budget_minutes: float,
-) -> int:
-    """Run the TraceLens deterministic pipeline (Steps 1 + 2-5 + 7 scripts + 7.5).
-
-    Invokes the CLI tools as subprocesses so they run in the TraceLens
-    package environment. Returns 0 on success.
-
-    Args:
-        trace_path: Path to the trace fed into the pipeline.
-        output_dir: Directory the pipeline writes its artifacts into.
-        tl_root: TraceLens package root used as the subprocess cwd.
-        platform: GPU arch platform string passed to the tools.
-        analysis_mode: The analysis mode selector.
-        framework: The serving framework name.
-        capture_folder: Optional TraceLens capture folder.
-        log_path: Log file the subprocess output is appended to.
-        budget_minutes: Time budget used to derive the subprocess timeout.
-
-    Returns:
-        ``0`` on success, else the first non-zero subprocess return code.
-    """
-    timeout_s = max(120, int(budget_minutes * 60))
-
-    csv_dir = output_dir / "perf_report_csvs"
-    csv_dir.mkdir(parents=True, exist_ok=True)
-
-    # Perf report. Serving frameworks use the inference report (adds steady-state
-    # phase columns, call stacks, pseudo-ops, graph-capture replay). Scriptable
-    # frameworks (xDiT) have no steady-state decode phase, so use the plain
-    # pytorch report and omit the inference-only flags.
-    if _is_scriptable_framework(framework):
-        report_cmd = [
-            sys.executable,
-            "-m",
-            "TraceLens.Reporting.generate_perf_report_pytorch",
-            "--profile_json_path",
-            str(trace_path),
-            "--output_csvs_dir",
-            str(csv_dir),
-            "--gpu_arch_platform",
-            platform,
-        ]
-    else:
-        report_cmd = [
-            sys.executable,
-            "-m",
-            "TraceLens.Reporting.generate_perf_report_pytorch_inference",
-            "--profile_json_path",
-            str(trace_path),
-            "--output_csvs_dir",
-            str(csv_dir),
-            "--gpu_arch_platform",
-            platform,
-            "--include_call_stack",
-            "--enable_pseudo_ops",
-        ]
-        if capture_folder and capture_folder.exists():
-            report_cmd += ["--capture_folder", str(capture_folder)]
-    rc = run_command(report_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
-    if rc != 0:
-        return rc
-
-    # Steps 2-5: orchestrator_prepare
-    prepare_cmd = [
-        sys.executable,
-        "-m",
-        "TraceLens.Agent.Analysis.utils.orchestrator_prepare",
-        "--trace-path",
-        str(trace_path),
-        "--output-dir",
-        str(output_dir),
-        "--platform",
-        platform,
-    ]
-    rc = run_command(prepare_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
-    if rc != 0:
-        return rc
-
-    # Category analysis scripts. The TraceLens manifest uses analyzer
-    # category names (e.g. sdpa_fwd / norm_bwd), while the Python modules are
-    # shared by families (sdpa_analysis / norm_analysis).
-    manifest_path = output_dir / "category_data" / "category_manifest.json"
-    category_failures: list[int] = []
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            append_log(
-                log_path,
-                f"deterministic: failed to parse {manifest_path}: {exc}",
-            )
-            return 1
-        for cat_entry in manifest.get("categories", []):
-            cat_name = cat_entry.get("name", "")
-            tier = cat_entry.get("tier", "")
-            analysis_cmd = _category_analysis_command(cat_name, tier, output_dir)
-            if analysis_cmd is None:
-                append_log(
-                    log_path,
-                    f"deterministic: no category analysis script for category={cat_name!r} tier={tier!r}; skipping",
-                )
-                continue
-            rc_cat = run_command(
-                analysis_cmd,
-                cwd=tl_root,
-                log_path=log_path,
-                timeout_s=timeout_s,
-            )
-            if rc_cat != 0:
-                category_failures.append(rc_cat)
-                append_log(
-                    log_path,
-                    f"deterministic: category script for {cat_name} exited "
-                    f"with rc={rc_cat}; continuing with remaining categories",
-                )
-
-    # generate_priority_data
-    priority_cmd = [
-        sys.executable,
-        "-c",
-        f"from TraceLens.Agent.Analysis.utils.report_utils import "
-        f"generate_priority_data; "
-        f"generate_priority_data({str(output_dir)!r})",
-    ]
-    rc = run_command(priority_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
-    if rc != 0:
-        return rc
-    if category_failures:
-        return category_failures[0]
-    return rc
-
-
 def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
     """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
@@ -5897,39 +5592,31 @@ def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
         return []
 
 
-# TraceLens has spelled the compute / exposed-communication timeline rows
-# several ways across versions; accept every spelling seen in the wild rather
-# than silently reporting "no compute row" (which would disable the gate).
-_COMPUTE_TIMELINE_TYPES = ("computation_time", "compute_time", "computation", "compute")
-_EXPOSED_COMM_TIMELINE_TYPES = ("exposed_comm_time", "exposed_communication_time", "exposed_communication")
-
-#: Column spellings for the share and duration cells of a gpu_timeline row. The
-#: row *labels* were already matched by shape; the columns holding the numbers
-#: need the same tolerance, or a renamed header reads as "value 0" instead of
-#: "value unknown".
-_GPU_TIMELINE_PCT_COLUMNS = ("percent", "percentage", "percentage (%)", "pct", "%")
+#: Column spellings for the duration cell of a gpu_timeline row. TraceLens has
+#: renamed this header across versions, and a spelling this tuple does not carry
+#: reads as "value 0" instead of "value unknown".
 _GPU_TIMELINE_MS_COLUMNS = ("time ms", "time (ms)", "time_ms", "ms")
 
 
-def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float | None:
-    """Read one numeric cell from a gpu_timeline row, or ``None`` if unusable.
+def _gpu_timeline_duration_ms(row: dict[str, str]) -> float | None:
+    """Read the duration cell (ms) from a gpu_timeline row, ``None`` if unusable.
 
     Absent, blank and unparseable all collapse to ``None`` rather than to a
-    number. A defaulted ``0`` is not a neutral answer here: the low-compute gate
-    fires *below* its threshold, so a renamed or truncated column would read as
-    "0% compute" and suppress the hot-kernel list on every trace, silently and
-    with ``status`` still ``ok``. Every caller must be able to distinguish "the
-    profile says zero" from "this file did not tell us".
+    number. A defaulted ``0`` is not a neutral answer here: the trace total time
+    is the ``gpu_pct`` denominator, so a renamed or truncated column would read
+    as "this trace took 0 ms" and skew every reported share, silently and with
+    ``status`` still ``ok``. The caller must be able to distinguish "the profile
+    says zero" from "this file did not tell us".
 
     Args:
         row: A parsed ``gpu_timeline.csv`` row.
-        columns: Accepted column spellings, in priority order.
 
     Returns:
-        The cell value, or ``None`` when no accepted column carries a number.
+        The duration in ms, or ``None`` when no accepted column carries a
+        number.
     """
     lowered = {str(k).strip().lower(): v for k, v in row.items() if k}
-    for column in columns:
+    for column in _GPU_TIMELINE_MS_COLUMNS:
         if column not in lowered:
             continue
         raw = lowered[column]
@@ -5942,70 +5629,6 @@ def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float |
         except (TypeError, ValueError):
             continue
     return None
-
-
-def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
-    """Read GPU idle percentage directly from gpu_timeline.csv.
-
-    Args:
-        output_dir: The analysis output directory holding
-            ``perf_report_csvs/gpu_timeline.csv``.
-
-    Returns:
-        The GPU idle percentage, or ``None`` when the CSV is absent or has no
-        usable idle-time row.
-    """
-    for row in _load_gpu_timeline_rows(output_dir):
-        if (row.get("type") or "").strip().lower() == "idle_time":
-            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
-    return None
-
-
-def _extract_pct_from_gpu_timeline(output_dir: Path, row_types: tuple[str, ...]) -> float | None:
-    """Read a percentage from the first matching gpu_timeline.csv row type.
-
-    Args:
-        output_dir: The analysis output directory holding
-            ``perf_report_csvs/gpu_timeline.csv``.
-        row_types: Accepted ``type`` spellings, in priority order.
-
-    Returns:
-        The percentage, or ``None`` when the CSV is absent, carries none of the
-        accepted row types, or holds no readable share column.
-    """
-    rows = _load_gpu_timeline_rows(output_dir)
-    by_type = {(row.get("type") or "").strip().lower(): row for row in rows}
-    for row_type in row_types:
-        row = by_type.get(row_type)
-        if row is not None:
-            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
-    return None
-
-
-def _extract_compute_pct_from_gpu_timeline(output_dir: Path) -> float | None:
-    """Read the GPU compute percentage from gpu_timeline.csv.
-
-    Args:
-        output_dir: The analysis output directory holding
-            ``perf_report_csvs/gpu_timeline.csv``.
-
-    Returns:
-        The compute percentage, or ``None`` when unavailable.
-    """
-    return _extract_pct_from_gpu_timeline(output_dir, _COMPUTE_TIMELINE_TYPES)
-
-
-def _extract_exposed_comm_pct_from_gpu_timeline(output_dir: Path) -> float | None:
-    """Read the exposed-communication percentage from gpu_timeline.csv.
-
-    Args:
-        output_dir: The analysis output directory holding
-            ``perf_report_csvs/gpu_timeline.csv``.
-
-    Returns:
-        The exposed-communication percentage, or ``None`` when unavailable.
-    """
-    return _extract_pct_from_gpu_timeline(output_dir, _EXPOSED_COMM_TIMELINE_TYPES)
 
 
 def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
@@ -6021,441 +5644,9 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
     """
     for row in _load_gpu_timeline_rows(output_dir):
         if (row.get("type") or "").strip().lower() == "total_time":
-            ms = _gpu_timeline_cell(row, _GPU_TIMELINE_MS_COLUMNS)
+            ms = _gpu_timeline_duration_ms(row)
             return None if ms is None else ms * 1000.0
     return None
-
-
-_MATCH_OP_MAX_DELTA_MS = 5.0
-
-
-def _match_op_by_time(
-    ops: list[dict[str, Any]],
-    name: str,
-    time_ms: float,
-) -> dict[str, Any]:
-    """Find the operation in *_metrics.json matching by name and time_ms.
-
-    Multiple operations can share the same name (e.g. ``aten::mm`` with
-    different shapes). We match by ``time_ms`` with a small tolerance to
-    account for floating-point rounding in JSON serialization.
-
-    Returns an empty dict when no candidate is within
-    ``_MATCH_OP_MAX_DELTA_MS`` milliseconds, preventing silent
-    mis-association of launcher paths and shapes.
-
-    Args:
-        ops: Operation rows from a ``*_metrics.json`` file.
-        name: The operation name to match.
-        time_ms: The operation time in milliseconds to match against.
-
-    Returns:
-        The best-matching operation row, or ``{}`` when none is within
-        ``_MATCH_OP_MAX_DELTA_MS``.
-    """
-    best: dict[str, Any] = {}
-    best_delta = float("inf")
-    for op in ops:
-        if op.get("name") != name:
-            continue
-        op_time = op.get("time_ms", 0)
-        delta = abs(op_time - time_ms)
-        if delta < best_delta:
-            best_delta = delta
-            best = op
-            if delta < 0.01:
-                break
-    if best_delta > _MATCH_OP_MAX_DELTA_MS:
-        return {}
-    return best
-
-
-def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
-    """Resolve a TraceLens launcher path to an existing absolute source file.
-
-    Args:
-        kernel_path: The TraceLens launcher path (possibly relative).
-
-    Returns:
-        The resolved absolute source-file path, or ``""`` when none exists.
-    """
-    raw_path, _, _ = _parse_launcher_path(kernel_path)
-    if not raw_path:
-        return ""
-    if os.path.isabs(raw_path) and os.path.isfile(raw_path):
-        return raw_path
-    if raw_path.startswith("sgl_kernel/"):
-        sgl_kernel_source = Path("/sgl-workspace/sglang/sgl-kernel/python") / raw_path
-        if sgl_kernel_source.is_file():
-            return str(sgl_kernel_source)
-    resolved = _resolve_launcher_to_abs_source(kernel_path)
-    if resolved is not None:
-        return resolved[0]
-    # Fallback: TraceLens launcher paths for aiter ops are relative to the
-    # aiter package dir (e.g. "ops/rmsnorm.py" → /sgl-workspace/aiter/aiter/ops/rmsnorm.py).
-    # Try known framework package roots when the head segment isn't a top-level package.
-    if not os.path.isabs(raw_path):
-        for pkg_root in _PACKAGE_INNER_ROOTS:
-            candidate = os.path.join(pkg_root, raw_path)
-            if os.path.isfile(candidate):
-                return candidate
-    return ""
-
-
-def deterministic_extract_hot_kernels(
-    output_dir: Path,
-    top_k: int = 10,
-    *,
-    log_path: Path | None = None,
-    fail_on_corrupt_priority: bool = False,
-) -> list[dict[str, Any]]:
-    """Extract hot kernels directly from TraceLens deterministic outputs.
-
-    Reads ``*_metrics.json`` and ``priority_data.json`` to produce the same
-    candidate list that ``parse_analysis_md()`` would extract from
-    ``analysis.md``, without any LLM involvement.
-
-    Each candidate maps to the same schema that ``_finalize_candidates``
-    expects downstream (name, duration_us, efficiency_percent, etc.).
-
-    Args:
-        output_dir: The deterministic-pipeline output directory.
-        top_k: Maximum number of candidates to return.
-        log_path: Optional log file for skip/parse diagnostics.
-        fail_on_corrupt_priority: When ``True``, raise instead of returning
-            ``[]`` on a corrupt ``priority_data.json``.
-
-    Returns:
-        The hot-kernel candidate dicts, sorted by GPU time and truncated to
-        ``top_k``; ``[]`` when no priority data is available.
-
-    Raises:
-        RuntimeError: When ``priority_data.json`` cannot be parsed and
-            ``fail_on_corrupt_priority`` is ``True``.
-    """
-    priority_path = output_dir / "priority_data.json"
-    if not priority_path.exists():
-        return []
-
-    try:
-        priority_data = json.loads(priority_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        if log_path is not None:
-            append_log(
-                log_path,
-                f"deterministic: failed to parse {priority_path}: {exc}",
-            )
-        if fail_on_corrupt_priority:
-            raise RuntimeError(f"Deterministic TraceLens pipeline failed to parse {priority_path}: {exc}") from exc
-        return []
-    findings = priority_data.get("findings", [])
-
-    cat_data_dir = output_dir / "category_data"
-    ops_by_category: dict[str, list[dict[str, Any]]] = {}
-    if cat_data_dir.is_dir():
-        for fname in sorted(cat_data_dir.iterdir()):
-            if not fname.name.endswith("_metrics.json"):
-                continue
-            try:
-                metrics = json.loads(fname.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if metrics.get("status") in ("ERROR", "NO_DATA"):
-                continue
-            cat = metrics.get("category", fname.stem.replace("_metrics", ""))
-            ops_by_category[cat] = metrics.get("operations", [])
-
-    candidates: list[dict[str, Any]] = []
-
-    # Collect candidates from priority_data findings
-    for finding in findings:
-        global_rank = finding.get("global_rank", 0)
-        category = finding.get("category", "")
-        impact_score = finding.get("impact_score", 0.0)
-        members = finding.get("members", [])
-
-        cat_ops = ops_by_category.get(category, [])
-
-        def _eff_sort_key(m: dict[str, Any]) -> float:
-            # ``efficiency_pct`` may be present-but-null in priority_data; a
-            # bare ``.get(key, 100)`` returns None then (default only applies
-            # to a missing key), which breaks both ``sorted`` comparisons and
-            # the downstream ``round``. Treat null as the missing-key default.
-            v = m.get("efficiency_pct")
-            return float(v) if isinstance(v, (int, float)) else 100.0
-
-        sorted_members = sorted(members, key=_eff_sort_key)
-
-        for member in sorted_members:
-            op_name = member.get("operation", "")
-            member_time_ms = member.get("time_ms") or 0
-
-            # Match by (name, time_ms) to avoid collisions when multiple
-            # ops share the same name (e.g. many aten::mm instances).
-            full_op = _match_op_by_time(cat_ops, op_name, member_time_ms)
-            if not full_op:
-                if log_path is not None:
-                    append_log(
-                        log_path,
-                        "deterministic: skipping priority member with no "
-                        "matching metrics row "
-                        f"(category={category!r}, operation={op_name!r}, "
-                        f"time_ms={member_time_ms!r}, "
-                        f"max_delta_ms={_MATCH_OP_MAX_DELTA_MS})",
-                    )
-                continue
-
-            duration_us = member_time_ms * 1000
-            eff_pct = member.get("efficiency_pct")
-            if not isinstance(eff_pct, (int, float)):
-                eff_pct = 0
-
-            launcher_path = str(full_op.get("launcher_path", "") or "")
-            if launcher_path.strip().lower() in _LAUNCHER_PATH_PLACEHOLDERS:
-                launcher_path = ""
-            source_file = _resolve_source_file_from_kernel_path(launcher_path)
-
-            shapes_raw = full_op.get("args", "")
-            shapes = [shapes_raw] if shapes_raw else []
-            op_count = full_op.get("count", 1)
-
-            # Build non-synthetic input_shapes directly from TraceLens metrics.
-            input_shapes: list[dict[str, Any]] = []
-            if shapes_raw:
-                input_shapes.append(
-                    {
-                        "call_num": op_count,
-                        "shape": shapes_raw,
-                    }
-                )
-
-            candidate = {
-                "name": op_name,
-                "duration_us": round(duration_us, 3),
-                "call_count": op_count,
-                "efficiency_percent": round(eff_pct, 2),
-                "impact_score": (
-                    member.get("impact_score") if member.get("impact_score") is not None else impact_score
-                ),
-                "bound_type": member.get("bound_type", ""),
-                "tracelens_category": category,
-                "tracelens_pitem_rank": global_rank,
-                "kernel_path": launcher_path,
-                "tracelens_launcher_path": launcher_path,
-                "source_file": source_file,
-                "shapes": shapes,
-                "input_shapes": input_shapes,
-                "library": member.get("library", full_op.get("library", "")),
-            }
-            candidates.append(candidate)
-
-    # Include "other" category ops with actionable source files: often the
-    # largest GPU-time consumers (e.g. Triton fused_moe) but absent from
-    # priority_data because TraceLens files them under "other" with no model.
-    other_ops = ops_by_category.get("other", [])
-    for op in other_ops:
-        # Guard null (not just missing) before the numeric compare below.
-        time_ms = op.get("time_ms") or 0
-        if time_ms < 1.0:
-            continue
-
-        # The profiler op ``name`` embeds the kernel definition file+function.
-        # ``launcher_path`` only points at the calling Python wrapper, so it must
-        # not be used as the editable source.
-        op_name = op.get("name", "") or op.get("operation", "")
-        launcher_path = str(op.get("launcher_path", "") or "")
-        if launcher_path.strip().lower() in _LAUNCHER_PATH_PLACEHOLDERS:
-            launcher_path = ""
-
-        # Resolve the symbol to its definition site (never falling back to the
-        # launcher wrapper). If the definition can't be located, skip.
-        if not op_name:
-            if log_path is not None:
-                append_log(
-                    log_path,
-                    f"deterministic: other-bucket op skipped (no op name) time_ms={time_ms} launcher={launcher_path!r}",
-                )
-            continue
-        source_file = locate_source_via_grep(op_name)
-        if not source_file:
-            # Never silently drop a hot op: surface unresolved high-GPU-time
-            # kernels so "missing hot_kernels" is observable.
-            if log_path is not None:
-                append_log(
-                    log_path,
-                    "deterministic: other-bucket op skipped (no editable "
-                    f"source resolved) time_ms={time_ms:.3f} "
-                    f"name={op_name!r} launcher={launcher_path!r}",
-                )
-            continue
-
-        duration_us = time_ms * 1000
-        op_count = op.get("count", 1)
-        shapes_raw = op.get("args", "")
-        shapes = [shapes_raw] if shapes_raw else []
-        input_shapes: list[dict[str, Any]] = []
-        if shapes_raw:
-            input_shapes.append(
-                {
-                    "call_num": op_count,
-                    "shape": shapes_raw,
-                }
-            )
-
-        candidate = {
-            "name": op_name,
-            "duration_us": round(duration_us, 3),
-            "call_count": op_count,
-            "efficiency_percent": 0.0,
-            "impact_score": 0.0,
-            "bound_type": "unknown",
-            "tracelens_category": "other",
-            "tracelens_pitem_rank": 0,
-            "kernel_path": launcher_path,
-            "tracelens_launcher_path": launcher_path,
-            "source_file": source_file,
-            "shapes": shapes,
-            "input_shapes": input_shapes,
-            "library": op.get("library", ""),
-            "candidate_source": "other_bucket_fallback",
-        }
-        candidates.append(candidate)
-
-    candidates.sort(key=lambda c: c.get("duration_us", 0), reverse=True)
-
-    return candidates[:top_k]
-
-
-def generate_minimal_analysis_md(
-    output_dir: Path,
-    candidates: list[dict[str, Any]],
-    idle_pct: float | None = None,
-    *,
-    model_name: str = "",
-) -> Path:
-    """Generate the deterministic-route ``analysis.md`` (human-readable output).
-
-    Deterministic hot-kernel extraction uses structured ``*_metrics.json`` and
-    ``priority_data.json`` directly; this Markdown report is intentionally not
-    the LLM-agent parser contract. It is rendered through the SHARED canonical
-    renderer (:func:`_analysis_md.render_report`), so its section structure and
-    table schemas match the bypass route exactly (fields the deterministic
-    minimal report does not model, e.g. arithmetic intensity, render as an em
-    dash rather than a fabricated value).
-
-    Args:
-        output_dir: Directory the ``analysis.md`` report is written into.
-        candidates: The finalized hot-kernel candidates to tabulate.
-        idle_pct: Optional GPU idle percentage (Executive Summary + idle gate).
-        model_name: Model identifier for the shared report title.
-
-    Returns:
-        The path to the written ``analysis.md``.
-    """
-    report_path = output_dir / "analysis.md"
-
-    gpu_rows = _load_gpu_timeline_rows(output_dir)
-
-    def _row_field(row_type: str, field: str) -> float | None:
-        """Return a numeric field from the gpu_timeline row of ``row_type``."""
-        for row in gpu_rows:
-            if (row.get("type") or "").strip().lower() == row_type:
-                try:
-                    return float(row.get(field, 0))
-                except (TypeError, ValueError):
-                    return None
-        return None
-
-    idle_share = idle_pct if idle_pct is not None else _row_field("idle_time", "percent")
-    busy_pct = _row_field("busy_time", "percent")
-    if busy_pct is None and isinstance(idle_share, (int, float)):
-        busy_pct = 100.0 - float(idle_share)
-    busy_ms = _row_field("busy_time", "time ms")
-    idle_ms = _row_field("idle_time", "time ms")
-    total_ms: float | None = None
-    if isinstance(busy_ms, (int, float)) or isinstance(idle_ms, (int, float)):
-        total_ms = (busy_ms or 0.0) + (idle_ms or 0.0) or None
-    memcpy_ms = _row_field("exposed_memcpy_time", "time ms")
-
-    def _cand_weight(c: dict[str, Any]) -> float:
-        """GPU-time weight for ranking (gpu_pct, else duration_us); robust to null."""
-        for key in ("gpu_pct", "duration_us"):
-            v = c.get(key)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                return float(v)
-        return 0.0
-
-    top_cat = ""
-    if candidates:
-        # Pick the hottest candidate's category (robust to caller ordering).
-        _top = max(candidates, key=_cand_weight)
-        top_cat = _top.get("kernel_category") or _top.get("tracelens_category") or ""
-
-    exec_summary = {
-        "total_gpu_time_ms": total_ms,
-        "gpu_busy_pct": busy_pct,
-        "gpu_idle_pct": idle_share,
-        "gpu_memcpy_ms": memcpy_ms,
-        "top_bottleneck_category": top_cat,
-        "attribution_pct": None,  # not modelled by the deterministic minimal report
-    }
-    system_signals = {
-        "idle_pct": idle_share,
-        "exposed_comm_pct": _row_field("exposed_comm_time", "percent"),
-        "exposed_memcpy_pct": _row_field("exposed_memcpy_time", "percent"),
-    }
-
-    hot_rows = [
-        {
-            "name": c.get("name"),
-            "time_us": c.get("duration_us"),
-            "gpu_pct": c.get("gpu_pct"),
-            "efficiency_percent": c.get("efficiency_percent"),
-            "arithmetic_intensity": c.get("arithmetic_intensity") or c.get("flops_per_byte"),
-            "bound_type": c.get("bound_type"),
-            "category": c.get("kernel_category") or c.get("tracelens_category"),
-            "source_file": c.get("source_file"),
-        }
-        for c in candidates
-    ]
-
-    # P-items in ascending rank order (P0, P1, ...), one group per pitem rank.
-    p_items: list[dict[str, Any]] = []
-    for rank in sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates}):
-        rank_cands = [x for x in candidates if int(x.get("tracelens_pitem_rank", 0)) == rank]
-        cat = ""
-        if rank_cands:
-            cat = rank_cands[0].get("kernel_category") or rank_cands[0].get("tracelens_category") or ""
-        rows = [
-            {
-                "name": rc.get("name"),
-                "time_us": rc.get("duration_us"),
-                "gpu_pct": rc.get("gpu_pct"),
-                "e2e_pct": rc.get("impact_score"),
-                "call_count": rc.get("call_count", 1),
-                "flops_per_byte": rc.get("flops_per_byte"),
-                "efficiency_percent": rc.get("efficiency_percent"),
-                "bound_type": rc.get("bound_type"),
-                "args": rc.get("shapes"),
-                "source_file": rc.get("source_file"),
-                "kernel_path": rc.get("kernel_path"),
-            }
-            for rc in rank_cands
-        ]
-        p_items.append({"rank": rank, "category": cat, "rows": rows})
-
-    body = render_report(
-        route="deterministic",
-        model_name=model_name,
-        provenance_detail="Deterministic hot-kernel extraction from structured *_metrics.json / priority_data.json.",
-        exec_summary=exec_summary,
-        system_signals=system_signals,
-        idle_threshold=resolve_idle_pct_threshold(),
-        hot_kernels=hot_rows,
-        p_items=p_items,
-    )
-    report_path.write_text(body, encoding="utf-8")
-    return report_path
 
 
 def run_command(
@@ -6496,8 +5687,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-# Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "a59a9c165bb64c7c416fd7cf79149803d552e43c"
+_TRACELENS_REF_DEFAULT = "384c362cb0e174ddf4e533e67ae74df30a849dc6"
 
 
 def _default_tracelens_root() -> Path:
@@ -7349,362 +6539,6 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def run_candidate_review_stage(
-    run_dir: Path,
-    *,
-    candidates: list[dict[str, Any]],
-    args: argparse.Namespace,
-    log_path: Path | str | None = None,
-    trace_health_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, str]:
-    """Run the review stage, converting any unexpected fault into a warning.
-
-    The stage is advisory by construction, and it sits at the end of an
-    analysis that a multi-hour benchmark paid for. An unforeseen fault in it
-    must cost the audit, not the run, so nothing escapes this boundary.
-    """
-    try:
-        return _run_candidate_review_stage(
-            run_dir,
-            candidates=candidates,
-            args=args,
-            log_path=log_path,
-            trace_health_warnings=trace_health_warnings,
-        )
-    except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
-        log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
-        if trace_health_warnings is not None:
-            trace_health_warnings.append(
-                {
-                    "code": "candidate_review_failed",
-                    "severity": "error",
-                    "status": "internal_error",
-                    "detail": type(exc).__name__,
-                    "message": (
-                        "The candidate review stage raised "
-                        f"{type(exc).__name__}; kernel_candidates.json is the "
-                        "unreviewed deterministic result."
-                    ),
-                }
-            )
-        return {}
-
-
-#: Everything the review can stage without moving ``source_file``. The
-#: re-derivation is skipped for rows that did not change, and a path is only one
-#: of the things that can: operand dims are most often supplied for a kernel the
-#: deterministic tiers already located, so keying the check on the path alone
-#: drops exactly the proposals that were hardest to obtain.
-_REVIEW_STAGED_PROPOSALS = (
-    "review_shapes",
-    "review_input_dtypes",
-    "review_reusable_hint",
-    "review_benchmark_files",
-)
-
-#: Rebuilt from ``shapes``, so they must not outlive the dims they described.
-#: ``enrich_candidates_with_runtime_metadata`` runs after this stage and refills
-#: ``input_shapes`` from whatever ``shapes`` now holds, marking it synthetic
-#: again -- which is the whole reason clearing it is safe.
-#:
-#: ``invocation_cases`` and ``raw_arg_spec`` are deliberately NOT here. Nothing
-#: rebuilds them: both are produced only by ``_finalize_candidates``, from the
-#: perf CSV, long before the review runs, and no later pass can re-derive an
-#: ordered scalar argument list from a list of operand dims. They also do not
-#: describe the dims being replaced -- a CSV row can carry a raw arg spec while
-#: yielding no tensor operands at all, which is precisely a row whose ``shapes``
-#: is empty and therefore the row a review supplies dims for. Clearing them
-#: there dropped the scalar signature and collapsed multi-case task groups
-#: (``_expanded_group_rows`` expands ``invocation_cases`` into one workload case
-#: each), so a stage that exists to add operand evidence removed some.
-_REVIEW_STALE_SHAPE_FIELDS = (
-    "input_shapes",
-    "_input_shapes_synthetic",
-)
-
-
-def _adopt_reviewed_shapes(item: dict[str, Any]) -> None:
-    """Take the operand dims the review supplied, if it supplied any.
-
-    Only fires where the deterministic stage came up empty. A recorded shape
-    outranks a reviewed one even when the review is confident, because the
-    reviewed dims can be arithmetic over the serving configuration and nothing
-    downstream re-measures them; the integration benchmark hours later is the
-    first thing that would notice they were wrong.
-
-    The alternate representations are dropped rather than translated. They
-    describe the previous dims, and a harness built from a mix of the two would
-    be wrong in a way that still benchmarks cleanly.
-    """
-    proposed = item.get("review_shapes")
-    if not isinstance(proposed, list) or not proposed:
-        return
-    if item.get("shapes"):
-        return
-    item["shapes"] = list(proposed)
-    item["shape_provenance"] = str(item.get("review_shape_provenance") or _REVIEW_DERIVED_PROVENANCE)
-    reviewed_dtypes = item.get("review_input_dtypes")
-    if isinstance(reviewed_dtypes, list) and reviewed_dtypes:
-        item["input_dtypes"] = list(reviewed_dtypes)
-    for key in _REVIEW_STALE_SHAPE_FIELDS:
-        item.pop(key, None)
-
-
-def _accept_review_proposals(
-    item: dict[str, Any],
-    op_cat_map: dict[str, str] | None = None,
-) -> None:
-    """Take what the review supplied for a candidate whose source did not move.
-
-    Restamping is still required, because the alternate shape representations
-    are rebuilt from ``shapes`` and adopting reviewed dims invalidates the ones
-    describing the old set. What it must not do is disturb the source judgments:
-    they describe the same path they were computed from, so there is nothing to
-    recompute and nothing stale to clear.
-    """
-    _adopt_reviewed_shapes(item)
-    _stamp_candidate_metadata(item, op_cat_map)
-    # Stamping recomputes benchmark_files from the curated marker table, which
-    # is coarser than a session that went and looked. Its verified answer wins.
-    # Only a non-empty one: an empty list means the session named harnesses and
-    # none of them exist, which says its proposal was wrong, not that the
-    # curated table's answer is. Letting it through would strip a runnable
-    # harness from the invocation spec the backend is handed.
-    reviewed_harnesses = item.get("review_benchmark_files")
-    if isinstance(reviewed_harnesses, list) and reviewed_harnesses:
-        item["benchmark_files"] = list(reviewed_harnesses)
-    # A restrictive hint is honoured, a permissive one is not. The reviewer can
-    # veto a kernel it knows is not worth a tuning session, but it cannot talk
-    # the gate into dispatching something the deterministic rules rejected.
-    if item.get("review_reusable_hint") is False and item.get("reusable_native_kernel"):
-        item["reusable_native_kernel"] = False
-        item["skip_reason"] = (
-            str(item.get("review_skip_reason") or "").strip()
-            or f"review: {item.get('review_reason') or 'not worth a tuning session'}"
-        )
-
-
-def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
-    """Recompute everything that follows from ``source_file`` after it moved.
-
-    The review returns a location, not a verdict. Re-running the deterministic
-    stamping keeps :func:`classify_patchability` the only gate that decides
-    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
-    rejections still apply to a path the model supplied.
-
-    Only for a revision that moved the path. Clearing
-    :data:`_SOURCE_DERIVED_METADATA` is sound when the values describe a source
-    the candidate no longer names, and unsound otherwise: eighteen of those
-    nineteen keys have no producer in this pass -- the finder that filled them
-    read the demangled device symbol and the binary's exports, and stamping
-    cannot reconstruct that from a path -- so clearing them where the source
-    stood still would drop them for good. Whether any of them is populated today
-    is not the point; a field that cannot be rebuilt must not be cleared on a
-    revision that gave no reason to doubt it.
-    """
-    new_source = str(item.get("source_file") or "")
-    for key in _SOURCE_DERIVED_METADATA:
-        item.pop(key, None)
-    item["source_path"] = new_source
-    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
-    item["source_type"] = source_type_for(item.get("name", ""), new_source)
-    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
-        item["source_type"] = "vendor_binary"
-        item["vendor_dispatch_wrapper"] = True
-    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
-    _accept_review_proposals(item, op_cat_map)
-
-
-def _run_candidate_review_stage(
-    run_dir: Path,
-    *,
-    candidates: list[dict[str, Any]],
-    args: argparse.Namespace,
-    log_path: Path | str | None = None,
-    trace_health_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, str]:
-    """Audit the deterministic candidate table with one agent session.
-
-    The deterministic tiers resolve a kernel from its symbol alone; they cannot
-    tell a file that defines a kernel from one that merely launches it, and they
-    have no view of the model or how it is being served. This hands that table
-    to an agent together with the paths of everything the run already produced,
-    and folds back the revisions it can verify.
-
-    Mandatory on the agent route, but never fatal: a definitive failure records
-    an ``error``-severity trace-health warning and leaves the deterministic
-    table standing. Losing the audit costs some candidates; failing the run
-    would cost the hours of benchmarking that produced the trace.
-
-    Args:
-        run_dir: The per-run output directory.
-        candidates: The finalized candidate rows, revised in place.
-        args: Parsed CLI args (model name, framework, source root).
-        log_path: Optional log file for diagnostics.
-        trace_health_warnings: Warning sink surfaced to the Coordinator.
-
-    Returns:
-        dict[str, str]: Artifact paths produced by this stage.
-    """
-    artifacts: dict[str, str] = {}
-    warnings = trace_health_warnings if trace_health_warnings is not None else []
-
-    def _note(message: str) -> None:
-        log.info("%s", message)
-        if log_path:
-            append_log(log_path, message)
-
-    try:
-        from _candidate_review_agent import (  # noqa: PLC0415
-            RAW_CANDIDATES_FILENAME,
-            REVISIONS_FILENAME,
-            apply_revisions,
-            run_candidate_review,
-        )
-    except ImportError as exc:  # pragma: no cover - packaging fault
-        warnings.append(
-            {
-                "code": "candidate_review_unavailable",
-                "severity": "error",
-                "message": (
-                    "The candidate review agent could not be imported "
-                    f"({type(exc).__name__}); the candidate table is the "
-                    "unreviewed deterministic result."
-                ),
-            }
-        )
-        return artifacts
-
-    tracelens_dir = run_dir / "tracelens"
-    raw_path = run_dir / RAW_CANDIDATES_FILENAME
-    # Demangled here rather than in the session. Demangling a vendor symbol was
-    # the one job that wanted a shell, and a shell cannot be confined to the run
-    # directory -- so the host does it and the session keeps a read-only tool
-    # surface. Written onto copies: the demangled name is an aid for the reader
-    # of this table, not a candidate field, and the reviewed table downstream
-    # must stay diffable against the deterministic one.
-    payload_rows = [_with_demangled_symbol(c) for c in candidates if isinstance(c, dict)]
-    routable = [c for c in payload_rows if c.get("reusable_native_kernel") is True]
-    atomic_write_json(
-        raw_path,
-        {
-            "model_name": args.model_name,
-            "framework": args.framework,
-            "source": "tracelens_analysis:deterministic",
-            "hot_kernels": payload_rows,
-            "routable_kernels": routable,
-        },
-    )
-    artifacts["kernel_candidates_raw"] = str(raw_path)
-
-    # Only ``analysis.md`` is a supported TraceLens output; everything else in
-    # that directory is internal and may be removed without notice. The rest of
-    # the list is Hyperloom's own or the model's, so it is ours to offer.
-    #
-    # Little is lost by not pointing at the sidecars: for every operator they
-    # describe, ``analysis.md`` carries the same operand dims and launcher in
-    # its own table, and for a graph-launched operator neither has anything --
-    # the replay has no CPU-side parent op, so nothing recorded the arguments.
-    reference_paths = {
-        "source resolution audit": str(run_dir / _SOURCE_RESOLUTION_NAME),
-        "tracelens report": str(tracelens_dir / "analysis.md"),
-        "trace input manifest": str(run_dir / "trace_input_manifest.json"),
-        "model directory": str(_RUNTIME_CONTEXT.get("model_path") or ""),
-    }
-    outcome = run_candidate_review(
-        run_dir=run_dir,
-        raw_candidates_path=raw_path,
-        reference_paths={k: v for k, v in reference_paths.items() if v},
-        framework_roots=kernel_search_roots(),
-        context_block=_source_context_block(),
-        log=_forward_to_log,
-    )
-
-    if not outcome.ok:
-        warnings.append(
-            {
-                "code": "candidate_review_failed",
-                "severity": "error",
-                "status": outcome.status,
-                "detail": outcome.detail,
-                "message": (
-                    f"The mandatory candidate review did not complete "
-                    f"({outcome.status}: {outcome.detail}). kernel_candidates.json "
-                    "is the unreviewed deterministic result; a wrongly resolved "
-                    "kernel will not have been caught."
-                ),
-            }
-        )
-        _note(f"candidate review failed ({outcome.status}): {outcome.detail}")
-        return artifacts
-
-    op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")
-    before_state = {str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates}
-    protected_ids = {
-        str(c.get("kernel_id") or "") for c in candidates if isinstance(c, dict) and _is_curated_resolution(c)
-    }
-    notes = apply_revisions(
-        candidates,
-        outcome.revisions,
-        framework_roots=kernel_search_roots(),
-        protected_ids=protected_ids,
-    )
-    changed = 0
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        kernel_id = str(item.get("kernel_id") or "")
-        source_moved = str(item.get("source_file") or "") != before_state.get(kernel_id)
-        staged = any(item.get(key) is not None for key in _REVIEW_STAGED_PROPOSALS)
-        if not source_moved and not staged:
-            continue
-        # Two different revisions. A moved path invalidates everything derived
-        # from the old one, so those are cleared and recomputed. A path that
-        # stood still invalidates nothing about the source, and most of what the
-        # finder recorded about it has no producer here -- so the proposals are
-        # taken and the source judgments are left alone.
-        if source_moved:
-            _rederive_after_review(item, op_cat_map)
-        else:
-            _accept_review_proposals(item, op_cat_map)
-        changed += 1
-
-    revisions_path = run_dir / REVISIONS_FILENAME
-    atomic_write_json(
-        revisions_path,
-        {
-            "status": outcome.status,
-            "revisions": outcome.revisions,
-            "applied_notes": notes,
-            "candidates_changed": changed,
-            "raw_candidates": str(raw_path),
-        },
-    )
-    artifacts["kernel_candidates_revisions"] = str(revisions_path)
-
-    # Unconditionally, not only when ``changed`` is non-zero. The audit was
-    # written during finalize, before this stage ran, so a review that moved a
-    # ``source_file`` left the public artifact naming the old path while
-    # kernel_candidates.json named the new one -- two answers to "where does
-    # this kernel live", and the one a human reads was the stale one. Rebuilding
-    # on every completed review keeps the two derived from the same table, and
-    # costs one projection over rows already in memory.
-    source_resolution_path = run_dir / _SOURCE_RESOLUTION_NAME
-    if write_source_resolution_artifact(
-        candidates,
-        source_resolution_path,
-        framework=args.framework or "",
-        model_name=args.model_name or "",
-        log_path=log_path,
-    ):
-        artifacts["kernel_source_resolution"] = str(source_resolution_path)
-
-    _note(f"candidate review applied {changed} change(s) over {len(outcome.revisions)} revision(s)")
-    for line in notes:
-        _note(f"  review: {line}")
-    return artifacts
-
-
 def write_reports(
     run_dir: Path,
     *,
@@ -7766,8 +6600,12 @@ def write_reports(
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # ``hot_kernels`` is always the full ranked set; the reusable dispatch subset
     # is exposed as ``routable_kernels`` and non-routable dicts as ``skipped_kernels``.
-    routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
-    skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
+    # This site's routability is the coarse reusability predicate; the shared
+    # helper guarantees the two lists partition ``candidates`` by construction.
+    routable_candidates, skipped_kernels = partition_kernels(
+        candidates,
+        lambda c: c.get("reusable_native_kernel") is True,
+    )
     atomic_write_json(
         kernel_candidates_path,
         {
@@ -8064,26 +6902,6 @@ def main() -> int:
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
-    default_analysis_route = os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower() or ANALYSIS_ROUTE_AGENT
-    if default_analysis_route not in _VALID_ANALYSIS_ROUTES:
-        default_analysis_route = ANALYSIS_ROUTE_AGENT
-    parser.add_argument(
-        "--analysis-route",
-        choices=sorted(_VALID_ANALYSIS_ROUTES),
-        default=default_analysis_route,
-        help=(
-            "Trace analysis pipeline route. 'agent' (default) runs the "
-            "TraceLens analysis-orchestrator LLM skill via Claude SDK to "
-            "produce analysis.md, then parses hot kernels from it. "
-            "'deterministic' bypasses all LLM calls and instead runs the "
-            "TraceLens deterministic Python toolchain (perf report, "
-            "orchestrator_prepare, category analysis scripts, "
-            "generate_priority_data) to extract hot kernels directly from "
-            "*_metrics.json. A minimal analysis.md is generated from "
-            "templates for downstream prompt injection. "
-            "Env: HYPERLOOM_TRACE_ANALYSIS_ROUTE."
-        ),
-    )
     default_llm_orchestrator = os.environ.get(
         "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
         "1",
@@ -8095,8 +6913,8 @@ def main() -> int:
         default=default_llm_orchestrator,
         help=(
             "Run TraceLens analysis-orchestrator skill through "
-            "claude_agent_sdk before falling back to the deterministic parser "
-            "(default: env KERNEL_AGENT_USE_LLM_ORCHESTRATOR, on)."
+            "claude_agent_sdk to produce analysis.md, then parse hot kernels "
+            "from it (default: env KERNEL_AGENT_USE_LLM_ORCHESTRATOR, on)."
         ),
     )
     parser.add_argument(
@@ -8182,7 +7000,6 @@ def main() -> int:
     args = parser.parse_args()
 
     args.target_platform = normalize_platform(args.target_platform)
-    use_deterministic = args.analysis_route == ANALYSIS_ROUTE_DETERMINISTIC
 
     # Give the model tiers the serving configuration. Which implementation a
     # kernel reaches depends on it, and forty lines of a candidate file cannot
@@ -8223,6 +7040,47 @@ def main() -> int:
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
+    # What this run saw and decided, returned to the caller instead of only
+    # reaching the CLI log. The caller records it on the SBD V6 roofline event as
+    # the run happens, so "which file was analysed, how was the steady-state
+    # window picked, which gate refused" survives without re-reading the log.
+    run_meta: dict[str, Any] = {
+        "preflight": {},
+        "split": {},
+        "selection": {},
+        "steps": [],
+        "route_ext": {},
+    }
+
+    def _note_step(
+        step_id: str,
+        *,
+        category: str,
+        status: str,
+        skip_reason: str | None = None,
+        **detail: Any,
+    ) -> None:
+        """Append one step to the run's ladder.
+
+        Args:
+            step_id: Stable step name.
+            category: Ladder phase (``preflight`` / ``install`` / ``split`` /
+                ``select`` / ``analyze`` / ``emit``).
+            status: ``ok`` / ``failed`` / ``skipped``.
+            skip_reason: Why the step did not run, when skipped.
+            **detail: Measured values for the step.
+        """
+        run_meta["steps"].append(
+            {
+                "step_id": step_id,
+                "order": len(run_meta["steps"]) + 1,
+                "category": category,
+                "status": status,
+                "skip_reason": skip_reason,
+                "detail": detail,
+            }
+        )
+
     # Discovery is cached per run, so re-run it here: a process that outlives a
     # single run would otherwise keep the roots it saw when it first imported
     # this module, and miss a framework installed since.
@@ -8261,6 +7119,20 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
+        run_meta["preflight"].update(
+            {
+                "trace_input": str(trace_input),
+                "trace_input_type": trace_input_type,
+                "trace_file_count": len(trace_files),
+            }
+        )
+        _note_step(
+            "discover_inputs",
+            category="preflight",
+            status="ok",
+            trace_input_type=trace_input_type,
+            trace_file_count=len(trace_files),
+        )
         # The file the analysis will actually read. Discovery order picks the
         # default; the preflight below promotes whichever candidate it proves
         # carries GPU kernels, because passing the check on one file and then
@@ -8345,6 +7217,23 @@ def main() -> int:
             append_log(
                 log_path,
                 f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
+            )
+            run_meta["preflight"].update(
+                {
+                    "probe_gpu_kernel_events": kernel_event_count,
+                    "probed_files": list(probed),
+                    "probed_bytes": spent_bytes,
+                    "analysed_file": analysis_trace_path.name,
+                    "input_promoted": analysis_trace_path != trace_files[0],
+                }
+            )
+            _note_step(
+                "probe_gpu_kernels",
+                category="preflight",
+                status="ok" if kernel_event_count else "failed",
+                gpu_kernel_events=kernel_event_count,
+                probed_file_count=len(probed),
+                analysed_file=analysis_trace_path.name,
             )
             if analysis_trace_path != trace_files[0]:
                 promotion_warning: dict[str, Any] = {
@@ -8635,6 +7524,31 @@ def main() -> int:
                 mixed_chunks = _collect("mixed")
                 decode_chunks = _collect("decode_only")
                 prefill_chunks = _collect("prefilldecode")
+                run_meta["split"].update(
+                    {
+                        "split_input": str(split_input_path),
+                        "split_dir": str(split_dir),
+                        "num_steps": split_num_steps,
+                        "conc": str(conc or ""),
+                        "osl": str(osl or ""),
+                        "r": r_str,
+                        "returncode": split_rc,
+                        "chunks_by_mode": {
+                            "mixed": len(mixed_chunks),
+                            "decode_only": len(decode_chunks),
+                            "prefilldecode": len(prefill_chunks),
+                        },
+                        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks),
+                    }
+                )
+                _note_step(
+                    "split_trace",
+                    category="split",
+                    status="ok" if split_rc == 0 and (mixed_chunks or decode_chunks or prefill_chunks) else "failed",
+                    returncode=split_rc,
+                    num_steps=split_num_steps,
+                    chunks_extracted=run_meta["split"]["chunks_extracted"],
+                )
                 # Splitter produced nothing -> trace_split_no_steady_state failure.
                 if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
                     warning = _build_trace_split_warning(
@@ -8703,6 +7617,18 @@ def main() -> int:
 
                 # Data-validity gate: the selected chunk must have observable GPU work.
                 cli_trace_path = selected_chunks[0]
+                run_meta["selection"].update(
+                    {
+                        "requested_mode": args.steady_state_mode,
+                        "chunk_label": chunk_label,
+                        "selected_chunk": str(cli_trace_path),
+                        "selected_chunk_count": len(selected_chunks),
+                        "available_modes": [mode for mode, (_, chunks) in _mode_to_chunks.items() if chunks],
+                        # TraceLens refuses the raw trace when no chunk qualifies,
+                        # so reaching here means the window is a real split chunk.
+                        "fell_back_to_full_trace": False,
+                    }
+                )
                 empty_chunk_warning = _check_selected_chunk_has_gpu_events(
                     split_dir=split_dir,
                     selected_chunk=cli_trace_path,
@@ -8738,6 +7664,16 @@ def main() -> int:
                     available_modes=_mode_to_chunks,
                 )
                 if low_quality_warning is not None:
+                    run_meta["selection"]["busy_ratio"] = low_quality_warning.get("busy_ratio")
+                    run_meta["selection"]["busy_ratio_threshold"] = low_quality_warning.get("threshold")
+                    _note_step(
+                        "select_chunk",
+                        category="select",
+                        status="failed",
+                        requested_mode=args.steady_state_mode,
+                        selected_chunk=cli_trace_path.name,
+                        busy_ratio=low_quality_warning.get("busy_ratio"),
+                    )
                     trace_health_warnings.append(low_quality_warning)
                     append_log(
                         log_path,
@@ -8764,6 +7700,14 @@ def main() -> int:
                         f"{low_quality_warning['non_empty_modes']}"
                     )
 
+                _note_step(
+                    "select_chunk",
+                    category="select",
+                    status="ok",
+                    requested_mode=args.steady_state_mode,
+                    selected_chunk=cli_trace_path.name,
+                    selected_chunk_count=len(selected_chunks),
+                )
                 artifacts["tracelens_trace_split_dir"] = str(split_dir)
                 artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
                 append_log(
@@ -8775,7 +7719,7 @@ def main() -> int:
                     f"using {cli_trace_path.name} for perf report",
                 )
 
-            # Discover capture_folder (shared by both routes).
+            # Graph-capture folder for TraceLens inference graph replay analysis.
             trace_input_path = Path(args.trace_input).expanduser().resolve()
             capture_folder: Path | None = (
                 Path(args.capture_folder).expanduser().resolve()
@@ -8785,156 +7729,21 @@ def main() -> int:
                 # cross-directory promotion those are different places.
                 else discover_capture_folder(trace_input_path, [analysis_trace_path])
             )
+            _note_step(
+                "discover_capture_folder",
+                category="preflight",
+                status="ok" if capture_folder else "skipped",
+                skip_reason=None if capture_folder else "no capture_traces/ beside the analysed trace",
+                capture_folder=str(capture_folder or ""),
+                exists=bool(capture_folder and capture_folder.is_dir()),
+            )
             if capture_folder:
                 append_log(
                     log_path,
                     f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
                 )
 
-            if use_deterministic and not trace_split_blocked:
-                update_status(
-                    status_path,
-                    state="running",
-                    current_step="deterministic_pipeline",
-                    log_path=log_path,
-                    artifact_paths=artifacts,
-                    run_id=run_id,
-                    started_at=started_at,
-                )
-                append_log(
-                    log_path,
-                    "analysis-route=deterministic: running TraceLens deterministic Python toolchain (no LLM calls)",
-                )
-
-                det_rc = _run_deterministic_tracelens_steps(
-                    trace_path=cli_trace_path,
-                    output_dir=tracelens_dir,
-                    tl_root=tl_root,
-                    platform=args.target_platform,
-                    analysis_mode=args.analysis_mode,
-                    framework=args.framework,
-                    capture_folder=capture_folder,
-                    log_path=log_path,
-                    budget_minutes=args.budget_minutes,
-                )
-                orchestrator_mode = "deterministic"
-                if det_rc != 0:
-                    orchestrator_error = f"Deterministic TraceLens pipeline returned rc={det_rc}"
-                _raise_on_failed_deterministic_pipeline(det_rc)
-
-                idle_pct_value = _extract_idle_pct_from_gpu_timeline(
-                    tracelens_dir,
-                )
-                idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = (
-                    _evaluate_idle_gate_with_graph_guard(
-                        idle_pct_value,
-                        tracelens_dir / "analysis.md",
-                        raw_trace_path,
-                    )
-                )
-                compute_pct_value = _extract_compute_pct_from_gpu_timeline(tracelens_dir)
-                exposed_comm_pct_value = _extract_exposed_comm_pct_from_gpu_timeline(
-                    tracelens_dir,
-                )
-                compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
-                    compute_pct_value,
-                    exposed_comm_pct_value,
-                    tracelens_dir / "analysis.md",
-                )
-                if graph_under_recorded_warning is not None:
-                    # Under-recording deflates every recorded share alike, so the
-                    # compute share is as unreliable as idle% here.
-                    low_compute_warning = None
-                    trace_health_warnings.append(graph_under_recorded_warning)
-                    append_log(
-                        log_path,
-                        "deterministic: high idle% is a graph under-recording "
-                        "artifact (profiler captured ~1 of N graph replays); "
-                        "skipping the idle/compute gates and keeping hot_kernels[].",
-                    )
-                if high_idle_warning is not None or low_compute_warning is not None:
-                    agent_candidates = []
-                    allow_empty_candidates = True
-                    if high_idle_warning is not None:
-                        assert idle_pct_value is not None
-                        trace_health_warnings.append(high_idle_warning)
-                        append_log(
-                            log_path,
-                            f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
-                            f"(threshold {idle_pct_threshold:.2f}%); "
-                            "suppressing hot_kernels[]",
-                        )
-                    if low_compute_warning is not None:
-                        assert compute_pct_value is not None
-                        trace_health_warnings.append(low_compute_warning)
-                        append_log(
-                            log_path,
-                            f"deterministic: GPU Compute % = "
-                            f"{compute_pct_value:.2f}% (threshold "
-                            f"{compute_pct_threshold:.2f}%); suppressing "
-                            "hot_kernels[] — a kernel rewrite is bounded by "
-                            "the compute share and cannot move end-to-end "
-                            "latency here",
-                        )
-                else:
-                    if idle_pct_value is not None and graph_under_recorded_warning is None:
-                        append_log(
-                            log_path,
-                            f"deterministic: GPU Idle % = "
-                            f"{idle_pct_value:.2f}% "
-                            f"(threshold {idle_pct_threshold:.2f}%) "
-                            "-- below gate, extracting candidates",
-                        )
-                    raw_det_candidates = deterministic_extract_hot_kernels(
-                        tracelens_dir,
-                        _default_top_k(),
-                        log_path=log_path,
-                        fail_on_corrupt_priority=True,
-                    )
-                    raw_det_candidates = _inject_collective_candidates(
-                        tracelens_dir,
-                        raw_det_candidates,
-                        log_path=log_path,
-                        health_warnings=trace_health_warnings,
-                    )
-                    if raw_det_candidates:
-                        total_dur = _extract_total_time_us_from_gpu_timeline(tracelens_dir) or sum(
-                            float(c.get("duration_us") or 0) for c in raw_det_candidates
-                        )
-                        agent_candidates = _finalize_candidates(
-                            raw_det_candidates,
-                            total_dur=total_dur or None,
-                            perf_report_csv_dir=(tracelens_dir / "perf_report_csvs"),
-                            framework=args.framework or None,
-                            trace_files=trace_files,
-                            log_path=log_path,
-                            source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
-                            model_name=args.model_name,
-                        )
-                        append_log(
-                            log_path,
-                            f"deterministic pipeline produced {len(agent_candidates)} hot kernels",
-                        )
-                    else:
-                        agent_candidates = []
-                        allow_empty_candidates = True
-                        append_log(
-                            log_path,
-                            "deterministic pipeline: no candidates "
-                            "extracted from *_metrics.json / "
-                            "priority_data.json; returning empty "
-                            "hot_kernels[]",
-                        )
-
-                agent_report_path = generate_minimal_analysis_md(
-                    tracelens_dir,
-                    agent_candidates or [],
-                    idle_pct=idle_pct_value,
-                    model_name=getattr(args, "model_name", "") or "",
-                )
-                artifacts["tracelens_agent_report"] = str(agent_report_path)
-
-            elif args.use_llm_orchestrator and not trace_split_blocked:
+            if args.use_llm_orchestrator and not trace_split_blocked:
                 update_status(
                     status_path,
                     state="running",
@@ -9128,12 +7937,6 @@ def main() -> int:
                     )
 
             if agent_candidates is None:
-                if use_deterministic:
-                    raise RuntimeError(
-                        "Deterministic analysis route failed to produce "
-                        "any candidates; check the TraceLens toolchain "
-                        "outputs under the tracelens/ directory."
-                    )
                 raise RuntimeError(
                     "TraceLens analysis.md was not produced; refusing to "
                     "fall back to priority_data/category_data/CSV candidate "
@@ -9200,23 +8003,6 @@ def main() -> int:
                 )
             if source_resolution_path.is_file():
                 artifacts["kernel_source_resolution"] = str(source_resolution_path)
-        if use_deterministic:
-            pass
-        elif args.dry_run:
-            # A dry run plans; it must not spend an agent session, wait out the
-            # session timeout, or read the framework tree to audit a table
-            # nobody will dispatch from.
-            append_log(log_path, "candidate review skipped: --dry-run")
-        else:
-            artifacts.update(
-                run_candidate_review_stage(
-                    run_dir,
-                    candidates=candidates,
-                    args=args,
-                    log_path=log_path,
-                    trace_health_warnings=trace_health_warnings,
-                )
-            )
         artifacts.update(
             write_reports(
                 run_dir,
@@ -9255,7 +8041,16 @@ def main() -> int:
             "orchestrator_error": orchestrator_error,
             # Trace-quality findings surfaced to the Coordinator (empty = nothing wrong).
             "trace_health_warnings": trace_health_warnings,
+            # What this run saw and decided, for the caller's timeline event.
+            "run_meta": run_meta,
         }
+        _note_step(
+            "extract_hot_kernels",
+            category="emit",
+            status="ok",
+            hot_kernel_count=len(candidates) if isinstance(candidates, list) else 0,
+            orchestrator_mode=orchestrator_mode,
+        )
         atomic_write_json(
             run_dir / "session_state.json",
             {
@@ -9291,6 +8086,9 @@ def main() -> int:
             error=f"{type(exc).__name__}: {exc}",
         )
         # Include trace_health_warnings accumulated pre-exception for auto-recovery.
+        # ``run_meta`` goes out on this path too: the ladder up to the failure is
+        # what says which rung refused, so dropping it here would leave the
+        # failure cases -- the ones worth explaining -- as the only blind spot.
         print(
             json.dumps(
                 {
@@ -9302,6 +8100,7 @@ def main() -> int:
                     "cli_log_path": str(log_path),
                     "status_path": str(status_path),
                     "trace_health_warnings": trace_health_warnings,
+                    "run_meta": run_meta,
                 },
                 indent=2,
                 sort_keys=True,

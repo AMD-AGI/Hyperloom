@@ -21,7 +21,6 @@ from hyperloom.inference_optimizer.session.manifest import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy import gate as policy_gate
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
@@ -501,76 +500,27 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     assert exc.value.rule == "path_outside_session_dir"
 
 
-def test_policy_source_file_trusted_scope_passes(tmp_path):
+def test_policy_source_like_fields_are_exempt_from_path_checks(tmp_path):
+    """``source_file`` and ``framework_source_root`` name framework source.
+
+    That source lives outside the session directory by construction, and where a
+    patch may land is decided by the integration step that applies it, so the
+    gate carries no scope test for these fields.
+    """
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "run_optimization",
+            "kind": "integrate",
             "params": {
                 "kernel_id": "k1",
                 "source_file": "/sgl-workspace/aiter/csrc/attn.cu",
+                "framework_source_root": "/sgl-workspace/aiter",
             },
         },
     )
     gate.validate_intent("orchestration", intent)
-
-
-def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
-    packages = tmp_path / "lib" / "python3.12" / "site-packages"
-    source = packages / "unrelated_package" / "native" / "kernel.cu"
-    source.parent.mkdir(parents=True)
-    source.write_text("// source")
-    monkeypatch.setattr(policy_gate, "resolve_source_file_allowlist", lambda: (f"{packages}/",))
-    gate = _gate(tmp_path)
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "run_optimization",
-            "params": {"kernel_id": "k1", "source_file": str(source)},
-        },
-    )
-    gate.validate_intent("orchestration", intent)
-
-
-def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
-    gate = _gate(tmp_path)
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "run_optimization",
-            "params": {
-                "kernel_id": "k1",
-                "source_file": "/random/path/attn.cu",
-            },
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "source_file_outside_trusted_scope"
-
-
-def test_policy_framework_source_root_outside_trusted_scope_denied(tmp_path):
-    # A framework_source_root override escaping trusted source scopes must be
-    # rejected under strict_paths.
-    gate = _gate(tmp_path)
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {
-                "trace_input": str(tmp_path / "runs" / "x.json.gz"),
-                "framework_source_root": "/root",
-            },
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
 def test_policy_strict_off_skips_path_check(tmp_path):

@@ -197,7 +197,7 @@ class _RenderMixin:
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
-            llm_proposable_actions_for,
+            allowed_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_cumulative_seconds,
@@ -226,8 +226,8 @@ class _RenderMixin:
                 f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
                 f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
             )
-        proposable = llm_proposable_actions_for(phase)
-        allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
+        actions_in_phase = allowed_actions_for(phase)
+        allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
         lines = [
             f"phase     : {phase}",
             f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
@@ -1026,10 +1026,8 @@ class _RenderMixin:
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed and absent from "
-                "`PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 "
-                "denies any LLM-emitted propose_action/delegate "
-                "against either name with rule `phase_incompatible`.)"
+                "`profile` are Coordinator-managed; you may also propose "
+                "them directly if the situation warrants it.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")

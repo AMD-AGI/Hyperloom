@@ -1,8 +1,8 @@
 # Session Breakdown v1.1 — Design Rationale (superseded)
 
 > **Historical design note, not the live contract.** `breakdown/schema.py` now declares
-> `hyperloom.session_breakdown.v2` / `v3.0` / `v4.0` / `v5.0`, with
-> `SCHEMA_VERSION = SCHEMA_VERSION_V5`. For current behaviour read
+> `hyperloom.session_breakdown.v2` / `v3.0` / `v4.0` / `v5.0` / `v6.0`, with
+> `SCHEMA_VERSION = SCHEMA_VERSION_V6`. For current behaviour read
 > `breakdown/SKILL.md` and `docs/reference/session-breakdown.md`. The file and symbol
 > pointers below are point-in-time; several no longer exist.
 

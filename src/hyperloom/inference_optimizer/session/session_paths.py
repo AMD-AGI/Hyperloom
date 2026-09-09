@@ -10,6 +10,7 @@ module; no ad-hoc string concatenation elsewhere.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..protocol.action_surfaces import ACTION_CATALOGUE
@@ -125,6 +126,28 @@ def _validate_id_component(value: str, *, field: str) -> str:
     if not v or v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():
         raise ValueError(f"{field}: unsafe path component {value!r}")
     return v
+
+
+def fs_safe_id(value: str, *, fallback: str = "anon") -> str:
+    """Fold an identifier into a single path segment every filesystem accepts.
+
+    ``_validate_id_component`` rejects traversal, not hostility: a fusion
+    operator name like ``llm:ar_residual_rmsnorm_fp8quant_wiring`` carries no
+    separator and no ``..``, so it passes -- and then ``mkdir`` raises
+    ``OSError(EINVAL)`` on filesystems that refuse ``:``. The identifier itself
+    stays canonical (it keys env flags and log lines); only the directory name
+    derived from it is folded here.
+
+    Args:
+        value (str): The identifier to fold. Blank folds to ``fallback``.
+        fallback (str): Segment to use when ``value`` holds nothing usable.
+
+    Returns:
+        str: ``value`` with every character outside ``[A-Za-z0-9._-]`` replaced
+            by ``-``, runs collapsed, and edge separators trimmed.
+    """
+    folded = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-._")
+    return folded or fallback
 
 
 def runs_root(session_dir: Path) -> Path:
@@ -476,6 +499,45 @@ def research_hints_json(session_dir: Path) -> Path:
         ``<session_dir>/research_hints.json``.
     """
     return Path(session_dir) / "research_hints.json"
+
+
+def forge_cycle_dir(session_dir: Path, macro_cycle: int) -> Path:
+    """Return the output root for one Forge macro cycle."""
+    cycle = max(0, int(macro_cycle))
+    return Path(session_dir) / "kernel-agent" / "forge" / f"cycle-{cycle}"
+
+
+def forge_attempt_dir(session_dir: Path, macro_cycle: int, attempt: int) -> Path:
+    """Return the output root for one Forge controller attempt inside a cycle."""
+    return forge_cycle_dir(session_dir, macro_cycle) / f"attempt-{max(0, int(attempt))}"
+
+
+def next_forge_attempt_dir(session_dir: Path, macro_cycle: int) -> Path:
+    """Return a fresh attempt directory for this macro cycle.
+
+    The controller refuses an output directory it has already initialized, so a
+    second KERNEL entry needs one of its own. ``macro_cycle`` cannot supply it:
+    it only advances in EXPLORE, which never runs under ``--no-framework-agent``,
+    so keying the output on the cycle alone leaves every re-entry permanently
+    barren. Numbering upward also keeps each attempt's handoff, tasks and patches
+    for inspection instead of overwriting the previous one's.
+    """
+    cycle_root = forge_cycle_dir(session_dir, macro_cycle)
+    highest = -1
+    if cycle_root.is_dir():
+        for entry in cycle_root.iterdir():
+            if not entry.is_dir() or not entry.name.startswith("attempt-"):
+                continue
+            try:
+                highest = max(highest, int(entry.name[len("attempt-") :]))
+            except ValueError:
+                continue
+    return forge_attempt_dir(session_dir, macro_cycle, highest + 1)
+
+
+def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
+    """Return the handoff directory for one Forge macro cycle."""
+    return forge_cycle_dir(session_dir, macro_cycle) / "handoff"
 
 
 def competitor_target_json(session_dir: Path) -> Path:
@@ -895,6 +957,8 @@ __all__ = [
     "manifest_path",
     "patches_dir",
     "failure_evidence_path",
+    "forge_cycle_dir",
+    "forge_handoff_dir",
     "enablement_dir",
     "enablement_round_dir",
     "reports_dir",

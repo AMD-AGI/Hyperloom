@@ -23,6 +23,8 @@ import pytest
 
 from .conftest import init_git_repo
 
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
@@ -1019,7 +1021,12 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
 
     monkeypatch.setattr(sp.subprocess, "Popen", _boom)
     # Pretend the parent has serving GPU visibility that must NOT leak through.
+    # The env allowlist already blocks every mask name; the pop below is the
+    # second barrier, and it is asserted over the whole mask set so widening
+    # the allowlist cannot quietly re-open a spelling it does not cover.
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
+    monkeypatch.setenv("HSA_VISIBLE_DEVICES", "6,7")
+    monkeypatch.setenv("GPU_DEVICE_ORDINAL", "6,7")
 
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
@@ -1040,9 +1047,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.started is not None, "the subprocess must run inside the lease actor"
     assert str(lease.started["log_path"]).endswith("process.log")
     # Ray owns the visible devices — the caller env must not pin them.
-    assert "ROCR_VISIBLE_DEVICES" not in lease.env
-    assert "HIP_VISIBLE_DEVICES" not in lease.env
-    assert "CUDA_VISIBLE_DEVICES" not in lease.env
+    assert not (GPU_MASK_ENV_NAMES & lease.env.keys())
     # The logical count is still advertised for specialist tooling.
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
@@ -1141,8 +1146,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     framework = tmp_path / "framework"
     for path in (workspace, worktree, framework):
         path.mkdir(parents=True, exist_ok=True)
-    user_prompt = workspace / "prompt.md"
-    user_prompt.write_text("user-prompt", encoding="utf-8")
     system_prompt_file = workspace / "system_prompt.md"
 
     cfg = SpecialistSubprocessConfig(
@@ -1155,7 +1158,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
         system_prompt_file=system_prompt_file,
         system_prompt="SYSTEM",
-        user_prompt_file=user_prompt,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
@@ -1175,7 +1177,8 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
-    assert add_dirs == [str(worktree), str(workspace), str(framework)]
+    # integrate_patch is the only writer of source; the specialist gets neither.
+    assert add_dirs == [str(worktree), str(workspace)]
 
 
 @pytest.mark.asyncio

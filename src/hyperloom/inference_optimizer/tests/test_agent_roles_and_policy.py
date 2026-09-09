@@ -19,6 +19,9 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
+)
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
@@ -108,7 +111,6 @@ def test_robustness_scheduling_police():
 def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_AGENT_OWNED_ACTIONS == frozenset(
         {
-            "kernel_opt",
             "integrate",
             "gemm_tuning",
         }
@@ -171,71 +173,56 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
-def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
+@pytest.mark.parametrize("precision", ["bf16", "fp8"])
+@pytest.mark.parametrize("backend_order", [None, "forge"])
+def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
+    """Refused by channel, not by applicability.
+
+    The lane is dispatched once at KERNEL entry from a lane budget, so a
+    per-tick re-issue would spend time the allocation never granted. Precision
+    and backend order are still not pre-filtered -- the reason is the same for
+    every combination of them, which is what the parametrization pins.
+    """
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+    if backend_order:
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
+    state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
             Intent(
-                type=IntentType.DELEGATE,
-                payload={"action_name": "kernel_opt"},
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
             ),
         )
-    assert exc.value.rule == "kernel_owned_by_kernel_agent"
+    assert exc.value.rule == "request_kind"
 
 
-def test_gate_orchestration_propose_kernel_owned_rejected():
-    """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
+def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
+    """Source rewrite is the controller's, so the kind is unregistered.
+
+    PolicyGate refuses a kind it knows is Coordinator-owned. ``run_optimization``
+    is not one of those any more -- it is nothing at all -- so the refusal comes
+    from the handler lookup instead, with the valid-kind vocabulary attached.
+    Asserting it here keeps the kind from quietly becoming requestable again.
+    """
+    from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
+
+    assert has_handler("run_optimization") is False
+    assert get_handler("run_optimization") is None
+    assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+
+
+def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
+    """Closing the lanes must not close integrate; draining KEEPs stays its job."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    for action in ("kernel_opt", "gemm_tuning", "integrate"):
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.PROPOSE_ACTION,
-                    payload={"action_name": action, "predicted_gain_pct": 10.0},
-                ),
-            )
-        assert exc.value.rule == "kernel_owned_by_kernel_agent", action
-
-
-def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
-    """Hyperloom does not pre-filter GEAK applicability by precision."""
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-        ),
-    )
-
-
-def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL_AGENT", precision="fp8", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-        ),
-    )
-
-
-def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"kernel_id": "k1"}},
         ),
     )
 
@@ -420,32 +407,6 @@ def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
             ),
         )
     assert exc.value.rule == "delegate_action_evidence"
-
-
-@pytest.mark.parametrize(
-    "phase,action",
-    [
-        ("PRELUDE", "baseline"),
-        ("FRAMEWORK_AGENT", "explore"),
-        ("SWEEP", "sweep"),
-        ("CLOSE", "session_breakdown"),
-    ],
-)
-def test_gate_robustness_delegate_out_of_scope_action_denied(phase, action):
-    """Robustness cannot delegate actions outside its declared set, even when the phase allows them."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        shared_state=SharedState(phase=phase, framework="sglang"),
-        strict_phase=True,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(type=IntentType.DELEGATE, payload={"action_name": action}),
-        )
-    assert exc.value.rule == "role"
 
 
 def test_gate_robustness_delegate_recover_still_allowed_in_all_phases(gate):

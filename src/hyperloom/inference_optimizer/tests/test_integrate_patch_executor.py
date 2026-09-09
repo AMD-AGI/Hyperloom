@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_allowlist
+from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -26,6 +26,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _resolve_setup_commands,
     _revert_patches_no_git,
     _run_setup_commands,
+    _with_skipped_setup_reason,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -72,7 +73,7 @@ index 0000000..1111111 100644
 
 @pytest.fixture(autouse=True)
 def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
 def _write_specialist_workspace(
@@ -273,7 +274,7 @@ def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypa
     repo = tmp_path / "repo"
     init_git_repo(repo)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
         lambda: [str(repo)],
     )
     root = _resolve_framework_root(str(repo))
@@ -295,8 +296,8 @@ def _patch_for(rel_path: str) -> str:
 
 
 def _root_resolution_repos(tmp_path: Path, monkeypatch):
-    """The live layout: an unrelated repo heading the allowlist, and the
-    session's own framework tree further down it."""
+    """The live layout: an unrelated repo heading the search roots, and the
+    session's own framework tree further down them."""
     unrelated = tmp_path / "aiter"
     (unrelated / "csrc").mkdir(parents=True)
     (unrelated / "csrc" / "kernel.cpp").write_text("old\n")
@@ -308,7 +309,7 @@ def _root_resolution_repos(tmp_path: Path, monkeypatch):
     init_git_repo(session)
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
         lambda: [str(unrelated), str(session)],
     )
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(session))
@@ -323,7 +324,7 @@ def test_unresolvable_patch_target_does_not_divert_to_an_unrelated_repo(
 
     Target-aware matching is all-or-nothing across the patch set, so a single
     path that resolves nowhere rejects the tree that holds all the others. The
-    next choice used to be the head of the allowlist — ``/sgl-workspace/aiter/``,
+    next choice used to be the head of the search roots — ``/sgl-workspace/aiter/``,
     which leads the static defaults whatever the session is optimising. Patches
     naming the real tree's files then could not apply, and two of the first six
     candidates in a live session were written off as ``rejected_apply_fail`` at
@@ -1141,6 +1142,19 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "pip install -U transformers>=4.58",
         "pip install 'torch<2.11' 'vllm>=0.21,<0.24'",
         "VLLM_ROCM_USE_AITER=1 pip install vllm>=0.21",
+        # An absolute path to the same installer is the same operation. Measured:
+        # two sessions hit one missing dependency and got opposite outcomes
+        # because one specialist wrote the venv's uv by path and the other did
+        # not -- the verdict turned on spelling, not on what the command does.
+        "/opt/venv/bin/uv pip install aiperf",
+        "/opt/venv/bin/pip install aiperf",
+        "/usr/bin/python3 -m pip install aiperf",
+        "sudo /usr/bin/apt-get install -y gh",
+        # Creating an isolated environment to install into. Rejecting these left
+        # PIP_BREAK_SYSTEM_PACKAGES as the only spelling that survived.
+        "uv venv /opt/aiperf-venv",
+        "python3 -m venv /opt/aiperf-venv",
+        "/opt/venv/bin/uv venv /opt/aiperf-venv",
     ],
 )
 def test_setup_allowlist_accepts_installs(cmd: str):
@@ -1166,6 +1180,30 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
+        # The allowlist is matched against the NORMALISED text, but the replay
+        # executes the ORIGINAL string under shell=True. A blanket basename
+        # strip would let a specialist drop its own `pip` into the workspace and
+        # borrow the allowlisted name, so only absolute system prefixes may be
+        # reduced to a basename.
+        "./pip install foo",
+        "../pip install foo",
+        "bin/pip install foo",
+        "/tmp/pip install foo",
+        "workspace/uv pip install foo",
+        # Traversal defeats the prefix check unless the segments are guarded:
+        # the string STARTS with a trusted prefix and still resolves to the
+        # workspace-writable path that "/tmp/pip install foo" is rejected for.
+        "/usr/bin/../../tmp/pip install foo",
+        "/opt/venv/../../tmp/pip install foo",
+        "/usr/local/./../../tmp/pip install foo",
+        "/bin/../tmp/pip install foo",
+        # Basename matching must not turn the allowlist into "anything with a
+        # path": what the gate decides is the KIND of operation, and these are
+        # still not installs.
+        "/usr/bin/rm -rf /tmp/x",
+        "/bin/systemctl restart docker",
+        "./configure --prefix=/usr",
+        "/opt/venv/bin/uv run evil.py",
     ],
 )
 def test_setup_allowlist_rejects_non_installs_and_chaining(cmd: str):
@@ -1198,6 +1236,122 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
     assert out["skipped"] == ["rm -rf /tmp/x"]
     assert ran == ["pip install -U transformers"]
     assert (tmp_path / "logs" / "enablement_setup.log").exists()
+
+
+def test_skipped_setup_commands_are_named_in_the_round_reason():
+    """A rejected command must reach the conclusion, not just a log line.
+
+    It used to be a lone ``log.warning``. Downstream saw the round's outcome
+    with no link to the cause, so the same proposal was re-authored and
+    re-dropped until the budget ran out -- the fix was never the problem, and
+    nothing in the result said so.
+    """
+    reason = _with_skipped_setup_reason(
+        "authored patch produced no gain",
+        {"applied": [], "skipped": ["/opt/x/uv venv /opt/v", "ln -sf a b"], "failed": []},
+    )
+    assert "authored patch produced no gain" in reason
+    assert "REJECTED" in reason
+    assert "ln -sf a b" in reason
+
+
+def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monkeypatch):
+    """``applied`` is the replay channel AND an artifact. It needs both.
+
+    ``lane.py`` stacks ``setup_commands_applied`` into
+    ``state.enablement.setup_commands``, and the next round EXECUTES what it
+    finds there. The allowlist admits
+    ``pip install --index-url https://user:token@host/simple foo``, so the
+    command that must stay runnable is also the one that must not be written
+    down verbatim -- redacting where the list is built would hand pip a masked
+    URL. It is redacted at the artifact writer instead.
+    """
+    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+
+    cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
+    monkeypatch.setattr(
+        subprocess, "run", lambda c, **kw: subprocess.CompletedProcess(args=c, returncode=0, stdout="", stderr="")
+    )
+
+    out = _run_setup_commands([cmd], cwd=tmp_path, log_dir=tmp_path / "logs")
+    # Replay must still work: the stored command is the one that ran.
+    assert out["applied"] == [cmd]
+
+    written = [art._sanitize_setup_command(c) for c in out["applied"]]
+    assert "ghp_notarealtoken" not in " ".join(written), "the artifact would carry the token"
+
+
+def test_round_artifact_on_disk_carries_no_credential(tmp_path):
+    """Assert on the file, not on the helper.
+
+    The test above checks ``_sanitize_setup_command`` in isolation, which stays
+    green if the call is dropped from the writer -- and the writer is the thing
+    that produces the durable artifact. ``round.json`` is copied into the
+    archive and read back by later sessions, so a token in it outlives the run.
+    """
+    import json
+
+    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+
+    token = "ghp_notarealtoken"
+    art.snapshot_round(
+        tmp_path,
+        {
+            "status": "ok",
+            "specialist_task_id": "t1",
+            "setup_commands_applied": [f"pip install --index-url https://u:{token}@pkgs.internal/simple aiperf"],
+        },
+    )
+
+    written = (art.enablement_round_dir(tmp_path, "t1") / "round.json").read_text(encoding="utf-8")
+    assert token not in written, "the durable round artifact carried a credential"
+    # Still a usable record of what ran, not an empty field.
+    assert "pip install" in json.loads(written)["setup_commands_applied"][0]
+
+
+def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
+    """The list itself must be safe, not just the sentence built from it.
+
+    ``setup_commands_skipped`` is copied verbatim into four result payloads and
+    from there into the journal, the report and the KB. Sanitising only at the
+    reporting sites protects those four and leaks at the fifth, so the list is
+    stored in its safe form.
+    """
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: pytest.fail("a rejected command was executed"))
+
+    out = _run_setup_commands(
+        [
+            "rm -rf /tmp/ghp_notarealtoken",
+            "rm -rf " + "z" * 900,
+        ],
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs",
+    )
+
+    stored = " ".join(out["skipped"])
+    assert "ghp_notarealtoken" not in stored, "a credential was stored verbatim"
+    assert all(len(c) <= 200 for c in out["skipped"]), "an unbounded command was stored"
+
+
+def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
+    """Rejected commands are LLM-written text that lands in durable results.
+
+    They reach the journal, the report and the KB, and are read back into the
+    next round's mandate -- so a credential in one must not survive, and twelve
+    long ones must not bury the reason they are appended to.
+    """
+    skipped = [f"rm -rf /tmp/{i}/ghp_notarealtoken " + "y" * 400 for i in range(30)]
+    out = _with_skipped_setup_reason("boot failed", {"applied": [], "skipped": skipped, "failed": []})
+
+    assert "ghp_notarealtoken" not in out
+    assert "boot failed" in out
+    assert len(out) < 4000, f"one rejection list grew to {len(out)} chars"
+    assert "(+18 more)" in out, "the command count was not bounded"
+
+
+def test_reason_is_untouched_when_nothing_was_rejected():
+    base = "authored patch produced no gain"
+    assert _with_skipped_setup_reason(base, {"applied": ["pip install x"], "skipped": [], "failed": []}) == base
 
 
 @pytest.mark.asyncio

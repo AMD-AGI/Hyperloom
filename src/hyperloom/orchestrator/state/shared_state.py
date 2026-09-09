@@ -432,42 +432,8 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-#: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
+#: top-level state.json schema version, stamped on every save.
 LATEST_STATE_SCHEMA_VERSION: int = 6
-
-#: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
-#: name. A state written before that rename spells them the old way, and the
-#: unknown-key filter in ``from_dict`` drops anything not in this table, which
-#: is why an un-migrated resume silently restarted the phase from scratch.
-#: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
-#: deliberately absent: both fields have since been removed, so there is
-#: nothing left to migrate them into.
-_FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
-    "framework_phase_enabled": "framework_agent_phase_enabled",
-    "framework_pr_phase_progress": "framework_agent_phase_progress",
-    "framework_pr_batches": "framework_agent_batches",
-    "framework_pr_phase_done": "framework_agent_phase_done",
-    "framework_pr_discover_failures": "framework_agent_discover_failures",
-    "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
-    "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
-    "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
-}
-
-#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
-#: current name. The old spelling tied the switch to GEMM tuning, which stopped
-#: being true once the dispatch moved into the shared entry tail. Without this
-#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
-#: a resumed opt-out session would silently start dispatching again.
-_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
-    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
-}
-
-#: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
-#: onto their ``variant_name``. Resume reconciliation keys on the bare candidate
-#: key, so an entry still carrying the prefix reads as an orphaned KEEP and
-#: misses the ``(action, variant_name)`` dedup that stops a second append.
-_FRAMEWORK_STACK_ACTION_V5: str = "framework"
-_FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
 
 
 def effective_closing_grace_sec(
@@ -663,11 +629,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
-    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
-    # only governs the entry's own dispatch: orchestration can still request
-    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
-    auto_kernel_opt_enabled: bool = True
+    # Terminal result of the phase-level KernelForge rewrite controller.
+    kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -681,6 +644,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
+    # Stamped once when the run objective is first met. Separate from
+    # ``stop_reason`` because that routes to CLOSE from any phase, which is what
+    # this exists to avoid: a met target goes to SWEEP first.
+    target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by
     # ``_parse_conc_sweep_concs``. Empty is not an instruction: both readers
     # send None instead, which resolves to the ladder for this workload.
@@ -1002,7 +969,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
     # skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
-    # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
+    # Most recent per-kernel optimization record. No lane writes it now that
+    # source-level rewrite belongs to the KernelForge controller, but the
+    # integrate path still reads it to back-fill a patch identity from a payload
+    # carrying only a kernel_id, and a resumed session can still carry one.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
@@ -1015,13 +985,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # silently reset the cap. Monotonic -- every outcome that would justify a reset
     # already stops the gate on its own.
     fusion_infra_aborts: int = 0
+    # How many times a fusion round left targets its lane ceiling never funded,
+    # counted here for the same reason as the aborts above.
+    fusion_withheld_retries: int = 0
     # Most recent collective campaign and capped integration audit.
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
     collective_only_mode: bool = False
-    # Most recent run_optimization dispatch skipped with no eligible kernels;
-    # recorded as a non-failure so the breakdown can surface it.
-    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
@@ -1133,6 +1103,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # phase. A timestamp rather than a flag, so one left behind by a process that
     # died mid-step goes stale instead of muting the guard for the next run.
     kernel_inline_step_seen_unix: float = 0.0
+
+    # Which macro cycle's kernel nomination pass has run to completion. A kernel
+    # a nominator looked at and passed over leaves no ledger row, so it stays
+    # "untried" forever and the phase-pending predicate never goes quiet. Stored
+    # as the cycle rather than a bare flag so the next cycle retires it without
+    # anyone having to clear it.
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -1540,22 +1516,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+        """Construct a :class:`SharedState` from a raw mapping.
 
-        Acts as the unified migration entry point: an absent
-        ``schema_version`` is treated as 1 and unknown keys are dropped. The
-        operation is idempotent and short-circuits when already at the latest
-        schema.
+        Unknown keys are dropped and missing keys take their field defaults;
+        the result is stamped with :data:`LATEST_STATE_SCHEMA_VERSION`.
 
         Args:
             raw: Decoded state mapping (e.g. from JSON on disk).
 
         Returns:
-            A fully-populated, migrated :class:`SharedState` instance.
+            A fully-populated :class:`SharedState` instance.
         """
-        # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
-        incoming_version = int(raw.get("schema_version") or 1)
-
         # Filter to known fields; unknown keys dropped, missing keys default.
         # ``fields()`` rather than ``__dataclass_fields__``: the latter also
         # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
@@ -1590,61 +1561,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
-
-        if incoming_version < 4:
-            # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
-            flat = {
-                k[len("enablement_") :]: v
-                for k, v in raw.items()
-                if k.startswith("enablement_") and k[len("enablement_") :] in _ENABLEMENT_ROUND_FIELDS
-            }
-            # Prefer any nested blob already present (from a partial migration).
-            if not isinstance(filtered.get("enablement"), dict):
-                filtered["enablement"] = flat
-            else:
-                for k, v in flat.items():
-                    filtered["enablement"].setdefault(k, v)
-
-        if incoming_version < 5:
-            # Carry the pre-rename FRAMEWORK fields over. Read from ``raw``:
-            # the old spellings are not dataclass fields, so the filter above
-            # has already discarded them. A state holding both spellings is
-            # mid-migration, and the current one wins.
-            for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = raw[legacy]
-
-            # Renaming the fields is not enough: a session that already promoted
-            # a FRAMEWORK KEEP has stack entries whose variant_name still carries
-            # the promote-side prefix, and reconciliation keys on the bare
-            # candidate key. Left alone they read as orphaned KEEPs for the rest
-            # of the session and no longer collide with the dedup key.
-            stack = filtered.get("optimization_stack")
-            if isinstance(stack, list):
-                # Rebuilt rather than edited in place: ``filtered`` is a shallow
-                # copy, so mutating an entry would also rewrite the caller's
-                # ``raw`` — and ``from_dict`` takes a mapping it does not own.
-                filtered["optimization_stack"] = [
-                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5) :]}
-                    if (
-                        isinstance(entry, dict)
-                        and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
-                        and str(entry.get("variant_name") or "").startswith(_FRAMEWORK_VARIANT_PREFIX_V5)
-                    )
-                    else entry
-                    for entry in stack
-                ]
-
-        if incoming_version < 6:
-            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
-            # reasoning as the v5 block: the old spelling is not a dataclass
-            # field, so the filter above has already dropped it, and a state
-            # holding both spellings is mid-migration with the current one
-            # winning.
-            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -2178,6 +2094,27 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return str(latest.get("top_bottleneck") or "")
         return ""
 
+    def current_within_roofline_pct(self) -> float | None:
+        """Return the latest snapshot's achieved share of its roofline ceiling.
+
+        ``None`` until a roofline has been measured, which is what keeps a
+        roofline target inert on a session that never ran one.
+
+        Returns:
+            float | None: ``within_roofline_pct`` from the newest snapshot, or
+                ``None`` when no snapshot carries a numeric one.
+        """
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            return None
+        value = latest.get("within_roofline_pct")
+        if not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
     def current_comm_pct(self) -> float | None:
         """Return the latest exposed-communication percentage."""
         snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
@@ -2686,12 +2623,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
-
-    def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""

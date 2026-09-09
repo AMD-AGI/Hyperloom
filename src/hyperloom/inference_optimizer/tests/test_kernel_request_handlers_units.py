@@ -20,8 +20,8 @@ from hyperloom.common.codex_session import (
     DEFAULT_CODEX_SANDBOX_MODE,
 )
 from hyperloom.common.env import is_truthy
-from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -1073,6 +1073,60 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._forge_fusion_timeout_sec({}) == 7200
 
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the fusion lane against a faked subprocess and return its input JSON."""
+        trace_dir = tmp_path / "trace"
+        trace_dir.mkdir()
+        (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace_dir),
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: tmp_path / "tools" / name)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "decision": "REVERT", "kept": False})
+            return (0, f"FORGE_FUSION_RESULT_BEGIN\n{body}\nFORGE_FUSION_RESULT_END\n", "")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        await krh._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
+        return json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+
+    async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+
+        assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
+
+    async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane.
+
+        The key is omitted rather than sent as 0, so forge-fuse keeps every
+        discovered recipe eligible; the rest of the brief is unaffected.
+        """
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_recipes" not in payload
+        assert payload["timeout"] == krh._forge_fusion_timeout_sec({})
+
+    async def test_an_explicit_recipe_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share."""
+        payload = await self._fusion_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=120,
+            payload={"max_recipes": 1},
+        )
+
+        assert payload["max_recipes"] == 1
+
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
@@ -1115,6 +1169,40 @@ class TestForgeGemmHelperCoverage:
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["timeout"] == 7200
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_takes_the_lane_share_of_a_bounded_phase(self, tmp_path, monkeypatch):
+        """600 min less the 5 min reserve = 35700s; fusion's 30% is 10710s."""
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 10710
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_unconfigured_provider_fails_before_subprocess(
@@ -1356,6 +1444,85 @@ class TestForgeGemmHelperCoverage:
         assert subprocess_cmd[2] == sys.executable
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+
+    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the gemm lane against a faked subprocess and return its input JSON."""
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model),
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_resolve_aiter_root_for_forge", lambda: "")
+        monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_k: (envs, ""))
+
+        async def _fake_subprocess(_cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+            return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        request = {"task_id": "gemm_ceiling", **(payload or {})}
+        await krh._run_forge_gemm_tuning(request, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(request, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_gemm_tuner_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=600)
+
+        assert payload["max_tuners"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_sends_no_gemm_tuner_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_named_gemm_tuner_needs_no_ceiling(self, tmp_path, monkeypatch):
+        """An explicit tuner has already narrowed the routed set to one."""
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"tuner": "a8w8"},
+        )
+
+        assert payload["tuner"] == "a8w8"
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share.
+
+        The lane's own figure is pinned to a different number, so the assertion
+        fails if the derived share is used instead of the explicit one.
+        """
+        monkeypatch.setattr(
+            krh,
+            "_lane_budget",
+            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(
+                lane=lane_budget.LANE_GEMM, budget_sec=7140, max_targets=4
+            ),
+        )
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"max_tuners": 1},
+        )
+
+        assert payload["max_tuners"] == 1
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
@@ -2765,12 +2932,12 @@ class TestBackendOrder:
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
 
-        assert krh._backend_order({}) == []
+        assert krh._raw_kernel_backend_order({}) == ["geak"]
 
     def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
 
-        assert krh._backend_order({}) == []
+        assert krh._raw_kernel_backend_order({}) == ["geak"]
 
 
 class TestCandidateEnvAllowed:
@@ -2792,25 +2959,6 @@ class TestCandidateEnvAllowed:
         assert krh._candidate_env_allowed(sample) is True
 
 
-class TestRuntimeGeneratedKernel:
-    def test_runtime_generated_path_treats_as_generated(self):
-        markers = krh._RUNTIME_GENERATED_SOURCE_MARKERS
-        if not markers:
-            pytest.skip("no runtime markers in build")
-        marker = next(iter(markers))
-        assert krh._is_runtime_generated_kernel("kernel_agent", f"/tmp/{marker}_x.py") is True
-
-    def test_reusable_source_root_overrides_compile_marker(self):
-        markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        roots = krh._reusable_source_roots()
-        if not markers or not roots:
-            pytest.skip("required tables empty in build")
-        marker = next(iter(markers))
-        reusable_root = next(iter(roots))
-        # Name matches but source lives under a reusable root -> False.
-        assert krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py") is False
-
-
 class TestSplitServerArgs:
     def test_empty_returns_empty(self):
         assert krh._split_server_args("") == []
@@ -2823,62 +2971,6 @@ class TestSplitServerArgs:
         # shlex.split raises ValueError on bad input; helper returns [].
         argv = krh._split_server_args('--foo "unterminated')
         assert argv == []
-
-
-class TestLoadCandidateMetadata:
-    def test_uses_inline_candidate(self):
-        out = krh._load_candidate_metadata({"candidate": {"kernel_id": "x"}})
-        assert out == {"kernel_id": "x"}
-
-    def test_returns_empty_when_no_kernel_id(self):
-        assert krh._load_candidate_metadata({}) == {}
-        assert krh._load_candidate_metadata({"candidates_path": "x"}) == {}
-
-    def test_reads_kernel_from_disk(self, tmp_path):
-        candidates = tmp_path / "hot.json"
-        candidates.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        {"kernel_id": "k0", "name": "first"},
-                        {"kernel_id": "k1", "name": "second"},
-                    ],
-                }
-            )
-        )
-        out = krh._load_candidate_metadata(
-            {
-                "candidates_path": str(candidates),
-                "kernel_id": "k1",
-            }
-        )
-        assert out["name"] == "second"
-
-    def test_returns_empty_on_missing_kernel(self, tmp_path):
-        candidates = tmp_path / "hot.json"
-        candidates.write_text(json.dumps({"hot_kernels": []}))
-        assert (
-            krh._load_candidate_metadata(
-                {
-                    "candidates_path": str(candidates),
-                    "kernel_id": "missing",
-                }
-            )
-            == {}
-        )
-
-    def test_returns_empty_on_bad_json(self, tmp_path):
-        candidates = tmp_path / "hot.json"
-        candidates.write_text("{not json")
-        assert (
-            krh._load_candidate_metadata(
-                {
-                    "candidates_path": str(candidates),
-                    "kernel_id": "x",
-                }
-            )
-            == {}
-        )
 
 
 class TestLoadMaterializedWorkloadMetadata:
@@ -3007,31 +3099,6 @@ class TestReusableSourceRootsAtom:
 
     def test_includes_atom_site_packages_python_3_12(self):
         assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
-
-    def test_atom_path_classified_as_reusable(self):
-        """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated."""
-        markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        if not markers:
-            pytest.skip("compile markers empty in build")
-        marker = next(iter(markers))
-        result = krh._is_runtime_generated_kernel(
-            marker,
-            "/app/ATOM/atom/model_engine/model_runner.py",
-        )
-        assert result is False
-
-    def test_non_framework_path_under_app_is_not_reusable(self):
-        """A non-atom path under /app/ must NOT match the atom reusable-source-root prefix."""
-        markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        if not markers:
-            pytest.skip("compile markers empty in build")
-        marker = next(iter(markers))
-        # Under /app/ but not /app/ATOM/atom/ -> runtime-generated (not reusable).
-        result = krh._is_runtime_generated_kernel(
-            marker,
-            "/app/session_dir/runs/baseline/foo.py",
-        )
-        assert result is True
 
 
 class TestRunGemmTuningHandler:
@@ -5070,445 +5137,8 @@ class TestRunGemmTuningHandler:
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
-class TestDefaultKernelBatchParallel:
-    @pytest.fixture
-    def patch_torch(self, monkeypatch):
-        """Returns a setter that overrides ``torch.cuda.device_count`` and ``$KERNEL_AGENT_NUM_GPUS``."""
-        torch = _ensure_torch_module(monkeypatch)
-
-        def _set(n_gpus, per_task=None):
-            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
-            if per_task is None:
-                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
-            else:
-                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
-
-        return _set
-
-    @pytest.mark.parametrize(
-        "n_gpus, per_task, expected",
-        [
-            # Full-node match: cap kicks in at 8.
-            (8, 1, 8),
-            # Partial node -> floor at the visible-GPU count.
-            (4, 1, 4),
-            # 8-GPU node with 4-GPU reservations -> 2 concurrent.
-            (8, 4, 2),
-            # 4-GPU pod with 2-GPU per task -> 2 concurrent.
-            (4, 2, 2),
-            # Larger-than-cap node -> cap still kicks in.
-            (16, 1, 8),
-            # Per-task larger than visible -> floor at 1.
-            (1, 4, 1),
-        ],
-    )
-    def test_scales_with_visible_gpus(
-        self,
-        patch_torch,
-        n_gpus,
-        per_task,
-        expected,
-    ):
-        patch_torch(n_gpus, per_task=per_task)
-        assert krh._default_kernel_batch_parallel() == expected
-
-    def test_per_task_unset_defaults_to_one(self, patch_torch):
-        patch_torch(4, per_task=None)
-        assert krh._default_kernel_batch_parallel() == 4
-
-    def test_per_task_invalid_falls_back_to_one(self, patch_torch):
-        patch_torch(4, per_task="not-an-int")
-        assert krh._default_kernel_batch_parallel() == 4
-
-    def test_zero_visible_gpus_returns_legacy_fallback(self, patch_torch):
-        patch_torch(0)
-        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-
-    def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
-        torch = _ensure_torch_module(monkeypatch)
-
-        def _boom():
-            raise RuntimeError("driver init failed")
-
-        monkeypatch.setattr(torch.cuda, "device_count", _boom)
-        monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
-        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-
-
-# _should_parallelize_backends — backends never auto-parallelize; False unless
-# forced via payload ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``.
-
-
-class TestShouldParallelizeBackends:
-    @pytest.fixture
-    def patch_torch(self, monkeypatch):
-        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS`` and clear the env override."""
-        torch = _ensure_torch_module(monkeypatch)
-
-        def _set(n_gpus, per_task=None):
-            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
-            if per_task is None:
-                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
-            else:
-                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
-            monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
-
-        return _set
-
-    @pytest.mark.parametrize(
-        "n_gpus, per_task, num_candidates",
-        [
-            # No auto-parallelize regardless of GPU count: without an explicit
-            # override the decision is always sequential (False).
-            (8, 1, 3),
-            (8, 1, 100),
-            (2, 1, 1),
-            (1, 1, 1),
-            (16, 8, 1),
-        ],
-    )
-    def test_no_auto_parallelize_without_override(
-        self,
-        patch_torch,
-        n_gpus,
-        per_task,
-        num_candidates,
-    ):
-        patch_torch(n_gpus, per_task=per_task)
-        assert krh._should_parallelize_backends({}, num_candidates) is False
-
-    def test_non_positive_candidates_is_false(self, patch_torch):
-        patch_torch(64, per_task=1)  # plenty of GPUs
-        assert krh._should_parallelize_backends({}, 0) is False
-        assert krh._should_parallelize_backends({}, -1) is False
-
-    def test_zero_visible_gpus_is_false(self, patch_torch):
-        patch_torch(0, per_task=1)
-        assert krh._should_parallelize_backends({}, 1) is False
-
-    def test_torch_unknown_is_false(self, monkeypatch):
-        torch = _ensure_torch_module(monkeypatch)
-
-        def _boom():
-            raise RuntimeError("driver init failed")
-
-        monkeypatch.setattr(torch.cuda, "device_count", _boom)
-        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
-        assert krh._should_parallelize_backends({}, 1) is False
-
-    def test_payload_override_enables_below_threshold(self, patch_torch):
-        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
-        assert (
-            krh._should_parallelize_backends(
-                {"parallel_backends": True},
-                5,
-            )
-            is True
-        )
-        assert (
-            krh._should_parallelize_backends(
-                {"parallel_backends": "on"},
-                5,
-            )
-            is True
-        )
-
-    def test_payload_override_disables_above_threshold(self, patch_torch):
-        patch_torch(64, per_task=1)  # GPU-aware math would say True
-        assert (
-            krh._should_parallelize_backends(
-                {"parallel_backends": False},
-                1,
-            )
-            is False
-        )
-        assert (
-            krh._should_parallelize_backends(
-                {"parallel_backends": "no"},
-                1,
-            )
-            is False
-        )
-
-    def test_env_override(self, patch_torch, monkeypatch):
-        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
-        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
-        assert krh._should_parallelize_backends({}, 5) is True
-        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
-        assert krh._should_parallelize_backends({}, 1) is False
-
-
-class TestReconcileKernelId:
-    CANDS = [
-        {"kernel_id": "k001", "name": "aten::mm"},
-        {"kernel_id": "k010", "name": "aiter::rmsnorm"},
-    ]
-
-    def test_exact_id_kept(self):
-        assert krh._reconcile_kernel_id("k010", self.CANDS) == "k010"
-
-    def test_name_match_kept(self):
-        # An exact operator-name match is canonicalized to the stable k00x id.
-        assert krh._reconcile_kernel_id("aten::mm", self.CANDS) == "k001"
-
-    def test_normalized_prefix_resolves_to_real_id(self):
-        assert krh._reconcile_kernel_id("kn001", self.CANDS) == "k001"
-        assert krh._reconcile_kernel_id("rn010", self.CANDS) == "k010"
-
-    def test_missing_id_falls_back_to_first(self):
-        assert krh._reconcile_kernel_id("", self.CANDS) == "k001"
-        assert krh._reconcile_kernel_id(None, self.CANDS) == "k001"
-
-    def test_hallucinated_id_is_left_for_guard_or_cli_skip(self):
-        # Non-empty ids are never guessed; a pure hallucination is left untouched.
-        assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "aiter.silu_and_mul"
-        assert (
-            krh._reconcile_kernel_id("framework_sglang_silu_and_mul_m64", self.CANDS)
-            == "framework_sglang_silu_and_mul_m64"
-        )
-
-
-class TestReconcileKernelIdForSingleBatch:
-    CANDS = [
-        {
-            "kernel_id": "k002",
-            "name": "_fwd_grouped_kernel_stage1",
-            "shape_provenance": "launch_grid",
-        },
-    ]
-
-    def test_pins_mismatched_id_to_sole_candidate(self):
-        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS)
-        assert kid == "k002"
-        assert pinned is True
-
-    def test_keeps_exact_match(self):
-        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS)
-        assert kid == "k002"
-        assert pinned is False
-
-
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
 # against the full hot ∪ skipped set (no fallback).
-class TestResolveCandidateId:
-    SKIPPED = [
-        {"kernel_id": "k001", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k003", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k010", "name": "aiter::rmsnorm", "reusable_native_kernel": False, "source_file": ""},
-    ]
-
-    def test_exact_id(self):
-        assert krh._resolve_candidate_id("k003", self.SKIPPED) == "k003"
-
-    def test_kn_prefix_alias_canonicalized(self):
-        assert krh._resolve_candidate_id("kn001", self.SKIPPED) == "k001"
-        assert krh._resolve_candidate_id("rn010", self.SKIPPED) == "k010"
-
-    def test_non_unique_or_nonroutable_name_not_resolved(self):
-        # ``aten::mm`` is non-unique and non-routable -> leave untouched ("").
-        assert krh._resolve_candidate_id("aten::mm", self.SKIPPED) == ""
-
-    def test_pure_hallucination_returns_empty(self):
-        assert krh._resolve_candidate_id("aiter.silu_and_mul", self.SKIPPED) == ""
-
-    def test_empty_request_returns_empty(self):
-        assert krh._resolve_candidate_id("", self.SKIPPED) == ""
-        assert krh._resolve_candidate_id(None, self.SKIPPED) == ""
-
-
-class TestAllKernelCandidates:
-    def test_union_of_hot_and_skipped(self, tmp_path):
-        cp = tmp_path / "kc.json"
-        cp.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
-                    "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
-                }
-            ),
-            encoding="utf-8",
-        )
-        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
-        assert {c["kernel_id"] for c in out} == {"k005", "k001"}
-
-    def test_missing_path_returns_empty(self):
-        assert krh._all_kernel_candidates({}) == []
-
-    def test_dedups_skipped_subset_of_hot(self, tmp_path):
-        # ``hot_kernels`` is the full ranked set and ``skipped_kernels`` its
-        # non-routable subset (they overlap); each kernel must be counted once.
-        cp = tmp_path / "kc.json"
-        hot = [
-            {"kernel_id": "k001", "name": "moe", "reusable_native_kernel": True},
-            {"kernel_id": "k002", "name": "aten::mm", "reusable_native_kernel": False},
-            {"kernel_id": "k003", "name": "aiter::rmsnorm", "reusable_native_kernel": False},
-        ]
-        skipped = [dict(c) for c in hot if not c["reusable_native_kernel"]]  # subset of hot
-        cp.write_text(json.dumps({"hot_kernels": hot, "skipped_kernels": skipped}), encoding="utf-8")
-        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
-        # Each kernel exactly once, hot order preserved.
-        assert [c["kernel_id"] for c in out] == ["k001", "k002", "k003"]
-        assert len(out) == 3
-
-    def test_dedups_by_name_when_kernel_id_missing(self, tmp_path):
-        # Fall back to ``name`` when ``kernel_id`` is absent; a row with neither
-        # id nor name is never dropped.
-        cp = tmp_path / "kc.json"
-        cp.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [{"name": "moe"}, {"name": "aten::mm"}, {"gpu_pct": 1.0}],
-                    "skipped_kernels": [{"name": "aten::mm"}, {"gpu_pct": 2.0}],
-                }
-            ),
-            encoding="utf-8",
-        )
-        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
-        names = [c.get("name") for c in out]
-        # "aten::mm" appears once; the two identity-less rows are both kept.
-        assert names.count("aten::mm") == 1
-        assert names.count("moe") == 1
-        assert sum(1 for c in out if not (c.get("kernel_id") or c.get("name"))) == 2
-
-
-class TestBatchKernelCandidatesRetryBudget:
-    def _write_candidates(self, tmp_path: Path) -> Path:
-        cp = tmp_path / "kc.json"
-        cp.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        {
-                            "kernel_id": "k001",
-                            "gpu_pct": 12.0,
-                            "reusable_native_kernel": True,
-                            "source_file": "/p/moe_op.py",
-                        }
-                    ],
-                    "reusable_native_kernel_ids": ["k001"],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return cp
-
-    def test_retryable_failed_kernel_remains_batch_eligible_by_default(self, tmp_path):
-        cp = self._write_candidates(tmp_path)
-        state = SharedState.load_or_init(tmp_path)
-        state.kernel_opt_attempts = {
-            "k001": {
-                "attempts": 1,
-                "attempts_per_source": {"/p/moe_op.py": 1},
-                "failure_count": 1,
-                "last_status": "failed",
-                "last_decision": "",
-                "rejected_reason": "",
-            }
-        }
-        state.save(tmp_path)
-
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-
-        assert [item["kernel_id"] for item in out] == ["k001"]
-
-    def test_exhausted_failed_kernel_is_not_batch_eligible_by_default(self, tmp_path):
-        cp = self._write_candidates(tmp_path)
-        state = SharedState.load_or_init(tmp_path)
-        state.kernel_opt_attempts = {
-            "k001": {
-                "attempts": 2,
-                "attempts_per_source": {"/p/moe_op.py": 2},
-                "failure_count": 2,
-                "last_status": "failed",
-                "last_decision": "",
-                "rejected_reason": "max_failures_2_without_keep",
-            }
-        }
-        state.rejected_kernel_ids = ["k001"]
-        state.save(tmp_path)
-
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-
-        assert out == []
-
-    def test_partial_kernel_stays_single_dispatch_by_default(self, tmp_path):
-        cp = self._write_candidates(tmp_path)
-        state = SharedState.load_or_init(tmp_path)
-        state.kernel_opt_attempts = {
-            "k001": {
-                "attempts": 1,
-                "attempts_per_source": {"/p/moe_op.py": 1},
-                "partial_count": 1,
-                "last_decision": "PARTIAL",
-                "last_status": "ok",
-                "rejected_reason": "",
-            }
-        }
-        state.save(tmp_path)
-
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-
-        assert out == []
-
-    def test_retryable_failed_kernel_respects_max_failures_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "3")
-        cp = self._write_candidates(tmp_path)
-        state = SharedState.load_or_init(tmp_path)
-        state.kernel_opt_attempts = {
-            "k001": {
-                "attempts": 2,
-                "attempts_per_source": {"/p/moe_op.py": 2},
-                "failure_count": 2,
-                "last_status": "failed",
-                "last_decision": "",
-                "rejected_reason": "",
-            }
-        }
-        state.save(tmp_path)
-
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-
-        assert [item["kernel_id"] for item in out] == ["k001"]
-
-    def test_geometry_only_shape_excluded_from_batch(self, tmp_path):
-        # A reusable kernel with a resolved source but shape_dispatchable=False
-        # fails the kernel-opt gate; it must be dropped before dispatch.
-        cp = tmp_path / "kc.json"
-        cp.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        {
-                            "kernel_id": "k001",
-                            "gpu_pct": 12.0,
-                            "reusable_native_kernel": True,
-                            "source_file": "/p/moe_op.py",
-                            "shape_dispatchable": False,
-                        },
-                        {
-                            "kernel_id": "k002",
-                            "gpu_pct": 11.0,
-                            "reusable_native_kernel": True,
-                            "source_file": "/p/attn_op.py",
-                            "shape_dispatchable": True,
-                        },
-                    ],
-                    "reusable_native_kernel_ids": ["k001", "k002"],
-                }
-            ),
-            encoding="utf-8",
-        )
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-        assert [item["kernel_id"] for item in out] == ["k002"]
-
-    def test_missing_shape_dispatchable_stays_batch_eligible(self, tmp_path):
-        # TraceLens candidates omit shape_dispatchable; absent field must not be
-        # filtered so the main path is preserved.
-        cp = self._write_candidates(tmp_path)  # no shape_dispatchable key
-        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
-        assert [item["kernel_id"] for item in out] == ["k001"]
-
-
 class TestTracelensRootResolution:
     """TraceLens root is resolved/validated independently of inherited env."""
 
@@ -5554,7 +5184,7 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert called["n"] == 1  # self-heal was attempted
@@ -5581,7 +5211,7 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
@@ -5605,7 +5235,7 @@ class TestTracelensRootResolution:
         )
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert out["status"] == "failed"
@@ -5699,138 +5329,6 @@ class TestTracelensRootResolution:
         assert called["root"] == default_root
 
 
-class TestKernelOptArtifactBundleRecording:
-    def test_materialize_unified_patch_snapshot_for_forge_fusion_patch(self, tmp_path):
-        repo = tmp_path / "framework"
-        repo.mkdir()
-        (repo / "model.py").write_text("old = 1\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
-            check=True,
-        )
-        # The live tree is already dirty; snapshot materialization must start from HEAD.
-        (repo / "model.py").write_text("new = 2\n", encoding="utf-8")
-        (repo / "model_fused.py").write_text("fused = True\n", encoding="utf-8")
-        patch = tmp_path / "fusion.patch"
-        patch.write_text(
-            "\n".join(
-                [
-                    "diff --git a/model.py b/model.py",
-                    "--- a/model.py",
-                    "+++ b/model.py",
-                    "@@ -1 +1 @@",
-                    "-old = 1",
-                    "+new = 2",
-                    "diff --git a/model_fused.py b/model_fused.py",
-                    "new file mode 100644",
-                    "index 0000000..1111111",
-                    "--- /dev/null",
-                    "+++ b/model_fused.py",
-                    "@@ -0,0 +1 @@",
-                    "+fused = True",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        snap = Path(
-            krh.materialize_unified_patch_snapshot(
-                patch_path=patch,
-                repo_root=repo,
-                snapshot_dir=tmp_path / "snapshot",
-            )
-        )
-
-        assert (snap / "model.py").read_text(encoding="utf-8") == "new = 2\n"
-        assert (snap / "model_fused.py").read_text(encoding="utf-8") == "fused = True\n"
-        assert (repo / "model.py").read_text(encoding="utf-8") == "new = 2\n"
-
-    def test_record_kernel_opt_persists_best_artifact_bundle(self):
-        state = SharedState()
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap",
-            "patch_path": "/tmp/best.patch",
-            "repo_root": "/repo",
-            "write_paths": ["aiter/ops/moe.py", "benchmarks/bench_moe.py"],
-            "delete_paths": [],
-        }
-        kd.record_kernel_opt(
-            state,
-            {
-                "status": "completed",
-                "kernel_id": "k001",
-                "source_file": "/repo/aiter/ops/moe.py",
-                "verification": {
-                    "micro_speedup": 1.25,
-                    "compile_passed": True,
-                    "correctness_passed": True,
-                    "best_backend": "forge",
-                    "best_artifact_path": "/repo/aiter/ops/moe.py",
-                    "best_artifact_bundle": bundle,
-                    "deploy_snapshot_dir": "/tmp/snap",
-                    "deploy_patch_path": "/tmp/best.patch",
-                    "deploy_repo_root": "/repo",
-                },
-                "proposal": {"decision": "KEEP", "reasons": ["ok"]},
-            },
-        )
-
-        assert state.kernel_opt_attempts["k001"]["last_artifact_bundle"] == bundle
-        assert state.last_kernel_opt["best_artifact_bundle"] == bundle
-
-    def test_resolve_integrate_payload_uses_last_kernel_artifact_bundle(self, tmp_path):
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap",
-            "patch_path": "/tmp/best.patch",
-            "repo_root": "/repo",
-        }
-        state = SharedState.load_or_init(tmp_path)
-        state.last_kernel_opt = {
-            "kernel_id": "k001",
-            "source_file": "/repo/aiter/ops/moe.py",
-            "best_artifact_bundle": bundle,
-        }
-        state.save(tmp_path)
-
-        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k001"}, session_dir=tmp_path)
-
-        assert error is None
-        assert resolved["snapshot_dir"] == "/tmp/snap"
-        assert resolved["patch_path"] == "/tmp/best.patch"
-        assert resolved["kernel_repo"] == "/repo"
-        assert resolved["source_file"] == "/repo/aiter/ops/moe.py"
-
-    def test_resolve_integrate_payload_uses_per_kernel_artifact_bundle(self, tmp_path):
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap2",
-            "patch_path": "/tmp/queued.patch",
-            "repo_root": "/repo2",
-        }
-        state = SharedState.load_or_init(tmp_path)
-        state.last_kernel_opt = {"kernel_id": "other"}
-        state.kernel_opt_attempts = {
-            "k002": {
-                "last_source_file": "/repo2/aiter/ops/queued.py",
-                "last_artifact_bundle": bundle,
-            }
-        }
-        state.save(tmp_path)
-
-        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k002"}, session_dir=tmp_path)
-
-        assert error is None
-        assert resolved["snapshot_dir"] == "/tmp/snap2"
-        assert resolved["patch_path"] == "/tmp/queued.patch"
-        assert resolved["kernel_repo"] == "/repo2"
-        assert resolved["source_file"] == "/repo2/aiter/ops/queued.py"
-
-
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable)
     and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
@@ -5857,8 +5355,7 @@ class TestBuildTraceAnalyzeCmd:
             model_name="Qwen",
             framework="sglang",
             target_platform="MI300X",
-            analysis_mode="deterministic",
-            analysis_route="deterministic",
+            analysis_mode="inference",
         )
         assert cmd == [
             "python3",
@@ -5878,7 +5375,7 @@ class TestBuildTraceAnalyzeCmd:
             "--target-platform",
             "MI300X",
             "--analysis-mode",
-            "deterministic",
+            "inference",
             # splitter hints: payload override wins over workload metadata.
             "--split-conc",
             "64",
@@ -5886,8 +5383,6 @@ class TestBuildTraceAnalyzeCmd:
             "1024",
             "--split-r",
             "0.5",
-            "--analysis-route",
-            "deterministic",
         ]
         assert steady == ""
 
@@ -5911,7 +5406,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="sglang",
             target_platform="MI355X",
             analysis_mode="default",
-            analysis_route="agent",
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
@@ -5941,7 +5435,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="bypass",
         )
         # bypass tool name; no --tracelens-root and no --skip-split.
         assert cmd[1] == "/tools/bypass_trace_analysis.py"
@@ -5952,8 +5445,6 @@ class TestBuildTraceAnalyzeCmd:
         assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
         assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
         assert "--split-conc" not in cmd
-        # bypass takes no analysis-route flag.
-        assert "--analysis-route" not in cmd
         assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
@@ -5977,7 +5468,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="sglang",
             target_platform="",
             analysis_mode="inference",
-            analysis_route="bypass",
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
@@ -5999,7 +5489,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="agent",
         )
         assert steady == "median"
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
@@ -6060,3 +5549,103 @@ def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
     generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
 
     assert rh._cold_start_rebaseline_timeout(generous) == generous
+
+
+class TestTheGemmLaneBudgetReachesTheInputJson:
+    """The gemm lane's share of the phase, as the wrapper actually receives it.
+
+    The wrapper exposes no "run at most N tuners" input, so a ceiling of one is
+    expressed by pinning ``tuner``; the wall-clock half travels as ``timeout`` and
+    ``global_timeout``.
+    """
+
+    @staticmethod
+    def _sentinel() -> str:
+        return (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+    def _prepare(self, tmp_path, monkeypatch, *, remaining_minutes, targets):
+        from hyperloom.orchestrator.state.shared_state import SharedState
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir(exist_ok=True)
+        SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path=str(model_dir),
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+        ).save(tmp_path)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: remaining_minutes)
+
+        monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_gemm_router_targets", lambda **_kwargs: targets)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+    async def _written(self, tmp_path, payload):
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_one_tuner_caps_the_routed_set_at_one(self, tmp_path, monkeypatch):
+        # 600 min less the 5 min reserve leaves 35700s; gemm's 20% is 7140s, which
+        # funds the first 60-minute tuner and not the second.
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-one"})
+        assert written["max_tuners"] == 1
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 7140
+        assert written["timeout"] == krh.gemm_per_tuner_timeout_sec(7140)
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_every_tuner_caps_at_that_count(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 600), ("a8w8", 600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-none"})
+        assert written["max_tuners"] == 2
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 7140
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_keeps_the_module_default_and_no_pin(self, tmp_path, monkeypatch):
+        """No allocation must degrade to the default session, never to zero."""
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=None,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-unbounded"})
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 18000
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_tuner_survives_the_ceiling(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
+        assert written["tuner"] == "a8w8"

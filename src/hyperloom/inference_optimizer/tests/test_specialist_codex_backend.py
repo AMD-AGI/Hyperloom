@@ -307,7 +307,6 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
             if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
         cmd, _ = dispatcher._build_codex_launch(
-            prompt_file=prompt_file,
             workspace=workspace,
             worktree=worktree,
             system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
@@ -318,7 +317,6 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     return dispatcher._build_claude_cmd(
         system_prompt_file=workspace / "system_prompt.md",
         system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
-        user_prompt_file=prompt_file,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset(),
@@ -347,10 +345,11 @@ def test_openai_only_deployment_builds_a_codex_exec_argv(
     assert "SYSTEM_INSTRUCTION_SENTINEL" not in rendered_argv
 
     workspace = tmp_path / "workspace"
-    # ``-C`` is the write-isolated worktree; workspace + framework roots are added.
+    # ``-C`` is the write-isolated worktree; only the workspace joins it.
     assert cmd[cmd.index("-C") + 1] == str(workspace / "worktree")
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
-    assert add_dirs == [str(workspace), str(tmp_path / "framework")]
+    assert add_dirs == [str(workspace)]
+    assert str(tmp_path / "framework") not in cmd
     codex_config = workspace / ".codex" / "config.toml"
     assert codex_config.stat().st_mode & 0o777 == 0o600
     config_text = codex_config.read_text(encoding="utf-8")
@@ -464,8 +463,9 @@ def test_claude_argv_is_unchanged_for_every_non_openai_only_shape(
     assert "exec" not in cmd and "--json" not in cmd
     workspace = tmp_path / "workspace"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
-    # Unchanged order: worktree (writes), workspace (done.json), framework roots.
-    assert add_dirs == [str(workspace / "worktree"), str(workspace), str(tmp_path / "framework")]
+    # Unchanged order: worktree (writes), then workspace (done.json).
+    assert add_dirs == [str(workspace / "worktree"), str(workspace)]
+    assert str(tmp_path / "framework") not in cmd
 
 
 @pytest.mark.parametrize(
@@ -1197,6 +1197,12 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         "OPENAI_API_KEY",
         "LLM_GATEWAY_KEY",
         "HYPERLOOM_CODEX_HTTP_HEADER_0",
+        # Every mask spelling, not just the canonical three: an MCP server env
+        # that re-pins the specialist's cards does so just as well through the
+        # legacy names, which ROCm honours whenever the modern one is absent.
+        "ROCR_VISIBLE_DEVICES",
+        "HSA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
     ],
 )
 @pytest.mark.asyncio

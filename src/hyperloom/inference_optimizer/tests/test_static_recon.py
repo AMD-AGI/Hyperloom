@@ -210,3 +210,31 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
     assert len(cids) == 1
     assert cids[0].startswith("gap.static_recon.")
     assert " " not in cids[0] and "/" not in cids[0]
+
+
+# -- workload precision -----------------------------------------------------
+class _PrecisionState:
+    """Minimal SharedState stand-in carrying the two precision sources."""
+
+    def __init__(self, precision: str, model_info: dict) -> None:
+        self.precision = precision
+        self.model_info = model_info
+
+
+def test_workload_precision_prefers_the_checkpoint_over_the_env_label():
+    state = _PrecisionState("fp8", {"quantization": "mxfp8"})
+    assert src.workload_precision(state) == "mxfp8"
+
+
+def test_workload_precision_falls_back_to_shared_state():
+    assert src.workload_precision(_PrecisionState("fp8", {})) == "fp8"
+    assert src.workload_precision(_PrecisionState("", {})) == ""
+
+
+def test_mxfp8_checkpoint_gets_the_mxfp8_focus_directories():
+    """An MXFP8 model labelled fp8 by $PRECISION must not get the fp8 entries."""
+    precision = src.workload_precision(_PrecisionState("fp8", {"quantization": "mxfp8"}))
+    dirs = src.source_hint_directories_for(gpu_type="MI355X", precision=precision)
+    assert "vllm/model_executor/kernels/linear/mxfp8/" in dirs
+    assert "vllm/model_executor/layers/fused_moe/experts/" in dirs
+    assert "vllm/model_executor/layers/quantization/" not in dirs

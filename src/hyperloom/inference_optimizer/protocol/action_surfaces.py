@@ -26,7 +26,6 @@ from types import MappingProxyType
 # Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
 KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
-        "kernel_opt",
         "integrate",
         "gemm_tuning",
     }
@@ -38,7 +37,6 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 # prompt must advertise the kind.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
-        "kernel_opt": "run_optimization",
         "gemm_tuning": "run_gemm_tuning",
         "integrate": "integrate",
     }
@@ -68,16 +66,36 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 )
 
 
-# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
-# rejects them from an LLM, which would bypass the lane's gate and accounting.
-# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
-# they have no executor and no prompt entry.
+# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
+# once their own gate passes. A direct request would skip that gate. An
+# unregistered kind is not listed here: the handler lookup auto-rejects it with
+# the valid-kind vocabulary, which is the better answer for a typo.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
-        "run_fusion",
         "run_collective",
+        "run_fusion",
+        # Dispatched once at phase entry from a lane budget. An LLM re-issuing it
+        # per tick would spend budget the allocation never granted.
+        "run_gemm_tuning",
     }
 )
+
+
+# Request kinds an LLM may address to the kernel agent. Derived from the action
+# table minus the Coordinator-owned lanes: those two are still kernel-owned
+# *actions* (they keep their catalogue entry and their handler), but the
+# Coordinator is the only caller, so advertising them here would invite a
+# request PolicyGate then denies.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
+    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
+    | {
+        "trace_analyze",
+        "apply_patch",
+    }
+) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+
+# The two sets answer the same question and must never both claim a kind.
+assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
 
 
 # Coordinator-managed actions that agents should not directly propose.
@@ -118,7 +136,6 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "explore",
     "specialist",
     "integrate_patch",
-    "kernel_opt",
     "integrate",
     "gemm_tuning",
     "report",
@@ -258,23 +275,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),
-        "kernel_opt": ActionMetadata(
-            name="kernel_opt",
-            family="deep_kernel",
-            pipeline_phase="deep",
-            verdict_class="exploration",
-            expected_gain_pct=(5.0, 25.0),
-            accuracy_risk=0.1,
-            crash_risk=0.2,
-            typical_runtime_min=60.0,
-            lease_ttl_sec=7200,
-            requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "launches_server"),
-            description=(
-                "REQUEST kernel: parallel-submit kernel optimization candidates for one reusable native kernel id "
-                "picked from the latest profile."
-            ),
-        ),
         "profile": ActionMetadata(
             name="profile",
             family="analysis",
@@ -356,7 +356,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("reads_server", "writes_results"),
             description=(
                 "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md "
-                "snapshot. Required prerequisite for explore / kernel_opt."
+                "snapshot. Required prerequisite for explore."
             ),
         ),
         "session_breakdown": ActionMetadata(
@@ -417,12 +417,13 @@ __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
-    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
+    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
+    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",

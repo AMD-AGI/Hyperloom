@@ -46,6 +46,8 @@ from ..state.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -629,22 +631,6 @@ class WritebackCollaborator:
         self.shared_state.optimization_stack = stack
         self.shared_state.save(self.session_dir)
 
-    def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
-
-        Args:
-            result: One sub-attempt's per-kernel result dict.
-        """
-        try:
-            self.shared_state.record_kernel_opt(result)
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            # Never let a per-sub-attempt hiccup poison the gather.
-            log.exception(
-                "_record_kernel_opt_partial failed for kernel_id=%s",
-                (result or {}).get("kernel_id") if isinstance(result, dict) else None,
-            )
-
     def _update_cumulative_gain_validated(
         self,
         new_tput: float,
@@ -667,10 +653,9 @@ class WritebackCollaborator:
                 cannot divide an output numerator by a total denominator.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
-                full-stack revalidation, ``e2e_decision_round`` when it is the
-                round an explore variant was graded on, ``derived_speedup``
-                when it was inferred from a micro-benchmark.
+            measurement_basis: How the reading was obtained — ``e2e_rebench``
+                for a full-stack revalidation, ``e2e_decision_round`` for the
+                round an explore variant was graded on.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
@@ -726,23 +711,37 @@ class WritebackCollaborator:
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
-        new_tput = result.get("new_tput")
+        new_tput = result.get("output_throughput")
+        if new_tput is None:
+            new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
+        # A fusion sibling drained through the shared integrate lane must still
+        # land on the stack as ``action="fusion"``: the idempotency short-circuit
+        # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
+        # (``build_kernel_fusion_value``) both key on that label, and the latter
+        # also gates on ``last_fusion_integrate`` being a KEEP. The generic path
+        # is otherwise unchanged.
+        is_fusion = str(result.get("source") or "") == "forge_fusion"
+        action_label = str(result.get("action_label") or "").strip() if is_fusion else ""
+        lift_kind = action_label or "integrate"
+        variant: dict[str, Any] = {
+            "name": result.get("kernel_id"),
+            "candidate_extra_server_args": result.get("extra_server_args"),
+            "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
+            "ttft_mean_ms": result.get("ttft_mean_ms"),
+            "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
+            **graded_axes_of(result),
+            "workspace": result.get("workspace"),
+        }
+        if is_fusion:
+            variant["provenance"] = "forge_fusion"
         lifted = self._lift_to_current_best(
-            "integrate",
+            lift_kind,
             float(new_tput),
-            {
-                "name": result.get("kernel_id"),
-                "candidate_extra_server_args": result.get("extra_server_args"),
-                "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
-                "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
-                **graded_axes_of(result),
-                "workspace": result.get("workspace"),
-            },
+            variant,
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
             entry_extra={
                 "integration_id": result.get("integration_id"),
@@ -753,8 +752,22 @@ class WritebackCollaborator:
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
                 "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                # Provenance for a fusion sibling; readers key the stack row on
+                # ``action == "fusion"`` above, this just records the producer.
+                **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
             },
         )
+        if is_fusion:
+            # ``build_kernel_fusion_value`` gates the remote-recipe fusion export
+            # on this being a KEEP; the old inline path set it and the generic
+            # drain does not, so restore it here for the fusion-origin case.
+            try:
+                self.shared_state.last_fusion_integrate = {
+                    **result,
+                    "decision": "KEEP",
+                }
+            except Exception:  # noqa: BLE001 - state shape tolerant, matches inline path
+                pass
         if lifted and self.shared_state.baseline_tput > 0:
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             self._update_cumulative_gain_validated(new_tput, result.get("bench_result") or result)
@@ -1175,6 +1188,28 @@ class WritebackCollaborator:
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
+            elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
+                # AgentX declares aiperf for itself, this repository owns its
+                # install, and the runtime already tried it (agentx.repair) --
+                # so reaching here means the environment cannot supply a
+                # dependency no amount of authoring can invent. Stop on the
+                # FIRST occurrence and name the fix.
+                #
+                # Measured: routed as an ordinary launch failure, this opened an
+                # enablement round instead. The specialist could not tell a
+                # supply gap from a framework bug, re-derived the install from
+                # scratch, had its commands rejected by the setup allowlist, and
+                # the PolicyGate's enablement_round_in_flight rule then blocked
+                # the baseline for the rest of the run -- 24h of budget spent
+                # retrying a problem one operator action fixes.
+                log.error(
+                    "baseline %s failed the AgentX preflight and the automatic install did not "
+                    "resolve it; stopping the run. This is an environment gap, not something a "
+                    "framework patch can close: %s",
+                    task.task_id,
+                    result_payload.get("error") or err_class,
+                )
+                self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
@@ -1204,8 +1239,11 @@ class WritebackCollaborator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump (fast arg errors excluded).
-            if err_class != "fast_exit_arg_error":
+            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
+            # fast arg errors, and an AgentX preflight abort -- the pump treats a
+            # non-blank log as "there is something here to author against", and
+            # for a missing pinned dependency there is not.
+            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log
@@ -2406,6 +2444,18 @@ class WritebackCollaborator:
             source=source,
             run_error=run_error,
         )
+        # Specialist notes reach the prompt only through this task's one inbox
+        # line; ``last_action_failures`` is rendered every SEED turn.
+        ungrounded = done_payload.get("patches_ungrounded")
+        if isinstance(ungrounded, list) and ungrounded:
+            self.shared_state.record_action_failure(
+                action="specialist",
+                task_id=task.task_id,
+                result={
+                    "error_class": "patch_targets_ungrounded",
+                    "error": "; ".join(str(d) for d in ungrounded[:4]),
+                },
+            )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
@@ -3048,6 +3098,15 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
+        # ``integrate_patch`` settles "apply_failed" / "reverted", which promote,
+        # so a promoted result is still the only record of why a patch failed.
+        error_class = str(result.get("error_class") or "").strip()
+        if error_class and task is not None:
+            self.shared_state.record_action_failure(
+                action=task_kind,
+                task_id=task.task_id,
+                result=result,
+            )
         # ``replay_warm_recipe`` is mirrored by _promote_replay_warm_recipe
         # instead: its executor settles on "succeeded" and the keep decision is
         # only reached further down this call, so mirroring it here published
@@ -3662,6 +3721,67 @@ class WritebackCollaborator:
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
+    def _record_geak_rebench_timeline(
+        self,
+        *,
+        task: Any,
+        decision: str,
+        pending_status: str,
+        measured: Any,
+        config_matched: bool | None,
+        overlay_loaded: bool | None,
+        got_hash: str,
+        got_overlay_digest: str,
+    ) -> None:
+        """Record one GEAK rebench attempt on the kernel timeline event.
+
+        The attempt is recorded whatever the verdict, including one the slot
+        ownership check goes on to reject: a measured rebench that was dropped
+        as orphaned or late is exactly the case that is hard to reconstruct
+        afterwards.
+
+        Args:
+            task: The settled rebench task.
+            decision: The final verdict.
+            pending_status: The candidate slot's status.
+            measured: The throughput the attempt measured.
+            config_matched: Whether the config fingerprint survived the run.
+            overlay_loaded: Whether the overlay survived the run.
+            got_hash: The fingerprint the run reported.
+            got_overlay_digest: The overlay digest observed after the run.
+        """
+        recorder = self.phase_kernel._kernel_timeline()
+        if recorder is None:
+            return
+        from ..phases.geak_rebench import MAX_REBENCH_ATTEMPTS_PER_CYCLE
+
+        params = task.params or {}
+        try:
+            recorder.record_geak_rebench_attempt(
+                max_attempts=MAX_REBENCH_ATTEMPTS_PER_CYCLE,
+                attempt_id=str(task.idempotency_key or task.task_id or ""),
+                source_ref=None,
+                idempotency_key=str(task.idempotency_key or ""),
+                task_id=str(task.task_id or ""),
+                dispatched_at=None,
+                settled_at=None,
+                base_tput=params.get("base_tput"),
+                measured_tput=measured,
+                decision=decision,
+                decision_reason=str(params.get("reason") or ""),
+                status=pending_status,
+                engagement={
+                    "config_matched": config_matched,
+                    "overlay_loaded": overlay_loaded,
+                    "expected_cfg_hash": params.get("expected_cfg_hash"),
+                    "observed_cfg_hash": got_hash,
+                    "expected_overlay_digest": params.get("expected_overlay_digest"),
+                    "observed_overlay_digest": got_overlay_digest,
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the verdict
+            log.debug("kernel timeline: geak rebench record failed", exc_info=True)
+
     async def _promote_roofline(
         self,
         result: dict,
@@ -3845,6 +3965,7 @@ class WritebackCollaborator:
                 # identity here; a miss is inconclusive, not validated.
                 expected_overlay = str((task.params or {}).get("expected_overlay") or "")
                 overlay_loaded = True
+                got_digest = ""
                 if expected_overlay:
                     expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
                     got_digest = _geak_overlay_digest(expected_overlay)
@@ -3899,6 +4020,23 @@ class WritebackCollaborator:
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+                # Both engagement facts were computed above to choose between
+                # ``validated`` and ``fallback``, and were then discarded: the
+                # V5 attempt row has no field for either, so a reader could see
+                # the verdict but not the evidence that the configuration under
+                # test had actually engaged. Record them with the attempt.
+                self._record_geak_rebench_timeline(
+                    task=task,
+                    decision=decision,
+                    pending_status=pending_status,
+                    measured=measured,
+                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
+                    if str((task.params or {}).get("expected_cfg_hash") or "")
+                    else None,
+                    overlay_loaded=overlay_loaded if expected_overlay else None,
+                    got_hash=got_hash,
+                    got_overlay_digest=got_digest,
+                )
                 if not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:

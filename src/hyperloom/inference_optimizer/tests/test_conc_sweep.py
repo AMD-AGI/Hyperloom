@@ -1148,13 +1148,8 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     assert coord.shared_state.save.call_count >= 2
 
 
-# NOTE: the former ``test_conc_sweep_phase_singleton_denies_after_auto_enqueue``
-# was retired together with PolicyGate._validate_conc_sweep_singleton. conc_sweep
-# is now a Coordinator-internal action (COORDINATOR_INTERNAL_ACTIONS), so an LLM
-# conc_sweep proposal is rejected as Coordinator-managed (phase_incompatible),
-# not via a per-action singleton rule. That behaviour is covered by
-# test_sweep_phase_auto.py::test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed
-# and ::test_conc_sweep_is_coordinator_internal_action.
+# An LLM conc_sweep proposal is refused as ``coordinator_managed_action``;
+# covered by test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
