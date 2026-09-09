@@ -2,8 +2,8 @@
 title: Evolve AttnRes combine on gfx950 - scheduling and live registers
 kind: case
 gens: [gfx950]
-status: source-inspected; performance author-reported
-updated: 2026-09-08
+status: GPU-reproduced; upstream address defect; corrected candidate measured
+updated: 2026-09-09
 ---
 
 <!--
@@ -91,5 +91,65 @@ does not repair a clobbered register or replace the required memory waits.
    softmax decomposition to the high-level implementation and reestablish
    assembly parity before further instruction edits.
 
-Forge has not independently reproduced this case's reported speedup. Do not
-attribute model throughput changes or MoE improvements to this schedule.
+## Independent reproduction: address carries and BF16 rounding
+
+Testing the pinned AITER source on MI355X, ROCm 7.2.3, PyTorch
+2.11.0+gitd0c8b1f, and Triton 3.6.0 found two details that matter before
+integration. The tests used Forge's assembler and a separate HIP harness
+forwarding the actual stream; this is not a general production HIP adapter.
+
+First, nine Phase B address updates modify only the low half of a 64-bit
+pointer: the initial bank H offset, seven bank-row increments, and the prefix
+H offset. They use `v_add_u32 v12, ...` without updating `v13`. Crossing a
+4-GiB address boundary loses the carry and accesses an address 4 GiB too low.
+Single-allocation warm tests can miss this. The original rotating-buffer
+test faulted; do not treat its warm timing success as general address safety.
+
+A local experimental correction replaced each affected add with a matching
+`v_add_co_u32` / `v_addc_co_u32` pair, without increasing VGPR allocation.
+Valid prefix and bank tensor views deliberately spanning a 4-GiB boundary
+passed the oracle and nondefault-stream graph replay after the correction.
+The original incorrect address arithmetic was checked on the CPU rather than
+deliberately launching a known out-of-range access. A 64-buffer GPU test then
+completed with the corrected candidate. The pinned upstream snapshot was
+retained unchanged; this is an experimental correction, not an upstream fix.
+
+Second, the final `v_lshrrev_b32 v2, 16, v1` truncates FP32 to BF16. It differs
+from the Triton reference's nearest rounding. A separate control used
+`v_cvt_pk_bf16_f32 v2, v1, v1`, storing the low BF16 result. On seed 42, combine
+SNR against FP64 improved from about 47.83 dB to 57.59 dB, close to Triton;
+the fraction differing from FP64 rounded to BF16 fell from about 57% to
+0.0011%. This is not a claim of bitwise equality for all inputs.
+
+The address-corrected, nearest-rounding candidate passed eight input cases
+(multiple seeds, scales, zero vectors/weights, and padded strides) plus four
+independent logit cases (uniform, peaked, negative, and large-offset finite
+logits). Checks included input preservation and graph/pointer rebinding.
+Fixed combine/pipeline bounds were `rtol=0.01, atol=1e-4` against FP64; these
+experimental bounds do not replace a production driver's required semantics.
+
+Independent graph timings exclude compilation, loading, allocation, clearing,
+and the oracle. Single-buffer warm measurements used 11 interleaved rounds,
+nine samples per round, and 100 calls per graph. Rotating measurements used
+nine rounds, nine samples, and 64 distinct buffers totaling 589,299,712 bytes.
+Standalone combine used fixed logits, separate from pipeline intermediates.
+
+| Operation | Warm Triton / corrected ASM | Rotating Triton / corrected ASM |
+| --- | --- | --- |
+| Combine only | 3.624 / 3.306 us | 7.538 / 4.546 us |
+| Triton score + combine, replacing only combine | 6.612 / 6.227 us | 8.266 / 8.107 us |
+
+Combine improves by about 1.096x warm and 1.658x rotating, but the two-kernel
+hybrid improves only 1.062x and 1.020x. Replacing score as well regresses the
+pipeline; see [the score measurements](evolve_attnres_score_gfx950.md).
+The pipeline reuses data from score, so its latency is not the sum of two
+independently measured rotating kernels.
+
+The author's original profiler benchmark faulted in this environment. With
+only the address-corrected combine object substituted, that protocol completed
+and reported 11.617 us Triton versus 5.513 us corrected combine. Its rotating
+inputs, profiler, and unequal wrapper initialization differ from the matched
+graph protocol above; do not mix their baselines or attribute the discrepancy
+solely to synchronization. Neither protocol reproduced the reported 104.02-us
+baseline. No model throughput or MoE speedup was measured, and no new Forge
+agent search or statistical KEEP was claimed for these independent tests.

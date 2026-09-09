@@ -2,7 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
-updated: 2026-09-08
+updated: 2026-09-09
 ---
 
 <!--
@@ -37,6 +37,12 @@ it is not evidence of FlyDSL `CompiledFunction` compatibility. Their fixed
 Kimi-K3 shape and author-reported timings do not establish performance on
 other shapes, GPUs, MoE kernels, or Forge's FlyDSL adapter. The cards distinguish
 source observations, reported results, and experiments still to run.
+
+Independent MI355X reproduction is recorded in both cards: the tested score
+assembly is slower than the Triton baseline, and combine requires address-carry
+corrections before wider allocation testing. Corrected combine shows gains
+that depend on cache/input reuse. The published headline ratios were not
+reproduced; use the measured scope and numerical contract when choosing a case.
 
 ## Case knowledge: verified FlyDSL roundtrip
 
