@@ -41,8 +41,8 @@ provider-side combinations and what each one enables.
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
-| `FORGE_CLAUDE_MODEL`  | No       | Inherits `CLAUDE_MODEL` | Forge Claude backend model id (fusion, rewrite, collective). Set when Forge should use a different Claude model than orchestration.                                                                                   |
-| `FORGE_CODEX_MODEL`   | No       | Inherits `CODEX_MODEL`  | Forge Codex backend model id (fusion, rewrite, collective). Set when Forge should use a different Codex model than the OpenAI-side default.                                                                          |
+| `FORGE_CLAUDE_MODEL`  | No       | Inherits `CLAUDE_MODEL` | Forge Claude backend model id (fusion, rewrite). Set when Forge should use a different Claude model than orchestration.                                                                                   |
+| `FORGE_CODEX_MODEL`   | No       | Inherits `CODEX_MODEL`  | Forge Codex backend model id (fusion, rewrite). Set when Forge should use a different Codex model than the OpenAI-side default.                                                                          |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
@@ -250,8 +250,7 @@ Globally, on every backend including the default `geak`:
   can neither propose either action nor request `run_optimization` /
   `run_gemm_tuning` of the kernel agent; both are refused as
   `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
-  entry from a lane budget, the way the fusion and collective lanes already
-  worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
 
 On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
@@ -282,23 +281,18 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
 
 ---
 
-## Collective optimization lane
+## Collective candidate extraction
 
-The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
-entry, never as an agent request. It requires `TP > 1`, a latest-snapshot
-`Exposed Communication %` of at least 1% as parsed from the TraceLens executive
-summary, a `trace_analyze` snapshot, and a source-resolved custom collective
-candidate (`all_reduce`, `reduce_scatter` or `all_gather`) — vendor RCCL/NCCL
-symbols are opaque binaries and never qualify.
+Communication operators are optimized by the rewrite controller like any other
+operator. TraceLens still resolves them deterministically: it maps a mangled
+NCCL/RCCL kernel name back to the framework device source that issued it and
+publishes the row in `kernel_candidates.json` with
+`candidate_source: nccl_summary`. Vendor RCCL/NCCL symbols are opaque binaries
+and never resolve to an editable source, so they are never published.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
-| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion, and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
-| `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
 | `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Unset (disabled) | Truthy allows a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family. The default rejects this inference because those shapes were not observed on that device symbol. |
-| `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
-| `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Unset (wrapper default)     | Per-agent timeout in seconds, forwarded to forge-collective as `--agent-timeout-sec`. A payload `agent_timeout_sec` takes precedence.                                                              |
 
 ---
 

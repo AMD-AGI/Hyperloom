@@ -287,12 +287,6 @@ def build(
     telemetry = _pick(
         "telemetry", _safe_collect("telemetry", lambda: collectors.collect_telemetry(sd, state, warnings), warnings)
     )
-    collective = _safe_collect(
-        "collective",
-        lambda: collectors.collect_collective(state),
-        warnings,
-        default={},
-    )
     # Canonical optimization read model.
     recorded_operations = [row for row in assembled.get("operations") or [] if isinstance(row, dict)]
     optimizations = (
@@ -546,9 +540,6 @@ def build(
         # GEAK route diagnostics and accepted artifacts.
         "geak": geak,
         "kernel_lifecycle": kernel_lifecycle,
-        # Collective lane audit trail; survives a campaign the E2E gate rejected, which never reaches
-        # ``optimizations``.
-        "collective": collective,
         "param_search": explore_search,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,

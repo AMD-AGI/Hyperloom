@@ -33,7 +33,6 @@ _SOURCES = (
 _ATTEMPT_KINDS = frozenset(
     {
         "kernel_optimization",
-        "kernel_collective",
         "gemm_tuning",
         "integrate_patch",
         "framework_agent",
@@ -164,7 +163,6 @@ def _work_kind(operation: dict[str, Any]) -> str:
 
 _AGENT_BY_RECORDED_KIND = {
     "kernel_optimization": "kernel_agent",
-    "kernel_collective": "kernel_agent",
     "gemm_tuning": "kernel_agent",
     "framework_agent": "framework_agent",
     "explore": "explore",
@@ -958,11 +956,11 @@ def collect_recorded_optimizations(
             # If the local figure was measured against something else, the next step's drift is what says so.
             chain_continuous = False
         else:
-            # Collective gain is local to its integrate anchor. Output-only readings cannot prove continuity for a
+            # Kernel gain is local to its integrate anchor. Output-only readings cannot prove continuity for a
             # second KEEP graded on a session-wide axis, whichever of the two that session was graded on.
             gain = (
                 None
-                if attempt["kind"] == "kernel_collective"
+                if attempt["kind"] == "kernel_optimization"
                 and gain_basis in _SESSION_WIDE_BASES
                 and gain_basis in seen_gain_bases
                 else local_gain

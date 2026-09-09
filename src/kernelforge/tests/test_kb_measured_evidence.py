@@ -61,9 +61,8 @@ BALANCED_SOURCE = PRISTINE_SOURCE.replace("BLOCK_SIZE = 32", "BLOCK_SIZE = 4")
 #: the keep threshold outright instead of losing on the suite total.
 SLOWER_SOURCE = PRISTINE_SOURCE.replace("BLOCK_SIZE = 32", "BLOCK_SIZE = 1024")
 
-#: Per-case wall clock the two-case driver double reports for each revision. The
-#: lopsided revision speeds one cheap case up fourfold and lets the expensive
-#: case slip to 0.8x, which averages to 2.4x while the suite total rises from
+#: Per-case wall clock the two-case driver double reports for each revision. The lopsided revision speeds one cheap
+#: case up fourfold and lets the expensive case slip to 0.8x, which averages to 2.4x while the suite total rises from
 #: 101.0 ms to 125.25 ms.
 _DRIVER_CASE_MS = {
     "BLOCK_SIZE = 8": {"case-cheap": 0.25, "case-expensive": 125.0},
@@ -217,6 +216,20 @@ def _install_suite_driver_doubles(
     monkeypatch.setattr(integration, "_bench_once", benchmark)
     monkeypatch.setattr(integration, "_correctness_once", correctness)
     return measured
+
+
+class _StubClock:
+    """A scripted stand-in for the ``time`` module warm start reads.
+
+    ``experience_integration`` consults it only to open and to check the search deadline, so a fixed sequence of
+    readings decides exactly which candidate the budget expires on. The last reading is held once the script runs out.
+    """
+
+    def __init__(self, readings: list[float]) -> None:
+        self._readings = list(readings)
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
 
 
 def _warm_start(workspace: Path, kernel: Path) -> dict:
@@ -594,11 +607,54 @@ def test_warm_start_stops_evaluating_once_the_top_claim_is_confirmed(
     assert len(warm["measured_writebacks"]) == 1
 
 
-def test_warm_start_evaluates_no_more_candidates_than_the_bound(
+def test_warm_start_does_not_pay_to_measure_a_port_that_lost_badly(
     monkeypatch,
     tmp_path,
 ):
-    """Bound the driver cost even when no claim survives its measurement."""
+    """A claim far under the source baseline is not worth a driver trial.
+
+    Records like these exist because a correct port is banked whatever it measured, which is what lets a losing
+    operator carry its progress forward. Reading them back is fine; starting a run from one is not.
+    """
+    _publish_candidate(
+        tmp_path,
+        "producer-crawling",
+        optimized_source=SLOWER_SOURCE,
+        claimed_speedup=0.1,
+    )
+    _publish_candidate(
+        tmp_path,
+        "producer-limping",
+        optimized_source=INFLATED_SOURCE,
+        claimed_speedup=0.2,
+    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
+    pristine = kernel.read_text()
+    measured = _install_driver_doubles(monkeypatch, kernel)
+
+    warm = _warm_start(consumer, kernel)
+
+    # Not a warm start with nothing adopted -- no warm start at all, and the
+    # author is not asked to read a port that lost by two orders of magnitude.
+    assert warm == {
+        "candidate": False,
+        "read_reason": "hit",
+        "read_error": "",
+    }
+    assert not (consumer / "forge_experiments" / "kb_references" / "index.md").exists()
+    # Nothing was built, so nothing was timed and the workspace is untouched for
+    # the agent that follows.
+    assert measured == []
+    assert kernel.read_text() == pristine
+    assert _git(consumer, "rev-parse", "HEAD") == base
+
+
+def _publish_four_ranked_candidates(tmp_path: Path) -> None:
+    """A field of four whose claims all collapse under measurement.
+
+    None is confirmed, so the search never exits early on a reproduced claim and whatever stops it is the bound
+    under test.
+    """
     for name, source, claim in (
         ("widest", WIDEST_SOURCE, 10.0),
         ("wide", WIDE_SOURCE, 9.0),
@@ -611,24 +667,67 @@ def test_warm_start_evaluates_no_more_candidates_than_the_bound(
             optimized_source=source,
             claimed_speedup=claim,
         )
-    monkeypatch.setattr(integration, "_WARMSTART_TOP_K", 4)
+
+
+def test_warm_start_reads_the_candidate_count_the_environment_asks_for(
+    monkeypatch,
+    tmp_path,
+):
+    """The width of the field is resolved per call, not once per interpreter.
+
+    Binding it at import time silently ignored every override set afterwards -- including one a deployment exports
+    before invoking the CLI -- and left the three warm-start bounds resolving at different moments from each other.
+    """
+    _publish_four_ranked_candidates(tmp_path)
+    monkeypatch.setenv("FORGE_KB_WARMSTART_TOP_K", "2")
     consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
 
+    # Two read, so two measured and two offered to the author: the bound governs the whole boundary, not just how many
+    # trials are paid for.
+    assert warm["num_references"] == 2
+    assert len(warm["measured_writebacks"]) == 2
+    assert measured == [10.0] * 3 + [6.0] * 3 + [7.0] * 3
+    assert warm["applied"] is True
+    assert warm["applied_rank"] == 1
+    assert kernel.read_text() == WIDEST_SOURCE
+
+
+def test_warm_start_closes_the_field_when_the_search_budget_is_spent(
+    monkeypatch,
+    tmp_path,
+):
+    """Wall time is what bounds this search; the candidate count cannot.
+
+    One trial is a compile plus a correctness suite plus a benchmark, minutes on the heaviest kernels, so a
+    well-populated identity would spend hours before the agent's first edit. On expiry the best already measured is
+    adopted: the search is cut short, not abandoned.
+    """
+    _publish_four_ranked_candidates(tmp_path)
+    monkeypatch.setenv("FORGE_KB_WARMSTART_BUDGET_SEC", "60")
+    # Opens the search at t=0 and expires it on the third candidate. Letting real time decide would make the
+    # assertions below depend on how fast the machine running them happens to be.
+    monkeypatch.setattr(integration, "time", _StubClock([0.0, 0.0, 0.0, 61.0]))
+    consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
+    measured = _install_driver_doubles(monkeypatch, kernel)
+
+    warm = _warm_start(consumer, kernel)
+
+    # All four were read and shown to the author -- reading is cheap -- but only the two the budget paid for were
+    # built and benchmarked.
     assert warm["num_references"] == 4
-    assert integration._WARMSTART_MAX_MEASURED_CANDIDATES == 3
-    assert len(warm["measured_writebacks"]) == 3
-    # Three measured candidates, then the field is closed: the fourth is never built or benchmarked even though no
-    # claim was confirmed.
-    assert measured == [10.0] * 3 + [6.0] * 3 + [7.0] * 3 + [8.0] * 3
+    assert len(warm["measured_writebacks"]) == 2
+    assert measured == [10.0] * 3 + [6.0] * 3 + [7.0] * 3
     assert warm["applied"] is True
     assert warm["applied_rank"] == 1
     assert warm["mean_case_speedup"] == pytest.approx(10.0 / 6.0)
     assert _index_status(consumer, 2) == "rejected:outperformed_by_rank_1"
-    assert _index_status(consumer, 3) == "rejected:outperformed_by_rank_1"
-    assert _index_status(consumer, 4) == "not_attempted_after_apply"
+    # Recorded as unreached rather than as rejected: nothing was learned about either one, and a later run must not
+    # read this as a verdict.
+    assert _index_status(consumer, 3) == "not_attempted_search_budget"
+    assert _index_status(consumer, 4) == "not_attempted_search_budget"
     assert kernel.read_text() == WIDEST_SOURCE
     assert _git(consumer, "status", "--porcelain=v1", "--untracked-files=no") == ""
 

@@ -97,7 +97,6 @@ from .kernels import (
     _normalize_optimization_stack_entry as _normalize_optimization_stack_entry,
     _resolve_gemm_engine as _resolve_gemm_engine,
     collect_gemm_tuning as collect_gemm_tuning,
-    collect_collective as collect_collective,
     collect_source_files as collect_source_files,
 )
 from .roofline import (
@@ -187,7 +186,6 @@ __all__ = [
     "collect_explore_search",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
-    "collect_collective",
     "collect_geak",
     "collect_phase_segments",
     "TimelineDedup",
