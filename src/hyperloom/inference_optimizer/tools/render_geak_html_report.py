@@ -696,9 +696,10 @@ def _outcome_section(
         else:
             tasks = out.get("tasks") or []
             measured = [t for t in tasks if t["present"]]
-            ab = [t["integration"] for t in tasks if t.get("integration")]
+            ab = [t for t in tasks if t.get("integration")]
             if ab:
-                best = max(ab, key=lambda i: _num(i.get("e2e_delta_pct")))
+                best_task = max(ab, key=lambda t: _num(t["integration"].get("e2e_delta_pct")))
+                best = best_task["integration"]
                 delta = _num(best.get("e2e_delta_pct"))
                 tone = "good" if delta > 0 else "bad" if delta < 0 else "mut"
                 gate = best.get("gate")
@@ -707,7 +708,8 @@ def _outcome_section(
                 )
                 bought = (
                     f'<span class="{tone}">{delta:+.2f}%</span> <span class="mut">end-to-end, '
-                    f"measured A/B of the kernel this run wrote "
+                    f"measured A/B of the kernel this run wrote for "
+                    f"<code>{_esc(best_task.get('task'))}</code> "
                     f"({_esc(best.get('candidate'))}, {_num(best.get('isolated_speedup')):.4f}x isolated, "
                     f"{acc}"
                     + (f", gate {_esc(gate)}" if gate else "")
@@ -830,11 +832,21 @@ def performance_ladder(joined: list[dict[str, Any]], outcome: dict[str, Any] | N
     for step in steps:
         step["usd"] = costed.get(step["phase"])
     kernel_only = [p for p in joined if p["outcome"] and p["outcome"]["kind"] == "kernel"]
+    # Kernel tasks the ledger has no phase for. A run can benchmark an operator
+    # without a "P<n> HeadKernel <head>" phase existing to join it to, and those
+    # tasks would otherwise vanish from the page entirely.
+    attributed = {t["task"] for p in kernel_only for t in (p["outcome"].get("tasks") or []) if t.get("task")}
+    orphans = [
+        stage
+        for stage in outcome.get("stages") or []
+        if isinstance(stage, dict) and stage.get("kind") == "kernel" and stage.get("task") not in attributed
+    ]
     silent = [p["phase"] for p in joined if p["outcome"] is None]
     return {
         "steps": steps,
         "total_gain": total_gain,
         "kernels": kernel_only,
+        "orphan_kernels": orphans,
         "silent": silent,
         "summary": outcome.get("summary") or {},
     }
@@ -879,21 +891,22 @@ def _performance_section(ladder: dict[str, Any], no_ledger: bool = False) -> str
         )
     notes = []
     validated = [
-        (p, i)
+        (p, best)
         for p in ladder["kernels"]
-        for i in [
+        for best in [
             max(
-                (t["integration"] for t in (p["outcome"].get("tasks") or []) if t.get("integration")),
-                key=lambda x: _num(x.get("e2e_delta_pct")),
+                (t for t in (p["outcome"].get("tasks") or []) if t.get("integration")),
+                key=lambda t: _num(t["integration"].get("e2e_delta_pct")),
                 default=None,
             )
         ]
-        if i
+        if best
     ]
     unvalidated = [
         p for p in ladder["kernels"] if not any(t.get("integration") for t in (p["outcome"].get("tasks") or []))
     ]
-    for phase, integ in validated:
+    for phase, best_task in validated:
+        integ = best_task["integration"]
         delta = _num(integ.get("e2e_delta_pct"))
         tone = "good" if delta > 0 else "bad"
         reason = integ.get("reason")
@@ -908,7 +921,11 @@ def _performance_section(ladder: dict[str, Any], no_ledger: bool = False) -> str
             + "</span> end to end.</b> "
         )
         body = (
-            "The run wrote its own candidate (" + _esc(integ.get("candidate")) + "), served it "
+            "The kernel is <code>"
+            + _esc(best_task.get("task"))
+            + "</code>. The run wrote its own candidate ("
+            + _esc(integ.get("candidate"))
+            + "), served it "
             "against the reference and measured " + _int(integ.get("e2e_throughput_tok_s")) + " tok/s "
             "-- " + f"{_num(integ.get('isolated_speedup')):.4f}" + "x on the kernel in isolation, "
             "against a " + f"{_num(integ.get('amdahl_ceiling_pct')):.2f}" + "% ceiling. Accuracy was "
@@ -922,7 +939,10 @@ def _performance_section(ladder: dict[str, Any], no_ledger: bool = False) -> str
         notes.append(head + body + tail)
     if unvalidated:
         detail = "; ".join(
-            f"{_esc(p['phase'])} {max((_num(t['amdahl_ceiling_e2e_pct']) for t in (p['outcome'].get('tasks') or []) if t['present']), default=0.0):+.2f}%"
+            f"{_esc(p['phase'])} ("
+            + ", ".join(f"<code>{_esc(t['task'])}</code>" for t in (p["outcome"].get("tasks") or []) if t.get("task"))
+            + ") "
+            + f"{max((_num(t['amdahl_ceiling_e2e_pct']) for t in (p['outcome'].get('tasks') or []) if t['present']), default=0.0):+.2f}%"
             for p in unvalidated
         )
         notes.append(
@@ -931,6 +951,24 @@ def _performance_section(ladder: dict[str, Any], no_ledger: bool = False) -> str
             "incumbent stayed fastest, so the Amdahl ceiling on any gain is "
             f"{detail}. That is a measured result, not a missing one: the work ran, was "
             "benchmarked, and did not beat what was already there."
+        )
+    if ladder.get("orphan_kernels"):
+        detail = "; ".join(
+            f"<code>{_esc(s.get('task'))}</code> "
+            + (
+                f"{_num(s.get('isolated_speedup')):.4f}x isolated, "
+                f"{_num(s.get('pct_gpu_time')):.2f}% GPU time, "
+                f"ceiling {_num(s.get('amdahl_ceiling_e2e_pct')):+.2f}%"
+                if s.get("present")
+                else "never benchmarked"
+            )
+            for s in ladder["orphan_kernels"]
+        )
+        notes.append(
+            "<b>Kernels the run benchmarked without a phase of their own:</b> "
+            + detail
+            + ". No phase in the LLM ledger is named after them, so nothing here is attributed "
+            "to them either way -- they are named because they are part of this run's kernel work."
         )
     if ladder["silent"]:
         notes.append(
@@ -1095,7 +1133,9 @@ def _deepdive_section(joined: list[dict[str, Any]], total_usd: float) -> str:
             window = f"{phase['first_ts'][11:19]}&ndash;{phase['last_ts'][11:19]} UTC"
         blocks.append(
             f"<details{' open' if rank < 2 else ''}>"
-            f"<summary><span>{_esc(phase['phase'])}</span>"
+            f"<summary><span>{_esc(phase['phase'])}"
+            + (f" <code>{_esc(_kernel_tasks(phase))}</code>" if _kernel_tasks(phase) else "")
+            + "</span>"
             f'<span class="r">{_usd(phase["usd"])} | {share:.1f}% of spend | '
             f"{phase['agents']} agents | {phase['calls']:,} calls | "
             f"{_int(phase['isl'])} in / {_int(phase['osl'])} out"
@@ -1166,10 +1206,25 @@ def _agent_payload(agents: list[dict[str, Any]]) -> str:
     return json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
 
 
+def _kernel_tasks(phase: dict[str, Any]) -> str:
+    """The kernel task names behind a HeadKernel phase, or "" for any other phase.
+
+    "P8 HeadKernel h0" names the head, not the operator it went after. The task
+    ("h0_gemm_a8w8_blockscale_task") is the only place the kernel is named, so
+    every heading that carries a kernel phase carries the task with it.
+    """
+    out = phase.get("outcome") or {}
+    if out.get("kind") != "kernel":
+        return ""
+    return ", ".join(str(t["task"]) for t in (out.get("tasks") or []) if t.get("task"))
+
+
 def _phase_table(joined: list[dict[str, Any]], total_usd: float, total_isl: float) -> str:
     peak = max((p["usd"] for p in joined), default=1.0) or 1.0
     rows = "".join(
-        f"<tr><td><b>{_esc(p['phase'])}</b></td><td>{p['agents']}</td><td>{p['calls']:,}</td>"
+        f"<tr><td><b>{_esc(p['phase'])}</b>"
+        + (f'<div class="mut"><code>{_esc(_kernel_tasks(p))}</code></div>' if _kernel_tasks(p) else "")
+        + f"</td><td>{p['agents']}</td><td>{p['calls']:,}</td>"
         f"<td>{_usd(p['usd'])}{_bar(p['usd'] / peak)}</td>"
         f"<td>{p['usd'] / total_usd * 100 if total_usd else 0:.1f}%</td>"
         f"<td>{_int(p['isl'])}</td><td>{p['isl'] / total_isl * 100 if total_isl else 0:.1f}%</td>"

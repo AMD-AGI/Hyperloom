@@ -407,3 +407,60 @@ def test_main_renders_the_outcome_alone_and_warns_that_it_did(reports, capsys):
     assert R.main(["--reports-dir", str(reports), "-o", str(out)]) == 0
     assert "rendering the outcome half only" in capsys.readouterr().err
     assert out.is_file() and out.read_text(encoding="utf-8").isascii()
+
+
+def test_a_kernel_phase_names_the_operator_it_went_after(reports: Path):
+    """ "P8 HeadKernel h0" names the head, not the kernel. The task name is the
+    only place the operator is identified, so it travels with every heading and
+    every verdict that mentions a kernel phase."""
+    outcome = R.load_outcome(reports / R.OUTCOME_FILENAME)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    phases = R.phase_records(rows, R.agent_records(rows))
+    joined = R.join_outcome(phases, outcome)
+    total = sum(p["usd"] for p in phases)
+
+    assert "h0_gemm_task" in R._phase_table(joined, total, 1.0)
+    assert "h0_gemm_task" in R._deepdive_section(joined, total)
+    # No candidate reached validation here, so the unvalidated note carries it.
+    assert "h0_gemm_task" in R._performance_section(R.performance_ladder(joined, outcome))
+
+
+def test_a_validated_kernel_names_its_task_beside_its_candidate(reports: Path):
+    outcome = _with_integration(reports)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    phases = R.phase_records(rows, R.agent_records(rows))
+    joined = R.join_outcome(phases, outcome)
+    total = sum(p["usd"] for p in phases)
+
+    perf = R._performance_section(R.performance_ladder(joined, outcome))
+    assert "h0_gemm_task" in perf and "c0_triton" in perf
+    bought = R._outcome_section(joined, total, outcome)
+    assert "h0_gemm_task" in bought and "c0_triton" in bought
+
+
+def test_a_benchmarked_kernel_with_no_phase_is_still_named(reports: Path):
+    """A run can benchmark an operator that no ledger phase is named after.
+
+    Those tasks joined to nothing and vanished from the page; they are measured
+    results and get named, with no cost attributed to them.
+    """
+    outcome = json.loads((reports / R.OUTCOME_FILENAME).read_text())
+    outcome["stages"].append(
+        {
+            "kind": "kernel",
+            "phase": "HeadKernel",
+            "task": "k0_fp8_quant_norm_fusion_task",
+            "present": True,
+            "isolated_speedup": 1.0,
+            "amdahl_ceiling_e2e_pct": 0.0,
+            "pct_gpu_time": 4.2,
+        }
+    )
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), outcome)
+    ladder = R.performance_ladder(joined, outcome)
+
+    assert [s["task"] for s in ladder["orphan_kernels"]] == ["k0_fp8_quant_norm_fusion_task"]
+    html = R._performance_section(ladder)
+    assert "k0_fp8_quant_norm_fusion_task" in html
+    assert "no phase of their own" in html or "without a phase of their own" in html
