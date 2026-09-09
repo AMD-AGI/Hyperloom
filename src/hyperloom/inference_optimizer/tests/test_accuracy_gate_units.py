@@ -346,22 +346,24 @@ class TestTheAgentXValidityGate:
         return tmp_path
 
     def test_a_rate_inside_the_threshold_passes(self, tmp_path):
-        ws = self._result(tmp_path, request_error_rate=0.007)
+        """0.722% is what a real 6-error / 831-request session reported."""
+        ws = self._result(tmp_path, request_error_rate=0.722)
         out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
         assert out["accuracy"] == 1.0
         assert out["task"] == "agentx_error_rate"
-        assert out["error_rate"] == pytest.approx(0.007)
+        assert out["error_rate"] == pytest.approx(0.722)
 
     def test_the_threshold_is_inclusive(self, tmp_path):
         """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD)
+        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD_PCT)
         assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
 
     def test_a_rate_past_the_threshold_fails(self, tmp_path):
-        ws = self._result(tmp_path, request_error_rate=0.5)
+        """The unit is a percentage, so 25 is 25% and well past upstream's 10%."""
+        ws = self._result(tmp_path, request_error_rate=25.0)
         out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
         assert out["accuracy"] == 0.0
-        assert out["error_rate"] == pytest.approx(0.5)
+        assert out["error_rate"] == pytest.approx(25.0)
 
     def test_a_result_without_a_rate_fails_closed(self, tmp_path):
         """Unknown is not the same as valid; scoring it as a pass is how an
@@ -395,18 +397,25 @@ class TestTheAgentXValidityGate:
 
 class TestParseAgentXErrorRate:
     def test_reads_the_rate_from_the_result(self, tmp_path):
-        (tmp_path / "inferencex_result.json").write_text(
-            json.dumps({"request_error_rate": 0.02}), encoding="utf-8"
-        )
+        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.02}), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) == pytest.approx(0.02)
 
     def test_reports_none_when_no_result_exists(self, tmp_path):
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_reports_none_when_the_field_is_absent_or_not_a_number(self, tmp_path):
-        (tmp_path / "inferencex_result.json").write_text(
-            json.dumps({"request_error_rate": "n/a"}), encoding="utf-8"
-        )
+        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
+        assert ag.parse_agentx_error_rate(tmp_path) is None
+
+    def test_a_mapped_result_missing_the_metric_reports_none(self, tmp_path):
+        """aiperf omits the metric when nothing completed. Coalescing that to
+        0.0 would report a perfect error rate for a run that measured nothing,
+        which is the fail-closed path this gate depends on."""
+        from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
+
+        mapped = map_aiperf({"output_token_throughput": {"avg": 300.0}})
+        assert mapped["request_error_rate"] is None
+        (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):
@@ -424,8 +433,6 @@ class TestParseAgentXErrorRate:
         new = tmp_path / "round_b"
         for d, rate in ((old, 0.9), (new, 0.01)):
             d.mkdir()
-            (d / "inferencex_result.json").write_text(
-                json.dumps({"request_error_rate": rate}), encoding="utf-8"
-            )
+            (d / "inferencex_result.json").write_text(json.dumps({"request_error_rate": rate}), encoding="utf-8")
         os.utime(old / "inferencex_result.json", (1, 1))
         assert ag.parse_agentx_error_rate(tmp_path) == pytest.approx(0.01)

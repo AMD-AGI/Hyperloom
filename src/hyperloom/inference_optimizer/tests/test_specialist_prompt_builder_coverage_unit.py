@@ -252,3 +252,73 @@ def test_format_version_note_empty_when_same_or_unknown():
     assert _format_version_note(inp, {}) == ""
     note = _format_version_note(inp, {"framework_version": "0.9"})
     assert "0.9" in note
+
+
+class TestTheAgentXWorkloadBranch:
+    """A specialist on an agentic replay must not be handed the ISL/OSL knobs.
+
+    ``state.isl``/``osl`` are inert placeholders there, so Section 2 renders the
+    corpus distribution instead and the kernel hints drop their short-OSL advice.
+    """
+
+    _SHAPE = {
+        "corpus_loader": "semianalysis_cc_traces_weka_062126",
+        "corpus_entries": 393,
+        "duration_s": 3600.0,
+        "isl": {"p50": 94821, "p90": 163328, "p99": 506158},
+        "osl": {"p50": 333, "p90": 1874, "p99": 6386},
+        "prefix_cache_hit": 0.975,
+    }
+
+    def _prompt(self, domain_key: str, **over) -> str:
+        domain = get_domain(domain_key)
+        assert domain is not None
+        kwargs = {
+            "task_id": "t-agentx",
+            "domain": domain,
+            "framework": "vllm",
+            "gpu_type": "MI355X",
+            "tp": 8,
+            "precision": "fp8",
+            "conc": 8,
+            "isl": 1024,
+            "osl": 1024,
+            **over,
+        }
+        # Both halves: the workload section lands in the user prompt, the
+        # domain-focus hints in the system prompt.
+        return "\n".join(build_specialist_prompts(SpecialistPromptInputs(**kwargs)))
+
+    def test_agentx_replaces_the_isl_osl_rows_with_the_corpus(self):
+        body = self._prompt("serving_specialist", benchmark_mode="agentx", agentx_corpus_shape=self._SHAPE)
+        assert "ISL (input seq len)" not in body
+        assert "OSL (output seq len)" not in body
+        assert "AgentX agentic trace replay" in body
+        assert "p50 94,821" in body
+        assert "prefix cache hit ~97.5%" in body
+
+    def test_agentx_states_the_graded_axis_in_the_workload_section(self):
+        body = self._prompt("serving_specialist", benchmark_mode="agentx", agentx_corpus_shape=self._SHAPE)
+        assert "E2E normalised interactivity P90" in body
+        assert "RECORDED" in body
+
+    def test_a_synthetic_session_still_gets_the_isl_osl_rows(self):
+        body = self._prompt("serving_specialist")
+        assert "- ISL (input seq len): 1024" in body
+        assert "- OSL (output seq len): 1024" in body
+        assert "AgentX agentic trace replay" not in body
+
+    def test_the_kernel_hints_retract_their_short_osl_advice_under_agentx(self):
+        """The canonical block advertises short-OSL tuning; that is wrong here."""
+        synthetic = self._prompt("kernel_switch_specialist")
+        agentic = self._prompt("kernel_switch_specialist", benchmark_mode="agentx", agentx_corpus_shape=self._SHAPE)
+        assert "short OSL" in synthetic
+        assert "does not apply to this workload" not in synthetic
+        assert "does not apply to this workload" in agentic
+        assert "long-KV decode GEMMs" in agentic
+
+    def test_the_mode_alone_arms_the_branch_without_a_shape(self):
+        """A session whose first measurement has not landed yet still says so."""
+        body = self._prompt("serving_specialist", benchmark_mode="agentx")
+        assert "ISL (input seq len)" not in body
+        assert "E2E normalised interactivity P90" in body

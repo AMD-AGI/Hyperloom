@@ -33,8 +33,11 @@ log = logging.getLogger(__name__)
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
 # Upstream rejects an AgentX submission whose error rate over completed
-# requests exceeds this (InferenceX ``validate_agentic_result.py``).
-AGENTX_ERROR_RATE_THRESHOLD = 0.10
+# requests exceeds 10% (InferenceX ``validate_agentic_result.py``). Expressed
+# as a percentage because that is aiperf's unit for ``request_error_rate``:
+# ``RequestErrorRateMetric`` is declared ``PERCENT`` and derives
+# ``100.0 * errors / total``.
+AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
 
 # Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the
 # enablement KEEP gate so the two never diverge.
@@ -661,7 +664,7 @@ def parse_eval_results(
     # how an incomparable measurement reaches the leaderboard set.
     if is_agentx_mode(benchmark_mode):
         rate = parse_agentx_error_rate(workspace)
-        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD
+        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
         log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
         return {
             "accuracy": 1.0 if passed else 0.0,

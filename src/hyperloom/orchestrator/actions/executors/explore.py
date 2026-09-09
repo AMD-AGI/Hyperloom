@@ -55,6 +55,7 @@ from ...state.failure_evidence import (
     tail_excerpt,
 )
 from ...state.shared_state import (
+    ANCHOR_DEGRADED,
     first_positive_tput,
     framework_is_scriptable,
     resolve_anchor_with_drift,
@@ -1112,8 +1113,9 @@ class ExploreExecutor:
             benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
         )
         running_base_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_intvty else (None, "")
-        if grade_on_intvty and _anchor_reason:
+        if grade_on_intvty and running_base_perf is None:
             log.info("explore: grading this round on output throughput (%s)", _anchor_reason)
+            running_base_perf = ANCHOR_DEGRADED
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a cold decision round instead of
@@ -1763,9 +1765,10 @@ class ExploreExecutor:
                             running_base_tput = decision_tput
                         if grade_on_intvty:
                             # The KEEP's own axes become the next variant's
-                            # anchor. A KEEP that could not supply them clears
-                            # the anchor so the rest of the round grades on
-                            # output too, rather than against a stale pair.
+                            # anchor. A KEEP that could not supply them holds
+                            # the round on the output axis, rather than letting
+                            # the session anchor grade later variants on
+                            # interactivity while they stack on top of it.
                             running_base_perf = perf_snapshot_from_mapping(variant_meas)
                             if running_base_perf is None:
                                 log.info(
@@ -1773,6 +1776,7 @@ class ExploreExecutor:
                                     "this round on output throughput",
                                     gv.name,
                                 )
+                                running_base_perf = ANCHOR_DEGRADED
 
                         winners.append(keep_entry)
                         winners_history_update.append(

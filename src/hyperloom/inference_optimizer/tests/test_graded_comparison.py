@@ -21,6 +21,7 @@ from hyperloom.common.perf_metric import (
     graded_axes_of,
 )
 from hyperloom.orchestrator.state.shared_state import (
+    ANCHOR_DEGRADED,
     resolve_graded_comparison,
     resolve_grading_anchor_tput,
 )
@@ -121,6 +122,27 @@ def test_agentx_recorded_when_neither_dominates(monkeypatch):
         state, _full_measurement(total=25984.0, output=183.0, intvty=22.79), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_RECORDED
+
+
+def test_a_degraded_round_stays_on_the_output_axis(monkeypatch):
+    """``ANCHOR_DEGRADED`` must not re-resolve the session anchor.
+
+    A round degrades when a KEEP cannot supply the graded axes. Passing ``None``
+    reads as "no anchor supplied" and falls back to ``current_best``, which
+    would grade later variants on interactivity against the round's opening
+    state while they stack on top of a KEEP graded on output.
+    """
+    _agentx(monkeypatch)
+    state = _State(current_best=_ANCHOR, baseline_tput=180.0)
+    meas = _full_measurement(total=26000.0, output=190.0, intvty=30.0)
+
+    graded = resolve_graded_comparison(state, meas, anchor_perf=ANCHOR_DEGRADED, anchor_tput=185.0)
+    assert graded.objective == GRADED_OUTPUT
+    assert graded.reference == pytest.approx(185.0)
+    assert graded.degrade_reason == "round_degraded"
+
+    # None keeps the old "not supplied" meaning.
+    assert resolve_graded_comparison(state, meas, anchor_perf=None).objective == GRADED_INTVTY
 
 
 def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(monkeypatch):

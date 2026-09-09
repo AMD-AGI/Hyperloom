@@ -111,7 +111,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "theoretical_prefix_cache_hit": _stat(m, "theoretical_prefix_cache_hit"),
             "submission_valid": _verdict,
             "submission_invalid_reasons": _reasons,
-            "request_error_rate": _stat(m, "request_error_rate"),
+            "request_error_rate": _stat(m, "request_error_rate", default=None),
             "corpus_loader": _corpus_loader(d),
             "isl_distribution": _distribution(m.get("input_sequence_length")),
             "osl_distribution": _distribution(m.get("output_sequence_length")),

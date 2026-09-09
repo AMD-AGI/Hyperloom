@@ -160,9 +160,11 @@ def map_aiperf(
         # slip into the leaderboard-comparable set.
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
-        # Upstream's hard validity gate is error_rate <= 0.10 over completed
-        # requests; the AgentX accuracy gate reads this field.
-        "request_error_rate": stat(m, "request_error_rate"),
+        # Upstream's hard validity gate, as a percentage (aiperf declares this
+        # metric PERCENT). ``default=None`` rather than 0.0: aiperf omits the
+        # metric when no request completed, and coalescing that to zero would
+        # report a perfect error rate for a run that measured nothing.
+        "request_error_rate": stat(m, "request_error_rate", default=None),
         # Corpus shape. A single ISL/OSL scalar cannot describe this workload
         # (p50 95k, p99 506k), so the distributions travel instead.
         "corpus_loader": _corpus_loader(d),

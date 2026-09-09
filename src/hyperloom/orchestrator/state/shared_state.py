@@ -176,6 +176,12 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
+#: ``anchor_perf`` value meaning "this round has already degraded to the output
+#: axis". Distinct from ``None``, which means "no explicit anchor supplied" and
+#: resolves the session anchor instead.
+ANCHOR_DEGRADED: Any = object()
+
+
 def resolve_graded_comparison(
     state: Any,
     measurement: Any,
@@ -205,7 +211,8 @@ def resolve_graded_comparison(
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
         keep_threshold_pct: Minimum gain to KEEP.
-        anchor_perf: Explicit anchor snapshot for the interactivity axis.
+        anchor_perf: Explicit anchor snapshot for the interactivity axis, or
+            :data:`ANCHOR_DEGRADED` to hold a round on the output axis.
         anchor_tput: Explicit anchor for the output axis. Both default to the
             session anchor. ``explore`` passes its own because variants stack
             within a round: each is graded against the anchor the previous
@@ -239,7 +246,13 @@ def resolve_graded_comparison(
         scriptable=framework_is_scriptable(getattr(state, "framework", None)),
         benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
     ):
-        if anchor_perf is not None:
+        if anchor_perf is ANCHOR_DEGRADED:
+            # Already on the output axis for this round. Re-resolving the
+            # session anchor here would grade later variants on interactivity
+            # against the round's opening state while they stack on top of a
+            # KEEP that was graded on output.
+            ref_perf, reason = None, "round_degraded"
+        elif anchor_perf is not None:
             ref_perf, reason = anchor_perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
