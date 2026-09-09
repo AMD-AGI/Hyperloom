@@ -66,6 +66,18 @@ MOE_KEY_FIELDS = MOE_TUPLE_FIELDS[2:]
 # identifies "the MoE shape to tune".
 MOE_SHAPE_FIELDS = tuple(f for f in MOE_KEY_FIELDS if f != "token")
 
+# The table fused-MoE misses are looked up in. Named here because the MoE side
+# records its misses under ``dispatch["moe"]`` rather than as a demand, and
+# turning those records into a demand needs the table's own name.
+MOE_TABLE = "tuned_fmoe.csv"
+
+# Kill switch for that conversion. It is on by default because the records it
+# reads are the only runtime evidence fmoe_ck has, but emitting the demand also
+# changes two behaviours outside this module -- the router starts selecting
+# fmoe_ck off the log, and ``demand_for_tuner(report, "fmoe_ck")`` stops
+# returning None -- so there has to be a way to put those back without a revert.
+MOE_DEMAND_DISABLE_ENV = "FORGE_MOE_DEMAND_DISABLE"
+
 # vLLM Triton MoE: found vs not-found are two different lines.
 VLLM_MOE_HIT = re.compile(r"Using configuration from (?P<path>\S+) for MoE layer")
 VLLM_MOE_MISS = re.compile(r"Config file not found at (?P<path>\S+)")
@@ -79,6 +91,10 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, ...]] = {
     "a8w8_bpreshuffle_tuned_gemm.csv": ("M", "N", "K", "q_dtype_w"),
     "a4w4_blockscale_tuned_gemm.csv": ("M", "N", "K"),
 }
+# ``tuned_fmoe.csv`` is deliberately absent. Its key schema is MOE_KEY_FIELDS,
+# but this map doubles as "is this a dense GEMM table?" -- vllm_dense_tunableop
+# borrows shapes from every table in it -- and a fused-MoE key has no (M, N, K)
+# for a dense tuner to borrow. The MoE demand carries its own key_schema.
 
 # Key columns the log actually exposes, so a demand entry can never claim one it did not observe.
 UNLOGGABLE_KEY_FIELDS = ("q_dtype_w",)
@@ -245,6 +261,12 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
             "cu_num": fields["cu_num"],
             "tokens": set(),
             "untuned_tokens": set(),
+            # Per-token miss counts, keyed by the token as a string so the
+            # record survives a JSON round trip unchanged. ``miss_count`` alone
+            # cannot say which token counts the runtime actually spent its
+            # misses on, and a demand that splits it evenly would be inventing
+            # the number it is asked for most.
+            "untuned_token_counts": {},
             "miss_count": 0,
         }
         moe["keys"][shape] = rec
@@ -252,9 +274,64 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
         rec["tokens"].add(token)
         if miss:
             rec["untuned_tokens"].add(token)
+            counts = rec.setdefault("untuned_token_counts", {})
+            counts[str(token)] = counts.get(str(token), 0) + 1
     if miss:
         rec["miss_count"] += 1
     return token
+
+
+def _moe_demand(report: dict[str, Any]) -> Demand | None:
+    """The fused-MoE misses, restated as a demand for ``tuned_fmoe.csv``.
+
+    MoE misses have always been recorded, but under ``dispatch["moe"]`` rather
+    than in ``demands`` -- so every consumer that reads the demand list saw a run
+    with millions of fmoe misses as a run with no MoE demand at all. The router
+    could not learn from the log that fmoe_ck was needed, ``demand_for_tuner``
+    answered None for it, and ``tuned_fmoe.csv`` could not become a coverage gap
+    however often the runtime missed it.
+
+    Nothing new is measured here. Each row is one (shape, token) pair the
+    runtime asked for and did not find, counted from the same lines, with the
+    stage attribution :func:`moe_ck_missed_keys` already applies -- a token only
+    ever seen on 1-stage dispatch is not something fmoe_ck's CK tuner can serve,
+    and handing it one would be demanding a row that cannot be produced.
+    """
+    if os.environ.get(MOE_DEMAND_DISABLE_ENV, "").strip().lower() in ("1", "true", "yes"):
+        return None
+    moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
+    impl = str(moe.get("impl") or "")
+    if impl and impl != "aiter_ck":
+        # fmoe_ck tunes aiter's CK path. Under vLLM's Triton MoE -- or a log
+        # carrying both -- these keys do not describe what the runtime will
+        # dispatch, and a demand claiming otherwise would route a tuner at a
+        # backend it cannot reach.
+        return None
+
+    keys: list[dict[str, Any]] = []
+    for rec in moe_ck_missed_keys(report):
+        counts = rec.get("untuned_token_counts") or {}
+        for token in rec.get("untuned_tokens") or []:
+            row: dict[str, Any] = {f: str(rec.get(f, "")) for f in MOE_KEY_FIELDS}
+            row["token"] = str(token)
+            row["requests"] = _as_int(counts.get(str(token))) or 0
+            keys.append(row)
+    if not keys:
+        return None
+    keys.sort(key=lambda r: (-r["requests"], _as_int(r["token"]) or 0))
+
+    tuner, env_var = TABLE_TO_TUNER[MOE_TABLE]
+    return Demand(
+        table=MOE_TABLE,
+        tuner=tuner,
+        env_var=env_var,
+        key_schema=list(MOE_KEY_FIELDS),
+        # Every field of a MoE key comes off the dispatch tuple itself, so
+        # unlike the dense tables there is nothing here supplied from hardware.
+        logged_fields=list(MOE_KEY_FIELDS),
+        miss_count=sum(r["requests"] for r in keys),
+        keys=keys,
+    )
 
 
 def parse_log(text: str) -> dict[str, Any]:
@@ -392,7 +469,18 @@ def parse_log(text: str) -> dict[str, Any]:
     if moe and isinstance(moe.get("keys"), dict):
         # Most-missed key first, so a consumer that can only afford one row tunes the one the runtime asked for most.
         moe["keys"] = [
-            {**rec, "tokens": sorted(rec["tokens"]), "untuned_tokens": sorted(rec["untuned_tokens"])}
+            {
+                **rec,
+                "tokens": sorted(rec["tokens"]),
+                "untuned_tokens": sorted(rec["untuned_tokens"]),
+                "untuned_token_counts": {
+                    k: v
+                    for k, v in sorted(
+                        (rec.get("untuned_token_counts") or {}).items(),
+                        key=lambda kv: _as_int(kv[0]) or 0,
+                    )
+                },
+            }
             for rec in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
         ]
         moe["miss_count"] = sum(r["miss_count"] for r in moe["keys"])
@@ -414,6 +502,10 @@ def parse_log(text: str) -> dict[str, Any]:
             dict(zip(KEY_FIELDS, k, strict=True)) | {"requests": n}
             for k, n in sorted(key_counts[base].items(), key=lambda kv: -kv[1])
         ]
+
+    moe_demand = _moe_demand({"dispatch": dispatch})
+    if moe_demand is not None:
+        demands[MOE_TABLE] = moe_demand
 
     ordered = sorted(demands.values(), key=lambda d: -d.miss_count)
     total = hits + misses
@@ -498,7 +590,14 @@ def demand_shapes(
     limit: int | None = None,
     bucket: bool = True,
 ) -> list[dict[str, Any]]:
-    """Requested keys for one table, most-requested first."""
+    """Requested keys for one table, most-requested first.
+
+    Fused-MoE keys are not M/N/K and are handled separately; everything else
+    goes through the padded-M bucketing below.
+    """
+    if canonical_table_name(entry.get("table") or "") == MOE_TABLE:
+        return _moe_demand_shapes(entry, limit=limit)
+
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
         m, n, k = _as_int(key.get("M")), _as_int(key.get("N")), _as_int(key.get("K"))
@@ -529,6 +628,24 @@ def demand_shapes(
         for shape in shapes:
             shape["observed_M"] = sorted(set(shape["observed_M"]))
 
+    if limit is not None and limit > 0:
+        shapes = shapes[:limit]
+    return shapes
+
+
+def _moe_demand_shapes(entry: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
+    """Demanded shapes for the fused-MoE table.
+
+    Kept apart from the dense path rather than folded into it, because every
+    step of that path is dense-specific: a MoE key has no M/N/K to read, and the
+    padded-M bucketing that makes a dense budget worth spending has no analogue
+    here -- aiter looks a fmoe row up at the exact token count, so collapsing
+    two token counts into one row would drop one of them. The keys are already
+    one row per (shape, token) the runtime asked for, ranked by how often; the
+    budget just takes the front of that list.
+    """
+    shapes = [dict(key) for key in entry.get("keys") or []]
+    shapes.sort(key=lambda s: (-(_as_int(s.get("requests")) or 0), _as_int(s.get("token")) or 0))
     if limit is not None and limit > 0:
         shapes = shapes[:limit]
     return shapes
