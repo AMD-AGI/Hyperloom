@@ -8,6 +8,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -113,6 +116,105 @@ def test_has_optimization_missing_current_best():
     s.current_best = {}
     has, _, _ = _has_optimization(s)
     assert has is False
+
+
+@pytest.mark.parametrize("persistent_server", [False, True])
+@pytest.mark.parametrize(
+    "current_best, expected_args, expected_env",
+    [
+        (
+            {
+                "extra_server_args": "--trust-remote-code --max-running-requests 64 --cuda-graph-max-bs 64",
+                "args_mode": "replace",
+            },
+            "--trust-remote-code --max-running-requests 64 --cuda-graph-max-bs 64",
+            "stock",
+        ),
+        ({"extra_server_args": "", "args_mode": "replace"}, "", "stock"),
+        ({"remove_args": ["--max-running-requests"]}, "--trust-remote-code", "stock"),
+        ({"unset_envs": ["SGLANG_SWEEP_TEST"]}, "--trust-remote-code --max-running-requests 64", None),
+        (
+            {"unset_envs": ["SGLANG_SWEEP_TEST"], "extra_envs": {"SGLANG_SWEEP_TEST": "accepted 'literal'"}},
+            "--trust-remote-code --max-running-requests 64",
+            "accepted 'literal'",
+        ),
+        (
+            {"extra_server_args": "--disable-radix-cache"},
+            "--trust-remote-code --max-running-requests 64 --disable-radix-cache",
+            "stock",
+        ),
+    ],
+    ids=["complete-args", "empty-replacement", "remove-args", "unset-env", "unset-then-assign", "legacy-delta"],
+)
+def test_conc_sweep_preserves_retained_launch_controls(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent_server: bool,
+    current_best: dict[str, Any],
+    expected_args: str,
+    expected_env: str | None,
+):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline_args = (
+        current_best.get("extra_server_args") if current_best.get("args_mode") == "replace" else ""
+    ) or "--trust-remote-code --max-running-requests 64"
+    baseline_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "envs": {
+                        "EXTRA_SGLANG_ARGS": baseline_args,
+                        "SGLANG_SWEEP_TEST": "stock",
+                    },
+                }
+            }
+        )
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml), current_best=current_best)
+    if persistent_server:
+        _patch_lifecycle_eligible(monkeypatch, [])
+    else:
+        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
+    children = []
+
+    async def launch_children(*, grid: list[GridVariant], base_yaml_path: Path, **kwargs):
+        results = []
+        for variant in grid:
+            config = _build_variant_yaml(
+                base_yaml_path, "", variant, output_subdir=session_dir / "children" / variant.name
+            )
+            envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
+            code = "import json, os, sys; print(json.dumps([sys.argv[1:], os.environ.get('SGLANG_SWEEP_TEST')]))"
+            command = shlex.join([sys.executable, "-S", "-c", code]) + " " + envs.get("EXTRA_SGLANG_ARGS", "")
+            child = subprocess.run(
+                ["bash", "-c", "exec " + command],
+                env={"PATH": os.defpath, **envs},
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            children.append((variant.name, json.loads(child.stdout)))
+            results.append(_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs))
+        return results
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=launch_children),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+    assert payload["status"] == "succeeded"
+    assert len(children) == 4
+    for name, (args, env) in children:
+        optimized = name.startswith("optimized_")
+        assert args == shlex.split(expected_args if optimized else baseline_args)
+        assert env == (expected_env if optimized else "stock")
 
 
 # _build_comparison

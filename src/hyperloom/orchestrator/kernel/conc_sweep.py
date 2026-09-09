@@ -44,6 +44,7 @@ from ..actions.executors._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from .roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
@@ -90,11 +91,9 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: i
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
     """Return ``(has_opt, args, envs)`` for a retained config or kernel overlay."""
     cb = state.current_best or {}
-    args = str(cb.get("extra_server_args") or "").strip()
-    envs_raw = cb.get("extra_envs") or {}
-    envs = {str(k): str(v) for k, v in envs_raw.items()}
+    config = normalize_proposal(cb)
     overlay = str(cb.get("final_overlay") or "").strip()
-    return bool(args or envs or overlay), args, envs
+    return bool(is_executable(config) or overlay), config["extra_args"], config["extra_envs"]
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
@@ -366,6 +365,7 @@ def _build_arm_grid(
     arm_args: str,
     arm_envs: dict[str, str],
     overlay_pythonpath: str = "",
+    arm_controls: Mapping[str, Any] | None = None,
 ) -> list[GridVariant]:
     """Build a single-arm grid in descending CONC order."""
     out: list[GridVariant] = []
@@ -386,6 +386,7 @@ def _build_arm_grid(
             extra_server_args=arm_args,
             extra_envs=envs,
             note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
+            **(arm_controls or {}),
         )
         variant.overlay_pythonpath = overlay_pythonpath  # type: ignore[attr-defined]
         out.append(variant)
@@ -453,6 +454,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         arm_args=arm_args,
         arm_envs=arm_envs,
         overlay_pythonpath=overlay if arm_name == "optimized" else "",
+        arm_controls=controls_of(normalize_proposal(state.current_best or {})) if arm_name == "optimized" else {},
     )
     if not grid:
         return arm_results
@@ -1464,6 +1466,7 @@ async def run_conc_sweep(
                 arm_args=_aa,
                 arm_envs=_ae,
                 overlay_pythonpath=opt_overlay if _an == "optimized" else "",
+                arm_controls=controls_of(normalize_proposal(state.current_best or {})) if _an == "optimized" else {},
             )
 
             # Check overall budget before starting each arm.
