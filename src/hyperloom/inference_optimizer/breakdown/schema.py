@@ -594,10 +594,11 @@ class CriticRobustness(TypedDict, total=False):
 class GpuMonitorAggregate(TypedDict, total=False):
     """Aggregated GPU power/thermal/clock telemetry over the session.
 
-    Metrics are tri-state: ``None`` means nobody sampled them, not zero. Test
-    with ``is None`` -- a real 0.0 reading is falsy too. ``samples`` counts
-    underlying samples behind the metrics; ``blocks`` counts the entries read,
-    so a collection gap stays distinguishable from a quiet GPU.
+    Metrics are tri-state: `None` means nobody sampled them, not zero. Test
+    with `is None` -- a real 0.0 reading is falsy too. `samples` counts the
+    underlying samples behind the metrics, over blocks that yielded at least
+    one, so a large count can never sit beside a row of `None`; `blocks`
+    counts every entry read, so a collection gap stays visible.
     """
 
     samples: int

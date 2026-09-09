@@ -132,6 +132,35 @@ _GPU_TEMP_KEYS = ("temperature_c", "temp_c", "temperature")
 _GPU_CLOCK_KEYS = ("gpu_clock_mhz", "clock_mhz", "sclk_mhz")
 
 
+def _gpu_source(block: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Pick the one alias in this block that carries a usable reading.
+
+    Resolved once per block rather than once per statistic. Choosing per
+    statistic lets the mean come from ``power_watts`` and the peak from a
+    stale ``power_w`` in the same block, which can report a maximum below the
+    average -- a self-contradictory number of exactly the kind this collector
+    exists to stop emitting.
+
+    Args:
+        block (dict[str, Any]): One ``gpu_monitor`` entry.
+        keys (tuple[str, ...]): Metric aliases to try, in order.
+
+    Returns:
+        Any: The raw value under the winning alias -- a scalar or a
+        ``{min, max, avg}`` mapping -- or ``None`` when no alias is usable.
+    """
+    for key in keys:
+        if key not in block:
+            continue
+        raw = block[key]
+        if isinstance(raw, dict):
+            if any(_to_float(raw.get(stat)) is not None for stat in ("avg", "max", "min")):
+                return raw
+        elif _to_float(raw) is not None:
+            return raw
+    return None
+
+
 def _gpu_metric(block: dict[str, Any], keys: tuple[str, ...], field: str) -> float | None:
     """Read one GPU metric out of a single ``gpu_monitor`` block.
 
@@ -151,18 +180,15 @@ def _gpu_metric(block: dict[str, Any], keys: tuple[str, ...], field: str) -> flo
         field (str): ``"avg"`` or ``"max"``; consulted only for nested blocks.
 
     Returns:
-        float | None: The reading, or ``None`` when this block carries none.
-        ``None`` rather than ``0.0`` on purpose -- a metric that was never
+        float | None: The reading, or ``None`` when this block carries none --
+        including when the winning alias omits this particular statistic.
+        ``None`` rather than ``0.0`` on purpose: a metric that was never
         sampled has to stay distinguishable from one that measured zero.
     """
-    for key in keys:
-        if key not in block:
-            continue
-        raw = block[key]
-        value = _to_float(raw.get(field)) if isinstance(raw, dict) else _to_float(raw)
-        if value is not None:
-            return value
-    return None
+    raw = _gpu_source(block, keys)
+    if raw is None:
+        return None
+    return _to_float(raw.get(field)) if isinstance(raw, dict) else _to_float(raw)
 
 
 def _aggregate_gpu_monitor(
@@ -193,10 +219,28 @@ def _aggregate_gpu_monitor(
         return {}
 
     # A Magpie block already summarises ``sample_count`` underlying samples, so
-    # weight its mean by that count; a flat per-sample block counts as one.
-    # Unweighted, a 10-sample block would pull the session mean as hard as a
-    # 10,000-sample one.
-    weights = [max(1.0, _to_float(b.get("sample_count")) or 1.0) for b in blocks]
+    # weight its mean by that count; a flat per-sample block, which has no such
+    # field, counts as one. Unweighted, a 10-sample block would pull the session
+    # mean as hard as a 10,000-sample one.
+    #
+    # Absent and zero are kept apart here too. ``or 1.0`` promoted a monitor
+    # that started and sampled nothing into one sample -- the same conflation of
+    # "no reading" with "a reading of zero" that this whole change is about.
+    def _weight(block: dict[str, Any]) -> float:
+        """Underlying samples behind one block; 1.0 when it does not say."""
+        declared = _to_float(block.get("sample_count"))
+        return 1.0 if declared is None else max(0.0, declared)
+
+    weights = [_weight(b) for b in blocks]
+    # Only blocks that yielded a metric count toward ``samples``. A block
+    # carrying ``sample_count: 27000`` and no recognised key measured nothing
+    # this function can report, and crediting it would put a large sample count
+    # beside a row of ``None``.
+    contributing = [
+        w
+        for b, w in zip(blocks, weights)
+        if any(_gpu_source(b, keys) is not None for keys in (_GPU_POWER_KEYS, _GPU_TEMP_KEYS, _GPU_CLOCK_KEYS))
+    ]
 
     def _avg(keys: tuple[str, ...]) -> float | None:
         """Sample-count-weighted mean of one metric, or ``None`` if unread."""
@@ -220,7 +264,7 @@ def _aggregate_gpu_monitor(
         return round(max(values), 2) if values else None
 
     return {
-        "samples": int(sum(weights)),
+        "samples": round(sum(contributing)),
         "blocks": len(blocks),
         "avg_power_w": _avg(_GPU_POWER_KEYS),
         "max_power_w": _max(_GPU_POWER_KEYS),
@@ -344,7 +388,15 @@ def collect_telemetry(
             _rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "system_profile*")
         ],
         "server_log_paths": [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
-        "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
+        # Omitted rather than written empty. The section's contract is that its
+        # absence means no report carried a ``gpu_monitor`` block, and a key
+        # holding ``{}`` would make a consumer testing for absence disagree
+        # with one testing for content.
+        **(
+            {"gpu_monitor_aggregate": _gpu_aggregate}
+            if (_gpu_aggregate := _aggregate_gpu_monitor(all_reports, warnings))
+            else {}
+        ),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
         "orchestration_context": {"tick_count": int(state.get("tick") or 0)},

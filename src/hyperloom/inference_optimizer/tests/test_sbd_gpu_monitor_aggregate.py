@@ -126,6 +126,58 @@ def test_no_gpu_monitor_yields_empty_dict(tmp_path):
     assert _aggregate_gpu_monitor([path], []) == {}
 
 
+def test_one_alias_wins_per_block_so_max_cannot_fall_below_avg(tmp_path):
+    """Resolving per statistic lets the mean come from one key and the peak from
+    a stale sibling, which reports a maximum below the average."""
+    block = {"power_watts": {"avg": 300.0, "max": 316.0}, "power_w": 12.0}
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["avg_power_w"] == 300.0
+    assert out["max_power_w"] == 316.0
+
+
+def test_a_statistic_the_winning_alias_omits_stays_none(tmp_path):
+    """Not borrowed from another key: the producer did not report it."""
+    block = {"power_watts": {"avg": 300.0}, "power_w": 12.0}
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["avg_power_w"] == 300.0
+    assert out["max_power_w"] is None
+
+
+def test_a_block_that_measured_nothing_is_not_counted_as_a_sample(tmp_path):
+    """``sample_count`` beside no recognised metric would put a large count next
+    to a row of ``None``."""
+    out = _aggregate_gpu_monitor(
+        [_report(tmp_path, "r.json", {"sample_count": 27000, "duration_sec": 10.0})],
+        [],
+    )
+
+    assert out["blocks"] == 1
+    assert out["samples"] == 0
+    assert out["avg_power_w"] is None
+
+
+def test_zero_sample_count_is_not_promoted_to_one(tmp_path):
+    """A monitor that started and sampled nothing reported zero, not one -- the
+    same absent-versus-zero conflation this change exists to remove."""
+    block = {"sample_count": 0, "power_watts": {"avg": 300.0, "max": 300.0}}
+    out = _aggregate_gpu_monitor([_report(tmp_path, "r.json", block)], [])
+
+    assert out["samples"] == 0
+
+
+def test_section_is_omitted_when_no_block_was_found(tmp_path):
+    """The documented contract is absence, not an empty object: a consumer
+    testing for the key must agree with one testing its contents."""
+    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
+
+    (tmp_path / "runs").mkdir()
+    section = collect_telemetry(tmp_path, {}, [])
+
+    assert "gpu_monitor_aggregate" not in section
+
+
 def test_malformed_report_warns_without_raising(tmp_path):
     """A bad report degrades to a warning; a good one alongside it still counts."""
     bad = tmp_path / "bad.json"
