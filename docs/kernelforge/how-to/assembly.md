@@ -14,8 +14,9 @@ SPDX-License-Identifier: MIT
 Select `--kernel-backend assembly` to explore AMDGPU assembly from a FlyDSL,
 Triton/Gluon, HIP, or existing assembly source in the ordinary `forge-loop`.
 The backend supplies the high-level/assembly development workflow. The
-executable helpers provide AMDHSA reassembly and a FlyDSL launcher adapter;
-other frontends still need their own verified code-object loader.
+executable helpers provide AMDHSA reassembly, a FlyDSL launcher adapter, and
+an explicit-ABI HIP module loader for standalone kernels. Frontend-specific
+argument layouts and launch geometry still belong to the candidate wrapper.
 
 Use the original Python launcher as `--kernel` and retain the existing driver:
 
@@ -93,6 +94,51 @@ parity, an incorrect SiLU candidate, runtime argument rebinding, and graph
 replay. It requires AITER's W4A16 helpers (validated with
 `amd-aiter 0.1.16.post2` and FlyDSL 0.2.0). This is a synthetic single-kernel regression;
 it does not validate a full MoE layer or a model-serving speedup.
+
+## Standalone assembly through HIP
+
+Use `kernelforge.assembly.hip.HipKernel` when the kernel has its own verified
+AMDHSA ABI rather than a compatible FlyDSL host launcher:
+
+```python
+from kernelforge.assembly import assemble
+from kernelforge.assembly.hip import HipKernel
+
+code_object = assemble(source, output, gpu_target="gfx950", toolchain_dir=toolchain)
+kernel = HipKernel(code_object, "my_kernel", ["ptr", "ptr", "i32", "f32"])
+kernel.launch(
+    [x.data_ptr(), y.data_ptr(), element_count, scale],
+    grid=(blocks, 1, 1), block=(64, 1, 1),
+    stream=torch.cuda.current_stream().cuda_stream,
+)
+```
+
+The argument types, order, symbol, dimensions, and device must match the source
+metadata and the driver's contract; the loader does not infer them. Supported
+types are `ptr`, `i32`, `u32`, `i64`, `u64`, `f32`, and `f64`. Initialize the
+intended HIP device before loading. Each instance loads the current code-object
+bytes and retains its own module, so replacing a path cannot change a live
+candidate. Build/load before capture and timing, and retain the instance while
+its captured graphs can run. Call `close()` only after synchronizing and retiring
+those graphs; unclosed modules remain owned by the HIP context until process exit.
+
+The [Qwen3 example](../../../examples/qwen3-qk-assembly/README.md) includes
+hand-written gfx950 assembly, a typed tensor wrapper, and an opt-in vLLM 0.25.1
+plugin. It fuses Q/K RMSNorm and NeoX RoPE for Qwen3-4B's BF16, head-size-128
+configuration. The GPU regression exercises real loading, pointer rebinding,
+nondefault-stream graph replay, a rounded FP64 oracle, and wrong-result rejection:
+
+```bash
+pytest -q src/kernelforge/tests/test_assembly_hip.py \
+  src/kernelforge/tests/test_assembly_hip_gpu.py
+```
+
+Select the plugin in worker processes with `VLLM_PLUGINS`, isolate compilation
+caches per candidate, and confirm the assembly symbol appears in a GPU trace.
+Keep fusion gains, instruction-level gains, kernel timing, and model serving
+results separate. See the
+[case card](../../../src/kernelforge/data/local_knowledge/languages/assembly/cases/qwen3_qk_rope_gfx950.md)
+for the measured domain and numerical limitations.
 
 ## Moving between languages
 

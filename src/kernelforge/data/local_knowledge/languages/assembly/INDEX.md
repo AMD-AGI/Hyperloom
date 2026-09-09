@@ -52,6 +52,15 @@ FlyDSL launcher adapter, weight/scale layouts, negative controls, and a packed
 multiply experiment that passed correctness but produced no useful speedup.
 This is Forge validation evidence, separate from the Evolve source cases.
 
+## Case knowledge: Qwen3 model integration
+
+The [Qwen3 Q/K normalization and RoPE case](cases/qwen3_qk_rope_gfx950.md)
+connects a standalone handwritten kernel to an existing vLLM model through
+Forge's explicit-ABI HIP loader. It covers graph/worker dispatch verification,
+BF16 intermediate rounding, same-fusion attribution, and the distinction
+between decode throughput and first-token latency. This is a separate
+deterministic experiment, not a FlyDSL change or an agent-discovered KEEP.
+
 ## Source and toolchain
 
 An editable AMDHSA assembly file contains `.amdgcn_target`, device symbols,
@@ -115,9 +124,15 @@ independently usable; the adapter never modifies a global compiler hook or
 FlyDSL cache entry. Rebuild the candidate after an assembly edit; an existing
 callable retains its own previous code object.
 
-Other frontends can use the assembler helper, but require their own verified
-code-object loader and ABI adapter. Selecting Assembly expertise does not
-automatically make the FlyDSL adapter work with Triton or HIP callables.
+Standalone kernels can use `kernelforge.assembly.hip.HipKernel` with explicit
+argument types, launch geometry, and stream. It loads fresh code-object bytes
+per instance, propagates HIP errors, and binds to the current device. It does
+not infer an ABI from the original frontend; the candidate wrapper must verify
+tensor shapes, strides, dtype, resource requirements, and metadata. Retain the
+module while captured graphs can run and unload explicitly only after GPU work
+and graph use finish. See the [HIP guide](guides/hip_module_validation.md).
+Selecting Assembly expertise does not automatically make the FlyDSL adapter
+work with Triton or HIP callables.
 
 ## Evidence and artifacts
 
