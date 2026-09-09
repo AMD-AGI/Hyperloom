@@ -44,7 +44,7 @@ def _sample(**kwargs) -> KvSample:
     return KvSample(**base)
 
 
-# ── scanner ────────────────────────────────────────────────────────────────
+# â”€â”€ scanner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def test_scan_survives_truncation_by_rescanning_from_the_top(tmp_path):
     """A rotated log is shorter than the consumed offset; markers in the new
     content must still be seen rather than skipped past."""
@@ -86,18 +86,46 @@ def test_resolve_scan_logs_includes_the_agentx_client_log(tmp_path):
     assert any(p.endswith("aiperf.log") for p in resolved)
 
 
-# ── recorder ───────────────────────────────────────────────────────────────
+# â”€â”€ recorder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def test_rows_are_tagged_with_the_phase_they_were_taken_in():
-    poller = _StubPoller([_sample(), _sample(), _sample()])
+    poller = _StubPoller([_sample() for _ in range(6)])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
 
     rec.tick(0.0)
-    rec.note_phase("warmup", 1.0)
+    rec.note_phase("warmup", 1.0)  # boundary reading closes boot
     rec.tick(1.0)
-    rec.note_phase("measured", 2.0)
+    rec.note_phase("measured", 2.0)  # boundary reading closes warmup
     rec.tick(2.0)
 
-    assert [r["phase"] for r in rec.rows()] == ["boot", "warmup", "measured"]
+    assert [r["phase"] for r in rec.rows()] == ["boot", "boot", "warmup", "warmup", "measured"]
+
+
+def test_a_boundary_reading_closes_one_phase_and_opens_the_next():
+    """Deriving a phase total from its own first and last periodic samples
+    leaves up to a full interval at each end credited to neither phase."""
+    poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in (7.0, 7.0, 9.0)])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+
+    rec.note_phase("measured", 1.0)
+    rec.tick(2.0)
+
+    # The single boundary read is both boot's endpoint and measured's baseline.
+    assert rec.summary()["retract_delta_by_phase"]["measured"] == 2.0
+
+
+def test_every_row_carries_gauges_and_raw_counters():
+    """Counters only at boundaries would blind the interior of a phase: one
+    burst and a steady trickle produce the same total, and a mid-phase engine
+    restart is invisible without the series."""
+    poller = _StubPoller([_sample(capacity_tokens=32768.0, retract_total=_grouped(a=48.0))])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
+    rec.tick(0.0)
+
+    row = rec.rows()[0]
+    assert row["capacity_tokens"] == 32768.0
+    assert row["counters_by_series"]["retract"] == _grouped(a=48.0)
+    assert "scrape_sec" in row and "mono" in row and "ts" in row
 
 
 def test_scrape_interval_is_enforced_on_the_monotonic_clock():
@@ -163,22 +191,27 @@ def test_counter_deltas_are_attributed_to_the_phase_that_earned_them():
     their phase and can be re-sliced -- a counter difference cannot be taken
     apart afterwards.
     """
-    poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in (0.0, 5.0, 5.0, 7.0, 7.0, 10.0)])
+    # Reads in scrape order. The boundary scrapes are the 0, 5, 7 and the final
+    # 10; each closes one phase and opens the next, so the windows meet.
+    reads = (0.0, 2.0, 5.0, 5.0, 6.0, 7.0, 7.0, 9.0, 10.0, 10.0)
+    poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in reads])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0)
 
     rec.note_phase("warmup", 0.0)
-    rec.tick(0.0)
     rec.tick(1.0)
-    rec.note_phase("measured", 2.0)
     rec.tick(2.0)
-    rec.tick(3.0)
-    rec.note_phase("eval", 4.0)
+    rec.note_phase("measured", 3.0)
     rec.tick(4.0)
     rec.tick(5.0)
+    rec.note_phase("eval", 6.0)
+    rec.tick(7.0)
+    rec.tick(8.0)
+    rec.close()
 
     summary = rec.summary()
     assert summary["retract_delta"] == 2.0
-    assert summary["retract_delta_by_phase"] == {"warmup": 5.0, "measured": 2.0, "eval": 3.0}
+    by_phase = summary["retract_delta_by_phase"]
+    assert (by_phase["warmup"], by_phase["measured"], by_phase["eval"]) == (5.0, 2.0, 3.0)
 
 
 def test_measured_delta_is_none_when_no_sample_landed_there():
@@ -238,7 +271,7 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted():
     window = rec.summary()["prefix_cache"]
     assert window["prefix_cache_queries_delta"] == 400.0
     assert window["prefix_cache_hits_delta"] == 300.0
-    assert window["prefix_cache_queries_delta_by_phase"] == {"measured": 400.0}
+    assert window["prefix_cache_queries_delta_by_phase"]["measured"] == 400.0
 
 
 def test_prefix_cache_counters_add_across_independent_engines():
@@ -326,7 +359,7 @@ def test_sampling_failure_does_not_propagate():
     assert rec.rows() == []
 
 
-# ── loop integration ───────────────────────────────────────────────────────
+# â”€â”€ loop integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _Recorder:
     """Minimal stand-in matching the duck-typed contract the loop expects."""
 
@@ -534,7 +567,7 @@ def test_artifact_name_is_stable():
     assert Path(KV_ARTIFACT_NAME).suffix == ".json"
 
 
-# ── call-site wiring ───────────────────────────────────────────────────────
+# â”€â”€ call-site wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def test_no_recorder_without_a_server_log_path():
     """A helper subprocess has no engine to scrape and no round to scope to."""
     assert sk._build_kv_recorder(None, {}) is None

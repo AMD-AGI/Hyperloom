@@ -698,10 +698,35 @@ _COMPARABLE_PHASE = "measured"
 #: three-hour round at the scrape interval below lands well over this.
 _MAX_STORED_ROWS = 5000
 
-#: Floor between scrapes. The loop this runs in can iterate faster than its
-#: nominal 0.5s when a deadline bounds the slice, so the interval is enforced
-#: on the monotonic clock rather than by counting passes.
-_MIN_SCRAPE_INTERVAL_SEC = 0.5
+#: Floor between scrapes, enforced on the monotonic clock -- the loop this runs
+#: in iterates faster than its nominal period when a deadline bounds the slice,
+#: so counting passes would sample fastest exactly when the run is most loaded.
+#:
+#: Not the loop's 0.5s. A scrape is a synchronous HTTP round trip plus a parse
+#: of the engine's whole exposition, which is not free at that rate, and the
+#: engine's own gauges do not refresh anywhere near it -- most of those samples
+#: would be the same numbers read again. Two seconds keeps the trend visible at
+#: a fraction of the cost. Override with
+#: ``INFERENCE_OPTIMIZER_KV_SCRAPE_INTERVAL_SEC``.
+_SCRAPE_INTERVAL_ENV = "INFERENCE_OPTIMIZER_KV_SCRAPE_INTERVAL_SEC"
+_DEFAULT_SCRAPE_INTERVAL_SEC = 2.0
+
+
+def resolve_scrape_interval_sec() -> float:
+    """Seconds between scrapes, from the environment or the default.
+
+    Returns:
+        float: The interval. A non-numeric or negative setting falls back to
+        the default rather than disabling sampling by accident.
+    """
+    raw = os.environ.get(_SCRAPE_INTERVAL_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SCRAPE_INTERVAL_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_SCRAPE_INTERVAL_SEC
+    return value if value >= 0 else _DEFAULT_SCRAPE_INTERVAL_SEC
 
 
 def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, float]]) -> float | None:
@@ -759,7 +784,7 @@ class KvMetricsRecorder:
         poller: KvMetricsPoller,
         output_path: str | None = None,
         scope: dict[str, Any] | None = None,
-        min_interval_sec: float = _MIN_SCRAPE_INTERVAL_SEC,
+        min_interval_sec: float | None = None,
     ) -> None:
         """Prepare a recorder without contacting anything.
 
@@ -776,7 +801,7 @@ class KvMetricsRecorder:
         self._poller = poller
         self._output_path = output_path
         self._scope = dict(scope or {})
-        self._min_interval = float(min_interval_sec)
+        self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._phase = "boot"
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
@@ -806,8 +831,16 @@ class KvMetricsRecorder:
         """
         if phase not in PHASES or phase == self._phase:
             return
+        # One reading taken at the boundary closes the phase that is ending and
+        # opens the one beginning. Deriving a phase total from its own first and
+        # last periodic samples instead leaves a gap at each end -- up to a full
+        # interval of activity credited to neither phase -- and the gap lands
+        # exactly where a phase change makes the engine's behaviour change most.
+        boundary = None if self._closed else self._scrape(mono)
         self._phase = phase
         self._phase_marks.append({"phase": phase, "mono": round(float(mono), 3), "ts": time.time()})
+        if boundary is not None:
+            self._record_counters(boundary)
 
     def tick(self, mono: float) -> None:
         """Scrape if the interval has elapsed, tagging the sample with the phase.
@@ -819,21 +852,40 @@ class KvMetricsRecorder:
             return
         if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < self._min_interval:
             return
+        self._scrape(mono)
+
+    def _scrape(self, mono: float) -> KvSample | None:
+        """Take one reading unconditionally, timing the round trip.
+
+        The duration is recorded per sample because a scrape is a synchronous
+        HTTP call inside a watchdog loop: if it ever starts costing real time,
+        that has to be visible in the artifact rather than inferred from a
+        benchmark that mysteriously slowed down.
+
+        Args:
+            mono (float): The loop's current monotonic instant.
+
+        Returns:
+            KvSample | None: The reading, or ``None`` when nothing was read.
+        """
         self._last_scrape_mono = mono
+        started = time.monotonic()
         try:
             sample = self._poller.sample()
         except Exception:  # noqa: BLE001 - collection must never fail a round
             log.debug("kv_metrics: sample failed", exc_info=True)
-            return
+            return None
         if sample is None:
-            return
-        self._absorb(sample)
+            return None
+        self._absorb(sample, scrape_sec=time.monotonic() - started)
+        return sample
 
-    def _absorb(self, sample: KvSample) -> None:
+    def _absorb(self, sample: KvSample, *, scrape_sec: float = 0.0) -> None:
         """Fold one sample into the row buffer and the counter windows.
 
         Args:
             sample (KvSample): The reading to record.
+            scrape_sec (float): How long the round trip took.
         """
         # Pool capacity is only observable while the engine is up; latch the
         # first non-null reading so the artifact still carries it after a round
@@ -853,6 +905,47 @@ class KvMetricsRecorder:
         # folds both into the one number that is supposed to describe the
         # measured window alone. The gauge rows carry their phase and can be
         # re-sliced later; counters cannot, so the split has to happen here.
+        self._record_counters(sample)
+        # Every row carries the gauges *and* the cumulative counters, in raw
+        # per-series form. Recording counters only at phase boundaries would
+        # leave the interior of a phase blind: an engine that retracted in one
+        # burst and one that retracted steadily produce the same phase total,
+        # and an engine restart mid-phase is invisible without the series. With
+        # the raw maps present a consumer can difference any two adjacent rows
+        # and does not have to trust this module's aggregation to do it.
+        self._rows.append(
+            {
+                "phase": self._phase,
+                "ts": round(sample.ts, 3),
+                "mono": round(sample.mono, 3),
+                "scrape_sec": round(scrape_sec, 4),
+                "active_pool_usage": sample.active_pool_usage,
+                "physical_pool_usage": sample.physical_pool_usage,
+                "used_tokens": sample.used_tokens,
+                "evictable_tokens": sample.evictable_tokens,
+                "available_tokens": sample.available_tokens,
+                "capacity_tokens": sample.capacity_tokens,
+                # Same aggregation rule the summary uses. Rows and summary
+                # disagreeing inside one artifact is worse than either rule
+                # being wrong, because nothing on the page says which is which.
+                "retract_total": aggregate_series(sample.retract_total),
+                "preempt_total": aggregate_series(sample.preempt_total),
+                "counters_by_series": {
+                    "retract": sample.retract_total,
+                    "preempt": sample.preempt_total,
+                    "prefix_cache_queries": sample.prefix_cache_queries,
+                    "prefix_cache_hits": sample.prefix_cache_hits,
+                    "cached_tokens_total": sample.cached_tokens_total,
+                },
+            }
+        )
+
+    def _record_counters(self, sample: KvSample) -> None:
+        """Bracket every cumulative counter under the phase in force.
+
+        Args:
+            sample (KvSample): The reading whose counters to record.
+        """
         for name, series in (
             ("retract", sample.retract_total),
             ("preempt", sample.preempt_total),
@@ -865,22 +958,6 @@ class KvMetricsRecorder:
             snapshot = {g: dict(s) for g, s in series.items()}
             self._first_counters.setdefault(self._phase, {}).setdefault(name, snapshot)
             self._last_counters.setdefault(self._phase, {})[name] = snapshot
-        self._rows.append(
-            {
-                "phase": self._phase,
-                "ts": round(sample.ts, 3),
-                "mono": round(sample.mono, 3),
-                "active_pool_usage": sample.active_pool_usage,
-                "physical_pool_usage": sample.physical_pool_usage,
-                "used_tokens": sample.used_tokens,
-                "evictable_tokens": sample.evictable_tokens,
-                # Same aggregation rule the summary uses. Rows and summary
-                # disagreeing inside one artifact is worse than either rule
-                # being wrong, because nothing on the page says which is which.
-                "retract_total": aggregate_series(sample.retract_total),
-                "preempt_total": aggregate_series(sample.preempt_total),
-            }
-        )
 
     def _counter_deltas(self, name: str) -> tuple[float | None, dict[str, float | None]]:
         """Increment of one counter, attributed to the phase that earned it.
@@ -989,6 +1066,11 @@ class KvMetricsRecorder:
         Returns:
             dict[str, Any]: The artifact payload, written or not.
         """
+        # Final boundary reading, for the same reason the phase transitions take
+        # one: without it the last phase ends at whenever its last periodic
+        # sample happened to land, and everything after that is lost.
+        if not self._closed:
+            self._scrape(time.monotonic())
         payload = self.summary(aborted=aborted)
         if self._closed or not self._output_path:
             self._closed = True
