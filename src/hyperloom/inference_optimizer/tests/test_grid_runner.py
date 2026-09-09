@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1272,7 +1273,7 @@ def test_probe_server_help_text_cache_keyed_by_framework(
     def fake_run(cmd, *args, **kwargs):
         # Identify the framework from the inline source code in cmd[-1].
         src = cmd[-1] if cmd else ""
-        if "sglang.launch_server" in src:
+        if "sglang.srt.server_args" in src:
             payload = payload_map["sglang"]
         elif "atom.model_engine" in src:
             payload = payload_map["atom"]
@@ -1309,6 +1310,25 @@ def test_probe_server_help_text_supports_all_three_frameworks(
         out = _grid_runner._probe_server_help_text(fw)
         assert isinstance(out, str)
         assert out, f"_probe_server_help_text({fw!r}) returned an empty string; command registration likely missing"
+
+
+@pytest.mark.parametrize("framework", sorted(_grid_variant_filter._HELP_PROBE_COMMANDS))
+def test_probe_command_runs_against_the_installed_framework(framework: str) -> None:
+    """The inline snippet must execute against the framework it names.
+
+    Every other probe test stubs ``subprocess.run``, so the snippet itself is
+    never run and a stale symbol stays green. Skips where the framework is absent.
+    """
+    pytest.importorskip(framework)
+    argv_tail = _grid_variant_filter._HELP_PROBE_COMMANDS[framework]
+    proc = subprocess.run(
+        [sys.executable, *argv_tail],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, f"{framework} probe exited {proc.returncode}: {proc.stderr[-500:]}"
+    assert "--" in proc.stdout, f"{framework} probe produced no flags"
 
 
 def test_probe_server_help_text_unknown_framework_returns_empty(

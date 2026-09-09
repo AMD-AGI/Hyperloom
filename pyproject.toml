@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0"
+version = "1.1.0"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -205,6 +205,9 @@ exclude = [
 ".agents/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
