@@ -12,7 +12,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
-from kernelforge.agent_backends.model_context import with_context_window
 
 
 #: Environment overlay applied to every session started inside the current
@@ -100,10 +99,6 @@ class AgentRuntimeConfig:
     executable: str = ""
     timeout_sec: int = 1800
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
-    #: Context window to name in the model id, empty when the gateway
-    #: publishes none. Settled once in :func:`resolve_agent_runtime` so
-    #: ``model`` already carries it; see :mod:`kernelforge.agent_backends.model_context`.
-    context_window: str = ""
     sandbox_mode: str = "bypass"
     precheck: bool = True
     fallback_provider: str = ""
@@ -236,7 +231,7 @@ class AgentRunSpec:
     max_reasoning_effort: str = ""
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
-        """Settle this session's model, context window, effort and environment.
+        """Settle this session's model, effort and environment.
 
         The runtime's reasoning effort wins over the spec's, which is the
         reverse of how these two used to rank. Under the old order every call
@@ -254,14 +249,10 @@ class AgentRunSpec:
         about effort, and it can only lower: a session that is structurally not
         reasoning work is capped there, while an operator running the campaign
         below the cap keeps their own value.
-
-        The context window is not negotiated at a call site either: every Claude
-        session gets whichever one the deployment named, and none when it named
-        none. See :mod:`kernelforge.agent_backends.model_context`.
         """
         return replace(
             self,
-            model=with_context_window(self.model.strip() or runtime.model, runtime.context_window),
+            model=self.model.strip() or runtime.model,
             timeout_sec=(self.timeout_sec if self.timeout_sec is not None else runtime.timeout_sec),
             reasoning_effort=_clamped_effort(
                 runtime.reasoning_effort.strip() or self.reasoning_effort.strip(),

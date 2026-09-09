@@ -22,10 +22,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentRuntimeConfig
-from kernelforge.agent_backends.model_context import with_context_window
 from kernelforge.agent_backends.registry import resolve_agent_runtime
 
 # The vendored tests live inside the package, so the source root is one level
@@ -78,45 +76,23 @@ def test_spec_effort_survives_a_runtime_that_names_none() -> None:
     assert spec.resolved(runtime).reasoning_effort == "xhigh"
 
 
-def test_no_context_window_by_default() -> None:
-    """An unconfigured deployment gets the plain model id.
+def test_no_window_suffix_ever_reaches_the_model_id() -> None:
+    """Forge names no context window: the id goes out exactly as configured.
 
-    This is the case that matters: the AMD gateway publishes no windowed ids,
-    and a session asking for one is rejected outright with "Invalid model
-    name", so an unconditional suffix would fail every run.
+    Upstream KernelForge appends ``[1m]`` on the strength of a gateway that
+    serves it. The gateway Hyperloom deploys against validates the suffix and
+    answers "400 Invalid model name" to every bracketed id, so an appended
+    window is not a smaller session but a failed one -- and ``[200k]`` is not
+    the spelling of the default window either, the bare id already is. Forge
+    has no use for the number on its own: it runs no compaction and no token
+    budget, so the suffix was the only thing a window could have driven. The
+    plumbing is gone, and this test fails if a re-port brings it back.
     """
     runtime = resolve_agent_runtime("claude", model="claude-opus-5")
     assert runtime.model == "claude-opus-5"
     spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp")
     assert spec.resolved(runtime).model == "claude-opus-5"
-
-
-def test_configured_context_window_reaches_every_session() -> None:
-    """A named window lands on the model id once, for Claude only."""
-    runtime = resolve_agent_runtime("claude", model="claude-opus-5", context_window="1m")
-    assert runtime.model == "claude-opus-5[1m]"
-    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp")
-    assert spec.resolved(runtime).model == "claude-opus-5[1m]"
-
-    codex = resolve_agent_runtime("codex", model="gpt-5.6", context_window="1m")
-    assert codex.model == "gpt-5.6"
-
-
-@pytest.mark.parametrize(
-    ("model", "window", "expected"),
-    [
-        ("claude-opus-5", "", "claude-opus-5"),
-        ("claude-opus-5", "1m", "claude-opus-5[1m]"),
-        ("claude-opus-5[1m]", "1m", "claude-opus-5[1m]"),
-        ("claude-opus-5[1m]", "200k", "claude-opus-5[1m]"),
-        ("  claude-opus-5  ", " 1m ", "claude-opus-5[1m]"),
-        ("gpt-5.6", "1m", "gpt-5.6"),
-        ("", "1m", ""),
-    ],
-)
-def test_with_context_window(model: str, window: str, expected: str) -> None:
-    """The rewrite is Claude-only, idempotent, and a no-op without a window."""
-    assert with_context_window(model, window) == expected
+    assert not hasattr(runtime, "context_window")
 
 
 def test_an_effort_ceiling_only_ever_lowers() -> None:

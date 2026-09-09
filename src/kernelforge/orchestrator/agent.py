@@ -119,7 +119,6 @@ def make_agent_fn(
             executable=config.agent_cli,
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
-            context_window=config.agent_context_window,
             sandbox_mode=config.agent_sandbox_mode,
             precheck=config.agent_precheck,
             fallback_provider=config.agent_fallback_provider,

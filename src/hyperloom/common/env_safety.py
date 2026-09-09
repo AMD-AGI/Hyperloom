@@ -137,11 +137,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         # Gateway auth header.
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
-        # Context window suffix for Claude model ids, read by KernelForge.
-        # Unset on this gateway (every bracketed id is a 400), so it is only
-        # ever an operator-written value -- and one a .env is the natural
-        # place for, which means the loader has to read it back.
-        "CLAUDE_CONTEXT_WINDOW",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by

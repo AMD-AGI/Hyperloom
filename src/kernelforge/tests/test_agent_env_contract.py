@@ -73,17 +73,18 @@ def test_the_forge_private_model_vars_are_not_read(clean_env) -> None:
     assert resolve_agent_model("auto") == "claude-opus-5"
 
 
-def test_the_context_window_has_one_spelling(clean_env) -> None:
-    """``CLAUDE_CONTEXT_WINDOW`` names the window; Forge adds no second name.
+def test_the_context_window_env_is_not_read(clean_env) -> None:
+    """``CLAUDE_CONTEXT_WINDOW`` is gone; setting it changes nothing.
 
-    The window is absent by default because the gateway Hyperloom deploys
-    against rejects every bracketed model id. Being off by default is exactly
-    why a Forge-private duplicate was worth deleting rather than keeping: a
-    second name nobody sets is a second name nobody notices is wrong.
+    It was the one rung this port added, and it turned out to name something
+    Forge does not need: the window is only ever spelled as a suffix on the
+    model id, this gateway rejects every bracketed id, and Forge has no
+    compaction or token budget that would want the number for its own sake.
     """
-    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_context_window == ""
     clean_env.setenv("CLAUDE_CONTEXT_WINDOW", "1m")
-    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_context_window == "1m"
+    config = Config.from_env(agent_backend="claude", workspace="/tmp")
+    assert not hasattr(config, "agent_context_window")
+    assert config.agent_runtime().model == "claude-opus-5"
 
 
 def test_the_removed_alias_is_no_longer_read(clean_env) -> None:

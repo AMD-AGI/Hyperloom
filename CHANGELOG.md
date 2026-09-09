@@ -282,22 +282,25 @@ for the user-facing summary.
   names no effort, which no provider here builds. Nine sessions that hardcoded
   `max` now run at the campaign effort (`high` by default), which is also the
   cheaper direction.<br/>
-  **Context window.** `agent_backends/model_context.py` names the window a
-  Claude session runs on, applied once where the runtime is built. It is
-  **empty by default and has to stay that way**: measured against the gateway
-  Hyperloom points Forge at (`.../api/v1/llm-proxy`), `claude-opus-5` answers
-  200 while `claude-opus-5[1m]` -- and every other bracketed form -- answers
-  `400 Invalid model name`, and `/v1/models` publishes 23 ids of which none is
-  windowed. Applying a suffix unconditionally would fail every
-  Hyperloom-launched session at the startup probe. Set
-  `CLAUDE_CONTEXT_WINDOW` on a deployment whose gateway does publish windowed
-  ids -- one spelling only, for the same reason the Forge-private model
-  variables are gone. A cross-provider or cross-backend
-  fallback rebuilds the runtime, and carries the window across with it.<br/>
+  **Context window: not ported.** Upstream appends `[1m]` to every Claude
+  model id. Measured against the gateway Hyperloom points Forge at
+  (`.../api/v1/llm-proxy`), `claude-opus-5` answers 200 while
+  `claude-opus-5[1m]` -- and every other bracketed form, `[200k]` included --
+  answers `400 Invalid model name`; `/v1/models` publishes 23 ids of which none
+  is windowed. So the suffix would fail every Hyperloom-launched session at the
+  startup probe rather than shrink it. Nor is the window something Forge needs
+  for its own sake: it runs no compaction and no token budget, so the suffix
+  was the only thing a window could have driven, and Hyperloom's own
+  `MODEL_CONTEXT_WINDOWS` answers a different question (when to compact the
+  orchestrator's conversation) and never reaches the wire. The whole mechanism
+  is therefore absent -- no `model_context.py`, no `context_window` on the
+  runtime, no environment variable. A test pins that, so a future re-port of
+  upstream fails the suite instead of every session.<br/>
   **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
   so it answered "some configuration works" rather than "this one does"; it now
   asks under the configuration the campaign will run. `[` terminates the model
-  family regex, so `claude-opus-5[1m]` is recognised as the model it is.
+  family regex, so an operator who hand-writes `claude-opus-5[1m]` into
+  `CLAUDE_MODEL` is still recognised as running `claude-opus-5`.
 
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
@@ -711,8 +714,8 @@ for the user-facing summary.
   documentation shipped beside it: a box that named no model started every
   Codex session on a rejected id and survived only by falling back to
   `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
-  a context-window suffix -- bracketed ids remain rejected by this gateway and
-  `with_context_window()` stays default-off.
+  a context-window suffix -- bracketed ids remain rejected by this gateway,
+  which is why no window suffix is applied at all.
 
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its

@@ -13,7 +13,6 @@ from dataclasses import dataclass, replace
 from importlib import metadata, util
 from typing import Callable
 
-from kernelforge.agent_backends.model_context import with_context_window
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -218,7 +217,6 @@ def resolve_agent_runtime(
     precheck: bool = True,
     fallback_provider: str = "",
     options: dict | None = None,
-    context_window: str = "",
 ) -> AgentRuntimeConfig:
     """Resolve provider defaults into one complete runtime configuration."""
     registration = get_agent_provider(provider)
@@ -227,15 +225,13 @@ def resolve_agent_runtime(
         fallback = ""
     if fallback:
         get_agent_provider(fallback)
-    window = context_window.strip()
     selected = model.strip() or registration.default_model
     return AgentRuntimeConfig(
         provider=registration.name,
-        model=with_context_window(selected, window),
+        model=selected,
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,
-        context_window=window,
         sandbox_mode=sandbox_mode.strip() or "bypass",
         precheck=precheck,
         fallback_provider=fallback,
@@ -274,7 +270,7 @@ def create_registered_backend(
         fallback_runtime = replace(
             runtime,
             provider=fallback_registration.name,
-            model=with_context_window(fallback_registration.default_model, runtime.context_window),
+            model=fallback_registration.default_model,
             executable="",
             fallback_provider="",
             options={},

@@ -61,7 +61,6 @@ def _hanging_backend(messages, captured):
         executable="",
         timeout_sec=60,
         reasoning_effort="high",
-        context_window="",
         options={},
     )
     backend.fallback_reason = ""

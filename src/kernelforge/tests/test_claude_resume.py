@@ -51,7 +51,6 @@ def _backend(messages, captured, stream_error=None):
         executable="",
         timeout_sec=60,
         reasoning_effort="high",
-        context_window="",
         options={},
     )
     backend.fallback_reason = ""
