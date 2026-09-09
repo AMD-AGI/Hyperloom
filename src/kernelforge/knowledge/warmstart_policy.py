@@ -20,6 +20,13 @@ import os
 
 #: How many best-ranked prior solutions a warm start reads. The store caps a
 #: ranked page at 100.
+#:
+#: More than one, so a champion that fails to apply -- a signature mismatch, a
+#: patch that no longer lands -- still leaves something to fall back to, and so
+#: a record whose claim does not survive measurement can lose to one that does.
+#: This also bounds how many trials a search can pay for, since every candidate
+#: read is a candidate that may be measured; :data:`DEFAULT_BUDGET_SEC` is what
+#: bounds the wall time those trials take.
 DEFAULT_TOP_K = 10
 
 #: The lowest claimed speedup worth spending a trial on. A record claiming less

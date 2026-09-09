@@ -1203,6 +1203,100 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
     assert final["session_digest"] == run_digest
 
 
+def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
+    tmp_path,
+    monkeypatch,
+):
+    """A record's SNR has to be a reading of the kernel the record is about.
+
+    PORT measures the ported kernel. Every KEEP after it is a different artifact,
+    validated by forge-loop under its own suite and with a reading the rewrite
+    layer never sees. Reusing PORT's number would file accuracy evidence about
+    one kernel against another, and the record does not say which kernel it came
+    from, so a later warm start reads it as belonging to the one it adopts.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+
+    def fake_git(_workspace, *args):
+        if args and args[0] == "show":
+            return subprocess.CompletedProcess(args, 0, stdout="import flydsl\n", stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_git", fake_git)
+
+    def fake_optimize(*_args, **kwargs):
+        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
+        return {"best_ms": 0.9, "best_commit": "c1", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    port, keep, final = writes
+    assert port["snr_db"] == 143.0
+    # OPTIMIZE moved the best onto c1, which nothing on this path has measured.
+    assert keep["snr_db"] is None
+    assert final["snr_db"] is None
+
+
+def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
+    tmp_path,
+    monkeypatch,
+):
+    """A fallback to the ported commit still describes the artifact PORT measured.
+
+    With no best of its own the run's final record names the port commit and,
+    sharing that name, replaces the record PORT wrote. Dropping the reading here
+    would erase a measurement that was genuinely taken.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    # The default OPTIMIZE stub reports no best_commit, so the run falls back.
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    port, final = writes
+    assert final["best_commit"] == port["best_commit"]
+    assert final["snr_db"] == port["snr_db"] == 143.0
+
+
 def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkeypatch):
     """An unreadable commit costs the publication, not the run."""
     src = tmp_path / "softmax.py"

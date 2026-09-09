@@ -42,21 +42,6 @@ from kernelforge.mcp_server.tools.bench import (
     calculate_measurement_case_speedups,
 )
 
-# How many best-ranked prior solutions to read for warm-start, and how many of
-# them one warm start may fully evaluate. More than one so a champion that fails
-# to apply -- a signature mismatch, a patch that no longer lands -- still leaves
-# something to fall back to, and so a record whose claim does not survive
-# measurement can lose to one that does.
-#
-# The two are equal on purpose: reading more than can be evaluated only pays for
-# ranked metadata nothing will act on. Each evaluation costs a correctness run
-# plus KEEP_MEASUREMENT_COUNT benchmark runs on the real driver, so the search is
-# bounded by ``warmstart_policy.budget_sec()`` as well as by this count -- on the
-# heaviest kernels one candidate is minutes, and the count alone would let a
-# well-populated identity spend hours before the agent's first edit.
-_WARMSTART_TOP_K = warmstart_policy.top_k()
-_WARMSTART_MAX_MEASURED_CANDIDATES = _WARMSTART_TOP_K
-
 # How much of the speedup a candidate was ranked on its own measurement has to
 # reproduce for that ranking to count as honest. A confirmed top candidate is
 # adopted without paying for the rest; the regression this answers measured 32%
@@ -1225,20 +1210,21 @@ def kb_warmstart(
     resolves the same kernel slug the write side uses when the anchor is a
     wrapper. Must stay in sync with ``write_experience_to_kb``.
 
-    Candidates arrive ranked on measured evidence ahead of bare claims. Up to
-    ``_WARMSTART_MAX_MEASURED_CANDIDATES`` of them are measured on this machine
-    and the best measured one is adopted, because the number a record claims is
-    not evidence that this consumer can reproduce it: adopting the first
-    candidate that merely applied is what let an inflated claim displace a
-    verified better start. The search stops early once a candidate reproduces
-    the value it was ranked on.
+    Candidates arrive ranked on measured evidence ahead of bare claims. They are
+    measured on this machine and the best measured one is adopted, because the
+    number a record claims is not evidence that this consumer can reproduce it:
+    adopting the first candidate that merely applied is what let an inflated
+    claim displace a verified better start. The search stops early once a
+    candidate reproduces the value it was ranked on.
 
-    Two bounds keep that search affordable. A candidate claiming less than
-    ``warmstart_policy.min_claimed_speedup()`` is skipped without being measured
-    or offered as reference material -- it is a port that lost badly, and one
-    costs a compile, a correctness suite and a benchmark. And the whole field
-    closes after ``warmstart_policy.budget_sec()``, since the candidate count
-    alone does not bound wall time when a single kernel takes minutes to build.
+    Three bounds keep that search affordable, all of them read from
+    ``warmstart_policy`` at call time so the deployment can move them.
+    ``top_k()`` is how wide the field is. A candidate claiming less than
+    ``min_claimed_speedup()`` is dropped without being measured or offered as
+    reference material -- it is a port that lost badly, and one costs a compile,
+    a correctness suite and a benchmark. And the whole field closes after
+    ``budget_sec()``, since the candidate count alone does not bound wall time
+    when a single kernel takes minutes to build.
 
     Every measurement is written back to its own KB record so the next run ranks
     that record on evidence, including the measurement of a candidate this run
@@ -1289,7 +1275,7 @@ def kb_warmstart(
                 "kernel_backend": kernel_backend,
                 "target_functions": target_functions,
                 "framework": framework,
-                "top_k": _WARMSTART_TOP_K,
+                "top_k": warmstart_policy.top_k(),
                 "source_files": source_files,
                 "workspace": workspace_dir,
                 "operator_name": operator_name,
@@ -1389,14 +1375,13 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
+            # The field is already capped at ``top_k()`` candidates, but a count
+            # does not bound wall time: one candidate is a compile plus a
+            # correctness suite plus a benchmark, minutes on the heaviest
+            # kernels. On expiry the field closes and the best already measured
+            # is adopted below.
             search_deadline = time.monotonic() + warmstart_policy.budget_sec()
             for idx, sol in enumerate(sols):
-                if len(measurements) >= _WARMSTART_MAX_MEASURED_CANDIDATES:
-                    statuses[idx] = "not_attempted_after_apply"
-                    continue
-                # The count alone does not bound this search: one candidate is
-                # minutes on the heaviest kernels. On expiry the field closes and
-                # the best already measured is adopted below.
                 if time.monotonic() >= search_deadline:
                     for later_index in range(idx, len(statuses)):
                         statuses[later_index] = "not_attempted_search_budget"

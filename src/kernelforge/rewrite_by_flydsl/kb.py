@@ -434,6 +434,11 @@ def write_flydsl_kb_solution(
     ``content_override`` supplies the kernel bytes instead of reading the
     workspace, for a caller publishing while an agent is still editing there.
 
+    ``snr_db`` is the accuracy measured for *this* artifact. A caller that did
+    not measure it passes ``None``; a reading taken from a different artifact is
+    not a substitute, because the record does not say which kernel it was taken
+    from and a later reader has no way to tell that it does not belong.
+
     Never raises, and the returned reason is persisted by the rewrite runner, so
     a store exception is redacted and bounded the way the read side above does
     it. The exception type leads the message, so the cap can only cut the tail of

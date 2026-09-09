@@ -528,7 +528,11 @@ def run_rewrite(
             flydsl_best_ms=payload.get("best_ms"),
             best_commit=commit,
             framework=framework,
-            snr_db=port.snr_db,
+            # PORT's SNR belongs to the ported kernel, not to the KEEP that has
+            # since been optimized out of it, and forge-loop's result file does
+            # not carry the accuracy it measured for this one. Unmeasured here,
+            # so unclaimed.
+            snr_db=None,
             session_digest=optimize_session_digest,
             content_override=shown.stdout.encode(),
         )
@@ -570,15 +574,21 @@ def run_rewrite(
         opt = {**opt, "best_commit": port_commit}
 
     if rewrite_kb_enabled:
+        final_commit = str(opt.get("best_commit") or "")
         kb_write = write_flydsl_kb_solution(
             spec,
             driver_path,
             config,
             source_ms=source_ms,
             flydsl_best_ms=opt.get("best_ms"),
-            best_commit=str(opt.get("best_commit") or ""),
+            best_commit=final_commit,
             framework=framework,
-            snr_db=port.snr_db,
+            # Only when the run's best is still the ported kernel is PORT's
+            # reading a measurement of the artifact being recorded. Once
+            # OPTIMIZE has moved the best off that commit it describes a kernel
+            # this record is not about, and nothing here has measured the one it
+            # is -- see the per-KEEP publication above.
+            snr_db=port.snr_db if final_commit == port_commit else None,
             # Replace this run's KEEP record rather than adding a sibling to it.
             # Empty when OPTIMIZE published nothing, which falls back to naming
             # the candidate after the artifact.
