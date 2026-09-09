@@ -120,10 +120,12 @@ def _record_remote_publication_result(
         state["solution_slug"] = str(result.get("solution") or "")
         return
     reason = str(result.get("reason") or "error")
+    # Settled outcomes: the store reached a decision, so retrying cannot change
+    # it. Everything else is treated as transient and stays pending.
     if reason in {
         "not_configured",
         "missing_gpu_type",
-        "no_improvement",
+        "no_improvement_over_reuse",
         "empty_diff",
         "not_better_than_kb",
     }:
