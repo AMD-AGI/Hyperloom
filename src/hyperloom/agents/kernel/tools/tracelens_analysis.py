@@ -31,13 +31,6 @@ from typing import Any
 
 try:
     from hyperloom.orchestrator.framework.paths import (
-        resolve_patch_target_roots as _resolve_patch_target_roots,
-    )
-except ImportError:
-    _resolve_patch_target_roots = None
-
-try:
-    from hyperloom.orchestrator.framework.paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     )
 except ImportError:
@@ -50,9 +43,13 @@ try:
     from hyperloom.orchestrator.framework.paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_known_source_prefixes as _resolve_known_source_prefixes,
+    )
 except ImportError:
     _FRAMEWORK_SOURCE_PACKAGES = None
     _resolve_kernel_search_roots = None
+    _resolve_known_source_prefixes = None
 
 try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
@@ -1818,20 +1815,22 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 
 
 @functools.lru_cache(maxsize=1)
-def _framework_patch_roots() -> tuple[str, ...]:
-    """Resolve framework install roots for patch-target matching.
+def _framework_source_roots() -> tuple[str, ...]:
+    """Resolve framework install roots for reusable-source matching.
 
-    Roots come from ``framework_paths.resolve_patch_target_roots``; a
-    lower-case variant of each (e.g. ``/app/ATOM/atom/`` ->
-    ``/app/atom/atom/``) is also emitted for case-insensitive matching.
+    Roots come from ``framework_paths.resolve_known_source_prefixes`` -- a
+    kernel path can name a tree that exists on the serving pod and not here, so
+    matching must not be filtered by what is on this host. A lower-case variant
+    of each (e.g. ``/app/ATOM/atom/`` -> ``/app/atom/atom/``) is also emitted
+    for case-insensitive matching.
 
     Returns:
         The framework install roots, including lower-case variants.
     """
     try:
-        if _resolve_patch_target_roots is None:
+        if _resolve_known_source_prefixes is None:
             raise ImportError
-        roots = _resolve_patch_target_roots()
+        roots = _resolve_known_source_prefixes()
     except ImportError:
         if _known_target_roots is None:
             roots = []
@@ -1892,7 +1891,7 @@ def _reusable_roots() -> tuple[str, ...]:
         tuple[str, ...]: Discovered framework roots plus the aiter csrc root
             and FlyDSL checkout roots, deduplicated.
     """
-    roots = _framework_patch_roots()
+    roots = _framework_source_roots()
     csrc = _aiter_csrc_root()
     if csrc and csrc not in roots:
         roots = roots + (csrc,)

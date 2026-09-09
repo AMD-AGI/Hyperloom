@@ -115,6 +115,7 @@ def _section_session_context(
     max_minutes: int,
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
+    session_framework_tree: str = "",
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
@@ -128,8 +129,10 @@ def _section_session_context(
         objective_value (float | str | None): Optional objective target value
             rendered alongside the kind.
         max_minutes (int): Wall-clock budget for the run, in minutes.
-        framework_source_roots (tuple[str, ...] | None): Optional framework
-            source roots; a PolicyGate-default note is shown when empty.
+        framework_source_roots (tuple[str, ...] | None): Optional source roots
+            to search; a "none discovered" note is shown when empty.
+        session_framework_tree (str): The tree this session optimises; omitted
+            from the rendering when empty.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
@@ -139,7 +142,9 @@ def _section_session_context(
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
     roots = framework_source_roots or ()
-    roots_line = ", ".join(roots) if roots else "(defaults from PolicyGate)"
+    roots_line = ", ".join(roots) if roots else "none discovered on this host"
+    tree = str(session_framework_tree or "").strip()
+    tree_lines = [f"- session_framework_tree: {tree}  (the tree under optimisation)"] if tree else []
     return [
         "## 2. SESSION CONTEXT",
         "",
@@ -148,7 +153,8 @@ def _section_session_context(
         f"- optimize_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
-        f"- framework_source_roots: {roots_line}",
+        *tree_lines,
+        f"- framework_source_roots: {roots_line}  (source roots to search)",
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
         "Shared session state, KB hints, inbox tail) is appended below the",
@@ -959,6 +965,7 @@ def build_orchestration_prompt(
     transport: str = TRANSPORT_TOOLS,
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
+    session_framework_tree: str = "",
     references_dir: Path | None = None,
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
@@ -990,7 +997,9 @@ def build_orchestration_prompt(
             that transport does not mount.
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
-        framework_source_roots: optional framework source roots passed through
+        framework_source_roots: optional source roots to search, passed through
+            to the session-context section.
+        session_framework_tree: the tree this session optimises, passed through
             to the session-context section.
         references_dir: directory of on-demand reference documents; defaults
             to ``asset_prompt_references_dir()`` when ``None``.
@@ -1035,6 +1044,7 @@ def build_orchestration_prompt(
             max_minutes=max_minutes,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
+            session_framework_tree=session_framework_tree,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(

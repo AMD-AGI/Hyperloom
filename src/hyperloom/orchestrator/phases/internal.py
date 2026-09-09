@@ -203,7 +203,7 @@ class InternalTasksPhase(PhaseHandler):
             _entries = _src_recon.entries_for(
                 model_class=str(getattr(state, "model_class", "") or ""),
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                precision=str(getattr(state, "precision", "") or ""),
+                precision=_src_recon.workload_precision(state),
             )
             _entries = _src_recon.filter_entries_for_model(_entries, dict(getattr(state, "model_info", None) or {}))
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
