@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -15,6 +17,26 @@ from kernelforge.knowledge.kernel_identity import (
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 BASE_COMMIT = "a" * 40
+
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "controller-test",
+    "GIT_AUTHOR_EMAIL": "controller-test@local",
+    "GIT_COMMITTER_NAME": "controller-test",
+    "GIT_COMMITTER_EMAIL": "controller-test@local",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run one git command in ``repo`` under a fixed identity and return stdout."""
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, **_GIT_IDENTITY},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout.strip()
 
 
 @pytest.fixture

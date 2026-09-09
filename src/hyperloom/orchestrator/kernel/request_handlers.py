@@ -269,9 +269,9 @@ def _reusable_source_roots() -> tuple[str, ...]:
         The de-duplicated framework install roots (each with a lower-case
         variant), including FlyDSL checkout roots.
     """
-    from ..framework.paths import resolve_patch_target_roots
+    from ..framework.paths import resolve_known_source_prefixes
 
-    roots = resolve_patch_target_roots()
+    roots = resolve_known_source_prefixes()
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -829,7 +829,6 @@ def _maybe_apply_kernel_patch(
         rebuild_command=payload.get("rebuild_command"),
         rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
         skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        allow_unknown_target=bool(payload.get("allow_unknown_target", False)),
         dry_run=bool(payload.get("dry_run_patch", False)),
         snapshot_dir=snapshot_dir,
         repo_root=repo_root,
@@ -6693,10 +6692,11 @@ async def integrate_handler(
     if apply_result.get("status") == "failed":
         # Apply crash: the patch was never measured. Stamp a top-level fault
         # error_class so SharedState routes this through the fault retry budget.
+        apply_reason = str(apply_result.get("error") or apply_result.get("reason") or "").strip()
         return {
             "status": "failed",
             "error_class": "apply_failed",
-            "error": "kernel patch apply failed",
+            "error": (f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"),
             "decision": "REVERT",
             "apply_result": apply_result,
             "kernel_id": kernel_id,

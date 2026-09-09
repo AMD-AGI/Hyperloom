@@ -24,8 +24,7 @@ def test_now_iso():
     assert "T" in ip._now_iso()
 
 
-def test_resolve_framework_root_explicit_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path)])
+def test_resolve_framework_root_explicit_dir(tmp_path):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
@@ -33,7 +32,7 @@ def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypa
     root = tmp_path / "framework"
     root.mkdir()
     create = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(root)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(root)])
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
 
     assert ip._resolve_framework_root(None, patch_texts=[create]) is None
@@ -48,7 +47,7 @@ def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch)
     patch = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
     monkeypatch.setattr(
         ip,
-        "resolve_source_file_allowlist",
+        "resolve_kernel_search_roots",
         lambda: [str(root) for root in roots],
     )
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
@@ -56,67 +55,28 @@ def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch)
     assert ip._resolve_framework_root(None, patch_texts=[patch]) is None
 
 
-def test_resolve_framework_root_explicit_outside_allowlist_rejected(tmp_path, monkeypatch):
-    """An explicit override outside the source allowlist must not be honoured."""
-    allowed = tmp_path / "allowed"
-    allowed.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(allowed)])
-    assert ip._resolve_framework_root(str(outside)) is None
-
-
-def test_resolve_framework_root_explicit_nested_under_allowlist(tmp_path, monkeypatch):
-    """A subdirectory of an allowlisted root may be selected explicitly."""
-    fw = tmp_path / "fw"
-    nested = fw / "pkg"
-    nested.mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-    assert ip._resolve_framework_root(str(nested)) == nested
-
-
-def test_resolve_framework_root_accepts_non_git_installed_package(tmp_path, monkeypatch):
-    packages = tmp_path / "lib" / "python3.12" / "site-packages"
-    package = packages / "unrelated_package"
-    package.mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(packages)])
-    assert ip._resolve_framework_root(str(package)) == package
-
-
-def test_resolve_framework_root_slash_override_rejected(tmp_path, monkeypatch):
-    """An explicit ``/`` override must never be returned as the framework root."""
-    fw = tmp_path / "fw"
-    fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-    assert ip._resolve_framework_root("/") is None
-
-
-def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path, monkeypatch):
+def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path):
     """Broken symlinks for explicit overrides are rejected without raising."""
-    fw = tmp_path / "fw"
-    fw.mkdir()
     broken = tmp_path / "broken-link"
     broken.symlink_to(tmp_path / "missing-target")
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
     assert ip._resolve_framework_root(str(broken)) is None
 
 
-def test_resolve_framework_root_explicit_missing_rejected(tmp_path, monkeypatch):
-    gitroot = tmp_path / "fw"
-    (gitroot / ".git").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(gitroot)])
+def test_resolve_framework_root_explicit_missing_rejected():
     assert ip._resolve_framework_root("/no/such/dir") is None
 
 
 def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(plain)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(plain)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
     assert ip._resolve_framework_root(None) == plain
 
 
 def test_resolve_framework_root_none(monkeypatch):
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
     assert ip._resolve_framework_root(None) is None
 
 

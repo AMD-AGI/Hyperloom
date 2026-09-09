@@ -67,7 +67,7 @@ def framework_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     patch_roots = (f"{sglang_root}/", f"{aiter_root}/")
 
-    def _fixture_patch_roots() -> tuple[str, ...]:
+    def _fixture_search_roots() -> tuple[str, ...]:
         """Return the temporary reusable roots for this test."""
         return patch_roots
 
@@ -76,8 +76,8 @@ def framework_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "kernel_search_roots",
         lambda: tuple(root.rstrip("/") for root in patch_roots),
     )
-    monkeypatch.setattr(tl, "_resolve_patch_target_roots", _fixture_patch_roots)
-    tl._framework_patch_roots.cache_clear()
+    monkeypatch.setattr(tl, "_resolve_known_source_prefixes", _fixture_search_roots)
+    tl._framework_source_roots.cache_clear()
     tl._GREP_CACHE.clear()
 
     yield {
@@ -89,7 +89,7 @@ def framework_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "collective_definition": str(collective_definition),
     }
 
-    tl._framework_patch_roots.cache_clear()
+    tl._framework_source_roots.cache_clear()
     tl._GREP_CACHE.clear()
 
 

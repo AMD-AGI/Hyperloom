@@ -115,7 +115,9 @@ def test_cross_domain_rule_descriptors():
 def test_is_garbage():
     assert ps.PatchGroundingResult(ps.GROUND_NOT_DIFF).is_garbage is True
     assert ps.PatchGroundingResult(ps.GROUND_PATH_ESCAPE).is_garbage is True
-    assert ps.PatchGroundingResult(ps.GROUND_MISSING_TARGET).is_garbage is True
+    # A root that could not be picked is a reporting verdict, not a drop.
+    assert ps.PatchGroundingResult(ps.GROUND_MISSING_TARGET).is_garbage is False
+    assert ps.PatchGroundingResult(ps.GROUND_AMBIGUOUS_ROOT).is_garbage is False
     assert ps.PatchGroundingResult(ps.GROUND_STALE).is_garbage is False
     assert ps.PatchGroundingResult(ps.GROUND_APPLIES).is_garbage is False
 
@@ -181,7 +183,7 @@ def test_ground_git_unavailable(tmp_path, monkeypatch):
 # ---- PatchSafetyReport.notes ----------------------------------------------
 def test_patch_safety_report_notes():
     rep = ps.PatchSafetyReport(
-        dropped=[
+        ungrounded=[
             {"path": "p1", "verdict": ps.GROUND_NOT_DIFF, "detail": "d"},
             {"path": "p2", "verdict": ps.GROUND_MISSING_TARGET, "detail": "miss"},
         ],
@@ -191,7 +193,7 @@ def test_patch_safety_report_notes():
     )
     notes = rep.notes()
     joined = "\n".join(notes)
-    assert "patch_safety_dropped" in joined
+    assert "patch_safety_ungrounded" in joined
     assert "patch_safety_missing_target" in joined
     assert "patch_safety_stale" in joined
     assert "patch_safety_numeric" in joined
@@ -374,16 +376,17 @@ def test_vet_patches(tmp_path, monkeypatch):
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(ps.subprocess, "run", _ground_only)
-    kept, dropped, grounding, spans_roots = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
+    kept, ungrounded, grounding, spans_roots = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
     assert str(good) in kept
-    assert any(d["verdict"] == ps.GROUND_NOT_DIFF for d in dropped)
+    assert str(bad) not in kept
+    assert any(d["verdict"] == ps.GROUND_NOT_DIFF for d in ungrounded)
     assert not spans_roots
 
 
 def test_vet_patches_unreadable(tmp_path):
-    kept, dropped, grounding, spans_roots = ps.vet_patches([str(tmp_path / "missing.patch")], base_checkout=None)
+    kept, ungrounded, grounding, spans_roots = ps.vet_patches([str(tmp_path / "missing.patch")], base_checkout=None)
     assert kept == []
-    assert dropped[0]["verdict"] == "unreadable"
+    assert ungrounded[0]["verdict"] == "unreadable"
     assert not spans_roots
 
 
@@ -486,7 +489,7 @@ def test_ground_patch_text_returns_ambiguous_root_verdict(tmp_path):
     diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
     res = ps.ground_patch_text(diff, base_checkout=tree_a, candidate_roots=(tree_b,))
     assert res.verdict == ps.GROUND_AMBIGUOUS_ROOT
-    assert res.is_garbage
+    assert not res.is_garbage
 
 
 def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
@@ -494,9 +497,10 @@ def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
     tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
     diff_file = tmp_path / "p.patch"
     diff_file.write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
-    _, dropped, grounding, _ = ps.vet_patches([str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,))
-    assert len(dropped) == 1
-    assert dropped[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
+    kept, ungrounded, grounding, _ = ps.vet_patches([str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,))
+    assert kept == [str(diff_file)]
+    assert len(ungrounded) == 1
+    assert ungrounded[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
     assert grounding[str(diff_file)] == ps.GROUND_AMBIGUOUS_ROOT
 
 

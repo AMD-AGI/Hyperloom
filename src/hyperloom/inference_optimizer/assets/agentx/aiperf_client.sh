@@ -65,6 +65,32 @@ PORT="${PORT:-8000}"
 # and the mapped result records no concurrency at all, so the mismatch would be
 # invisible afterwards. The switch always projects CONC; if it ever stops, say so.
 : "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
+
+# Match preflight's override -> managed CLI -> PATH order without changing PATH.
+_aiperf_override="${AIPERF_BIN:-}"
+_aiperf_override="${_aiperf_override#"${_aiperf_override%%[![:space:]]*}"}"
+_aiperf_override="${_aiperf_override%"${_aiperf_override##*[![:space:]]}"}"
+AIPERF_CMD=("${_aiperf_override:-aiperf}")
+if [ -z "$_aiperf_override" ]; then
+  _aiperf_state="${HYPERLOOM_STATE_DIR:-}"
+  if [ -z "$_aiperf_state" ]; then
+    _aiperf_home="${HOME:-}"
+    if [ -z "$_aiperf_home" ]; then
+      _aiperf_home="$(env -u __PYVENV_LAUNCHER__ "${PYTHON:-python3}" -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+    fi
+    _aiperf_state="${_aiperf_home}/.hyperloom"
+  fi
+  case "$_aiperf_state" in
+    /*) ;;
+    *) log "ERROR: HYPERLOOM_STATE_DIR must be an absolute path: $_aiperf_state"; exit 2 ;;
+  esac
+  _aiperf_managed="${_aiperf_state}/aiperf-venv/bin/aiperf"
+  if [ -f "$_aiperf_managed" ] && [ -x "$_aiperf_managed" ]; then
+    # Only the independent client interpreter is isolated, not server/mapper Python.
+    AIPERF_CMD=(env -u PYTHONHOME -u PYTHONPATH -u PYTHONUSERBASE -u PYTHONPLATLIBDIR -u __PYVENV_LAUNCHER__ "$_aiperf_managed")
+  fi
+fi
+
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
 ART="${RESULT_DIR}/aiperf_artifacts"
@@ -360,8 +386,6 @@ export AIPERF_UI_REALTIME_METRICS_ENABLED="${AGENTX_REALTIME_METRICS:-true}"
 _mmap_default="${HF_HUB_CACHE:-${HOME:-/tmp}/.cache/huggingface/hub}/aiperf_dataset_mmap"
 export AIPERF_DATASET_MMAP_CACHE_DIR="${AGENTX_MMAP_CACHE_DIR:-$_mmap_default}"
 
-AIPERF="${AIPERF_BIN:-aiperf}"
-
 # Abort the run once the error rate exceeds this ratio. aiperf's own default is
 # None, i.e. the check is DISABLED -- without the flag a run whose requests
 # mostly 4xx still exits 0 and is mapped as a normal measurement, because
@@ -481,7 +505,7 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #   --max-context-length omitted (see the replay-context note above).
 AIPERF_PROGRESS_ARGS=()
 run_aiperf() {
-  "$AIPERF" profile \
+  "${AIPERF_CMD[@]}" profile \
     --scenario inferencex-agentx-mvp \
     --url "http://localhost:${PORT}" \
     --endpoint /v1/chat/completions \

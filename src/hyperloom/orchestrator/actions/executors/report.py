@@ -369,8 +369,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "policy_loop": "The policy gate detected a decision loop and stopped to avoid spinning on the same transition.",
     "crash_threshold_exceeded": "Too many recoverable crashes accumulated; the run stopped to preserve the validated result.",
     "robustness_escalated": (
-        "Robustness escalated: the run stopped early (not a target hit). Common triggers are an "
-        "approaching deadline, a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
+        "Robustness escalated: the run closed early with budget still on the clock (not a target hit). "
+        "Common triggers are a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
+        "A close driven by the remaining budget reports time_exhausted instead. "
         "The best validated result was locked in before exit."
     ),
     "user_stop_requested": "Stopped on an explicit operator request.",

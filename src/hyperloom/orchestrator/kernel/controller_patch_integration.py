@@ -274,8 +274,7 @@ async def integrate_controller_patches(
     Args:
         patches_root: The Controller's published patch directory.
         session_dir: The session whose state the KEEPs are recorded into.
-        shared_state: The live session state, read for the admissible patch
-            target roots and persisted after each recorded KEEP.
+        shared_state: The live session state, persisted after each recorded KEEP.
         record_keep: Session-owned writeback for AgentX; other workloads use the local recorder.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
@@ -289,13 +288,6 @@ async def integrate_controller_patches(
             session_dir=Path(session_dir),
         )
     )
-    from hyperloom.orchestrator.framework.paths import resolve_patch_target_roots
-
-    configured_roots = [Path(root).expanduser().resolve() for root in resolve_patch_target_roots() if str(root).strip()]
-    state_root = str(getattr(shared_state, "framework_repo_path", "") or "").strip()
-    if state_root:
-        configured_roots.append(Path(state_root).expanduser().resolve())
-    allowed_roots = tuple(dict.fromkeys(configured_roots))
     results: list[PatchIntegrationResult] = []
     # One base commit per repository rather than one repository per run. A patch
     # only ever applies to its own repository, so two independent repositories
@@ -318,21 +310,6 @@ async def integrate_controller_patches(
             results.append(result)
             _write_result(results_dir, index, result)
             continue
-        if not any(
-            publication.repo_root == root or publication.repo_root.is_relative_to(root) for root in allowed_roots
-        ):
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_invalid",
-                reason="publication repo_root is outside the configured patch target roots",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(publication.repo_root),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
         repo = publication.repo_root
         if repo not in pinned_bases:
             pinned_bases[repo] = publication.base_commit

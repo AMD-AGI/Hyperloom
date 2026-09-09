@@ -319,11 +319,11 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
     """A framework specialist must get a worktree of the framework it patches.
 
-    ``framework_source_roots`` is the source-file allowlist, and its order is
-    arbitrary with respect to the session: on a pod that ships aiter as a git
+    ``framework_source_roots`` lists the framework search roots, and its order
+    is arbitrary with respect to the session: on a pod that ships aiter as a git
     checkout, aiter sorts first. A WorldPlay session then handed its specialist
     an aiter worktree, the specialist authored correct patches against
-    ``hyvideo/`` paths that are absent from it, and patch-safety dropped every
+    ``hyvideo/`` paths that are absent from it, and patch-safety flagged every
     one as ``missing_target`` — leaving an env-only proposal that toggled a
     switch with no code behind it and measured 0.0% five rounds running.
     """

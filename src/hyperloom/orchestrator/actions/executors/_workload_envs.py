@@ -395,18 +395,17 @@ def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
     """Publish a scriptable framework's checkout into the orchestrator's own env.
 
     A scriptable framework runs out of a repo checkout rather than a pip-installed
-    package, so ``resolve_source_file_allowlist`` can only find it through
+    package, so ``resolve_kernel_search_roots`` can only find it through
     ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` in ``os.environ``. Writing the
     resolved path into the materialized YAML reaches the *benchmark* subprocess
-    but not the orchestrator, and it is the orchestrator that runs PolicyGate — so
-    without this the source root is absent from the allowlist and every patch a
-    specialist writes against the framework's own code is rejected, on a session
-    that otherwise looks correctly configured.
+    but not the orchestrator — so without this the framework's own code is absent
+    from the roots the specialist is pointed at and from the trees a patch can be
+    grounded against, on a session that otherwise looks correctly configured.
 
     An operator-provided value always wins; this only fills the gap when the
     checkout was resolved (or is about to be cloned) by Hyperloom itself. The path
     is published even when it does not exist yet, because the benchmark wrapper
-    clones on first use and the allowlist is recomputed per call.
+    clones on first use and the roots are recomputed per call.
 
     Args:
         framework: Framework name, used for the env prefix.

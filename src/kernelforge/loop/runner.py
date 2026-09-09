@@ -45,7 +45,6 @@ from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.learning.auto_evolve import AutoEvolver
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.loop.experience import ExperienceLedger
@@ -743,7 +742,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         iter_config: IterationConfig,
         tracker: ExperimentTracker,
         config: Config | None = None,
-        evolver: AutoEvolver | None = None,
         resume: bool = False,
     ):
         self.ic = iter_config
@@ -801,7 +799,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             os.environ.pop("FORGE_NPROC_PER_NODE", None)
         self.tracker = tracker
         self.config = config or Config.from_env()
-        self.evolver = evolver or AutoEvolver.from_config(self.config)
         self.resume = resume
         self.experiment: Experiment | None = None
         self.results: list[IterationResult] = []
@@ -3621,10 +3618,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             detail=stopped,
         )
 
-    def _scored_case_ids(self) -> list[str]:
-        """The cases the mean this campaign is scored on is taken over."""
-        return [case_id for case_id in sorted(self._baseline_case_times) if case_id not in self._unscored_cases]
-
     def _case_move_rule(
         self,
         before: float,
@@ -4829,25 +4822,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             pmc_full=pmc_full,
             error_output=bench_error_output,
         )
-
-        # Auto-evolve: log benchmark to tuning DB
-        if selected_raw_mean_ms is not None:
-            try:
-                self.evolver.on_benchmark(
-                    operation=Path(self.ic.kernel_file).stem,
-                    backend=self.experiment.backend if self.experiment else "unknown",
-                    shape={},
-                    config={"iteration": iteration, "kept": improved},
-                    wall_ms=selected_raw_mean_ms,
-                    snr_db=snr_db,
-                    passed_correctness=snr_db is not None and snr_db >= self.ic.snr_threshold,
-                    pmc_diagnosis=pmc_diagnosis,
-                    vgpr=vgpr,
-                    experiment_id=self.experiment.experiment_id if self.experiment else "",
-                    gpu_target=self.config.gpu_target,
-                )
-            except Exception:
-                log.debug("auto-evolve on_benchmark logging failed", exc_info=True)
 
         return result
 
@@ -7083,20 +7057,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         # external callers can read the token cost.
         self._checkpoint_llm_usage()
 
-        # Auto-evolve: run post-experiment learning
         if self.experiment:
             try:
                 self.tracker.mark_complete(self.experiment.experiment_id)
             except Exception:
                 log.debug("failed to mark experiment complete", exc_info=True)
-            try:
-                learned = self.evolver.on_experiment_complete(self.experiment)
-                if learned.get("lessons"):
-                    print(f"  Lessons learned: {len(learned['lessons'])}")
-                if learned.get("transfer_rules"):
-                    print(f"  Transfer rules discovered: {len(learned['transfer_rules'])}")
-            except Exception:
-                log.debug("auto-evolve post-experiment learning failed", exc_info=True)
 
         # Final report
         total_time = time.time() - self.start_time

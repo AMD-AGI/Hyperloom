@@ -10,8 +10,8 @@ must not be copied onto the restore target, while a legitimate manifest reverts
 unchanged.
 
 Note: the restore *target* itself is intentionally not framework-root-gated
-here, because apply accepts arbitrary targets under ``allow_unknown_target``;
-gating the target would break those legitimate reverts.
+here, because apply accepts targets outside the known framework roots; gating
+the target would break those legitimate reverts.
 """
 
 from __future__ import annotations

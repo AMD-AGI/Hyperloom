@@ -18,6 +18,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,11 @@ def _fake_builtin(write_pid: bool) -> str:
         "{\n"
         '  echo "VLLM_HTTP_TIMEOUT_KEEP_ALIVE=${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
         '  echo "SGLANG_TIMEOUT_KEEP_ALIVE=${SGLANG_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '  echo "PATH=$PATH"\n'
+        '  echo "PYTHON=${PYTHON:-UNSET}"\n'
+        '  echo "PYTHONPATH=${PYTHONPATH:-UNSET}"\n'
+        '  echo "PYTHONHOME=${PYTHONHOME:-UNSET}"\n'
+        '  echo "PYTHONUSERBASE=${PYTHONUSERBASE:-UNSET}"\n'
         '} > "${AGENTX_TEST_SERVER_MARKER:-/dev/null}"\n'
     )
     return "#!/usr/bin/env bash\nset -e\n" + dump + pid_line + "exit 0\n"
@@ -63,6 +69,14 @@ mkdir -p "$art"
 echo '{"output_token_throughput":{"avg":1.0},"request_count":{"avg":1}}' > "$art/profile_export_aiperf.json"
 printf '%s\n' "$@" > "$art/aiperf_args.txt"
 {
+  echo "CLI=$0"
+  echo "PATH=$PATH"
+  echo "PYTHON=${PYTHON:-UNSET}"
+  echo "PYTHONPATH=${PYTHONPATH:-UNSET}"
+  echo "PYTHONHOME=${PYTHONHOME:-UNSET}"
+  echo "PYTHONUSERBASE=${PYTHONUSERBASE:-UNSET}"
+  echo "PYTHONPLATLIBDIR=${PYTHONPLATLIBDIR:-UNSET}"
+  echo "__PYVENV_LAUNCHER__=${__PYVENV_LAUNCHER__:-UNSET}"
   echo "AIPERF_BIN=${AIPERF_BIN:-UNSET}"
   echo "AIPERF_FOO=${AIPERF_FOO:-UNSET}"
   echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
@@ -258,6 +272,7 @@ def _run(bench, bind, res, tmp_path, **extra_env):
         AGENTX_TEST_MARKER=str(tmp_path / "marker.txt"),
     )
     env.update(extra_env)
+    env = {key: value for key, value in env.items() if value is not None}
     return subprocess.run(
         ["bash", str(bench / "aiperf_client.sh")],
         env=env,
@@ -271,6 +286,147 @@ def test_happy_path_writes_result(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
+
+
+def _managed_aiperf(state: Path) -> Path:
+    cli = state / "aiperf-venv" / "bin" / "aiperf"
+    cli.parent.mkdir(parents=True)
+    _write_exec(cli, _FAKE_AIPERF)
+    return cli
+
+
+@pytest.mark.parametrize("custom_state", [False, True])
+def test_managed_client_outranks_broken_path_without_changing_parent_env(tmp_path, custom_state):
+    bench, bind, res = _sandbox(tmp_path)
+    home = tmp_path / "home"
+    state = tmp_path / "custom state" if custom_state else home / ".hyperloom"
+    cli = _managed_aiperf(state)
+    _write_exec(bind / "aiperf", "#!/bin/sh\nexit 91\n")
+    before = dict(os.environ)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN=" \t\n",
+        HOME=str(home),
+        HYPERLOOM_STATE_DIR=str(state) if custom_state else "",
+        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    client = _server_env(tmp_path, tmp_path / "marker.txt")
+    server = _server_env(tmp_path, tmp_path / "server.txt")
+    assert client["CLI"] == str(cli)
+    assert client["PATH"] == server["PATH"] == f"{bind}:{before.get('PATH', '')}"
+    assert client["PYTHON"] == server["PYTHON"] == before.get("PYTHON", "UNSET")
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("home", [None, ""])
+def test_managed_client_missing_home_uses_isolated_system_user_lookup(tmp_path, home):
+    bench, bind, res = _sandbox(tmp_path)
+    cli = _managed_aiperf(tmp_path / "system-home" / ".hyperloom")
+    user_python = bind / "user-python"
+    _write_exec(
+        user_python,
+        f'#!/bin/sh\n[ "$1" = "-I" ] || exit 88\nprintf \'%s\\n\' {shlex.quote(str(tmp_path / "system-home"))}\n',
+    )
+    _write_exec(bind / "aiperf", "#!/bin/sh\nexit 91\n")
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN=None, HOME=home, HYPERLOOM_STATE_DIR="", PYTHON=str(user_python))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _server_env(tmp_path, tmp_path / "marker.txt")["CLI"] == str(cli)
+
+
+@pytest.mark.parametrize(
+    "state_env", [{"HYPERLOOM_STATE_DIR": "relative"}, {"HOME": "relative-home", "HYPERLOOM_STATE_DIR": ""}]
+)
+def test_client_rejects_relative_state(tmp_path, state_env):
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN="", **state_env)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "HYPERLOOM_STATE_DIR must be an absolute path" in r.stdout + r.stderr
+    assert not (tmp_path / "marker.txt").exists()
+
+
+@pytest.mark.parametrize("candidate_kind", ["missing", "directory", "not-executable"])
+def test_managed_client_unusable_falls_back_to_path(tmp_path, candidate_kind):
+    bench, bind, res = _sandbox(tmp_path)
+    state = tmp_path / "state"
+    if candidate_kind != "missing":
+        cli = _managed_aiperf(state)
+        if candidate_kind == "directory":
+            cli.unlink()
+            cli.mkdir()
+        else:
+            cli.chmod(0o644)
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN=None, HYPERLOOM_STATE_DIR=str(state))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _server_env(tmp_path, tmp_path / "marker.txt")["CLI"] == str(bind / "aiperf")
+
+
+@pytest.mark.parametrize("broken_override", [False, True])
+def test_managed_client_explicit_override_wins_and_keeps_pythonpath(tmp_path, broken_override):
+    bench, bind, res = _sandbox(tmp_path)
+    _managed_aiperf(tmp_path / "state")
+    override = bind / "operator-aiperf"
+    _write_exec(override, "#!/bin/sh\nexit 79\n" if broken_override else _FAKE_AIPERF)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN=f" \t{override}\n",
+        HYPERLOOM_STATE_DIR=str(tmp_path / "state"),
+        PYTHONPATH="/operator/python-packages",
+    )
+    assert r.returncode == (79 if broken_override else 0), r.stdout + r.stderr
+    if not broken_override:
+        client = _server_env(tmp_path, tmp_path / "marker.txt")
+        assert client["CLI"] == str(override)
+        assert client["PYTHONPATH"] == "/operator/python-packages"
+    else:
+        assert not (res / "inferencex_result.json").exists()
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_managed_client_sanitizes_only_aiperf_python_environment(tmp_path, profile):
+    bench, bind, res = _sandbox(tmp_path)
+    cli = _managed_aiperf(tmp_path / "state")
+    _write_exec(
+        bind / "python3",
+        '#!/bin/sh\nprintf "%s\\n" "${PYTHONPATH:-UNSET}" >> "$AGENTX_TEST_PYTHON_MARKER"\n'
+        "exec env -u PYTHONHOME -u PYTHONPATH -u PYTHONUSERBASE -u PYTHONPLATLIBDIR -u __PYVENV_LAUNCHER__ "
+        f'{shlex.quote(sys.executable)} "$@"\n',
+    )
+    pollution = {
+        "PYTHONHOME": "/host/python310",
+        "PYTHONPATH": "/host/python310/site-packages",
+        "PYTHONUSERBASE": "/host/user-packages",
+        "PYTHONPLATLIBDIR": "host-lib",
+        "__PYVENV_LAUNCHER__": "/host/python310/bin/python",
+    }
+    run = _run_profile if profile else _run
+    r = run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN="",
+        HYPERLOOM_STATE_DIR=str(tmp_path / "state"),
+        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
+        AGENTX_TEST_PYTHON_MARKER=str(tmp_path / "python.txt"),
+        **pollution,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    client = _server_env(tmp_path, tmp_path / "marker.txt")
+    server = _server_env(tmp_path, tmp_path / "server.txt")
+    assert client["CLI"] == str(cli)
+    for key in pollution:
+        assert client[key] == "UNSET"
+    for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE"):
+        assert server[key] == pollution[key]
+    assert set((tmp_path / "python.txt").read_text().splitlines()) == {pollution["PYTHONPATH"]}
     assert (res / "inferencex_result.json").exists()
 
 

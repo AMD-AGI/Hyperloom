@@ -1021,7 +1021,6 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "kernel_id": "k_abc",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1080,7 +1079,6 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1137,7 +1135,6 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1192,7 +1189,6 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "kernel_id": "k001",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1231,7 +1227,6 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "kernel_id": "k_warn",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1260,7 +1255,6 @@ async def test_integrate_handler_rejects_rebaseline_that_exited_nonzero(session_
         "kernel_id": "k_nonzero",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1293,7 +1287,6 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "kernel_id": "k_bad",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1310,7 +1303,6 @@ def _accuracy_payload(base_yaml: Path, target: Path, patch_file: Path, kernel_id
         "kernel_id": kernel_id,
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
 
@@ -1791,7 +1783,6 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
         "kernel_id": "k_fault",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1846,7 +1837,6 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "kernel_id": "k_bad",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -1899,7 +1889,6 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "base_tput": 800.0,
         "config_path": str(base_yaml),
         "kernel_id": "k006",
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -2012,7 +2001,6 @@ async def test_integrate_handler_rejects_text_patch_artifact(session_dir, tmp_pa
         "kernel_id": "k_text",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     res = await krh.integrate_handler(payload, session_dir=session_dir)
@@ -2049,7 +2037,6 @@ async def test_integrate_handler_rejects_incompatible_standalone_cpp(
         "kernel_id": "k_standalone",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     res = await krh.integrate_handler(payload, session_dir=session_dir)
@@ -2090,7 +2077,6 @@ async def test_integrate_handler_injects_extra_server_args(
         "extra_server_args": "--cuda-graph-max-bs 8",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -2130,7 +2116,6 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "kernel_id": "k_review",
         "patch_path": str(patch_file),
         "target_file": str(target),
-        "allow_unknown_target": True,
         "skip_rebuild": True,
     }
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
@@ -2193,7 +2178,6 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
                             "kernel_id": "k1",
                             "patch_path": str(patch_file),
                             "target_file": str(target),
-                            "allow_unknown_target": True,
                             "skip_rebuild": True,
                         },
                     },
@@ -2265,7 +2249,6 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "kernel_id": "k_repeat",
                 "patch_path": str(patch_file),
                 "target_file": str(target),
-                "allow_unknown_target": True,
                 "skip_rebuild": True,
             },
         }

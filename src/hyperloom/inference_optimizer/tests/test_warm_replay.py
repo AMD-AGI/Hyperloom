@@ -55,9 +55,19 @@ class _StubSharedState:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
+    last_action_failures: list = field(default_factory=list)
 
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
+
+    def record_action_failure(self, *, action, task_id, result, **kwargs):
+        self.last_action_failures.append(
+            {
+                "action": action,
+                "task_id": task_id,
+                "error_class": str((result or {}).get("error_class") or ""),
+            }
+        )
 
     def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
         from hyperloom.common.gain_math import gain_pct

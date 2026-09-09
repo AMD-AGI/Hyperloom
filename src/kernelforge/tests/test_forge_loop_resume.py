@@ -754,7 +754,6 @@ def _driver_integrity_resume(tmp_path, monkeypatch):
         iter_config,
         SimpleNamespace(),
         config=SimpleNamespace(),
-        evolver=SimpleNamespace(),
         resume=True,
     )
     head = subprocess.run(
