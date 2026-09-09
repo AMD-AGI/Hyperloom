@@ -105,7 +105,7 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher
-from kernelforge.rtk import err_wrap, smart_wrap, unavailable_warning as rtk_unavailable_warning
+from kernelforge.rtk import err_wrap, unavailable_warning as rtk_unavailable_warning
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
