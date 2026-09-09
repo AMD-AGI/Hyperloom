@@ -1031,8 +1031,8 @@ def materialize_config_with_envs(
         extra_envs: Overrides applied last over any computed env values;
             shell/loader hijack names and credentials are dropped.
         remove_args: Inherited framework server args to remove before launch.
-        unset_envs: Inherited env names to remove before applying
-            ``extra_envs``; workload pins are refused.
+        unset_envs: Env names to remove after applying ``extra_envs``;
+            workload pins are refused.
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
@@ -1770,8 +1770,7 @@ def materialize_config_with_envs(
         if str(key).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
             log.warning("Refusing to unset pinned benchmark env %s", key)
             continue
-        if str(key) not in safe_extra_envs or str(key) not in (extra_envs or {}):
-            envs.pop(str(key), None)
+        envs.pop(str(key), None)
     if pending_vllm_profiler_flags and framework_env == "EXTRA_VLLM_ARGS":
         # The profile path's iteration bounds have to be the LAST word on this env,
         # because three separate steps above can drop them: a candidate carrying

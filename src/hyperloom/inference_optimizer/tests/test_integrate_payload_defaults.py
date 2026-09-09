@@ -170,26 +170,21 @@ class TestFillIntegrateDefaultsFromState:
         assert {key: out[key] for key in requested} == requested
         assert payload == {"kernel_id": "k_recipe", **requested}
 
-    def test_requested_unset_prunes_current_envs_before_candidate_overrides(self, session_dir):
+    @pytest.mark.parametrize("explicit_unset", [False, True], ids=["inherited-unset", "requested-unset"])
+    def test_candidate_envs_override_only_inherited_unsets(self, session_dir, explicit_unset):
         current_envs = {"CURRENT_ONLY": "1", "REENABLE": "state"}
         state = _seed_state(session_dir, current_best_envs=current_envs)
         state.current_best["unset_envs"] = ["CURRENT_ONLY", "REENABLE"]
         state.save(session_dir)
+        payload = {"kernel_id": "k_recipe", "extra_envs": {"REENABLE": "candidate"}}
+        if explicit_unset:
+            payload["unset_envs"] = [" CURRENT_ONLY ", "REENABLE"]
 
-        inherited = krh._fill_integrate_defaults_from_state({"kernel_id": "k_recipe"}, session_dir=session_dir)
-        assert inherited["extra_envs"] == current_envs
+        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
-            {
-                "kernel_id": "k_recipe",
-                "unset_envs": [" CURRENT_ONLY ", "REENABLE"],
-                "extra_envs": {"REENABLE": "candidate"},
-            },
-            session_dir=session_dir,
-        )
-
-        assert out["extra_envs"] == {"REENABLE": "candidate"}
-        assert out["unset_envs"] == ["CURRENT_ONLY", "REENABLE"]
+        assert out["extra_envs"] == ({} if explicit_unset else {"REENABLE": "candidate"})
+        assert out["unset_envs"] == (["CURRENT_ONLY", "REENABLE"] if explicit_unset else ["CURRENT_ONLY"])
+        assert payload["extra_envs"] == {"REENABLE": "candidate"}
         assert SharedState.load_or_init(session_dir).current_best["extra_envs"] == current_envs
 
     def test_paired_empty_recipe_controls_do_not_inherit_live_defaults(self, session_dir):

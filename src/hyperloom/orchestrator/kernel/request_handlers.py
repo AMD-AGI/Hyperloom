@@ -1179,18 +1179,18 @@ def _fill_integrate_defaults_from_state(
         resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
         current_envs = current_best.get("extra_envs")
         current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
-        for key in to_str_list(payload.get("unset_envs")):
+        for key in resolved["unset_envs"]:
             current_envs.pop(key, None)
         requested_envs = resolved.get("extra_envs")
         requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
-        if current_envs or requested_envs:
-            # The candidate stacks onto current_best. Candidate-specific
-            # overrides win, but omitting an env must not silently drop the
-            # accepted recipe during E2E validation.
-            resolved["extra_envs"] = {
-                **current_envs,
-                **requested_envs,
-            }
+        # A candidate can replace an inherited removal, not its own explicit unset.
+        if "unset_envs" not in payload:
+            resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
+        else:
+            for key in resolved["unset_envs"]:
+                requested_envs.pop(key, None)
+        if current_envs or requested_envs or "extra_envs" in resolved:
+            resolved["extra_envs"] = {**current_envs, **requested_envs}
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id:

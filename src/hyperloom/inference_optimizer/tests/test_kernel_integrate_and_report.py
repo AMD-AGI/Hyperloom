@@ -395,7 +395,10 @@ async def test_integrate_handler_materializes_recipe_controls(
     for key in ("YAML_KEEP", "REFERENCE_KEEP", "OPERATOR_KEEP", "CURRENT_ONLY", "CANDIDATE_ONLY"):
         assert envs[key] == "1"
     assert envs["SHARED"] == "candidate"
-    assert envs["REENABLE"] == "candidate"
+    if controls_source == "request":
+        assert "REENABLE" not in envs
+    else:
+        assert envs["REENABLE"] == "candidate"
     assert benchmarks[0]["benchmark_script"] == "aiperf_client.sh"
     assert base_yaml.read_bytes() == original_yaml
 
@@ -433,7 +436,7 @@ async def test_integrate_handler_explicit_empty_controls_keep_inherited_recipe(s
 
 
 @pytest.mark.asyncio
-async def test_integrate_handler_requested_unset_removes_current_env_and_reenables_explicit_env(
+async def test_integrate_handler_requested_unset_wins_over_current_and_explicit_envs(
     session_dir, integrate_recipe_case
 ):
     state, _base_yaml, benchmarks = integrate_recipe_case
@@ -455,7 +458,7 @@ async def test_integrate_handler_requested_unset_removes_current_env_and_reenabl
     assert len(benchmarks) == 1
     envs = benchmarks[0]["envs"]
     assert "CURRENT_ONLY" not in envs
-    assert envs["REENABLE"] == "candidate"
+    assert "REENABLE" not in envs
     assert envs["CANDIDATE_ONLY"] == "1"
     assert envs["SHARED"] == "state"
 
@@ -566,10 +569,9 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
             assert "--cuda-graph-max-bs 16" in args
             for inherited in ("--disable-cuda-graph", "--page-size 16", "--mem-fraction-static 0.7"):
                 assert inherited not in args
-            for key in ("YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "REFERENCE_ONLY"):
+            for key in ("YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "REFERENCE_ONLY", "REENABLE"):
                 assert key not in envs
             assert envs["CANDIDATE_ONLY"] == "1"
-            assert envs["REENABLE"] == "candidate"
     assert (reference, candidate, state.current_best) == frozen
     assert SharedState.load_or_init(session_dir).current_best == frozen[2]
 
