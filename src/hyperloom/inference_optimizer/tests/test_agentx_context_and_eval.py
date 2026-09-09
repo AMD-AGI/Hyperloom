@@ -160,8 +160,8 @@ def test_sglang_context_non_sglang_untouched(tmp_path, monkeypatch):
 # --- eval opt-out -------------------------------------------------------------
 
 
-def test_agentx_is_a_deliberate_eval_optout(monkeypatch):
-    """``eval_disabled`` must be set by AgentX, not only by ``--no-eval``."""
+def test_agentx_runs_its_own_eval_not_lmeval(monkeypatch):
+    """AgentX eval is a post-hoc error-rate gate, not an lm-eval opt-out, so ``eval_disabled`` tracks --no-eval."""
     from hyperloom.inference_optimizer.cli import bootstrap
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -170,8 +170,8 @@ def test_agentx_is_a_deliberate_eval_optout(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     assert bootstrap._agentx_enabled() is True
 
-    # The seeding expression must OR the two opt-outs together.
+    # eval_disabled must NOT be forced on by AgentX any more.
     import inspect
 
     src = inspect.getsource(bootstrap)
-    assert 'eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),' in src
+    assert "_agentx_enabled()" not in src.split("eval_disabled=")[1].split("\n")[0]

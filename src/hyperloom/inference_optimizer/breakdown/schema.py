@@ -1257,7 +1257,8 @@ class ConcSweepSummary(TypedDict, total=False):
     tp: int
     benchmark_mode: str  # "agentx" / "synthetic"; names the axis pair the points carry
     concs_requested: list[int]
-    # {extra_server_args, extra_envs, points[]}.
+    # {extra_server_args, extra_envs, points[]}. A point carries the pair its mode is plotted on:
+    # output_throughput + e2el_mean_ms synthetic, total_token_throughput + e2e_norm_intvty_p90 agentic.
     baseline: dict[str, Any]
     optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)

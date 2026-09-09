@@ -182,28 +182,14 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     return {**os.environ, "CONC": str(conc)}
 
 
-def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
-    """Whether an agentic measurement must stay out of the cross-session KB.
-
-    The recipe canonical id is a seven-tuple of model / hardware / framework /
-    precision identity: no workload, no mode. Row workload tags are copied from
-    ``SharedState.isl``/``osl``, which under AgentX are the inert 1024/1024
-    placeholders the corpus overrides. So an agentic throughput would overwrite a
-    synthetic ``best_throughput`` on a bare numeric comparison, and the row would
-    be tagged as a 1024/1024 synthetic run -- which a later synthetic session's
-    shape filter then matches positively. The store is machine-global and
-    ``--reset-state`` does not clear it, so the damage outlives its session.
-
-    One helper rather than a gate per sink: there are three writers (CLOSE
-    finalize, the runtime amend, and the T0 anchor), they were not all found at
-    once, and a fourth should have something obvious to call.
-
-    Args:
-        shared_state: Session state, when the caller has one.
-
-    Returns:
-        True when the caller must skip its Recipe KB write.
-    """
+def agentx_kb_blocked(shared_state: Any = None) -> bool:
+    """Whether an AgentX session must skip its Recipe KB exchange, in either direction."""
+    # The recipe canonical id is a seven-tuple of model / hardware / framework / precision identity: no workload, no
+    # mode. Row workload tags come from ``SharedState.isl``/``osl``, the inert 1024/1024 placeholders under AgentX, so
+    # a write would overwrite a synthetic ``best_throughput`` on a bare numeric comparison and tag the row as a
+    # 1024/1024 synthetic run. Reads are blocked for the mirror-image reason: a recipe validated on that synthetic
+    # shape clears the donor shape gate and would warm-start an AgentX session onto the wrong regime. The store is
+    # machine-global and ``--reset-state`` does not clear it, so the damage outlives its session.
     return agentx_active(shared_state)
 
 
