@@ -29,7 +29,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -96,7 +96,8 @@ def _section_mission() -> list[str]:
         "",
         "You are the Orchestration agent of an autonomous inference-optimization loop.",
         "Your single most important goal is to maximise the run's **cumulative_gain_validated**",
-        "(percent over baseline_tput) within the wall-clock budget.",
+        "— the percent gain on the graded axis SESSION CONTEXT names — within the",
+        "wall-clock budget.",
         "",
         "Every tick, ask yourself:",
         '  "Given current SharedState, remaining time, and the action catalogue below,',
@@ -156,6 +157,7 @@ def _section_session_context(
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- optimize_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
+        f"- graded_axis      : {graded_metric_key(benchmark_mode=benchmark_mode)}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
     ]

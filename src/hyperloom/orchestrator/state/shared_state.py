@@ -241,6 +241,13 @@ def resolve_graded_comparison(
         if ref_perf and cand_perf:
             gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
             threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
+            if threshold > keep_threshold_pct:
+                log.info(
+                    "graded: raising keep_threshold %.2f%% -> %.2f%% (AgentX floor; "
+                    "the slow-tail percentile's own variance is unmeasured)",
+                    keep_threshold_pct,
+                    threshold,
+                )
             tput_holds = passes_tput_guard(cand_perf, ref_perf)
             if gain is not None and gain >= threshold and tput_holds:
                 verdict = VERDICT_KEEP
