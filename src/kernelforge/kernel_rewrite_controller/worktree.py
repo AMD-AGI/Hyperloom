@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
+import logging
 import re
 import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.llm.git import GitError, git
@@ -30,6 +33,8 @@ FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
 
 #: Prefix of the branch one campaign commits onto. Shared with the sweep that
 #: reclaims a repository from a run the host killed before it could restore.
+log = logging.getLogger(__name__)
+
 CAMPAIGN_BRANCH_PREFIX = "forge/controller/"
 
 #: Tells a recorded object id apart from a recorded branch name, so HEAD is
@@ -116,11 +121,104 @@ def untracked_paths(repo_root: Path) -> frozenset[str]:
     return frozenset(path for path in (listed.stdout or "").split("\0") if path)
 
 
+#: Where a borrow records what the repository was, for whoever has to hand it
+#: back. Under ``.git`` because nothing that restores a working tree touches it,
+#: and beside the lock because it has the same lifetime: written when the
+#: repository is taken, read if the taker never came back, removed once it has.
+BASELINE_FILENAME = "forge_campaign_baseline.json"
+
+
+def _baseline_path(repo_root: Path) -> Path:
+    return repo_root / ".git" / BASELINE_FILENAME
+
+
+def _restore_tree_to_base(
+    repo_root: Path,
+    base_commit: str,
+    origin_ref: str,
+    baseline_untracked: frozenset[str] | None,
+) -> None:
+    """Return one repository to its base commit, keeping what it did not bring.
+
+    Deliberately not ``checkout --force`` or ``reset --hard``. Either would
+    delete a path that is tracked on the campaign branch and absent from the
+    base -- and a campaign that committed with ``add -A`` swept the operator's
+    own untracked files in, so those two calls remove files no campaign wrote.
+
+    This order does not: base content is restored over the tree, HEAD and the
+    index move to the base, and only then is anything deleted. A file the
+    campaign committed reads as untracked by that point, which is what lets the
+    inventory decide whose it is instead of Git deciding by reachability.
+    """
+    git("checkout", base_commit, "--", ".", cwd=repo_root, check=False)
+    if origin_ref and not _COMMIT_LIKE.fullmatch(origin_ref):
+        git("symbolic-ref", "HEAD", f"refs/heads/{origin_ref}", cwd=repo_root, check=False)
+    else:
+        git("update-ref", "--no-deref", "HEAD", origin_ref or base_commit, cwd=repo_root, check=False)
+    git("reset", "--quiet", base_commit, "--", ".", cwd=repo_root, check=False)
+    if baseline_untracked is not None:
+        remove_foreign_untracked(repo_root, baseline_untracked)
+
+
+def record_campaign_baseline(
+    repo_root: Path,
+    base_commit: str,
+    untracked: frozenset[str],
+    *,
+    origin_ref: str = "",
+) -> None:
+    """Leave the pre-campaign state on disk, for a process that may not return.
+
+    Held in memory it is lost with the process, and it is exactly the process
+    the host kills that needed to write it down: without this the next borrow
+    inherits a repository on an abandoned branch and no account of what was in
+    it beforehand.
+    """
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        atomic_write_text(
+            _baseline_path(repo_root),
+            json.dumps(
+                {
+                    "base_commit": base_commit,
+                    "origin_ref": origin_ref,
+                    "untracked": sorted(untracked),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+
+def read_campaign_baseline(repo_root: Path) -> tuple[str, frozenset[str]] | None:
+    """What a previous borrow recorded: where HEAD was, and what was untracked.
+
+    ``None`` means unknown, which is not the same claim as "nothing was
+    untracked" -- the difference decides whether anything may be deleted.
+    """
+    try:
+        payload = json.loads(_baseline_path(repo_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    listed = payload.get("untracked")
+    if not isinstance(listed, list):
+        return None
+    return str(payload.get("origin_ref") or ""), frozenset(str(item) for item in listed)
+
+
+def forget_campaign_baseline(repo_root: Path) -> None:
+    """Drop the record once the repository has actually been handed back."""
+    with contextlib.suppress(OSError):
+        _baseline_path(repo_root).unlink(missing_ok=True)
+
+
 def reclaim_campaign_branch(
     repo_root: Path,
     base_commit: str,
     *,
-    baseline_untracked: frozenset[str] = frozenset(),
+    baseline_untracked: frozenset[str] | None = None,
 ) -> str:
     """Return a repository a campaign never handed back, and name the branch.
 
@@ -130,16 +228,30 @@ def reclaim_campaign_branch(
     branch it reclaimed, or ``""`` when there was nothing to reclaim.
 
     ``checkout --force`` restores tracked content but leaves whatever the
-    campaign committed and the switch untracked, so the inventory is what
-    finally removes it. Without one, nothing here can tell those files from the
-    operator's own and they are left alone.
+    campaign committed and the switch untracked, so an inventory is what finally
+    removes it. ``None`` -- the caller has none and none was recorded -- leaves
+    every untracked path alone: a real serving tree holds files no campaign owns
+    and no lane tracked, and with nothing to compare against there is no way to
+    tell one from the other.
     """
     branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo_root, check=False).stdout.strip()
     if not branch.startswith(CAMPAIGN_BRANCH_PREFIX):
         return ""
-    git("checkout", "--force", base_commit, cwd=repo_root)
+    origin_ref = ""
+    if baseline_untracked is None:
+        recorded = read_campaign_baseline(repo_root)
+        if recorded is not None:
+            origin_ref, baseline_untracked = recorded
+    if baseline_untracked is None:
+        log.warning(
+            "reclaiming %s from %s without an inventory of what it held before that campaign; "
+            "leaving every untracked path in place rather than guessing which are its leavings",
+            repo_root,
+            branch,
+        )
+    _restore_tree_to_base(repo_root, base_commit, origin_ref, baseline_untracked)
     git("branch", "-D", branch, cwd=repo_root, check=False)
-    remove_foreign_untracked(repo_root, baseline_untracked)
+    forget_campaign_baseline(repo_root)
     return branch
 
 
@@ -274,6 +386,7 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
         # Taken before the branch is cut, so it describes the repository as its
         # owner left it and not as the campaign will.
         baseline_untracked = untracked_paths(repo_root)
+        record_campaign_baseline(repo_root, task.base_commit, baseline_untracked, origin_ref=origin_ref)
         branch = _branch_name(task.operator_id)
         git("branch", "-D", branch, cwd=repo_root, check=False)
         git("checkout", "-b", branch, task.base_commit, cwd=repo_root)
@@ -325,24 +438,16 @@ def release_operator_worktree(worktree: OperatorWorktree | None) -> None:
     repo_root = worktree.repo_root
     try:
         _archive_campaign_output(worktree)
-        # Tracked content first. A path the campaign created is not in the base
-        # commit, so this cannot restore it -- it is still carried by the branch
-        # HEAD is on, and only becomes visible as untracked once HEAD and the
-        # index have moved below.
-        changed = git("diff", "--name-only", worktree.base_commit, cwd=repo_root, check=False)
-        for relative in (changed.stdout or "").splitlines():
-            if relative.strip():
-                git("checkout", worktree.base_commit, "--", relative.strip(), cwd=repo_root, check=False)
-        # HEAD by ref and the index by commit, neither touching the tree.
-        if worktree.origin_ref and not _COMMIT_LIKE.fullmatch(worktree.origin_ref):
-            git("symbolic-ref", "HEAD", f"refs/heads/{worktree.origin_ref}", cwd=repo_root, check=False)
-        elif worktree.origin_ref:
-            git("update-ref", "--no-deref", "HEAD", worktree.origin_ref, cwd=repo_root, check=False)
-        git("reset", "--quiet", worktree.base_commit, "--", ".", cwd=repo_root, check=False)
-        # Last, because until the index matches the base commit a file the
-        # campaign committed does not read as untracked and this cannot see it.
-        remove_foreign_untracked(repo_root, worktree.baseline_untracked)
+        _restore_tree_to_base(
+            repo_root,
+            worktree.base_commit,
+            worktree.origin_ref,
+            worktree.baseline_untracked,
+        )
         git("branch", "-D", worktree.branch, cwd=repo_root, check=False)
+        # Only now: while this exists, a later borrow reads it as the account
+        # of a campaign that never came back.
+        forget_campaign_baseline(repo_root)
     finally:
         release_repo_lock(worktree.lock)
 
@@ -460,7 +565,11 @@ __all__ = [
     "WorktreeError",
     "changed_files_from_base",
     "create_operator_worktree",
+    "BASELINE_FILENAME",
     "export_patch_from_base",
+    "forget_campaign_baseline",
+    "read_campaign_baseline",
+    "record_campaign_baseline",
     "operator_workspace",
     "reclaim_campaign_branch",
     "release_operator_worktree",

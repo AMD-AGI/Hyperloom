@@ -19,9 +19,11 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     create_operator_worktree,
     export_patch_from_base,
     reclaim_campaign_branch,
+    read_campaign_baseline,
     release_operator_worktree,
     untracked_paths,
 )
+from kernelforge.loop.editable_repo import release_repo_lock
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -428,20 +430,123 @@ def test_release_keeps_the_campaign_bookkeeping_out_of_the_repository(
     assert (archived / "best_result.json").read_text(encoding="utf-8") == "{}"
 
 
-def test_reclaiming_a_branch_also_removes_what_that_campaign_created(tmp_path: Path) -> None:
-    """`checkout --force` restores tracked content and leaves the rest behind."""
+def _abandon_campaign(repo: Path, base_commit: str, *, stage: str) -> None:
+    """Leave the repository as a killed campaign would have."""
+    _git(repo, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}killed", base_commit)
+    (repo / "sglang" / "kernels" / "fused_moe.py").write_text("CAMPAIGN\n", encoding="utf-8")
+    (repo / "left_behind.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", stage)
+    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "killed campaign")
+
+
+def test_reclaiming_a_branch_removes_what_that_campaign_created(tmp_path: Path) -> None:
     repo, base_commit = _source_repo(tmp_path)
     baseline = untracked_paths(repo)
-    _git(repo, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}killed", base_commit)
-    (repo / "left_behind.py").write_text("x\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "killed campaign")
+    _abandon_campaign(repo, base_commit, stage="--all")
 
     branch = reclaim_campaign_branch(repo, base_commit, baseline_untracked=baseline)
 
     assert branch == f"{CAMPAIGN_BRANCH_PREFIX}killed"
     assert not (repo / "left_behind.py").exists()
+    assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("stage", ["--update", "--all"])
+def test_reclaiming_keeps_untracked_files_the_campaign_did_not_write(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    """A serving tree holds files no lane tracked -- fusion writes one.
+
+    The seal commits with ``add --update``, so a module another lane created is
+    untracked for the whole session. It also means a campaign that committed
+    with ``add --all`` swept it onto its own branch, which is why the restore
+    cannot be ``checkout --force``: that would delete it for being absent from
+    the base rather than leave it untracked for the inventory to judge.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    theirs = repo / "glm4_moe_fused_llm_allreduce.py"
+    theirs.write_text("another lane wrote this\n", encoding="utf-8")
+    baseline = untracked_paths(repo)
+    _abandon_campaign(repo, base_commit, stage=stage)
+
+    reclaim_campaign_branch(repo, base_commit, baseline_untracked=baseline)
+
+    assert theirs.read_text(encoding="utf-8") == "another lane wrote this\n"
+    assert not (repo / "left_behind.py").exists()
+
+
+def test_reclaiming_without_an_inventory_deletes_nothing(tmp_path: Path) -> None:
+    """An empty inventory would read as "every untracked path is the campaign's".
+
+    Reached when the controller was killed and Hyperloom's own reclaim did not
+    run either, so no caller has one and none was recorded. Unknown has to mean
+    unknown: guessing here removes files nothing in this system wrote.
+    """
+    repo, base_commit = _source_repo(tmp_path)
+    theirs = repo / "glm4_moe_fused_llm_allreduce.py"
+    theirs.write_text("another lane wrote this\n", encoding="utf-8")
+    _abandon_campaign(repo, base_commit, stage="--update")
+
+    reclaim_campaign_branch(repo, base_commit)
+
+    assert theirs.read_text(encoding="utf-8") == "another lane wrote this\n"
+    assert (repo / "left_behind.py").exists()
+    assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_a_borrow_records_the_inventory_for_whoever_has_to_hand_it_back(
+    tmp_path: Path,
+    editable,
+) -> None:
+    """Held in memory it dies with the process the host kills."""
+    repo, base_commit = _source_repo(tmp_path)
+    theirs = repo / "glm4_moe_fused_llm_allreduce.py"
+    theirs.write_text("another lane wrote this\n", encoding="utf-8")
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    recorded = read_campaign_baseline(repo)
+
+    assert recorded is not None
+    origin_ref, untracked = recorded
+    assert origin_ref == "master"
+    assert "glm4_moe_fused_llm_allreduce.py" in untracked
+
+    release_operator_worktree(borrowed)
+    # Dropped once the repository is actually back, or a later borrow would read
+    # it as the account of a campaign that never returned.
+    assert read_campaign_baseline(repo) is None
+
+
+def test_a_later_borrow_reclaims_a_killed_campaign_from_the_record(
+    tmp_path: Path,
+    editable,
+) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    theirs = repo / "glm4_moe_fused_llm_allreduce.py"
+    theirs.write_text("another lane wrote this\n", encoding="utf-8")
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    # A borrow the host killed: the record is on disk, nothing released.
+    killed = create_operator_worktree(task, layout)
+    (repo / "left_behind.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    _git(repo, "-c", "user.name=c", "-c", "user.email=c@l", "commit", "-m", "killed campaign")
+    release_repo_lock(killed.lock)
+
+    borrowed = create_operator_worktree(task, layout)
+
+    try:
+        assert not (repo / "left_behind.py").exists()
+        assert theirs.read_text(encoding="utf-8") == "another lane wrote this\n"
+    finally:
+        release_operator_worktree(borrowed)
 
 
 def test_releasing_a_borrowed_repository_twice_is_harmless(tmp_path: Path, editable) -> None:
