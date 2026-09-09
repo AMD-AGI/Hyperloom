@@ -277,3 +277,71 @@ def test_rendered_document_is_pure_ascii(reports: Path):
 def test_esc_folds_non_ascii_to_entities():
     assert R._esc("a—b") == "a&#8212;b"
     assert R._esc("<b>") == "&lt;b&gt;"
+
+
+def _with_integration(reports: Path, **over) -> dict:
+    outcome = json.loads((reports / R.OUTCOME_FILENAME).read_text())
+    integ = {
+        "candidate": "c0_triton",
+        "isolated_speedup": 1.3143,
+        "e2e_delta_pct": 3.538,
+        "e2e_throughput_tok_s": 6078.752,
+        "amdahl_ceiling_pct": 5.86,
+        "gate": "stack",
+        "gsm8k_ref": 0.89,
+        "gsm8k_cand": 0.89,
+        "reason": "provisional stack, authoritative call deferred",
+    }
+    integ.update(over)
+    for stage in outcome["stages"]:
+        if stage.get("kind") == "kernel":
+            stage["integration"] = integ
+    (reports / R.OUTCOME_FILENAME).write_text(json.dumps(outcome))
+    return outcome
+
+
+def test_a_validated_kernel_beats_the_opbench_ceiling(reports: Path):
+    """The A/B of a kernel the run wrote is the result; the ceiling is a bound.
+
+    opbench races library backends, so an unbeaten incumbent records 1.0000x and
+    a 0.00% ceiling -- which says nothing about the candidate the run authored.
+    Reading only the ceiling reports a real measured win as nothing.
+    """
+    outcome = _with_integration(reports)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), outcome)
+    kernel = next(p["outcome"] for p in joined if p["outcome"] and p["outcome"]["kind"] == "kernel")
+    assert kernel["gain_pct"] == pytest.approx(3.538)
+
+
+def test_the_opbench_ceiling_is_used_when_nothing_was_validated(reports: Path):
+    outcome = R.load_outcome(reports / R.OUTCOME_FILENAME)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), outcome)
+    kernel = next(p["outcome"] for p in joined if p["outcome"] and p["outcome"]["kind"] == "kernel")
+    assert kernel["gain_pct"] == pytest.approx(0.0)
+
+
+def test_a_validated_kernel_renders_its_gain_and_its_caveat(reports: Path):
+    """The harness's own verdict travels with the number, caveats included."""
+    outcome = _with_integration(reports)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), outcome)
+    html = R._performance_section(R.performance_ladder(joined, outcome))
+    assert "+3.54%" in html
+    assert "end to end" in html
+    assert "c0_triton" in html
+    assert "gsm8k 0.89" in html
+    assert "provisional stack" in html
+    assert "no measured end-to-end throughput" not in html
+
+
+def test_a_validated_kernel_shows_cost_per_percent(reports: Path):
+    outcome = _with_integration(reports)
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    phases = R.phase_records(rows, R.agent_records(rows))
+    joined = R.join_outcome(phases, outcome)
+    total = sum(p["usd"] for p in phases)
+    html = R._outcome_section(joined, total, outcome)
+    assert "+3.54%" in html
+    assert "measured A/B of the kernel this run wrote" in html

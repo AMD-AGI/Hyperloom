@@ -362,9 +362,17 @@ def join_outcome(phases: list[dict[str, Any]], outcome: dict[str, Any] | None) -
                 measured = [s for s in stages if s.get("present")]
                 found = {
                     "kind": "kernel",
-                    "gain_pct": max((_num(s.get("amdahl_ceiling_e2e_pct")) for s in measured), default=None)
-                    if measured
-                    else None,
+                    # The end-to-end A/B of a kernel the run wrote is the real
+                    # result when there is one; the opbench ceiling is only the
+                    # upper bound that applies when nothing was validated.
+                    "gain_pct": max(
+                        (_num(s["integration"].get("e2e_delta_pct")) for s in stages if s.get("integration")),
+                        default=(
+                            max((_num(s.get("amdahl_ceiling_e2e_pct")) for s in measured), default=None)
+                            if measured
+                            else None
+                        ),
+                    ),
                     "tasks": [
                         {
                             "task": s.get("task"),
@@ -373,6 +381,7 @@ def join_outcome(phases: list[dict[str, Any]], outcome: dict[str, Any] | None) -
                             "amdahl_ceiling_e2e_pct": s.get("amdahl_ceiling_e2e_pct"),
                             "pct_gpu_time": s.get("pct_gpu_time"),
                             "winner_backend": s.get("winner_backend"),
+                            "integration": s.get("integration"),
                         }
                         for s in stages
                     ],
@@ -646,6 +655,32 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
         else:
             tasks = out.get("tasks") or []
             measured = [t for t in tasks if t["present"]]
+            ab = [t["integration"] for t in tasks if t.get("integration")]
+            if ab:
+                best = max(ab, key=lambda i: _num(i.get("e2e_delta_pct")))
+                delta = _num(best.get("e2e_delta_pct"))
+                tone = "good" if delta > 0 else "bad" if delta < 0 else "mut"
+                gate = best.get("gate")
+                acc = (
+                    "accuracy held" if _num(best.get("gsm8k_cand")) >= _num(best.get("gsm8k_ref")) else "accuracy fell"
+                )
+                bought = (
+                    f'<span class="{tone}">{delta:+.2f}%</span> <span class="mut">end-to-end, '
+                    f"measured A/B of the kernel this run wrote "
+                    f"({_esc(best.get('candidate'))}, {_num(best.get('isolated_speedup')):.4f}x isolated, "
+                    f"{acc}"
+                    + (f", gate {_esc(gate)}" if gate else "")
+                    + f"; ceiling was {_num(best.get('amdahl_ceiling_pct')):.2f}%)</span>"
+                )
+                efficiency = _usd(phase["usd"] / delta) if delta > 0 else '<span class="none">n/a</span>'
+                rows.append(
+                    f"<tr><td><b>{_esc(phase['phase'])}</b></td>"
+                    f"<td>{_usd(phase['usd'])}{_bar(share)}</td>"
+                    f"<td>{share * 100:.1f}%</td>"
+                    f'<td style="text-align:left">{bought}</td>'
+                    f"<td>{efficiency}</td></tr>"
+                )
+                continue
             ceiling = max((_num(t["amdahl_ceiling_e2e_pct"]) for t in measured), default=0.0)
             detail = ", ".join(
                 f"{_esc(t['task'])}: "
@@ -788,16 +823,59 @@ def _performance_section(ladder: dict[str, Any]) -> str:
             f"<td>{share_cell}</td><td>{cost}</td></tr>"
         )
     notes = []
-    if ladder["kernels"]:
+    validated = [
+        (p, i)
+        for p in ladder["kernels"]
+        for i in [
+            max(
+                (t["integration"] for t in (p["outcome"].get("tasks") or []) if t.get("integration")),
+                key=lambda x: _num(x.get("e2e_delta_pct")),
+                default=None,
+            )
+        ]
+        if i
+    ]
+    unvalidated = [
+        p for p in ladder["kernels"] if not any(t.get("integration") for t in (p["outcome"].get("tasks") or []))
+    ]
+    for phase, integ in validated:
+        delta = _num(integ.get("e2e_delta_pct"))
+        tone = "good" if delta > 0 else "bad"
+        reason = integ.get("reason")
+        head = (
+            "<b>"
+            + _esc(phase["phase"])
+            + " shipped a kernel and measured "
+            + '<span class="'
+            + tone
+            + '">'
+            + f"{delta:+.2f}%"
+            + "</span> end to end.</b> "
+        )
+        body = (
+            "The run wrote its own candidate (" + _esc(integ.get("candidate")) + "), served it "
+            "against the reference and measured " + _int(integ.get("e2e_throughput_tok_s")) + " tok/s "
+            "-- " + f"{_num(integ.get('isolated_speedup')):.4f}" + "x on the kernel in isolation, "
+            "against a " + f"{_num(integ.get('amdahl_ceiling_pct')):.2f}" + "% ceiling. Accuracy was "
+            "checked rather than assumed: gsm8k "
+            + f"{_num(integ.get('gsm8k_ref')):.2f}"
+            + " -&gt; "
+            + f"{_num(integ.get('gsm8k_cand')):.2f}"
+            + "."
+        )
+        tail = (" The harness recorded this verdict as <em>" + _esc(reason) + "</em>") if reason else ""
+        notes.append(head + body + tail)
+    if unvalidated:
         detail = "; ".join(
-            f"{_esc(p['phase'])} {_num(max((_num(t['amdahl_ceiling_e2e_pct']) for t in (p['outcome'].get('tasks') or []) if t['present']), default=0.0)):+.2f}%"
-            for p in ladder["kernels"]
+            f"{_esc(p['phase'])} {max((_num(t['amdahl_ceiling_e2e_pct']) for t in (p['outcome'].get('tasks') or []) if t['present']), default=0.0):+.2f}%"
+            for p in unvalidated
         )
         notes.append(
-            f"<b>The kernel phases contributed no measured end-to-end throughput.</b> Their "
-            f"best kernels came out at 1.0000x against the reference, so the Amdahl ceiling on "
-            f"an end-to-end gain is {detail}. That is a measured result, not a missing one: the "
-            f"work ran, was benchmarked, and did not beat what was already there."
+            "<b>The other kernel phases contributed no measured end-to-end throughput.</b> No "
+            "candidate they wrote reached an end-to-end A/B, and among the library backends the "
+            "incumbent stayed fastest, so the Amdahl ceiling on any gain is "
+            f"{detail}. That is a measured result, not a missing one: the work ran, was "
+            "benchmarked, and did not beat what was already there."
         )
     if ladder["silent"]:
         notes.append(
