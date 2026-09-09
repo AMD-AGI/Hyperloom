@@ -733,7 +733,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="mock",
         default=None,
-        help="Force the heartbeat-only mock Robustness backend.",
+        help="Force the observation-only mock Robustness backend.",
     )
     opt.add_argument(
         "--robustness-agent",
