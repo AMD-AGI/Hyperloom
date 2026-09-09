@@ -244,10 +244,12 @@ Apply these non-negotiable opportunity rules:
 6. Set world_size to the current serving TP width only when the operator is a
    true collective that needs multiple ranks to compute the correct result.
    Otherwise keep world_size at 1.
-7. When world_size > 1, operator_name must encode the parallelism (for example
-   custom_all_reduce_tp8) because the same collective at different rank counts
-   is a different optimization target. Choose backend aiter for editable
-   all_reduce / reduce_scatter / all_gather sources in aiter.
+7. When world_size > 1, operator_name must end in the rank count (for example
+   custom_all_reduce_tp8). This is validated, not advisory: world_size is not
+   part of the identity that keys the experience store, so without the suffix
+   two rank counts of one collective become the same operator and only one
+   task survives. Choose backend aiter for editable all_reduce /
+   reduce_scatter / all_gather sources in aiter.
 8. A communication operator is a first-class target, not a special case to be
    avoided. Publish it when its own source is editable, or when the dispatch
    layer that selects and configures it is. A candidate row whose

@@ -18,7 +18,10 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_rewrite_controller import dispatcher
-from kernelforge.kernel_rewrite_controller._collective_names import looks_like_multi_rank_operator
+from kernelforge.kernel_rewrite_controller._collective_names import (
+    carries_parallelism_suffix,
+    looks_like_multi_rank_operator,
+)
 from kernelforge.kernel_rewrite_controller.contracts import TASK_STATUS_SKIPPED, TaskContractError
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
@@ -81,10 +84,7 @@ def _published(tmp_path: Path, task_payload: dict, name: str, world_size: int) -
         "ag_gemm",
         "rs_gemm",
         "fused_ar_rmsnorm",
-        # A parallelism suffix says multi-rank on its own.
-        "fused_moe_tp8",
-        # Truncated and misspelled spellings still read as what they are.
-        "allreduc_kernel",
+        # "algather" still carries "gather"; nothing here approximates.
         "algather_v2",
     ],
 )
@@ -106,6 +106,10 @@ def test_a_name_that_reads_as_multi_rank_is_accepted(name: str) -> None:
         # The abbreviations only count as whole words.
         "arange_fill",
         "search_sorted",
+        # A stated rank count says which shard, not that ranks compute the
+        # answer; counting it here would make this test vacuous, because the
+        # suffix is separately mandatory.
+        "fused_moe_tp8",
     ],
 )
 def test_an_ordinary_single_gpu_name_is_not_mistaken_for_one(name: str) -> None:
@@ -119,8 +123,10 @@ def test_either_spelling_of_the_task_can_carry_the_evidence() -> None:
 
 
 def test_several_ranks_on_an_ordinary_operator_are_refused(task_dir: Path, task_payload: dict) -> None:
+    # Carries the mandatory rank count, so only the collective test can refuse
+    # it -- which is the one under test here.
     with pytest.raises(TaskContractError) as excinfo:
-        _parse(task_dir, _as_operator(task_payload, "fused_moe", world_size=8))
+        _parse(task_dir, _as_operator(task_payload, "fused_moe_tp8", world_size=8))
 
     assert "world_size 8" in str(excinfo.value)
     assert "names one" in str(excinfo.value)
@@ -211,3 +217,37 @@ def test_an_empty_mask_is_an_answer_not_a_silence(monkeypatch) -> None:
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
 
     assert dispatcher._visible_gpu_count() == 0
+
+
+# --- the parallelism suffix ---------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["custom_all_reduce_tp8", "moe_ep4_dispatch", "fused_moe_tp2", "arTp16"])
+def test_a_name_stating_its_rank_count_is_accepted(name: str) -> None:
+    assert carries_parallelism_suffix(name) is True
+
+
+@pytest.mark.parametrize("name", ["custom_all_reduce", "all_gather", "fused_moe", "tphint", ""])
+def test_a_name_without_a_rank_count_is_not(name: str) -> None:
+    assert carries_parallelism_suffix(name) is False
+
+
+def test_several_ranks_without_a_rank_count_in_the_name_are_refused(task_dir, task_payload) -> None:
+    """The suffix keys the experience store, so it cannot stay advisory.
+
+    world_size is deliberately outside the identity six-tuple. Left to the
+    prompt, a TP-2 and a TP-8 all-reduce normalise to one operator_id: the
+    scheduler keeps one task per id and drops the other, and both write the
+    same recipe.
+    """
+    with pytest.raises(TaskContractError) as excinfo:
+        _parse(task_dir, _as_operator(task_payload, "custom_all_reduce", world_size=8))
+
+    assert "needs the rank count in the operator name" in str(excinfo.value)
+    assert "_tp8" in str(excinfo.value)
+
+
+def test_the_suffix_is_only_required_of_a_multi_rank_task(task_dir, task_payload) -> None:
+    task = _parse(task_dir, _as_operator(task_payload, "fused_moe"))
+
+    assert task.world_size == 1

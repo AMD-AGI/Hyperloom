@@ -14,13 +14,18 @@ little, while refusing a real collective because it is named unusually costs
 the operator the whole lane. Kernel names are not written to a convention:
 they arrive camel-cased, mangled, abbreviated (``custom_ar``, ``ag_gemm``) and
 sometimes named for their role rather than their collective
-(``EpDispatchCombineOp``). Matching is therefore fuzzy on purpose.
+(``EpDispatchCombineOp``), so a phrase is matched against the name with its
+separators removed and the short forms are matched as whole words.
+
+That same reasoning is why there is no approximate matching here. A misspelled
+or truncated spelling escaping the check costs what any doubtful name costs --
+nothing the run does not settle -- which does not buy a similarity scan with
+two thresholds to tune.
 """
 
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 
 #: Collective vocabulary, compared against the name with its separators
 #: removed, so ``all_reduce``, ``allReduce`` and ``allreduce`` are one entry.
@@ -49,17 +54,16 @@ _PHRASES: tuple[str, ...] = (
 #: means nothing; ``custom_ar`` means an all-reduce.
 _ABBREVIATIONS: frozenset[str] = frozenset({"ar", "ag", "rs", "a2a", "ep", "comm", "dist"})
 
-#: A parallelism suffix is itself evidence of multi-rank intent, and the
-#: analyst prompt already requires one on a multi-rank operator name.
+#: A stated rank count, required of a multi-rank operator name by
+#: :func:`carries_parallelism_suffix`.
+#:
+#: Not evidence of a collective, and deliberately not consulted by
+#: :func:`looks_like_multi_rank_operator`. A suffix says which rank count a
+#: recipe was tuned for, not that ranks are needed to compute the answer --
+#: ``fused_moe_tp8`` is a tensor-parallel shard of ordinary single-GPU work.
+#: Counting it as evidence would make the collective test vacuous, since the
+#: suffix is separately mandatory.
 _PARALLEL_SUFFIX = re.compile(r"^(?:tp|ep|dp|pp|cp|sp)\d+$")
-
-#: Below this length a fuzzy comparison stops discriminating, so short entries
-#: are matched literally or as whole words and never approximately.
-_FUZZY_MIN_LEN = 6
-
-#: Tuned to accept a truncated or misspelled spelling (``allreduc``,
-#: ``algather``) while still rejecting an unrelated word of the same length.
-_FUZZY_RATIO = 0.85
 
 _NORMALISE_DELIMS = re.compile(r"[\W]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -78,20 +82,17 @@ def normalise_kernel_name(name: str) -> str:
     return text.strip("_")
 
 
-def _fuzzy_contains(haystack: str, phrase: str) -> bool:
-    """Whether some window of ``haystack`` reads closely enough like ``phrase``."""
-    if len(phrase) < _FUZZY_MIN_LEN or len(haystack) < _FUZZY_MIN_LEN:
-        return False
-    matcher = SequenceMatcher(None, phrase, "", autojunk=False)
-    # Windows one character either side of the phrase absorb a dropped or an
-    # extra character, which is what most odd spellings amount to.
-    for width in (len(phrase) - 1, len(phrase), len(phrase) + 1):
-        if width < _FUZZY_MIN_LEN or width > len(haystack):
-            continue
-        for start in range(len(haystack) - width + 1):
-            matcher.set_seq2(haystack[start : start + width])
-            if matcher.ratio() >= _FUZZY_RATIO:
-                return True
+def carries_parallelism_suffix(*names: str) -> bool:
+    """Whether any supplied name states the rank count it was tuned for.
+
+    Required rather than encouraged: ``world_size`` is not part of the identity
+    that keys the experience store, so this suffix is the only thing separating
+    one rank count's recipe from another's.
+    """
+    for name in names:
+        tokens = normalise_kernel_name(name).split("_")
+        if any(_PARALLEL_SUFFIX.match(token) for token in tokens):
+            return True
     return False
 
 
@@ -107,17 +108,16 @@ def looks_like_multi_rank_operator(*names: str) -> bool:
         if not normalised:
             continue
         tokens = set(normalised.split("_"))
-        if tokens & _ABBREVIATIONS or any(_PARALLEL_SUFFIX.match(token) for token in tokens):
+        if tokens & _ABBREVIATIONS:
             return True
         squashed = normalised.replace("_", "")
         if any(phrase in squashed for phrase in _PHRASES):
-            return True
-        if any(_fuzzy_contains(squashed, phrase) for phrase in _PHRASES):
             return True
     return False
 
 
 __all__ = [
+    "carries_parallelism_suffix",
     "looks_like_multi_rank_operator",
     "normalise_kernel_name",
 ]
