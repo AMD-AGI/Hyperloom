@@ -41,6 +41,19 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "conftest.py",
 ]
 
+# Ignore only named tool outputs; undeclared files remain safety violations.
+# Exported so tests exercise the exact list used by agent sessions.
+TOOL_OWNED_UNTRACKED_GLOBS = [
+    # rocprof runs below the git root, so cover root and nested directories.
+    ".rocprofv3/*",
+    "*/.rocprofv3/*",
+    "*_results.db",
+    # AITER may create JIT shards during a turn; its configured root always ends
+    # in ``aiter_cache``, regardless of the experiments directory.
+    "aiter_cache/*",
+    "*/aiter_cache/*",
+]
+
 # task_type values that mean "a full source tree, not a self-contained snippet".
 _REPO_TASK_TYPES = {"repository", "image_kernel"}
 
@@ -581,15 +594,7 @@ Make your change(s) now.
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
             # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
             allow_dirty_baseline=True,
-            # A profiler writes where it is run, and it is run here. rocprofv3 drops these two next to the driver; a
-            # session was failed for them rather than for anything it did.
-            ignored_untracked_globs=[
-                # Both entries must reach any depth: the profiler runs in ``run_cwd``, which is the kernel file's
-                # parent (see above), while the guard reports paths relative to the git toplevel.
-                ".rocprofv3/*",
-                "*/.rocprofv3/*",
-                "*_results.db",
-            ],
+            ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
             hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
             mcp_servers=pr_mcp_servers,

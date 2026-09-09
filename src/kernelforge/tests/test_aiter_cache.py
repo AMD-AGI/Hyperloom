@@ -341,6 +341,94 @@ def test_profiler_droppings_do_not_fail_a_session(tmp_path):
         run([]).verify()  # undeclared -> still refused
 
 
+def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
+    """Accept mid-turn JIT shards using the exact tool-owned glob list."""
+    import subprocess
+
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import (
+        WorkspaceGuard,
+        WorkspaceSafetyError,
+    )
+    from kernelforge.orchestrator.agent import TOOL_OWNED_UNTRACKED_GLOBS
+
+    ws = tmp_path / "ws"
+    (ws / "csrc").mkdir(parents=True)
+    (ws / "csrc" / "k.cu").write_text("// kernel\n", encoding="utf-8")
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
+
+    # The exact shapes observed in the campaign that lost the candidate.
+    shard = "forge_experiments/aiter_cache/sources/d7287ba5e00fb3a3529d082a"
+
+    def run(globs):
+        spec = AgentRunSpec(
+            system_prompt="",
+            user_prompt="",
+            cwd=str(ws),
+            target_files=[str(ws / "csrc" / "k.cu")],
+            ignored_untracked_globs=list(globs),
+        )
+        guard = WorkspaceGuard(spec, dirty_baseline_default=True)
+        guard.prepare()
+        (ws / shard / "flydsl_cache").mkdir(parents=True, exist_ok=True)
+        (ws / shard / ".forge_cache_owner.json").write_text("{}", encoding="utf-8")
+        (ws / shard / "flydsl_cache" / "launch_1b1a70825d5869240ee77e954dd460a0").write_text("", encoding="utf-8")
+        return guard
+
+    run(TOOL_OWNED_UNTRACKED_GLOBS).verify()  # declared -> passes
+
+    subprocess.run(["git", "clean", "-fdq"], cwd=ws, capture_output=True)
+    with pytest.raises(WorkspaceSafetyError, match="new non-ignored files"):
+        run([]).verify()  # undeclared -> still refused
+
+
+def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
+    """Tool-owned globs do not permit unrelated untracked files."""
+    import subprocess
+
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import (
+        WorkspaceGuard,
+        WorkspaceSafetyError,
+    )
+    from kernelforge.orchestrator.agent import TOOL_OWNED_UNTRACKED_GLOBS
+
+    ws = tmp_path / "ws"
+    (ws / "csrc").mkdir(parents=True)
+    (ws / "csrc" / "k.cu").write_text("// kernel\n", encoding="utf-8")
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(cmd, cwd=ws, check=True, capture_output=True)
+
+    spec = AgentRunSpec(
+        system_prompt="",
+        user_prompt="",
+        cwd=str(ws),
+        target_files=[str(ws / "csrc" / "k.cu")],
+        ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
+    )
+    guard = WorkspaceGuard(spec, dirty_baseline_default=True)
+    guard.prepare()
+    (ws / "forge_experiments" / "aiter_cache").mkdir(parents=True, exist_ok=True)
+    (ws / "forge_experiments" / "aiter_cache" / "shard.json").write_text("{}", encoding="utf-8")
+    (ws / "smuggled_notes.txt").write_text("not the framework's", encoding="utf-8")
+
+    with pytest.raises(WorkspaceSafetyError, match="smuggled_notes.txt"):
+        guard.verify()
+
+
 def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
     """The guard reports paths from the git toplevel; the profiler runs deeper."""
     import subprocess
