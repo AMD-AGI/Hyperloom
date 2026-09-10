@@ -304,11 +304,6 @@ def next_forge_attempt_dir(session_dir: Path, macro_cycle: int) -> Path:
     return forge_attempt_dir(session_dir, macro_cycle, highest + 1)
 
 
-def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
-    """Return the handoff directory for one Forge macro cycle."""
-    return forge_cycle_dir(session_dir, macro_cycle) / "handoff"
-
-
 def competitor_target_json(session_dir: Path) -> Path:
     """``<sd>/competitor_target.json`` — LLM-authored competitor target numbers (each per-concurrency entry carries its own source)."""
     return Path(session_dir) / "competitor_target.json"
@@ -498,7 +493,6 @@ __all__ = [
     "patches_dir",
     "failure_evidence_path",
     "forge_cycle_dir",
-    "forge_handoff_dir",
     "enablement_dir",
     "enablement_round_dir",
     "reports_dir",
