@@ -1422,7 +1422,13 @@ class KvMetricsRecorder:
             "sample_source": "aiperf_server_metrics" if adopted else "watchdog_scrape",
             "aiperf_server_metrics_path": adopted,
             "url": self._poller.url,
-            "available": self._poller.available,
+            # Whether this round obtained readings at all, by whichever collector -- not whether the watchdog's own
+            # poller reached the endpoint. Once aiperf's records are adopted the poller may legitimately never succeed
+            # (it backs off to a minute, and on a containerised round the engine's port need not be reachable from
+            # where the watchdog runs) while aiperf, in there with it, collects the whole round. Reporting the poller's
+            # view alone put ``available: false`` on an artifact carrying 1656 samples, and the breakdown folds this
+            # field into a session-level "no round ever reached the endpoint".
+            "available": True if adopted else self._poller.available,
             "aborted": bool(aborted),
             "scope": self._scope,
             "capacity_tokens": self._capacity_tokens,

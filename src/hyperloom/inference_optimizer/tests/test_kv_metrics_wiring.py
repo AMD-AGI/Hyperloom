@@ -834,6 +834,55 @@ def test_eval_rows_survive_the_aiperf_adoption(tmp_path):
     assert payload["sample_source"] == "aiperf_server_metrics"
 
 
+def test_adopted_rows_make_the_round_available_whatever_the_poller_saw(tmp_path):
+    """``available`` answers "did this round get readings", not "did our poller".
+
+    On a containerised AgentX round the engine's port need not be reachable from
+    where the watchdog runs, and the poller backs off to a minute besides. A live
+    round produced `available: false` on an artifact carrying 1656 aiperf samples,
+    which the breakdown then folds into a session-level "no round ever reached the
+    endpoint".
+    """
+    base = 1_789_048_708_000_000_000
+    _write_server_metrics(tmp_path, [_slim_record(ts_ns=base, usage=0.5, retracts=0)])
+
+    class _NeverReached:
+        url = "http://127.0.0.1:8888/metrics"
+        available = False
+
+        def sample(self):
+            return None
+
+    rec = KvMetricsRecorder(
+        poller=_NeverReached(),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    payload = rec.summary()
+
+    assert payload["sample_source"] == "aiperf_server_metrics"
+    assert payload["available"] is True
+    assert payload["sample_count"] == 1
+
+
+def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
+    """No export and a poller that gave up: the honest answer is still false."""
+
+    class _GaveUp:
+        url = "http://127.0.0.1:8888/metrics"
+        available = False
+
+        def sample(self):
+            return None
+
+    rec = KvMetricsRecorder(poller=_GaveUp(), output_path=str(tmp_path / KV_ARTIFACT_NAME), min_interval_sec=0)
+    rec.tick(1.0)
+    payload = rec.summary()
+
+    assert payload["available"] is False
+    assert payload["sample_count"] == 0
+
+
 def test_an_unstamped_aiperf_record_is_boot_not_measured(tmp_path):
     """aiperf's baseline capture carries no phase, and it is not measured data.
 
