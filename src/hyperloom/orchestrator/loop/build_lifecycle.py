@@ -38,16 +38,14 @@ class BuildLifecycleCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
-        """Enqueue a ``targeted_build`` row (idempotent by novelty key).
-
-        Pre-generates the task_id so that ``attempt_root`` can be derived before the
-        row is written, giving the executor a stable path without a post-create update.
-        """
+        """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""
         from ..enablement.runtime.targeted_build import _resolve_budget_sec
 
+        # The default attempt_root derives from the task_id, so the id is minted
+        # here rather than by the insert: the params must carry the path they name.
         task_id = uuid.uuid4().hex
-        # Fill attempt_root in the params so consumers never need to re-derive it.
-        action = dataclasses.replace(action, attempt_root=str(enablement_builds_dir(self.session_dir, task_id)))
+        if not action.attempt_root:
+            action = dataclasses.replace(action, attempt_root=str(enablement_builds_dir(self.session_dir, task_id)))
         ttl = int(_resolve_budget_sec(action)) + _LEASE_GRACE_SEC
         task, _existing = await self.tasks.create_or_return_existing(
             kind=_BUILD_KIND,

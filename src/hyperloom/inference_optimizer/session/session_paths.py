@@ -10,8 +10,8 @@ from pathlib import Path
 
 from ..protocol.action_surfaces import ACTION_CATALOGUE
 
-# Segment-name constants — single source of truth for the two report sub-trees that
-# are also referenced as glob literals in session_package.py.
+# Named because session_package.py needs them as glob strings, where a Path helper
+# does not fit.
 BRINGUP_SEGMENT: str = "bringup"
 ENABLEMENT_SEGMENT: str = "enablement"
 

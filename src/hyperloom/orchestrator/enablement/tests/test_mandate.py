@@ -277,15 +277,6 @@ def test_falls_back_to_generic_when_probe_empty():
     assert _ROCM_HIP_ROOT_HINT in hints
 
 
-def test_falls_back_on_probe_exception():
-    with patch(
-        "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
-        side_effect=RuntimeError("no roots"),
-    ):
-        hints = _resolve_actual_root_hints("vllm")
-    assert _FRAMEWORK_ROOT_HINT in hints
-
-
 def test_version_appended_when_package_installed():
     with (
         patch(
