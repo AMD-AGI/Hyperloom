@@ -450,6 +450,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Expert-parallel size for MoE; mirror of ``EP`` env var. Resume-safe.
     ep: int = 0
     precision: str = ""
+    # Optional path to a MAIDAS projection .xlsx (or dir). When set and a row
+    # matches the run config, the roofline ceiling is sourced from MAIDAS.
+    maidas_projection_path: str = ""
     # ``framework_version`` — only recipe-snapshot v2 canonical-id member not derivable from other fields; empty => ``unknown_version``.
     framework_version: str = ""
     conc: int = 0
