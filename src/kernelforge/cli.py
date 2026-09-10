@@ -482,13 +482,14 @@ def _assert_lane_session_cwd(*, kernel_path: str, workspace: str, lane_dir: str)
 
 
 # What a lane needs its provider to do, and what a provider that does not do it costs.
+#
+# Refusal is reserved for a guarantee whose absence makes a lane's own
+# measurement meaningless. Every lane compiles a different edit of one kernel,
+# and aiter loads a JIT module by name without checking the binary against the
+# source it was built from, so lanes sharing one build cache measure each
+# other's binaries. Nothing downstream can tell that apart from a real result,
+# which is what makes it a refusal rather than a warning.
 _LANE_PROVIDER_REQUIREMENTS = (
-    (
-        "stop_hooks",
-        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
-        "an edit to the driver, harness or oracle while its session can still "
-        "be saved",
-    ),
     (
         "session_env",
         "apply AgentRunSpec.env to the session it spawns, which is what gives "
@@ -497,14 +498,54 @@ _LANE_PROVIDER_REQUIREMENTS = (
     ),
 )
 
+# Guarantees a lane is better off with and can still run without.
+#
+# ``stop_hooks`` used to be a refusal alongside the requirement above. What it
+# buys a lane is in-session denial: the PreToolUse callbacks refuse an edit to
+# the driver, harness or oracle, and refuse a driver run that skips the shared
+# device lock. A provider that ignores ``AgentRunSpec.hooks`` gets neither.
+#
+# It is an advisory rather than a refusal because a campaign's published
+# numbers do not rest on it. A lane candidate that touches the measurement
+# surface is refused by ``IterationRunner._lane_rejection`` on its patch paths,
+# the canonical driver is re-checked byte-for-byte by
+# ``_validate_driver_integrity`` after the patch applies, and every candidate is
+# re-measured one at a time in the canonical tree -- a lane's own timings never
+# decide a KEEP. Unlocked concurrent benchmarking is caught after the fact too,
+# by the lane teardown's contention report, which voids the round out loud.
+#
+# So the cost of running without it is wasted budget, reported when it happens,
+# rather than a result nobody can distinguish from a real one.
+_LANE_PROVIDER_ADVISORIES = (
+    (
+        "stop_hooks",
+        "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
+        "an edit to the driver, harness or oracle while its session can still "
+        "be saved, and denies a driver run that skips the device lock its "
+        "siblings are queueing on. Without them a lane can lose its whole "
+        "session at the boundary check, and concurrent unlocked benchmarks can "
+        "corrupt their own and their siblings' timings -- the round is voided "
+        "rather than trusted when that happens",
+    ),
+)
+
 
 def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
-    """Refuse concurrent lanes on a provider that cannot keep a lane's promises."""
+    """Refuse concurrent lanes a provider cannot measure, warn about the rest."""
     if lanes < 2:
         return
     from kernelforge.agent_backends.registry import get_agent_provider
 
     capabilities = get_agent_provider(provider).capabilities
+    # Warned before any refusal below, so one re-run is still enough: an
+    # operator who switches to a provider that clears the refusal has already
+    # been told what that provider will and will not do for a lane. Each is
+    # named so a voided round is a known cost of this provider rather than a
+    # mystery found in the logs months later.
+    for name, detail in _LANE_PROVIDER_ADVISORIES:
+        if getattr(capabilities, name, False):
+            continue
+        print(f"  [lanes] WARNING: agent provider {provider!r} does not declare {name}; it cannot {detail}")
     missing = [
         f"{name} (it must {detail})"
         for name, detail in _LANE_PROVIDER_REQUIREMENTS
@@ -722,8 +763,9 @@ def _make_lane_agent_factory(
     "of the round's wall clock, and three is what the three "
     "specialist analyses can be divided into. The partition "
     "returns fewer when the evidence supports fewer. Above 1 "
-    "needs a provider that declares stop_hooks and session_env, "
-    "and is refused on one that does not.",
+    "needs a provider that declares session_env and is refused on "
+    "one that does not; a provider without stop_hooks runs and is "
+    "warned, because it can waste a round but not misreport one.",
 )
 @click.option(
     "--merge-stacking/--no-merge-stacking",
