@@ -53,6 +53,7 @@ from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.task_progress import heartbeat_while_output_flows
 
+
 from ._recorder_trace import trace_recording_skipped
 
 # Re-exported: callers patch these at ``request_handlers.<name>``.
@@ -4602,15 +4603,6 @@ async def run_gemm_tuning_handler(
     """
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            session_dir,
-            payload={**payload, "gemm_tuning_backend": backend},
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("gemm v4 start recording failed", exc_info=True)
 
     if backend == "forge":
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
@@ -4619,16 +4611,6 @@ async def run_gemm_tuning_handler(
     result.setdefault("task_id", payload.get("task_id"))
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            session_dir,
-            payload={**payload, "gemm_tuning_backend": backend},
-            result=result,
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("gemm v4 result recording failed", exc_info=True)
     return result
 
 
@@ -5522,33 +5504,22 @@ async def trace_analyze_handler(
             trace_input=str(trace_input),
             duration_sec=_disc_duration_sec,
         )
-
-        # Record hot-kernel discovery provenance (best-effort).
+        # This run is the only place the build of the reader that produced the
+        # session's hot kernels is in scope. Nothing downstream can recover it,
+        # so it is recorded here even though the rest of the discovery run is
+        # already on the roofline event.
         try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 
-            _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            instrument.record_kernel_discovery(
-                session_dir,
-                source=_disc_tool,
-                status=str(result.get("status") or ""),
-                hot_kernels=_hot if isinstance(_hot, list) else [],
-                scan={
-                    "splitter_mode": steady_state_mode,
-                    "trace_dir": str(trace_input),
-                    "candidates_path": str(result.get("candidates_path") or ""),
-                    "trace_report_path": str(result.get("trace_report_path") or ""),
-                    "analysis_route": _disc_route,
-                },
-                duration_sec=_disc_duration_sec,
-                error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),
-            )
+            tool_versions.record_tool_version(session_dir, tool=_disc_tool)
         except Exception as exc:  # noqa: BLE001
             trace_recording_skipped(
-                "kernel_discovery",
+                "versions",
                 reason="caller raised before the recorder",
+                entity=_disc_tool,
                 error=exc,
             )
+
     return result
 
 
@@ -6718,24 +6689,6 @@ async def integrate_handler(
         if decision == "KEEP":
             result["integration_validation_status"] = "passed"
             result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_kernel_e2e(
-            session_dir,
-            kernel_id=str(kernel_id or ""),
-            integrated=decision == "KEEP",
-            e2e_gain_pct=gain_pct,
-            validated=True if decision == "KEEP" else False,
-            decision=decision,
-            patch_path=str(patch_path or "") or None,
-            target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
-            extra_server_args=extra_args,
-            result=result,
-            validation_tier=str(result.get("validation_tier") or "integrate_e2e"),
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("kernel integrate v4 result recording failed", exc_info=True)
     return result
 
 

@@ -99,12 +99,13 @@ async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_d
         task=_task("conc_sweep"),
     )
 
-    # conc_sweep is NOT in _AUDIT_ACTIONS, so the in-branch record_action_attempt is a no-op recorder, and the tail
-    # also skips it.
+    # conc_sweep is NOT in _AUDIT_ACTIONS, so an audit attempt here could only
+    # ever return on the method's first line. The branch used to make the call
+    # anyway, assembling a rich extras dict that was dropped every time; it has
+    # been removed, and the sweep's skip reason, budget verdict and summary are
+    # recorded on the conc_sweep timeline event instead.
     assert "conc_sweep" not in _AUDIT_ACTIONS
-    assert len(calls) == 1
-    assert calls[0]["action"] == "conc_sweep"
-    assert calls[0]["decision"] == "discarded"
+    assert calls == []
     # No conc_sweep_attempts ledger exists; record_conc_sweep wrote last_conc_sweep.
     assert not hasattr(s, "conc_sweep_attempts")
     assert s.last_conc_sweep.get("status") == "succeeded"
@@ -1942,7 +1943,7 @@ class TestWritebackRequiredAxes:
     @pytest.mark.parametrize("missing_from", ["candidate", "baseline"])
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_cumulative_missing_required_axes_preserves_validation(self, coord, monkeypatch, missing_from, axis):
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         state = coord.shared_state
         candidate = self._candidate()
@@ -1954,7 +1955,7 @@ class TestWritebackRequiredAxes:
         state.gain_per_stack_entry.append(None)
         before = state.to_dict()
         record = Mock()
-        monkeypatch.setattr(instrument, "record_session_validation", record)
+        monkeypatch.setattr(stack_event, "record_validation", record)
 
         coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
 
@@ -1967,7 +1968,7 @@ class TestWritebackRequiredAxes:
     async def test_complete_local_winner_with_missing_baseline_axes_skips_validation(
         self, coord, monkeypatch, lane, axis
     ):
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         state = coord.shared_state
         state.baseline_perf.pop(axis)
@@ -1976,7 +1977,7 @@ class TestWritebackRequiredAxes:
         prior_entry = deepcopy(state.optimization_stack[0])
         record = Mock()
         watermark = AsyncMock()
-        monkeypatch.setattr(instrument, "record_session_validation", record)
+        monkeypatch.setattr(stack_event, "record_validation", record)
         monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
         outcome = wb._PromoteOutcome()
@@ -2039,7 +2040,7 @@ class TestWritebackRequiredAxes:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     async def test_incomparable_resume_revalidation_remains_pending(self, coord, monkeypatch, axis):
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         state = coord.shared_state
         state.resume_pending_revalidation = True
@@ -2050,7 +2051,7 @@ class TestWritebackRequiredAxes:
         candidate = self._candidate()
         candidate.pop(axis)
         record = Mock()
-        monkeypatch.setattr(instrument, "record_session_validation", record)
+        monkeypatch.setattr(stack_event, "record_validation", record)
 
         await coord.writeback._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
@@ -2066,7 +2067,7 @@ class TestWritebackRequiredAxes:
         record.assert_not_called()
 
     def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         state = coord.shared_state
@@ -2076,7 +2077,7 @@ class TestWritebackRequiredAxes:
             state.current_best.pop(axis)
             candidate.pop(axis)
         record = Mock()
-        monkeypatch.setattr(instrument, "record_session_validation", record)
+        monkeypatch.setattr(stack_event, "record_validation", record)
 
         lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
         coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")

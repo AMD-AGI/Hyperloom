@@ -53,46 +53,70 @@ def test_delta_block_table():
 # ---- render ----
 
 
+def _event(*snapshots: dict | None) -> dict:
+    """A ``roofline`` timeline event holding one action per snapshot."""
+    return {
+        "type": "roofline",
+        "ext": {"actions": [{"outcome": {"snapshot": snap}} for snap in snapshots]},
+    }
+
+
 def test_render_absent():
     assert rl.render({}).skipped is True
 
 
-def test_render_empty_list():
-    assert rl.render({"roofline": []}).skipped is True
+def test_render_skips_a_session_whose_roofline_never_ran():
+    assert rl.render({"timeline": []}).skipped is True
 
 
-def test_render_non_list():
-    assert rl.render({"roofline": "bad"}).skipped is True
+def test_render_skips_a_run_that_recorded_no_snapshot():
+    """A failed roofline action closes with no conclusion to compare."""
+    assert rl.render({"timeline": [_event(None)]}).skipped is True
 
 
-def test_render_full_entry():
+def test_render_reports_the_baseline_top_kernel():
     bd = {
-        "roofline": [
-            {
-                "source_path": "/x/final.json",
-                "mode": "vs_baseline",
-                "baseline": {
-                    "snapshot_id": "b",
+        "timeline": [
+            _event(
+                {
+                    "snapshot_id": 1,
+                    "compute_pct": 60,
                     "top_kernel": {
                         "name": "attn",
                         "gpu_pct": 50,
                         "efficiency_pct": 60,
                         "bound_type": "memory",
                     },
-                },
-                "latest": {"snapshot_id": "l"},
-                "delta": {"compute_pct": 3},
-            },
+                }
+            )
         ]
     }
     sec = rl.render(bd)
+
     assert sec.skipped is False
-    assert "final.json files surfaced: 1" in sec.key_facts[0]
+    assert "Roofline snapshots recorded: 1" in sec.key_facts[0]
     assert "attn" in " ".join(sec.key_facts)
-    assert "Roofline #1" in sec.markdown_block
+    assert "**Baseline**" in sec.markdown_block
 
 
-def test_render_skips_non_dict_entries():
-    sec = rl.render({"roofline": ["bad", 1]})
+def test_render_compares_the_first_snapshot_against_the_last():
+    """Two snapshots are a before/after, and the delta is what moved."""
+    bd = {
+        "timeline": [
+            _event({"snapshot_id": 1, "compute_pct": 60.0, "idle_pct": 30.0, "comm_pct": 10.0}),
+            _event({"snapshot_id": 2, "compute_pct": 72.0, "idle_pct": 18.0, "comm_pct": 10.0}),
+        ]
+    }
+    sec = rl.render(bd)
+
     assert sec.skipped is False
-    assert "surfaced: 2" in sec.key_facts[0]
+    assert "Roofline snapshots recorded: 2" in sec.key_facts[0]
+    assert "before_after" in sec.key_facts[0]
+    assert "**Delta**" in sec.markdown_block
+
+
+def test_render_gathers_snapshots_from_every_action_on_one_event():
+    """A phase can dispatch roofline twice in a cycle; both land on one event."""
+    bd = {"timeline": [_event({"snapshot_id": 1}, {"snapshot_id": 2})]}
+
+    assert "recorded: 2" in rl.render(bd).key_facts[0]

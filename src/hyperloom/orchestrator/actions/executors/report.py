@@ -1087,18 +1087,6 @@ def _write_kernel_opt_summary(
         out_path = output_dir / "kernel_optimization_summary.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
-        # Mirror the summary into the breakdown recorder.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_singleton_section(
-                session_dir,
-                "kernel_optimization_summary",
-                summary,
-                producer="coordinator",
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never break the report
-            log.debug("kernel_optimization_summary capture failed", exc_info=True)
         return out_path
     except Exception as exc:  # noqa: BLE001
         log.warning(

@@ -11,6 +11,25 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+    GATE_ACCURACY,
+    GATE_KEEP_THRESHOLD,
+    GATE_PARAMS_PRESENT,
+    GATE_PROMOTION,
+    GATE_QUALITY,
+    GATE_TPUT_VALID,
+    SKIP_BEST_CONFIG_EMPTY,
+    SKIP_CONFIDENCE_BELOW_THRESHOLD,
+    SKIP_DISABLED_BY_FLAG,
+    SKIP_ENQUEUE_FAILED,
+    SKIP_FRAMEWORK_ROOT_MISSING,
+    SKIP_KERNEL_PREPARATION_FAILED,
+    SKIP_KERNEL_ROOT_MISSING,
+    SKIP_NO_WARM_START_RECIPE,
+    SKIP_RECIPE_NOT_REPLAYABLE,
+    SKIP_RECIPE_READ_FAILED,
+    SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+)
 
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
@@ -33,6 +52,22 @@ log = _logging.getLogger(__name__)
 # The ``parse_eval_results`` reasons that prove an eval produced output: a results file it could not decode, and one
 # carrying no metric it recognises.
 _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
+
+# The phase segment of the warm-replay event id. A literal rather than a read of
+# ``state.phase``: the id must be identical at the tick that enqueues the replay
+# and the later tick that harvests it, and the replay only ever runs in PRELUDE.
+_WARM_REPLAY_EVENT_PHASE = "prelude"
+
+# The donor's identity, carried flattened on the outcome and re-nested for the
+# event. Listed once so the two directions cannot drift apart.
+_WARM_REPLAY_DONOR_FIELDS = (
+    "donor_canonical_id",
+    "donor_model",
+    "donor_session_id",
+    "donor_family_tags",
+    "donor_gain_pct",
+    "donor_breakdown_link",
+)
 
 
 def _merge_named_current_recipe_configs(
@@ -1050,13 +1085,13 @@ class PreludePhase(PhaseHandler):
         """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior."""
         state = self.shared_state
         if not getattr(self, "_warm_replay_enabled", True):
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "disabled_by_flag",
-            }
-            # Flip the one-shot guard even on disabled-skip so a resume without --no-warm-replay can't retroactively
-            # trigger a replay against the operator's original intent.
-            state.warm_replay_attempted = True
+            # The guard is flipped even on a disabled-skip so a resume without
+            # --no-warm-replay cannot retroactively trigger a replay against
+            # the operator's original intent.
+            self._skip_warm_replay(
+                code=SKIP_DISABLED_BY_FLAG,
+                outcome={"status": "skipped", "reason": "disabled_by_flag"},
+            )
             return None
         if state.warm_replay_attempted:
             # Resume safety: a previous boot already enqueued/ran the replay.
@@ -1069,44 +1104,55 @@ class PreludePhase(PhaseHandler):
         if current_remote:
             recipe_metadata = warm.get("recipe") or {}
             if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": str(recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"),
-                    "view_source": str(recipe_metadata.get("view_source") or ""),
-                }
-                state.save(self.session_dir)
+                self._skip_warm_replay(
+                    code=SKIP_RECIPE_NOT_REPLAYABLE,
+                    outcome={
+                        "status": "skipped",
+                        "reason": str(
+                            recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"
+                        ),
+                        "view_source": str(recipe_metadata.get("view_source") or ""),
+                    },
+                    details={"view_source": str(recipe_metadata.get("view_source") or "")},
+                )
                 return None
             try:
                 sdk_replay = self._read_current_recipe_replay()
             except Exception as exc:  # noqa: BLE001 — current replay fails closed
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
-                }
-                state.save(self.session_dir)
+                self._skip_warm_replay(
+                    code=SKIP_RECIPE_READ_FAILED,
+                    outcome={
+                        "status": "skipped",
+                        "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
+                    },
+                    details={"error_class": type(exc).__name__},
+                )
                 return None
             if patch_entries := list(sdk_replay.get("patches") or []):
                 # Every overlay names the checkout it was measured on.
                 recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
                 if not all(recorded):
-                    state.warm_replay_attempted = True
-                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason="framework_apply_root_missing",
-                        root_kind="framework",
-                        roots=[root for root in recorded if root],
+                    known = [root for root in recorded if root]
+                    self._skip_warm_replay(
+                        code=SKIP_FRAMEWORK_ROOT_MISSING,
+                        outcome=self._warm_replay_root_skip_outcome(
+                            reason="framework_apply_root_missing",
+                            root_kind="framework",
+                            roots=known,
+                        ),
+                        details={"root_kind": "framework", "recorded_roots": known},
                     )
-                    state.save(self.session_dir)
                     return None
                 if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
-                    state.warm_replay_attempted = True
-                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason="framework_apply_root_absent",
-                        root_kind="framework",
-                        roots=absent,
+                    self._skip_warm_replay(
+                        code=SKIP_FRAMEWORK_ROOT_MISSING,
+                        outcome=self._warm_replay_root_skip_outcome(
+                            reason="framework_apply_root_absent",
+                            root_kind="framework",
+                            roots=absent,
+                        ),
+                        details={"root_kind": "framework", "recorded_roots": list(absent)},
                     )
-                    state.save(self.session_dir)
                     return None
         try:
             kernel = (
@@ -1144,19 +1190,26 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
-                "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
-                "rollback": rollback,
-            }
-            state.save(self.session_dir)
+            self._skip_warm_replay(
+                code=SKIP_KERNEL_PREPARATION_FAILED,
+                outcome={
+                    "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
+                    "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
+                    "rollback": rollback,
+                },
+                details={"kernel_status": str(kernel.get("status") or "")},
+            )
             return None
         kernel_root_block = self._warm_replay_kernel_root_block_reason(state)
         if kernel_root_block is not None:
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = kernel_root_block
-            state.save(self.session_dir)
+            self._skip_warm_replay(
+                code=SKIP_KERNEL_ROOT_MISSING,
+                outcome=kernel_root_block,
+                details={
+                    "root_kind": "kernel",
+                    "recorded_roots": list(kernel_root_block.get("kernel_patch_recorded_roots") or []),
+                },
+            )
             return None
         kernel_pending = list(kernel.get("pending") or []) if kernel.get("status") == "prepared" else []
         kernel_applied = list(kernel.get("applied") or []) if kernel_pending else []
@@ -1172,11 +1225,10 @@ class PreludePhase(PhaseHandler):
         if not warm and not kernel_pending:
             if str(kernel.get("status") or "") in {"empty", "loaded"}:
                 state.warm_replay_pending = {}
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "no_warm_start_recipe",
-            }
-            state.warm_replay_attempted = True
+            self._skip_warm_replay(
+                code=SKIP_NO_WARM_START_RECIPE,
+                outcome={"status": "skipped", "reason": "no_warm_start_recipe"},
+            )
             return None
         # tier/conf stamped at T0.
         tier = str(warm.get("tier") or "").strip()
@@ -1249,16 +1301,19 @@ class PreludePhase(PhaseHandler):
                 config_tier = "suppressed_low_confidence"
                 donor_expected_gain = 0.0
             else:
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
-                    "warm_recipe_tier": tier,
-                    "warm_recipe_conf": conf,
-                    "config_donor_tier": config_tier,
-                    "config_source": config_source,
-                    **donor_metadata,
-                }
-                state.warm_replay_attempted = True
+                self._skip_warm_replay(
+                    code=SKIP_CONFIDENCE_BELOW_THRESHOLD,
+                    outcome={
+                        "status": "skipped",
+                        "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
+                        "warm_recipe_tier": tier,
+                        "warm_recipe_conf": conf,
+                        "config_donor_tier": config_tier,
+                        "config_source": config_source,
+                        **donor_metadata,
+                    },
+                    details={"observed": replay_conf, "threshold": min_conf},
+                )
                 return None
         # Current records derive fail-closed mode from their exact SDK timeline.
         wsc_patches = (
@@ -1300,24 +1355,29 @@ class PreludePhase(PhaseHandler):
                     }
                     if hasattr(state, "set_stop_reason"):
                         state.set_stop_reason("warm_replay_rollback_failed")
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                    reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
-                    root_kind="framework",
-                    roots=unusable or [root for root in recorded_roots if root],
-                    rollback=rollback,
+                blocking_roots = unusable or [root for root in recorded_roots if root]
+                self._skip_warm_replay(
+                    code=SKIP_FRAMEWORK_ROOT_MISSING,
+                    outcome=self._warm_replay_root_skip_outcome(
+                        reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
+                        root_kind="framework",
+                        roots=blocking_roots,
+                        rollback=rollback,
+                    ),
+                    details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
                 )
-                state.save(self.session_dir)
                 return None
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "best_config_empty",
-                "warm_recipe_tier": tier,
-                "warm_recipe_conf": conf,
-                **donor_metadata,
-            }
-            state.warm_replay_attempted = True
+            self._skip_warm_replay(
+                code=SKIP_BEST_CONFIG_EMPTY,
+                outcome={
+                    "status": "skipped",
+                    "reason": "best_config_empty",
+                    "warm_recipe_tier": tier,
+                    "warm_recipe_conf": conf,
+                    **donor_metadata,
+                },
+            )
             return None
         # Historical gain anchor: donor's expected gain, else MAX gain across attrs.sessions[], else the flat
         # gain_pct.
@@ -1395,18 +1455,24 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
-                "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
-                "target_workload_shape": {
-                    "conc": int(getattr(state, "conc", 0) or 0),
-                    "isl": int(getattr(state, "isl", 0) or 0),
-                    "osl": int(getattr(state, "osl", 0) or 0),
-                },
-                "rollback": rollback,
+            target_workload_shape = {
+                "conc": int(getattr(state, "conc", 0) or 0),
+                "isl": int(getattr(state, "isl", 0) or 0),
+                "osl": int(getattr(state, "osl", 0) or 0),
             }
-            state.save(self.session_dir)
+            self._skip_warm_replay(
+                code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+                outcome={
+                    "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
+                    "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
+                    "target_workload_shape": target_workload_shape,
+                    "rollback": rollback,
+                },
+                details={
+                    "error_class": type(exc).__name__,
+                    "target_workload_shape": dict(target_workload_shape),
+                },
+            )
             return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
@@ -1461,13 +1527,15 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("enqueue_failed" if rollback.get("ok") else "rollback_failed"),
-                "reason": f"warm replay enqueue failed: {type(exc).__name__}",
-                "rollback": rollback,
-            }
-            state.save(self.session_dir)
+            self._skip_warm_replay(
+                code=SKIP_ENQUEUE_FAILED,
+                outcome={
+                    "status": ("enqueue_failed" if rollback.get("ok") else "rollback_failed"),
+                    "reason": f"warm replay enqueue failed: {type(exc).__name__}",
+                    "rollback": rollback,
+                },
+                details={"error_class": type(exc).__name__},
+            )
             raise
         if not was_existing:
             log.info(
@@ -1506,6 +1574,10 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.debug("combined warm replay pending save failed", exc_info=True)
+        # Opened after the outcome is persisted so the request block reads the
+        # donor identity the outcome just stamped, and a session killed between
+        # the two is recovered as an in-flight replay of a named recipe.
+        self._open_warm_replay_timeline(task=task, session_baseline_tput=state.baseline_tput)
         return task
 
     def _resolve_promoted_recipe_checkout(
@@ -1655,9 +1727,17 @@ class PreludePhase(PhaseHandler):
         result: dict[str, Any],
         task: "Task | None",
         outcome: dict[str, Any],
+        recorder: Any = None,
     ) -> bool:
-        """Rollback or persist a terminal recovery failure without clearing it."""
+        """Rollback or persist a terminal recovery failure without clearing it.
+
+        The rollback is recorded here rather than at each of the six branches
+        that unwind a rejected replay: what a reader needs is whether the trees
+        came back. Returns ``True`` when every tree was restored.
+        """
         rollback = self._rollback_combined_warm(result, task)
+        if recorder is not None:
+            recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
         if rollback.get("ok"):
             return True
         outcome["status"] = "rollback_failed"
@@ -1700,8 +1780,20 @@ class PreludePhase(PhaseHandler):
         result: dict,
         task: "Task | None",
         outcome: dict,
+        recorder: Any = None,
     ) -> bool:
-        """Whether a replayed config may be promoted on accuracy grounds."""
+        """Whether a replayed config may be promoted on accuracy grounds.
+
+        Every replay is judged, not just the ones touching a knob known to be
+        risky: a KB recipe is evidence from another session, so reproducing its
+        throughput says nothing about whether it still computes correctly here.
+        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent:
+        a score of 0.0 means the model answered nothing, while no score at all
+        means no evidence either way.
+
+        Returns ``True`` when promotion may proceed; ``False`` when the caller
+        must stop (the rollback and outcome have already been recorded).
+        """
         from ..actions.executors._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             accuracy_meets_floor,
@@ -1752,14 +1844,39 @@ class PreludePhase(PhaseHandler):
                 baseline_accuracy,
                 eval_error or "no reason recorded",
             )
+            if recorder is not None:
+                # Ran but could not rule, which is a verdict of its own:
+                # recording a pass here would claim evidence there is none.
+                recorder.record_gate(
+                    GATE_ACCURACY,
+                    passed=None,
+                    reason=eval_error or "no accuracy verdict",
+                    threshold=baseline_accuracy if baseline_accuracy > 0 else None,
+                )
             return True
         if baseline_accuracy > 0:
             if accuracy_passed(baseline_accuracy, float(measured)):
+                if recorder is not None:
+                    recorder.record_gate(
+                        GATE_ACCURACY,
+                        passed=True,
+                        reason="no regression against the baseline reference",
+                        observed=measured,
+                        threshold=baseline_accuracy,
+                    )
                 return True
             reason = (
                 f"accuracy regression on the replayed config (baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
             )
         elif accuracy_meets_floor(measured, DEFAULT_ENABLEMENT_ACCURACY_FLOOR):
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_ACCURACY,
+                    passed=True,
+                    reason="clears the absolute floor with no baseline to compare against",
+                    observed=measured,
+                    threshold=DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+                )
             return True
         else:
             reason = (
@@ -1767,7 +1884,15 @@ class PreludePhase(PhaseHandler):
                 f"(replay {measured:.4f}, "
                 f"floor {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:.2f})"
             )
-        if not self._require_combined_warm_rollback(result, task, outcome):
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_ACCURACY,
+                passed=False,
+                reason=reason,
+                observed=measured,
+                threshold=baseline_accuracy if baseline_accuracy > 0 else DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            )
+        if not self._require_combined_warm_rollback(result, task, outcome, recorder):
             return False
         outcome["status"] = "accuracy_failed"
         outcome["reason"] = reason
@@ -1776,13 +1901,184 @@ class PreludePhase(PhaseHandler):
         log.info("warm-replay REJECTED on accuracy: %s", reason)
         return False
 
+    # ---- warm-replay timeline recording ----------------------------------
+    # The replay spans two ticks: one enqueues the task, a later one harvests it.
+    # The event id derives from persisted state alone, so the promote seam
+    # rebinds to the event the enqueue seam opened rather than holding a
+    # recorder across a boundary a resume does not survive.
+
+    def _warm_replay_donor(self, source: Mapping[str, Any]) -> dict[str, Any]:
+        """Lift the donor block out of a flat ``donor_*`` mapping; empty when not borrowed."""
+        return {
+            field.removeprefix("donor_"): source[field]
+            for field in _WARM_REPLAY_DONOR_FIELDS
+            if source.get(field) not in (None, "", [])
+        }
+
+    def _open_warm_replay_timeline(self, *, task: "Task | None", session_baseline_tput: Any) -> None:
+        """Open the replay's event at the moment its task is dispatched.
+
+        ``session_baseline_tput`` is kept beside the enqueue anchor so a reader
+        can see the two diverge across a re-baseline.
+        """
+        params = dict(getattr(task, "params", None) or {})
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+                make_warm_replay_recorder,
+            )
+
+            make_warm_replay_recorder(
+                phase=_WARM_REPLAY_EVENT_PHASE,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                task_id=str(getattr(task, "task_id", "") or ""),
+                tier=str(params.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct"),
+                confidence=params.get("warm_recipe_conf"),
+                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+                session_baseline_tput=session_baseline_tput,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+                recipe_suppressed=not str(params.get("config_source") or ""),
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
+            log.debug("warm replay timeline: opening the event failed", exc_info=True)
+
+    def _warm_replay_timeline(self, task: "Task | None" = None):
+        """Rebind to the in-flight replay's event, or ``None`` when one could not be built.
+
+        Absent task params degrade the request block, never the gates and the
+        measurement the promote seam is here to record.
+        """
+        params = dict(getattr(task, "params", None) or {})
+        outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+                make_warm_replay_recorder,
+            )
+
+            return make_warm_replay_recorder(
+                phase=_WARM_REPLAY_EVENT_PHASE,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+                session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+                # Rebinding, not opening: the enqueue seam already put this event
+                # on the timeline, and opening it twice would restate its start.
+                open_event_on_timeline=False,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
+            log.debug("warm replay timeline: rebinding to the event failed", exc_info=True)
+            return None
+
+    def _skip_warm_replay(
+        self,
+        *,
+        code: str,
+        outcome: Mapping[str, Any],
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Settle the one-shot guard for a replay that will not run.
+
+        Every refusal owes the same four things: flip the guard, state the
+        outcome, close the timeline event, and persist. The persist is the one
+        that used to be left out of some branches, and it is what makes the
+        guard mean anything -- a refusal that never reached disk would let the
+        next boot replay against the decision just taken.
+
+        Call this after any rollback or stop-reason the branch also sets, so
+        that one save carries the whole refusal.
+        """
+        state = self.shared_state
+        state.warm_replay_attempted = True
+        state.warm_replay_outcome = dict(outcome)
+        self._record_warm_replay_skip(code=code, outcome=state.warm_replay_outcome, details=details)
+        state.save(self.session_dir)
+
+    def _record_warm_replay_skip(
+        self,
+        *,
+        code: str,
+        outcome: Mapping[str, Any],
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record the event for a replay refused before it ran.
+
+        A skip is a decision, so it closes an event of its own rather than
+        leaving the timeline silent. ``code`` is a ``SKIP_*`` value. The
+        earliest refusals have no identity fields on ``outcome`` yet, and state
+        an empty request rather than an invented one.
+        """
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+                make_warm_replay_recorder,
+            )
+
+            recorder = make_warm_replay_recorder(
+                phase=_WARM_REPLAY_EVENT_PHASE,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                tier=str(outcome.get("warm_recipe_tier") or ""),
+                config_source=str(outcome.get("config_source") or ""),
+                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=outcome.get("expected_gain_pct"),
+                confidence=outcome.get("warm_recipe_conf"),
+            )
+            if recorder is None:
+                return
+            if rollback := (outcome.get("rollback") if isinstance(outcome.get("rollback"), Mapping) else None):
+                recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
+            recorder.finish_skipped(code=code, outcome=outcome, details=details)
+        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
+            log.debug("warm replay timeline: recording the skip failed", exc_info=True)
+
     def _promote_warm_replay(
         self,
         result: dict,
         *,
         task: "Task | None" = None,
     ) -> None:
-        """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result."""
+        """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
+
+        Closes the replay's timeline event on whichever outcome the settling
+        below persisted. Done here, around the whole arc, rather than at each
+        of the ten branches that can end it: a branch that forgot to close
+        would leave a settled replay reading as still in flight.
+        """
+        recorder = self._warm_replay_timeline(task)
+        try:
+            self._settle_warm_replay(result, task=task, recorder=recorder)
+        except BaseException as exc:
+            if recorder is not None:
+                recorder.finish_crashed(exc)
+            raise
+        if recorder is not None:
+            recorder.finish(self.shared_state.warm_replay_outcome)
+
+    def _settle_warm_replay(
+        self,
+        result: dict,
+        *,
+        task: "Task | None",
+        recorder: Any,
+    ) -> None:
+        """Settle a combined Recipe+Kernel replay onto an outcome.
+
+        Measured uplift promotes the warm config onto ``optimization_stack`` and
+        ``current_best``. Failures (including a failed required patch timeline)
+        roll back both halves fail-closed, set an outcome status, and never
+        propagate. ``task`` may be ``None`` (degraded path). Each gate writes
+        its own verdict onto ``recorder`` as it rules, which is what lets a
+        reader see why the arc ended.
+        """
         state = self.shared_state
         outcome = dict(state.warm_replay_outcome or {})
         # Stamped once up front so every terminal branch below carries it; each of them re-persists ``outcome`` before
@@ -1790,7 +2086,7 @@ class PreludePhase(PhaseHandler):
         outcome["settled_at"] = now_iso(timespec="seconds")
         expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
         if not isinstance(result, dict):
-            if not self._require_combined_warm_rollback({}, task, outcome):
+            if not self._require_combined_warm_rollback({}, task, outcome, recorder):
                 return
             outcome["status"] = "failed"
             outcome["reason"] = "non_dict_result"
@@ -1799,7 +2095,7 @@ class PreludePhase(PhaseHandler):
             return
         status = str(result.get("status") or "")
         if status != "succeeded":
-            if not self._require_combined_warm_rollback(result, task, outcome):
+            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
                 return
             outcome["status"] = "failed"
             outcome["error_class"] = str(result.get("error_class") or "")
@@ -1837,26 +2133,61 @@ class PreludePhase(PhaseHandler):
         if baseline_tput <= 0:
             baseline_tput = float(state.baseline_tput or 0.0)
         if single_round_tput <= 0 or baseline_tput <= 0:
-            if not self._require_combined_warm_rollback(result, task, outcome):
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_TPUT_VALID,
+                    passed=False,
+                    reason=f"invalid_tput tput={single_round_tput} baseline={baseline_tput}",
+                    observed=single_round_tput,
+                    threshold=baseline_tput,
+                )
+            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
                 return
             outcome["status"] = "failed"
             outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
-        # Recorded before the gates below, not after the KEEP ruling: a replay rejected on quality or accuracy still
-        # produced a real measurement, and reading what it scored is how a gate rejection is told apart from a replay
-        # that never got that far.
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_TPUT_VALID,
+                passed=True,
+                reason="the replay and its anchor both measured",
+                observed=single_round_tput,
+                threshold=baseline_tput,
+            )
+        # Recorded before the gates below, not after the KEEP ruling: a replay
+        # rejected on quality or accuracy still produced a real measurement, and
+        # reading what it scored is how a gate rejection is told apart from a
+        # replay that never got that far.
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
-        # warm_replay is an optimization candidate, so it must clear the image-quality gate against the baseline
-        # reference before promotion.
+        if recorder is not None:
+            # The anchor goes on record here, where it is used: back-solving it
+            # from the gain is exact only until a re-baseline moves the number
+            # the replay was never judged against.
+            recorder.record_measurement(
+                before_tput=baseline_tput,
+                after_tput=tput,
+                gain_pct=measured_gain,
+                hot_tput=hot_tput,
+                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+            )
+        # warm_replay is an optimization candidate, so it must clear the
+        # image-quality gate against the baseline reference before promotion.
+        # ``require=False`` keeps a missing/skipped gate non-blocking.
         from ..actions.executors._accuracy_gate import quality_gate_passed
 
         qg = result.get("quality_gate")
         if qg is not None and not quality_gate_passed(qg, require=False):
-            if not self._require_combined_warm_rollback(result, task, outcome):
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_QUALITY,
+                    passed=False,
+                    reason="image-quality gate failed vs baseline reference",
+                )
+            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
                 return
             outcome["status"] = "quality_failed"
             outcome["reason"] = "image-quality gate failed vs baseline reference"
@@ -1865,12 +2196,39 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
-        # A replayed config lands on ``current_best``, so every later measurement in the session is taken against it.
-        if not self._warm_replay_accuracy_ok(result, task, outcome):
+        # A replayed config lands on ``current_best``, so every later
+        # measurement in the session is taken against it. Promoting on
+        # throughput alone selects for garbage: breaking the numerics is itself
+        # a large throughput win.
+        if recorder is not None and qg is not None:
+            # Only recorded when a gate existed to rule, which is how a reader
+            # tells "passed quality" from "quality did not apply".
+            recorder.record_gate(GATE_QUALITY, passed=True, reason="no quality regression vs baseline reference")
+        if not self._warm_replay_accuracy_ok(result, task, outcome, recorder):
             return
+        if recorder is not None:
+            # Restated now that the gate has read the scores onto the outcome,
+            # so the score sits beside the reference it was judged against.
+            recorder.record_measurement(
+                before_tput=baseline_tput,
+                after_tput=tput,
+                gain_pct=measured_gain,
+                hot_tput=hot_tput,
+                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+                accuracy=outcome.get("replay_accuracy"),
+                baseline_accuracy=outcome.get("baseline_accuracy"),
+                eval_ran=outcome.get("eval_ran"),
+            )
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
         combined_current_contract = bool(decision_params.get("combined_current_contract"))
+        if recorder is not None:
+            # Recorded before the keep ruling, so a replay that measured and
+            # lost still states what lost.
+            recorder.record_applied(
+                extra_server_args=str(decision_params.get("extra_server_args") or ""),
+                extra_envs=dict(decision_params.get("extra_envs") or {}),
+            )
         keep_threshold = 0.0
         if combined_current_contract:
             raw_threshold = decision_params.get("combined_keep_threshold_pct")
@@ -1887,8 +2245,24 @@ class PreludePhase(PhaseHandler):
         # Local legacy replay keeps any positive gain.
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
         outcome["keep_threshold_pct"] = keep_threshold
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_KEEP_THRESHOLD,
+                passed=reproduced,
+                reason=(
+                    "cleared the approved kernel replay threshold"
+                    if combined_current_contract
+                    else "legacy local replay keeps any positive gain"
+                ),
+                observed=measured_gain,
+                threshold=keep_threshold,
+            )
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce
+            # Advisory, and deliberately not a gate row: falling short never
+            # rejects a replay that cleared the keep threshold, and a
+            # ``passed=False`` row would make ``blocked_by`` name it as the
+            # reason an arc that actually succeeded ended.
             if measured_gain > 0 and measured_gain < historical_bar:
                 outcome["below_historical_reproduce_pct"] = True
                 outcome["historical_reproduce_bar_pct"] = round(
@@ -1903,10 +2277,17 @@ class PreludePhase(PhaseHandler):
                 task,
             )
             if not promoted:
+                if recorder is not None:
+                    recorder.record_gate(
+                        GATE_PROMOTION,
+                        passed=False,
+                        reason=str(promotion.get("failure") or "validated Recipe checkout promotion failed"),
+                    )
                 if not self._require_combined_warm_rollback(
                     result,
                     task,
                     outcome,
+                    recorder,
                 ):
                     return
                 outcome["status"] = "promotion_failed"
@@ -1947,8 +2328,20 @@ class PreludePhase(PhaseHandler):
                     and str(item.get("patch_file") or "")
                 )
             ]
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_PROMOTION,
+                    passed=True,
+                    reason="every patched checkout the replay measured on was promoted",
+                )
             has_kernel = bool(params.get("warm_kernel_plan"))
             if not warm_args and not warm_envs and not replayed_patch_refs and not has_kernel:
+                if recorder is not None:
+                    recorder.record_gate(
+                        GATE_PARAMS_PRESENT,
+                        passed=False,
+                        reason="task params carry no args, no envs, no patch and no kernel plan to replay",
+                    )
                 outcome["status"] = "reproduced_but_no_params"
                 outcome["reason"] = "task.params missing extra_server_args/extra_envs and no warm patch was applied"
                 log.warning(
@@ -1959,6 +2352,12 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_PARAMS_PRESENT,
+                    passed=True,
+                    reason="the replay carries params that can be pushed onto the stack",
+                )
             outcome["status"] = "reproduced"
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
@@ -1978,6 +2377,8 @@ class PreludePhase(PhaseHandler):
                 entry_extra["framework_source_root"] = promoted_checkout
             kernel_outcome = self._book_combined_kernel_keep(result, task)
             outcome["kernel"] = dict(kernel_outcome)
+            if recorder is not None:
+                recorder.record_applied(kernel=kernel_outcome)
             if kernel_outcome.get("kept"):
                 entry_extra["kernel_replay"] = {
                     "validation": "combined_recipe_kernel",
@@ -2036,8 +2437,17 @@ class PreludePhase(PhaseHandler):
                 },
                 entry_extra=entry_extra,
             )
-            # Publish the reproduced verdict now that the stack entry exists but before the cumulative update (the one
-            # step below that can raise and is swallowed by the caller).
+            if recorder is not None:
+                recorder.record_promotion(
+                    promoted_checkout=promoted_checkout,
+                    replayed_patch_refs=replayed_patch_refs,
+                    stack_entry=entry_extra,
+                )
+            # Publish the reproduced verdict now that the stack entry exists but
+            # before the cumulative update (the one step below that can raise and
+            # is swallowed by the caller). Placed after the lift on purpose --
+            # if the lift raises, the outcome stays in_flight and both the stack
+            # and the post-ruling mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput, result)
@@ -2069,7 +2479,7 @@ class PreludePhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay journal append failed")
         else:
-            if not self._require_combined_warm_rollback(result, task, outcome):
+            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
                 return
             kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
             kernel_outcome = {
@@ -2080,6 +2490,8 @@ class PreludePhase(PhaseHandler):
                 "validation": "combined_recipe_kernel",
             }
             outcome["kernel"] = dict(kernel_outcome)
+            if recorder is not None:
+                recorder.record_applied(kernel=kernel_outcome)
             outcome["status"] = "drift"
             outcome["reason"] = f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
             log.info(

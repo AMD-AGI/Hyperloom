@@ -1637,7 +1637,12 @@ class TestKernelE2EMeasurementPromotion:
     async def test_promotion_recorder_keeps_gain_objective_separate_from_output(
         self, coord, monkeypatch, explicit_output
     ):
-        from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+            ROUTE_FORGE,
+            assemble_kernel_ext,
+        )
+        from hyperloom.inference_optimizer.session.session_binding import session_scope
 
         if explicit_output:
             monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
@@ -1660,21 +1665,17 @@ class TestKernelE2EMeasurementPromotion:
             "new_tput": 150.0,
             "candidates": [{"tuner": "dense", "env": {"GEMM_CONFIG": "/candidate.csv"}}],
         }
-        await phase._handle_gemm_tuning_result(result)
-        kind = "gemm_tuning"
+        with session_scope(coord.session_dir):
+            phase._open_kernel_timeline(route=ROUTE_FORGE, route_reason="unit", from_phase="")
+            await phase._handle_gemm_tuning_result(result)
+            recorder = phase._kernel_timeline()
+            ext, _status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
 
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
-        parts = assemble_parts(coord.session_dir)
-        operation = next(row for row in parts["operations"] if row["kind"] == kind)
-        measurements = {
-            row["name"]: row for row in parts["measurements"] if row["measurement_id"] in operation["measurement_refs"]
-        }
-        assert measurements["baseline_throughput"]["value"] == 100.0
-        assert measurements["baseline_throughput"]["metric_basis"] == "output"
-        assert measurements["final_throughput"]["value"] == 150.0
-        assert measurements["final_throughput"]["metric_basis"] == "output"
-        assert measurements["e2e_gain_pct"]["value"] == pytest.approx(gain)
-        assert measurements["e2e_gain_pct"]["metric_basis"] == ("output" if explicit_output else "intvty")
+        # The gain is graded on the session's own axis, and the run says which
+        # one, so an interactivity gain is never read back as an output gain.
+        [run] = ext["forge"]["lanes"]["gemm_tuning_runs"]
+        assert run["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):

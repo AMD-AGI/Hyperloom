@@ -840,6 +840,16 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     assert reasons.get("v_risky") == "accuracy_unavailable"
     # Post-baseline accuracy failure reverts the variant but never halts the run.
     assert state.stop_reason == ""
+    # The arc is carried gate by gate: it cleared the gain bar and died on
+    # accuracy. The outcome alone cannot say which of the two ended it.
+    row = next(v for v in out["per_variant_outcomes"] if v["variant_name"] == "v_risky")
+    assert [(g["gate"], g["passed"]) for g in row["gates"]] == [
+        ("keep_threshold", True),
+        ("accuracy", False),
+    ]
+    assert row["gates"][1]["reason"] == "accuracy_unavailable"
+    # Nothing was adopted, so nothing stands behind an adoption.
+    assert row["validation_basis"] == ""
 
 
 @pytest.mark.asyncio
@@ -1056,6 +1066,74 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
     tested = out["explore_search_update"]["tested"][fp]
     assert tested["outcome"] == "KEEP"
     assert tested["base_tput"] == 800.0
+
+
+@pytest.mark.asyncio
+async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
+    sub_agent_runner,
+    tmp_path,
+):
+    """The round's own verdicts travel out with its numbers.
+
+    Write-back records these on the framework timeline verbatim, because it
+    cannot honestly rebuild them: an outcome of ``REVERT`` does not name the
+    gate that ended the arc, and the stack a variant launched on has already
+    moved on to whatever KEEP'd after it.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-verdict-carry"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_keep",
+                    "extra_args": "--keep-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-verdict-carry",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    row = next(v for v in res.result["per_variant_outcomes"] if v["variant_name"] == "v_keep")
+    assert row["outcome"] == "KEEP"
+    # The gain bar ruled, and says what it ruled against.
+    keep_gate = next(g for g in row["gates"] if g["gate"] == "keep_threshold")
+    assert keep_gate["passed"] is True
+    assert keep_gate["observed"] == pytest.approx(5.0, abs=0.01)
+    # This session has no baseline accuracy, so nothing gated the change and
+    # the KEEP rests on throughput alone. The accuracy gate is absent rather
+    # than reported as having passed.
+    assert [g["gate"] for g in row["gates"]] == ["keep_threshold"]
+    assert row["validation_basis"] == "keep_verdict_unscored"
+    # The stack it launched on: the anchor plus a base config still empty,
+    # since nothing has KEPT before it.
+    assert row["measured_against"]["throughput"] == 800.0
+    assert row["measured_against"]["extra_server_args"] == ""
 
 
 @pytest.mark.asyncio

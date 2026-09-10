@@ -109,7 +109,7 @@ class TestExecutor:
         )
         monkeypatch.setattr(
             "hyperloom.inference_optimizer.breakdown.build",
-            lambda *a, **k: {"warnings": ["w1"]},
+            lambda *a, **k: {"metadata": {"warnings": ["w1"]}},
         )
         ctx = _ctx(extra={"session_dir": str(session_dir)})
         result = await sb.SessionBreakdownExecutor()(ctx)

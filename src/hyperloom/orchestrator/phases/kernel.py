@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from ..actions.executors._workload_envs import geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
@@ -64,13 +65,12 @@ log = _logging.getLogger(__name__)
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
-# How much of the route-level lift must survive the share the per-kernel ledger already claims before the residual is
-# worth recording as its own attempt. 0.1% is measurement noise, and a noise-sized keep in the gain ledger reads as an
-# optimization that never happened.
-_GEAK_RESIDUAL_MIN_RATIO = 1.001
-
-# How many times a session re-runs forge-fusion after it aborted on infrastructure (no git workspace, harness could
-# not be authored).
+# How many times a session re-runs forge-fusion after it aborted on
+# infrastructure (no git workspace, harness could not be authored). Such a run
+# judged nothing, so reporting it as a result would be wrong and it has to stay
+# retryable -- but the causes do not all heal mid-session, and a retry re-runs
+# LLM discovery before failing in the same place. Two is one free recovery from
+# a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
 # One lane ceiling covers both fusion pipelines, so a round can leave targets unfunded.
@@ -146,6 +146,46 @@ def _geak_decline_status(decline_reason: Any) -> str:
     """Map a 2b decline reason to the status left on ``geak_pending``."""
     reason = str(decline_reason or "").strip().lower()
     return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
+
+
+def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cycle: int) -> None:
+    """Mirror one GEAK adoption onto the kernel event as an integrate row.
+
+    GEAK adopts by writing the per-kernel ledger directly rather than through
+    the integrate queue, so without this the timeline holds no gate row for a
+    GEAK adoption at all -- and the basis the gain was measured on, along with
+    whether it could be pinned on this one kernel, lives only on that ledger.
+
+    The integration id is synthesized from the kernel, because the queue that
+    would have minted one was never involved. It keys the row, so it carries
+    no ``:``: that is the fragment key's own separator, and a row whose key
+    contains one is dropped on the way to the event.
+
+    Args:
+        entry (dict[str, Any]): The per-kernel ledger entry just written.
+        kernel_id (str): The kernel the adoption is for.
+        macro_cycle (int): The cycle the adoption settled in.
+    """
+    if not kernel_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+
+        record_integrate_verdict(
+            macro_cycle=macro_cycle,
+            integration_id=f"geak-{kernel_id}",
+            kernel_id=kernel_id,
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            gain_attributed=bool(entry.get("validated", True)),
+            settled_at=str(entry.get("updated_at") or ""),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+        log.debug("kernel timeline: geak integration record failed", exc_info=True)
 
 
 class KernelPhase(PhaseHandler):
@@ -315,6 +355,8 @@ class KernelPhase(PhaseHandler):
             snapshot_id_after=snapshot_id_after,
             task_id=str(getattr(reprofile_task, "task_id", "") or ""),
         )
+        if snapshot_landed:
+            self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
 
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer."""
@@ -341,6 +383,9 @@ class KernelPhase(PhaseHandler):
         self._kernel_timeline_recorder = recorder
         if recorder is None:
             return
+        state = self.shared_state
+        stack = state.optimization_stack if isinstance(getattr(state, "optimization_stack", None), list) else []
+        self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = getattr(state, "last_trace_analyze", None) or {}
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
         try:
@@ -353,6 +398,163 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: begin failed", exc_info=True)
+        else:
+            self._record_kernel_discovered_from_cache(provenance="entry_snapshot")
+
+    def _record_kernel_discovered_from_cache(self, *, provenance: str) -> None:
+        """Record the profiling table the visit inherited or just produced."""
+        recorder = self._kernel_timeline()
+        if recorder is None:
+            return
+        cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        try:
+            recorder.record_discovered_kernels(cached, provenance=provenance)
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: discovered kernels record failed", exc_info=True)
+
+    def _record_kernel_rewrite_controller_timeline(self, result: dict[str, Any]) -> None:
+        """Record settled Controller integrations as Forge kernel rewrites."""
+        integration = result.get("integration")
+        rows = integration.get("results") if isinstance(integration, dict) else None
+        if not isinstance(rows, list):
+            return
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
+                record_backend_versions_and_timeline,
+            )
+
+            cycle = int(result.get("macro_cycle") or getattr(self.shared_state, "macro_cycle", 0) or 0)
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                kernel_id = str(row.get("operator_id") or "")
+                if not kernel_id:
+                    continue
+                status = str(row.get("status") or "unknown").lower()
+                if status == "kept":
+                    decision = "KEEP"
+                elif status.startswith("reverted"):
+                    decision = "REVERT"
+                elif status.startswith("skipped"):
+                    decision = "SKIPPED"
+                else:
+                    decision = "FAILED"
+                attempt_id = f"controller-c{cycle}-{index}"
+                gain_pct = row.get("gain_pct")
+                speedup = (
+                    1.0 + float(gain_pct) / 100.0
+                    if isinstance(gain_pct, (int, float)) and not isinstance(gain_pct, bool)
+                    else None
+                )
+                record_backend_versions_and_timeline(
+                    self.session_dir,
+                    {
+                        "kernel_id": kernel_id,
+                        "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
+                        "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
+                        "status": status,
+                        "attempts": [
+                            {
+                                "attempt_id": attempt_id,
+                                "backend": "forge",
+                                "status": status,
+                                "decision": decision,
+                                "micro_speedup": speedup,
+                                "error": str(row.get("reason") or ""),
+                            }
+                        ],
+                        "verification": {
+                            "best_attempt_id": attempt_id if decision == "KEEP" else "",
+                            "micro_speedup": speedup,
+                        },
+                        "proposal": {"decision": decision},
+                    },
+                )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: Controller rewrite record failed", exc_info=True)
+
+    def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
+        """Record a settled GEMM campaign in the Forge lane."""
+        recorder = self._kernel_timeline()
+        if recorder is None or not isinstance(result, dict):
+            return
+        tuners = result.get("tuners_run")
+        tuner_rows = [row for row in tuners if isinstance(row, dict)] if isinstance(tuners, list) else []
+        shape_capture = result.get("shape_capture")
+        shape_capture = shape_capture if isinstance(shape_capture, dict) else {}
+        shapes_tuned = result.get("shapes_tuned")
+        if shapes_tuned is None and tuner_rows:
+            values = [
+                row.get("improved_shapes")
+                for row in tuner_rows
+                if isinstance(row.get("improved_shapes"), int) and not isinstance(row.get("improved_shapes"), bool)
+            ]
+            shapes_tuned = sum(values) if values else None
+        gain_pct = result.get("gain_pct")
+        best_speedup = result.get("best_speedup")
+        if gain_pct is None and isinstance(best_speedup, (int, float)) and not isinstance(best_speedup, bool):
+            gain_pct = (float(best_speedup) - 1.0) * 100.0
+        workspace = str(result.get("workspace") or "")
+        run_id = str(
+            result.get("task_id")
+            or (Path(workspace).name if workspace else "")
+            or f"gemm-c{int(getattr(self.shared_state, 'macro_cycle', 0) or 0)}"
+        )
+        tuner = str(result.get("tuner") or "")
+        if not tuner and tuner_rows:
+            tuner = ",".join(str(row.get("tuner") or "") for row in tuner_rows if row.get("tuner"))
+        try:
+            recorder.record_gemm_tuning_run(
+                run_id=run_id,
+                status=str(result.get("status") or "unknown"),
+                shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
+                shapes_tuned=shapes_tuned,
+                config_path=str(result.get("tuned_file") or result.get("config_path") or ""),
+                gain_pct=gain_pct,
+                # Set by the e2e validation above, and only when a KEEP was
+                # actually graded; an unvalidated run has no axis to name.
+                graded_objective=str(result.get("graded_objective") or ""),
+                tuner=tuner,
+                micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+                rebench_ref=str(result.get("rebench_ref") or ""),
+                started_at=str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                duration_sec=result.get("duration_sec"),
+                failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+            )
+            backend = str(result.get("backend") or result.get("engine") or "").lower()
+            if backend:
+                tool_versions.record_tool_version(self.session_dir, tool=backend)
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
+
+    def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
+        """Record a settled fusion campaign in the Forge lane."""
+        recorder = self._kernel_timeline()
+        if recorder is None or not isinstance(result, dict):
+            return
+        try:
+            recorder.record_fusion_run(
+                run_id=str(result.get("fusion_run_id") or ""),
+                status=str(result.get("status") or "unknown"),
+                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
+                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                applied=bool(result.get("kept")),
+                gain_pct=result.get("gain_pct"),
+                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+                micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+                rebench_ref=str(result.get("rebench_ref") or result.get("integration_id") or ""),
+                started_at=str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                duration_sec=result.get("duration_sec"),
+                failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+            )
+            tool_versions.record_tool_version(self.session_dir, tool="forge")
+            agent_backend = str(result.get("agent_backend") or "").lower()
+            if agent_backend:
+                tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: fusion record failed", exc_info=True)
 
     def _close_kernel_timeline(self, *, verdict: str = "", exit_reason: str = "") -> None:
         """Close the kernel timeline event when the phase is left."""
@@ -362,6 +564,14 @@ class KernelPhase(PhaseHandler):
         self._kernel_timeline_recorder = None
         state = self.shared_state
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
+        stack_after = [dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)]
+        if len(stack_after) >= len(stack_before):
+            stack_added = stack_after[len(stack_before) :]
+            stack_removed = []
+        else:
+            stack_added = [item for item in stack_after if item not in stack_before]
+            stack_removed = [item for item in stack_before if item not in stack_after]
         try:
             recorder.finish(
                 verdict=verdict,
@@ -369,6 +579,8 @@ class KernelPhase(PhaseHandler):
                 tput_after=current_best.get("tput"),
                 cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
                 stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+                stack_added=stack_added,
+                stack_removed=stack_removed,
             )
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: finish failed", exc_info=True)
@@ -382,27 +594,6 @@ class KernelPhase(PhaseHandler):
             )
             return
         geak_enabled = self._geak_enabled()
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            selected = "geak" if geak_enabled else "kernel_agent_forge"
-            instrument.record_kernel_strategy_selection(
-                self.session_dir,
-                selected_strategy=selected,
-                actual_path=selected,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            )
-            if not geak_enabled:
-                instrument.record_native_kernel_run_start(
-                    self.session_dir,
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    payload={
-                        "kernel_optimizer": str(getattr(self.shared_state, "kernel_optimizer", "") or ""),
-                        "from_phase": from_phase,
-                    },
-                )
-        except Exception:  # noqa: BLE001
-            log.debug("kernel v4 strategy selection recording failed", exc_info=True)
         self._open_kernel_timeline(
             route=ROUTE_GEAK if geak_enabled else ROUTE_FORGE,
             route_reason=f"kernel_optimizer={str(getattr(self.shared_state, 'kernel_optimizer', '') or '')}",
@@ -785,18 +976,6 @@ class KernelPhase(PhaseHandler):
 
         benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
         agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="runner_started",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result={"from_phase": from_phase},
-                status="running",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 start recording failed", exc_info=True)
         cb = state.current_best or {}
         try:
             env_spec = self.build_env_spec()
@@ -1028,31 +1207,25 @@ class KernelPhase(PhaseHandler):
             *,
             recovered_from: str,
             runner_timeout_s: int | None = None,
+            started_at: str = "",
+            duration_sec: float | None = None,
+            kill_timeout_s: int | None = None,
         ) -> None:
+            self._record_geak_delegation_timeline(
+                result,
+                handoff=handoff,
+                started_at=started_at,
+                duration_sec=duration_sec,
+                recovered_from_disk=True,
+                runner_timeout_sec=runner_timeout_s,
+                kill_timeout_sec=kill_timeout_s,
+            )
             state.geak_result = result
-            # Rebench-first: record the recovered win as an UNVALIDATED candidate; the caller enqueues the main-flow
-            # rebench that writes the headline.
+            self._record_geak_measurement(result)
+            # Rebench-first: record the recovered win as an UNVALIDATED candidate;
+            # the caller enqueues the main-flow rebench that writes the headline.
             self._record_geak_candidate(result)
             self._record_geak_kernel_journey(result)
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                instrument.record_geak_operation(
-                    self.session_dir,
-                    stage="runner_result",
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    result={**result, "recovered_from": recovered_from},
-                    status=str(result.get("status") or "unknown"),
-                )
-                instrument.record_geak_operation(
-                    self.session_dir,
-                    stage="candidate",
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    result=result,
-                    status="running",
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("geak recovered v4 result recording failed", exc_info=True)
             evidence = {
                 "status": result.get("status"),
                 "throughput_speedup": result.get("throughput_speedup"),
@@ -1068,23 +1241,32 @@ class KernelPhase(PhaseHandler):
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
-        def _finish_skip(result: dict[str, Any]) -> None:
-            """Record a failed/skipped GEAK entry without retiring a settled candidate."""
+        def _finish_skip(
+            result: dict[str, Any],
+            *,
+            started_at: str = "",
+            duration_sec: float | None = None,
+            runner_timeout_s: int | None = None,
+            kill_timeout_s: int | None = None,
+            record_delegation: bool = True,
+        ) -> None:
+            """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
+
+            A settled AgentX verdict is left standing: a later failure records
+            itself without retiring the candidate that already adjudicated.
+            """
+            if record_delegation:
+                self._record_geak_delegation_timeline(
+                    result,
+                    handoff=handoff,
+                    started_at=started_at,
+                    duration_sec=duration_sec,
+                    runner_timeout_sec=runner_timeout_s,
+                    kill_timeout_sec=kill_timeout_s,
+                )
             prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
             if not (agentx and _geak_rebench.geak_verdict_is_terminal(prev)):
                 state.geak_result = result
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                instrument.record_geak_operation(
-                    self.session_dir,
-                    stage="failed",
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    result=result,
-                    status=str(result.get("status") or "failed"),
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("geak v4 failure recording failed", exc_info=True)
             self._record_phase_entry_evidence(
                 geak={
                     "status": result.get("status"),
@@ -1294,7 +1476,8 @@ class KernelPhase(PhaseHandler):
                         f"report window"
                     ),
                     "runner_timeout_s": runner_timeout,
-                }
+                },
+                runner_timeout_s=runner_timeout,
             )
             return
 
@@ -1368,6 +1551,8 @@ class KernelPhase(PhaseHandler):
                 )
             return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
+        runner_started_at = datetime.now(timezone.utc).isoformat()
+        runner_started_monotonic = time.monotonic()
         try:
             proc = await asyncio.to_thread(_run)
             stderr_tail = (proc.stderr or "")[-2000:]
@@ -1389,6 +1574,9 @@ class KernelPhase(PhaseHandler):
                     recovered,
                     recovered_from="sigterm_flushed_result_json",
                     runner_timeout_s=runner_timeout,
+                    started_at=runner_started_at,
+                    duration_sec=time.monotonic() - runner_started_monotonic,
+                    kill_timeout_s=kill_timeout,
                 )
                 # Rebench-first: enqueue the main-flow rebench (candidate stays pending if a budget cap prevents it
                 # from running).
@@ -1401,12 +1589,22 @@ class KernelPhase(PhaseHandler):
                     "error": (f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved"),
                     "runner_timeout_s": runner_timeout,
                     "kill_timeout_s": kill_timeout,
-                }
+                },
+                started_at=runner_started_at,
+                duration_sec=time.monotonic() - runner_started_monotonic,
+                runner_timeout_s=runner_timeout,
+                kill_timeout_s=kill_timeout,
             )
             return
         except Exception as exc:  # noqa: BLE001
             log.exception("GEAK runner crashed")
-            _finish_skip({"status": "error", "error_class": "runner_crashed", "error": repr(exc)})
+            _finish_skip(
+                {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
+                started_at=runner_started_at,
+                duration_sec=time.monotonic() - runner_started_monotonic,
+                runner_timeout_s=runner_timeout,
+                kill_timeout_s=kill_timeout,
+            )
             return
 
         result: dict[str, Any] = _read_geak_result(result_path)
@@ -1417,7 +1615,12 @@ class KernelPhase(PhaseHandler):
                     "error_class": "no_result_json",
                     "error": (f"runner rc={proc.returncode} produced no parseable result.json at {result_path}"),
                     "stderr_tail": stderr_tail,
-                }
+                    "returncode": proc.returncode,
+                },
+                started_at=runner_started_at,
+                duration_sec=time.monotonic() - runner_started_monotonic,
+                runner_timeout_s=runner_timeout,
+                kill_timeout_s=kill_timeout,
             )
             return
         if agentx and _settled_replay(result):
@@ -1436,19 +1639,16 @@ class KernelPhase(PhaseHandler):
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.
         result.setdefault("returncode", proc.returncode)
+        self._record_geak_delegation_timeline(
+            result,
+            handoff=handoff,
+            started_at=runner_started_at,
+            duration_sec=time.monotonic() - runner_started_monotonic,
+            runner_timeout_sec=runner_timeout,
+            kill_timeout_sec=kill_timeout,
+        )
         state.geak_result = result
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="runner_result",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result=result,
-                status=str(result.get("status") or "unknown"),
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 runner-result recording failed", exc_info=True)
+        self._record_geak_measurement(result)
 
         # Invariant guard: a GEAK run whose baseline ref failed to reproduce ``orchestrator_best_tput_same_config``
         # optimized against a phantom baseline, so its gain is non-comparable — never promote it.
@@ -1468,7 +1668,8 @@ class KernelPhase(PhaseHandler):
                     ),
                     "ref_tput": result.get("ref_tput"),
                     "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
-                }
+                },
+                record_delegation=False,
             )
             return
 
@@ -1476,19 +1677,8 @@ class KernelPhase(PhaseHandler):
         # measured rebench.
         self._record_geak_candidate(result)
         self._record_geak_kernel_journey(result)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="candidate",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result=result,
-                status="running",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 candidate recording failed", exc_info=True)
-        # Enqueue the same-harness config-identity rebench — the ONLY path that writes the headline.
+        # Enqueue the same-harness config-identity rebench — the ONLY path that
+        # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
             await _enqueue_geak_revalidation(reason="geak_e2e_win")
         elif _geak_has_accepted_kernel(result):
@@ -1670,9 +1860,14 @@ class KernelPhase(PhaseHandler):
                 continue
             kept = out[position]
             kept["alias_collapsed"] = True
+            # The collapsed twin's name is the one a reader may hold, so it is
+            # carried on the survivor rather than dropped with the row.
+            aliases = {*(kept.get("aliases") or []), _geak_spec_name(kept), name}
             if geak_is_cand_tag(_geak_spec_name(kept)) and not geak_is_cand_tag(name):
                 row["alias_collapsed"] = True
                 out[position] = row
+                kept = row
+            kept["aliases"] = sorted({a for a in aliases if a and a != _geak_spec_name(kept)})
         return out
 
     @staticmethod
@@ -1749,28 +1944,6 @@ class KernelPhase(PhaseHandler):
                 current_best_tput=float(cb_tput or 0.0),
                 provenance="geak_promote_rejected",
             )
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                rejected_result = dict(result)
-                rejected_result["final_validation"] = {
-                    "decision": "REJECTED",
-                    "reason": "rebench_did_not_beat_current_best",
-                    "measured_tput": measured,
-                    "current_best_tput": float(cb_tput or 0.0),
-                }
-                instrument.record_geak_operation(
-                    self.session_dir,
-                    stage="final_validation_failed",
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    result=rejected_result,
-                    status="failed",
-                    validated=False,
-                    measured_tput=measured,
-                    validation_source="geak_promote_rejected",
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("geak v4 final validation rejection recording failed", exc_info=True)
             return False
 
         base = float(self.shared_state.baseline_tput or 0.0)
@@ -1802,52 +1975,6 @@ class KernelPhase(PhaseHandler):
             )
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="final_validation",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result=result,
-                status="succeeded",
-                validated=True,
-                measured_tput=measured,
-                validation_source="geak_orch_harness",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 final validation recording failed", exc_info=True)
-
-        # The route operation above is diagnostic context and is deliberately excluded from the canonical
-        # optimization-attempt ledger.
-        try:
-            # A journey KEEP is attributable only when the final measurement proved that its overlay was loaded.
-            claimed_delta = self._geak_journey_attributed_delta(result) if overlay_loaded is True else 0.0
-            # Anchor the route attempt where the per-kernel ledger stops, so the two records partition the measured
-            # lift instead of overlapping.
-            residual_before = pre_geak + claimed_delta
-            if base > 0 and pre_geak > 0 and measured > residual_before * _GEAK_RESIDUAL_MIN_RATIO:
-                # Only an ``AITER_CONFIG_*`` env names a GEMM tuning table.
-                is_gemm = any(str(key).upper().startswith("AITER_CONFIG_") for key in dict(parsed_envs or {}))
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                instrument.record_geak_e2e_attempt(
-                    self.session_dir,
-                    kind="gemm_tuning" if is_gemm else "kernel_optimization",
-                    throughput_before=residual_before,
-                    throughput_after=measured,
-                    baseline_tput=base,
-                    # ``local_gain_pct`` is measured against the attempt's own starting point, not the session
-                    # baseline.
-                    gain_pct=(measured - residual_before) / residual_before * 100.0,
-                    attribution_eligible=True,
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    accepted_config=result.get("accepted_config"),
-                    provenance=provenance,
-                    result=result,
-                )
-        except Exception:  # noqa: BLE001
-            log.debug("geak e2e attempt recording failed", exc_info=True)
         return True
 
     @staticmethod
@@ -1880,28 +2007,6 @@ class KernelPhase(PhaseHandler):
         """Return the journey's kernel records, or ``[]`` when unreadable."""
         journey = cls._load_geak_journey(result)
         return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
-
-    @classmethod
-    def _geak_journey_attributed_delta(cls, result: dict[str, Any]) -> float:
-        """Return the tok/s the per-kernel ledger already credits."""
-        delta = 0.0
-        for kernel in cls._geak_journey_kernels(result):
-            e2e = kernel.get("e2e") if isinstance(kernel.get("e2e"), dict) else {}
-            decision = str(e2e.get("decision") or "").upper()
-            base_tput = e2e.get("base_tput")
-            new_tput = e2e.get("new_tput")
-            if (
-                e2e.get("validated") is True
-                and decision in {"KEEP", "ADOPTED"}
-                and isinstance(base_tput, (int, float))
-                and isinstance(new_tput, (int, float))
-                and base_tput > 0
-                and new_tput > 0
-            ):
-                # A regression is never "claimed gain": clamp at 0 so a slower KEEP cannot inflate the route-level
-                # residual.
-                delta += max(0.0, float(new_tput) - float(base_tput))
-        return delta
 
     def _record_geak_adopted_kernels(
         self,
@@ -1988,6 +2093,15 @@ class KernelPhase(PhaseHandler):
                 }
             )
             ledger[kid] = entry
+            # GEAK adopts by writing this ledger directly rather than through
+            # the integrate queue, so without this the kernel timeline holds no
+            # gate row for a GEAK adoption at all -- and the basis the gain was
+            # measured on lives only here.
+            _record_geak_integration(
+                entry,
+                kernel_id=kid,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
         self.shared_state.kernel_integrate_attempts = ledger
         log.info(
             "geak: recorded %d adopted kernel(s) in the per-kernel ledger (overlay_loaded=%r attributable=%r gain=%r)",
@@ -1997,8 +2111,76 @@ class KernelPhase(PhaseHandler):
             rebench_gain if attributable else None,
         )
 
+    def _record_geak_measurement(self, result: dict[str, Any]) -> None:
+        """Record the latency and parity GEAK's harness measured for this run.
+
+        Called where ``geak_result`` is set rather than beside the candidate
+        record, because a run that measured a latency but accepted nothing
+        never reaches the candidate path and would otherwise report none of it.
+
+        Best-effort: a failed record never breaks the phase.
+        """
+        if not isinstance(result, dict) or not result:
+            return
+        recorder = self._kernel_timeline()
+        if recorder is None:
+            return
+        try:
+            recorder.record_geak_measurement(result)
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: geak measurement record failed", exc_info=True)
+
+    def _record_geak_delegation_timeline(
+        self,
+        result: dict[str, Any],
+        *,
+        handoff: dict[str, Any],
+        started_at: str = "",
+        duration_sec: float | None = None,
+        recovered_from_disk: bool = False,
+        runner_timeout_sec: int | None = None,
+        kill_timeout_sec: int | None = None,
+    ) -> None:
+        """Record the delegated GEAK runner's terminal state."""
+        recorder = self._kernel_timeline()
+        if recorder is None:
+            return
+        versions = result.get("versions")
+        versions = versions if isinstance(versions, dict) else {}
+        try:
+            recorder.record_geak_delegation(
+                runner_status=str(result.get("status") or "unknown"),
+                started_at=started_at or str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
+                duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
+                error=str(result.get("error") or ""),
+                returncode=result.get("returncode"),
+                runner_timeout_sec=(
+                    runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+                ),
+                kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
+                exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
+                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
+                report_path=str(result.get("report_path") or ""),
+                versions=versions,
+                recovered_from_disk=recovered_from_disk,
+                stages_reached=result.get("stages_reached"),
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: GEAK delegation record failed", exc_info=True)
+
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
-        """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder."""
+        """Record what GEAK-e2e's ``kernel_journey.json`` says about its run.
+
+        Two facts come out of the file. The attempts themselves go onto the
+        kernel timeline event, which is what the breakdown reads. The tool
+        builds are the other: GEAK reports the build of every tool its run went
+        through, and this journey is the only place they reach the optimizer at
+        all, so they are recorded even though nothing else in the file is.
+
+        Best-effort: a missing or partial file never breaks the phase.
+        """
         journey = self._load_geak_journey(result)
         if not journey:
             return
@@ -2010,83 +2192,18 @@ class KernelPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
                 log.debug("kernel timeline: geak attempts record failed", exc_info=True)
 
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        sdir = self.session_dir
-        commit = str(getattr(self.shared_state, "code_revision", "") or "")
-        # Replay GEAK-e2e's discovery substream so the assembler backfills each kernel's discovery-sourced fields;
-        # GEAK profiles via rocprofv3 (route ``bypass``), ``tool="geak"`` for version provenance.
-        for run in journey.get("discovery_runs") or []:
-            if not isinstance(run, dict):
-                continue
-            try:
-                instrument.record_kernel_discovery(
-                    sdir,
-                    source=str(run.get("source") or "bypass"),
-                    status=str(run.get("status") or "success"),
-                    hot_kernels=list(run.get("hot_kernels") or []),
-                    scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
-                    tool="geak",
-                    route_strategy="geak",
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("geak kernel_journey discovery replay failed", exc_info=True)
-        for k in journey.get("kernels") or []:
-            if not isinstance(k, dict):
-                continue
-            kid = str(k.get("kernel_id") or "")
-            if not kid:
-                continue
-            disp = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
-            try:
-                instrument.record_kernel_dispatch(
-                    sdir,
-                    kernel_id=kid,
-                    dispatched=bool(disp.get("dispatched", True)),
-                    backends=list(disp.get("backends") or []),
-                    skip_reason=str(disp.get("skip_reason") or ""),
-                    orchestration_commit=commit,
-                    task_group=disp.get("task_group"),
-                    route_strategy="geak",
-                )
-                br = k.get("backend_result")
-                if isinstance(br, dict):
-                    instrument.record_kernel_backend_result(
-                        sdir,
-                        br,
-                        route_strategy="geak",
-                    )
-                e2e = k.get("e2e")
-                if isinstance(e2e, dict):
-                    instrument.record_kernel_e2e(
-                        sdir,
-                        kernel_id=kid,
-                        integrated=bool(e2e.get("integrated", False)),
-                        e2e_gain_pct=e2e.get("e2e_gain_pct"),
-                        validated=e2e.get("validated"),
-                        decision=str(e2e.get("decision") or ""),
-                        patch_path=e2e.get("patch_path"),
-                        target_file=e2e.get("target_file"),
-                        extra_server_args=str(e2e.get("extra_server_args") or ""),
-                        result=e2e,
-                        route_strategy="geak",
-                        # Replaying must land on the reading it originally recorded, not count itself as a fresh one.
-                        occurrence=e2e.get("occurrence"),
-                    )
-            except Exception:  # noqa: BLE001
-                log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
                 continue
             try:
-                instrument.record_tool_version(
-                    sdir,
+                tool_versions.record_tool_version(
+                    self.session_dir,
                     tool=str(tool),
                     root=str(meta.get("root_dir") or "") or None,
                     version=str(meta.get("version") or meta.get("commit") or "") or None,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: geak tool version record failed", exc_info=True)
 
     def _reject_geak_kernel_journey(
         self,
@@ -2099,10 +2216,9 @@ class KernelPhase(PhaseHandler):
     ) -> None:
         """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
 
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        # Named on the class, not through ``self``: Coordinator does not delegate this method, so callers bind it with
-        # a Coordinator as ``self`` and an attribute lookup there would not find the helper.
+        # Named on the class, not through ``self``: Coordinator does not
+        # delegate this method, so callers bind it with a Coordinator as
+        # ``self`` and an attribute lookup there would not find the helper.
         for kernel in KernelPhase._geak_journey_kernels(result):
             kernel_id = str(kernel.get("kernel_id") or "")
             e2e = kernel.get("e2e")
@@ -2121,30 +2237,6 @@ class KernelPhase(PhaseHandler):
                     "rejection_reason": rejection_reason,
                 }
             )
-            try:
-                instrument.record_kernel_e2e(
-                    self.session_dir,
-                    kernel_id=kernel_id,
-                    integrated=False,
-                    e2e_gain_pct=None,
-                    validated=False,
-                    decision="REVERT",
-                    # Same route as the KEEP that this withdraws.
-                    route_strategy="geak",
-                    patch_path=e2e.get("patch_path"),
-                    target_file=e2e.get("target_file"),
-                    extra_server_args=str(e2e.get("extra_server_args") or ""),
-                    result=evidence,
-                    # This is a second look at a kernel that was already kept, and ``evidence`` still carries the
-                    # original integrate's identity.
-                    occurrence="revalidation",
-                )
-            except Exception:  # noqa: BLE001
-                log.debug(
-                    "geak kernel_journey rejection replay failed for %s",
-                    kernel_id,
-                    exc_info=True,
-                )
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""
@@ -2896,21 +2988,7 @@ class KernelPhase(PhaseHandler):
             # (decision/micro_decision/...) do not reach the recorded entry on their own -- only the normal exit
             # re-syncs it.
             self._replace_latest_gemm_tuning_attempt(result)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_gemm_tuning_operation(
-                self.session_dir,
-                payload={
-                    "task_id": str(result.get("task_id") or "kernel_entry_gemm_tuning"),
-                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                },
-                result=result,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                graded_objective=result.get("graded_objective"),
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("gemm v4 finalized-result recording failed", exc_info=True)
+        self._record_gemm_tuning_timeline(result)
         self.shared_state.save(self.session_dir)
 
     def _journal_gemm_tuning_keep(
@@ -3695,6 +3773,7 @@ class KernelPhase(PhaseHandler):
                     "reverted_count": 0,
                     "skipped_count": 0,
                 }
+        self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
         # The summary rides a ``response`` message the inbox dumps raw once.
@@ -3834,6 +3913,8 @@ class KernelPhase(PhaseHandler):
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
             pass
+        if isinstance(result, dict):
+            self._record_fusion_timeline(result)
         try:
             await self.bus.append_and_seq(
                 Message.new(
