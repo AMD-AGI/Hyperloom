@@ -15,6 +15,7 @@ from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.coerce import to_int as _to_int
+from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
@@ -126,11 +127,20 @@ _HOST_DEFAULT_MODELS: dict[str, str] = {"api.deepseek.com": _DEEPSEEK_MODEL}
 _ANTHROPIC_SIDE_KEYS: tuple[str, ...] = ("ANTHROPIC_BASE_URL", *ANTHROPIC_CREDENTIAL_ENV_ORDER)
 _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
+# A managed gateway carries the credential itself, so it configures the Anthropic side without naming a key.
+ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
+# The two agent CLIs that can drive this repository's agentic roles.
+AGENT_BACKEND_CLAUDE = "claude"
+AGENT_BACKEND_CODEX = "codex"
+
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
-    """True when an Anthropic-side endpoint or key is configured."""
+    """True when an Anthropic-side endpoint, key or managed gateway is configured."""
     source = env if env is not None else os.environ
-    return any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS)
+    if any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS):
+        return True
+    return any(is_truthy(source.get(name)) for name in ANTHROPIC_MANAGED_GATEWAY_ENVS)
 
 
 def has_openai_side(env: Mapping[str, str] | None = None) -> bool:
@@ -147,6 +157,24 @@ def is_anthropic_only(env: Mapping[str, str] | None = None) -> bool:
 def is_openai_only(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side is the only configured provider."""
     return has_openai_side(env) and not has_anthropic_side(env)
+
+
+def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the agent backend this environment's credentials point at.
+
+    One rule for the whole repository: the configured side decides, and Claude
+    wins whenever both sides -- or neither -- are configured. An OpenAI-only
+    deployment holds no Anthropic credential, so the Claude runtime starts and
+    immediately fails to authenticate; Codex is the only one that can run
+    there. "Neither configured" still resolves to Claude, because a runtime
+    logged in by other means carries no credential this can see, and that
+    runtime's own preflight is what reports a genuine authentication failure.
+
+    Callers that also need to know whether a backend is *installed* rank this
+    answer above SDK availability rather than below it -- see
+    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`.
+    """
+    return AGENT_BACKEND_CODEX if is_openai_only(env) else AGENT_BACKEND_CLAUDE
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -994,7 +1022,10 @@ async def astream_chat_completion_text(
 
 
 __all__ = [
+    "AGENT_BACKEND_CLAUDE",
+    "AGENT_BACKEND_CODEX",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
+    "ANTHROPIC_MANAGED_GATEWAY_ENVS",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
@@ -1037,6 +1068,7 @@ __all__ = [
     "is_openai_only",
     "openai_client_kwargs",
     "parse_custom_headers",
+    "preferred_agent_backend",
     "provider_model_defaults",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",

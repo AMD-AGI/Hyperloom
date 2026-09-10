@@ -98,9 +98,9 @@ async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_
     monkeypatch.delenv("LLM_MODEL", raising=False)
     config = Config.discover()
 
-    # The OpenAI side is filled too, and it is checked first.
-    assert config.llm_provider == "openai"
-    assert config.llm_base_url == "https://api.deepseek.com/v1"
+    # Normalization fills both sides, and a dual-configured deployment prefers Claude.
+    assert config.llm_provider == "anthropic"
+    assert config.llm_base_url == "https://api.deepseek.com/anthropic"
     assert config.llm_api_key == "deepseek-token"
     assert config.llm_model == "deepseek-v4-pro"
 
@@ -184,7 +184,8 @@ async def test_config_discover_does_not_treat_gateway_key_as_official_openai(mon
 
     assert config.llm_base_url == ""
     assert config.llm_api_key == ""
-    assert config.llm_provider == "openai"
+    # A gateway key configures neither side, and an unconfigured deployment reports Claude's.
+    assert config.llm_provider == "anthropic"
 
 
 async def _async_value(value):

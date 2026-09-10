@@ -10,13 +10,15 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from hyperloom.common.env import env_bool, env_int
 from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CLAUDE,
     CLAUDE_OAUTH_TOKEN_ENV,
     anthropic_synthesizable_key,
     deepseek_compat_env,
+    preferred_agent_backend,
 )
 
 from .sources.local_probe import _OTHER_PROCESS_PATTERNS, _SERVER_PROCESS_PATTERNS
@@ -267,9 +269,8 @@ def _provider_env() -> dict[str, str]:
     return env
 
 
-def _discover_llm_credentials() -> tuple[str, str, str]:
-    """Pick up LLM credentials already in the Claw sandbox environment."""
-    env = _provider_env()
+def _openai_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] | None:
+    """Resolve the OpenAI-side RCA credential, or ``None`` when that side carries no key."""
     openai_base = env.get("OPENAI_BASE_URL", "").strip()
     openai_key = env.get("OPENAI_API_KEY", "").strip()
     if openai_key:
@@ -277,7 +278,11 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     gateway_key = env.get("LLM_API_KEY", "").strip() or env.get("LLM_GATEWAY_KEY", "").strip()
     if gateway_key and openai_base:
         return openai_base, gateway_key, "openai"
+    return None
 
+
+def _anthropic_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] | None:
+    """Resolve the Anthropic-side RCA credential, or ``None`` when that side carries no key."""
     # The synthesizable subset, which is exactly the set that may be handed on as an api_key: a subscription token is
     # spent by the CLI and never travels as a key, so it is excluded here by construction rather than by omission.
     anthropic_key = anthropic_synthesizable_key(env)
@@ -291,8 +296,30 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     # api_key; the provider alone selects it.
     if env.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
         return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
+    return None
 
-    return "", "", "openai"
+
+def _discover_llm_credentials() -> tuple[str, str, str]:
+    """Pick up LLM credentials already in the Claw sandbox environment.
+
+    The configured side is asked first and the other one is the fall-through, so
+    a dual-configured deployment runs RCA on the same provider as every other
+    role. This used to ask the OpenAI side first unconditionally -- the one
+    place in the repository that preferred Codex -- which put RCA on GPT while
+    the rest of the session ran on Claude.
+    """
+    env = _provider_env()
+    if preferred_agent_backend(env) == AGENT_BACKEND_CLAUDE:
+        resolvers = (_anthropic_rca_credentials, _openai_rca_credentials)
+        unconfigured = ("", "", "anthropic")
+    else:
+        resolvers = (_openai_rca_credentials, _anthropic_rca_credentials)
+        unconfigured = ("", "", "openai")
+    for resolve in resolvers:
+        discovered = resolve(env)
+        if discovered is not None:
+            return discovered
+    return unconfigured
 
 
 def _discover_llm_model(provider: str) -> str:

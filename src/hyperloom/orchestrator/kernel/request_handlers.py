@@ -4725,13 +4725,11 @@ def _resolve_forge_agent(
     """Resolve the Forge agent backend and model as one decision.
 
     Shared by forge-fusion and the rewrite lane, which uses the same model
-    ladder via :func:`llm_config.resolve_forge_llm_model`. The canonical
-    provider-shape predicates decide the default backend: OpenAI-only uses
-    Codex, while Anthropic-only and dual-configured deployments use Claude, the
-    established default for this agentic role. A valid explicit
-    ``agent_backend`` or ``llm_model`` in the request wins. With no configured
-    provider, the request fails instead of silently spawning an unauthenticated
-    Claude process.
+    ladder via :func:`llm_config.resolve_forge_llm_model`. A valid explicit
+    ``agent_backend`` or ``llm_model`` in the request wins; otherwise
+    :func:`llm_config.preferred_agent_backend` decides, so this role cannot
+    disagree with the specialists, the TraceLens runner or the Forge registry
+    about which backend a box is configured for.
 
     Model id precedence (after the backend is chosen) is owned by
     :func:`llm_config.resolve_forge_llm_model`.
@@ -4744,32 +4742,16 @@ def _resolve_forge_agent(
         The canonical ``(agent_backend, llm_model)`` pair.
 
     Raises:
-        RuntimeError: If neither provider side is configured.
         ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
     """
     source = env if env is not None else os.environ
-    openai_only = llm_config.is_openai_only(source)
-    anthropic_only = llm_config.is_anthropic_only(source)
-    has_openai = llm_config.has_openai_side(source)
-    has_anthropic = llm_config.has_anthropic_side(source)
-    if not has_openai and not has_anthropic:
-        raise RuntimeError("no LLM provider is configured for forge")
-
+    known_backends = {llm_config.AGENT_BACKEND_CLAUDE, llm_config.AGENT_BACKEND_CODEX}
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
-    if explicit_backend and explicit_backend not in {"claude", "codex"}:
+    if explicit_backend and explicit_backend not in known_backends:
         raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
 
-    if explicit_backend:
-        agent_backend = explicit_backend
-    elif openai_only:
-        agent_backend = "codex"
-    elif anthropic_only:
-        agent_backend = "claude"
-    else:
-        # Dual-configured deployments retain this agentic role's Claude default.
-        agent_backend = "claude"
-
-    default_model = DEFAULT_CODEX_MODEL if agent_backend == "codex" else DEFAULT_CLAUDE_MODEL
+    agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
+    default_model = DEFAULT_CODEX_MODEL if agent_backend == llm_config.AGENT_BACKEND_CODEX else DEFAULT_CLAUDE_MODEL
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,
@@ -4888,12 +4870,12 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     gpu = str(payload.get("gpu") or "0").strip()
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
-    except (RuntimeError, ValueError) as exc:
+    except ValueError as exc:
         return {
             "status": "failed",
             "backend": "forge",
             "engine": "forge_fusion",
-            "error_class": ("llm_provider_unconfigured" if isinstance(exc, RuntimeError) else "invalid_agent_backend"),
+            "error_class": "invalid_agent_backend",
             "error": str(exc),
             "decision": "REVERT",
             "kept": False,

@@ -15,20 +15,21 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.roles.codex_agent as codex_agent
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.orchestrator.trace import parse_usage as pu
 
-AGENT_BACKEND_CLAUDE = sp.AGENT_BACKEND_CLAUDE
-AGENT_BACKEND_CODEX = sp.AGENT_BACKEND_CODEX
+AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
+AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX
 SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
 SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
 SpecialistSubprocessDispatcher = sp.SpecialistSubprocessDispatcher
 _build_specialist_env = sp._build_specialist_env
 resolve_codex_executable = sp.resolve_codex_executable
-resolve_specialist_agent_backend = sp.resolve_specialist_agent_backend
+preferred_agent_backend = llm_config.preferred_agent_backend
 
 # Every provider-shape signal ``llm_config`` consults, so a test can pin an exact deployment shape instead of
 # inheriting the developer's own gateway.
@@ -248,7 +249,7 @@ def test_agent_backend_follows_the_credential_shape(
 ) -> None:
     """Only the shape that cannot drive Claude at all is redirected to Codex."""
     _pin_provider_env(monkeypatch, shape)
-    assert resolve_specialist_agent_backend() == expected, shape_name
+    assert preferred_agent_backend() == expected, shape_name
 
 
 def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:

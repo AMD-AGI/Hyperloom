@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +16,11 @@ import pytest
 from click.testing import CliRunner
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
+    AgentProviderUnavailableError,
     AgentRunResult,
     AgentRuntimeConfig,
 )
+from kernelforge.agent_backends.registry import get_agent_provider, register_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 from kernelforge.fusion import discover as discover_module
@@ -63,6 +66,23 @@ def clean_agent_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture
+def installed_sdks():
+    """Pin which optional Agent SDKs the registry reports as installed."""
+    originals = {name: get_agent_provider(name) for name in ("claude", "codex")}
+
+    def _pin(*, claude: bool, codex: bool) -> None:
+        for name, installed in (("claude", claude), ("codex", codex)):
+            register_agent_provider(
+                replace(originals[name], availability=lambda installed=installed: installed),
+                replace_existing=True,
+            )
+
+    yield _pin
+    for provider in originals.values():
+        register_agent_provider(provider, replace_existing=True)
+
+
 @pytest.mark.parametrize(
     ("env", "expected"),
     [
@@ -93,29 +113,61 @@ def clean_agent_env(monkeypatch):
 )
 def test_auto_agent_backend_uses_credential_shape(
     clean_agent_env,
+    installed_sdks,
     monkeypatch,
     env,
     expected,
 ):
+    # Both extras present, so the credential shape is the only key left to decide.
+    installed_sdks(claude=True, codex=True)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     provider, _model = _resolve_agent_choice("auto", None)
     assert provider == expected
 
 
-def test_auto_agent_backend_rejects_unconfigured_environment(clean_agent_env):
-    with pytest.raises(click.UsageError, match="no OpenAI or Anthropic credentials"):
+def test_auto_agent_backend_keeps_the_configured_side_over_an_installed_sdk(
+    clean_agent_env,
+    installed_sdks,
+    monkeypatch,
+):
+    """Credentials outrank the SDK -- the pair that used to be the other way round."""
+    installed_sdks(claude=True, codex=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "codex"
+
+
+def test_auto_agent_backend_falls_back_to_the_installed_sdk(clean_agent_env, installed_sdks):
+    """With no credential to read, the installed runtime decides."""
+    installed_sdks(claude=False, codex=True)
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "codex"
+
+
+def test_auto_agent_backend_defaults_an_unconfigured_environment_to_claude(clean_agent_env, installed_sdks):
+    """A runtime logged in by other means carries no credential this can see."""
+    installed_sdks(claude=True, codex=True)
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
+
+
+def test_auto_agent_backend_rejects_neither_credentials_nor_sdk(clean_agent_env, installed_sdks):
+    installed_sdks(claude=False, codex=False)
+    with pytest.raises(AgentProviderUnavailableError, match="no Agent provider is configured or installed"):
         _resolve_agent_choice("auto", None)
 
 
 @pytest.mark.parametrize("retired", ["SAFE_API_KEY", "FORGE_API_KEY"])
-def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, monkeypatch, retired):
-    """A key the gateway rejects must not satisfy ``auto``."""
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, installed_sdks, monkeypatch, retired):
+    """A key the gateway rejects must not make its side look configured."""
+    installed_sdks(claude=True, codex=True)
     monkeypatch.setenv(retired, "retired-value")
 
-    with pytest.raises(click.UsageError, match="no OpenAI or Anthropic credentials"):
-        _resolve_agent_choice("auto", None)
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
 
 
 def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monkeypatch):

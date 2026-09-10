@@ -433,13 +433,13 @@ def _should_use_codex_runner() -> bool:
     """Return true when the Codex Agent SDK runner should run this skill.
 
     An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The shape
-    test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
+    Agent SDK, so the Codex runner is the only one that can execute. The choice
+    itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
     disagree with backend selection or the forge kernel_backend.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
-    return llm_config.is_openai_only()
+    return llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
