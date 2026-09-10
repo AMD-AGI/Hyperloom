@@ -678,7 +678,7 @@ class WritebackCollaborator:
                 cannot divide an output numerator by a total denominator.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: How the reading was obtained â€” ``e2e_rebench``
+            measurement_basis: How the reading was obtained — ``e2e_rebench``
                 for a full-stack revalidation, ``e2e_decision_round`` for the
                 round an explore variant was graded on.
             ts: Author-time stamp the caller already minted for this
@@ -836,7 +836,7 @@ class WritebackCollaborator:
         task: "Task",
         result: Any,
     ) -> None:
-        """Log a completed task's change_type into SharedState.intervention_mix (explore â†’ config; integrate_patch â†’ code_patch_attempt or code_patch when kept). Best-effort.
+        """Log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
 
         Args:
             task: The completed task whose kind selects the intervention class.
@@ -1172,7 +1172,7 @@ class WritebackCollaborator:
             # Single-node eval-pending failure: throughput measured fine and the
             # eval is expected to re-run under enablement, so do not spend the
             # baseline_failed budget yet. Multi-node keeps the strict backstop,
-            # and so does a session that never admitted the eval lane â€” nothing
+            # and so does a session that never admitted the eval lane — nothing
             # would re-run the eval, so holding the budget just stalls the run.
             eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
             if eval_failed:
@@ -1330,7 +1330,7 @@ class WritebackCollaborator:
                         source_session_id=source_session_id,
                         variant_outcome=vo,
                     )
-                except Exception:  # noqa: BLE001 â€” defensive
+                except Exception:  # noqa: BLE001 — defensive
                     log.exception(
                         "fact-write per-variant failed (task=%s)",
                         task.task_id,
@@ -1343,14 +1343,14 @@ class WritebackCollaborator:
                     result_dict=result_dict,
                     kept=kept,
                 )
-            except Exception:  # noqa: BLE001 â€” defensive
+            except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "fact-write per-task failed (task=%s)",
                     task.task_id,
                 )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 â€” defensive; never crash on save
+        except Exception:  # noqa: BLE001 — defensive; never crash on save
             log.exception("fact-write SharedState.save failed")
 
     def _ensure_journal(self) -> Journal:
@@ -1530,14 +1530,14 @@ class WritebackCollaborator:
         result_dict: dict[str, Any],
         kept: bool,
     ) -> None:
-        """Per-task fact write â€” one journal row + maybe one KB fact (source_session_id is hyperloom-local).
+        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
 
         Args:
             task: The completed task being recorded.
             source_session_id: The hyperloom-local session id stamped on the
                 fact provenance.
             result_dict: The task result dict.
-            kept: Whether the result was KEEP-promoted (KEEP â†’ lesson, else
+            kept: Whether the result was KEEP-promoted (KEEP → lesson, else
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
@@ -1552,7 +1552,7 @@ class WritebackCollaborator:
         change = summarize_change(task.kind, None, result_dict)
         # Journal outcome follows the executor's per-status verdict for source-
         # patch kinds (a ``reverted`` patch is promotable but NOT a KEEP); other
-        # kinds keep the binary promotableâ†’KEEP behaviour. See
+        # kinds keep the binary promotable→KEEP behaviour. See
         # ``derive_journal_outcome`` (fixes the "fake KEEP" bug).
         outcome = derive_journal_outcome(task.kind, result_dict, promotable=kept)
         is_keep = outcome == OUTCOME_KEEP
@@ -1615,7 +1615,7 @@ class WritebackCollaborator:
 
         Args:
             change: The summarized change description.
-            kind: ``"lesson"`` or ``"pitfall"`` â€” selects the rendered form.
+            kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
             severity: The pitfall severity, rendered only when ``kind`` is
                 ``"pitfall"``.
 
@@ -1629,7 +1629,7 @@ class WritebackCollaborator:
         if kind == "lesson":
             return f"{fw_tag}{change} on {model}/{hw}"
         # kind == "pitfall"
-        return f"{fw_tag}{change} â†’ {severity or '?'} on {model}/{hw}"
+        return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
 
     @staticmethod
     def _build_measured_impact(
@@ -1667,7 +1667,7 @@ class WritebackCollaborator:
         source_session_id: str,
         variant_outcome: dict[str, Any],
     ) -> None:
-        """Per-variant fact write â€” mirror of _record_fact_per_task for explore per-variant decisions.
+        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
 
         Args:
             task: The completed explore task.
@@ -1763,7 +1763,7 @@ class WritebackCollaborator:
                 task=task,
                 variant_attrs=change_attrs,
             ),
-            # Workload-shape tags â€” see _record_fact_per_task.
+            # Workload-shape tags — see _record_fact_per_task.
             evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
             pitfall_severity_dict={
                 **(metrics if isinstance(metrics, dict) else {}),
@@ -1814,7 +1814,7 @@ class WritebackCollaborator:
                 n = 0
             if n > 0:
                 out["ep"] = n
-        # PP â€” no SharedState field (no CLI surface); env-only.
+        # PP — no SharedState field (no CLI surface); env-only.
         raw_pp = (os.environ.get("PP") or "").strip()
         try:
             pp_n = int(raw_pp) if raw_pp else 0
@@ -2154,7 +2154,7 @@ class WritebackCollaborator:
         state.recipe_finalize_status = "pending"
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 â€” publication can still proceed
+        except Exception:  # noqa: BLE001 — publication can still proceed
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -2165,7 +2165,7 @@ class WritebackCollaborator:
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception as exc:  # noqa: BLE001 â€” persist retryable failure
+        except Exception as exc:  # noqa: BLE001 — persist retryable failure
             log.exception("Recipe finalize raised")
             outcome = {
                 "status": "error",
@@ -2180,7 +2180,7 @@ class WritebackCollaborator:
         state.recipe_finalize_outcome = outcome
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 â€” T4 can still retry in-process
+        except Exception:  # noqa: BLE001 — T4 can still retry in-process
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -2200,7 +2200,7 @@ class WritebackCollaborator:
                 final_throughput=final_tput if final_tput > 0 else None,
                 total_gain_pct=total_gain,
             )
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
@@ -2346,11 +2346,11 @@ class WritebackCollaborator:
                         if not isinstance(row, dict):
                             continue
                         if str(row.get("session_id") or "") in my_session_ids:
-                            # Resume/retry of the same session â€” our new entry supersedes the prior one.
+                            # Resume/retry of the same session — our new entry supersedes the prior one.
                             continue
                         existing_sessions.append(dict(row))
                     merged_sessions = existing_sessions + my_sessions
-                except Exception as exc:  # noqa: BLE001 â€” defensive
+                except Exception as exc:  # noqa: BLE001 — defensive
                     log.info(
                         "recipe read failed (%s); finalize will append "
                         "the current session only; the next finalize "
@@ -2410,7 +2410,7 @@ class WritebackCollaborator:
                 "backend": "local",
             }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception as exc:  # noqa: BLE001 â€” defensive
+        except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("update_recipe raised unexpectedly")
             return {
                 "status": "error",
@@ -2487,7 +2487,7 @@ class WritebackCollaborator:
                             task.task_id,
                             input_err,
                         )
-            except Exception:  # noqa: BLE001 â€” advisory; never block
+            except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
                     "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
                     task.task_id,
@@ -2501,7 +2501,7 @@ class WritebackCollaborator:
             )
 
         # Per-anchor coverage ledger: every specialist completion is
-        # one "round" â€” tick all anchors, then zero the one that just ran so a
+        # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
         try:
             self.shared_state.bump_domain_round_counters()
@@ -2552,7 +2552,7 @@ class WritebackCollaborator:
                 domain=domain,
                 proposals=proposals,
             )
-        except Exception:  # noqa: BLE001 â€” defensive; never block bookkeeping
+        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
             log.exception(
                 "mn_auto_materialize: bridge raised for task=%s (continuing)",
                 task.task_id,
@@ -2562,7 +2562,7 @@ class WritebackCollaborator:
         if done_payload.get("new_findings"):
             try:
                 await self._coord._harvest_specialist_findings(done_payload)
-            except Exception:  # noqa: BLE001 â€” defensive
+            except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "specialist findings harvest failed for task=%s",
                     task.task_id,
@@ -2573,7 +2573,7 @@ class WritebackCollaborator:
         if domain == "static_recon_specialist":
             try:
                 self._coord._consume_static_recon(done_payload)
-            except Exception:  # noqa: BLE001 â€” defensive
+            except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "static-recon consume failed for task=%s",
                     task.task_id,
@@ -2585,7 +2585,7 @@ class WritebackCollaborator:
         # (already harvested above). Fail-soft.
         try:
             self._coord._aggregate_research_evidence(done_payload)
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "research evidence aggregation failed for task=%s",
                 task.task_id,
@@ -2604,14 +2604,14 @@ class WritebackCollaborator:
                         "proposals_total": len(proposals),
                     },
                 )
-            except Exception:  # noqa: BLE001 â€” defensive
+            except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "specialist bookkeeping: append_gap_attempt failed for gap=%s",
                     gap_cid,
                 )
         try:
             await self._refresh_gaps(reason="specialist_done")
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
@@ -2633,7 +2633,7 @@ class WritebackCollaborator:
                 task=task,
                 done_payload=done_payload,
             )
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
@@ -2646,7 +2646,7 @@ class WritebackCollaborator:
                 task=task,
                 done_payload=done_payload,
             )
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "FRAMEWORK config autosubmit failed for task=%s",
                 task.task_id,
@@ -2674,7 +2674,7 @@ class WritebackCollaborator:
             return
         try:
             added = self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "depth: register_seen_pr_ids failed during research aggregation",
             )
@@ -2711,7 +2711,7 @@ class WritebackCollaborator:
                     "research-scout: dropped %d sourceless hint(s)",
                     dropped,
                 )
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: append_hints failed")
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
@@ -2730,12 +2730,12 @@ class WritebackCollaborator:
                         pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: register_seen_pr_ids failed")
         # Seed high-priority hints as gaps[] so the config arm tries them early.
         try:
             self._seed_gaps_from_research_hints()
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("specialist findings: gap seeding failed")
         log.info(
             "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
@@ -3286,7 +3286,7 @@ class WritebackCollaborator:
                 # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
                 try:
                     parsed = _parse_baseline_workload_extra(materialized)
-                except Exception:  # noqa: BLE001 â€” defensive
+                except Exception:  # noqa: BLE001 — defensive
                     log.exception(
                         "baseline workload extra parsing failed for %s",
                         materialized,
@@ -3406,7 +3406,7 @@ class WritebackCollaborator:
         if isinstance(tput, (int, float)) and tput > 0 and not agentx_active(self.shared_state):
             try:
                 self.shared_state.record_baseline_roofline_ceiling()
-            except Exception as exc:  # noqa: BLE001 â€” best-effort backup
+            except Exception as exc:  # noqa: BLE001 — best-effort backup
                 log.warning(
                     "baseline roofline-ceiling backup failed: %r",
                     exc,
@@ -3418,7 +3418,7 @@ class WritebackCollaborator:
             # History injection (fires regardless of --no-warm-replay).
             try:
                 self._inject_warm_recipe_history_into_ledger()
-            except Exception as exc:  # noqa: BLE001 â€” defensive
+            except Exception as exc:  # noqa: BLE001 — defensive
                 log.exception(
                     "PRELUDE: warm-recipe history injection failed: %r",
                     exc,
@@ -3428,7 +3428,7 @@ class WritebackCollaborator:
                 await self._maybe_enqueue_warm_replay(
                     baseline_tput=float(self.shared_state.baseline_tput or tput),
                 )
-            except Exception as exc:  # noqa: BLE001 â€” defensive
+            except Exception as exc:  # noqa: BLE001 — defensive
                 log.exception(
                     "PRELUDE: failed to enqueue warm-replay task: %r",
                     exc,
@@ -3462,7 +3462,7 @@ class WritebackCollaborator:
                 reason=reason,
                 exclude_task_ids=spared,
             )
-        except Exception:  # noqa: BLE001 â€” draining is best-effort
+        except Exception:  # noqa: BLE001 — draining is best-effort
             log.exception("baseline drain: cancel_family failed")
             return []
         if not cancelled:
@@ -3497,7 +3497,7 @@ class WritebackCollaborator:
                     continue
                 if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
                     spared.add(str(getattr(task, "task_id", "") or ""))
-        except Exception:  # noqa: BLE001 â€” fall back to the tracked id alone
+        except Exception:  # noqa: BLE001 — fall back to the tracked id alone
             log.exception("baseline drain: queued-task scan failed")
         return {t for t in spared if t}
 
@@ -3611,7 +3611,7 @@ class WritebackCollaborator:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
         try:
             self._promote_warm_replay(result, task=task)
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("warm-replay promote failed")
         # Mirrored after the ruling, so the canonical streams carry the verdict
         # the run actually acted on. This record is the whole point of the fix,
@@ -3619,7 +3619,7 @@ class WritebackCollaborator:
         # original bug was found only by hand-scanning sessions.
         try:
             self._mirror_warm_replay_verdict(result, task)
-        except Exception:  # noqa: BLE001 â€” best-effort recording
+        except Exception:  # noqa: BLE001 — best-effort recording
             log.exception("warm-replay v4 verdict capture failed")
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
@@ -3778,7 +3778,7 @@ class WritebackCollaborator:
                     "observed_overlay_digest": got_overlay_digest,
                 },
             )
-        except Exception:  # noqa: BLE001 â€” observability cannot change the verdict
+        except Exception:  # noqa: BLE001 — observability cannot change the verdict
             log.debug("kernel timeline: geak rebench record failed", exc_info=True)
 
     async def _promote_roofline(
@@ -3927,7 +3927,7 @@ class WritebackCollaborator:
         # A post-resume revalidation task confirms the EXISTING stack/current
         # best rather than adding a variant, so it never "promotes".
         # Reconcile the validation watermark + clear the
-        # ``resume_pending_revalidation`` flag from the measured tput â€” but
+        # ``resume_pending_revalidation`` flag from the measured tput — but
         # ONLY when the rebench actually produced a valid measurement, so a
         # failed/empty rebench leaves the flag set and reports keep warning.
         is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
@@ -3986,7 +3986,7 @@ class WritebackCollaborator:
                 ):
                     decision = "no_promote"
                 # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
-                # cannot see the overlay drop out between dispatch and launch â€”
+                # cannot see the overlay drop out between dispatch and launch —
                 # ``run_grid`` skips an overlay whose dir has gone away and logs
                 # a warning, and the run then measures plain flags while the
                 # credit still reads as a kernel win. Re-check the overlay's own
@@ -4028,7 +4028,7 @@ class WritebackCollaborator:
                     # an already-proven win, so this is a resume revalidation.
                     # It must short-circuit the material check regardless of
                     # geak_result (which is persisted and thus non-empty on
-                    # resume) â€” by now current_best already carries the GEAK
+                    # resume) — by now current_best already carries the GEAK
                     # accepted_config, so the fingerprint would match and be
                     # mis-judged no_material, reverting a real win. Only apply
                     # the material gate on the FIRST validation (no prior entry),
@@ -4331,7 +4331,7 @@ class WritebackCollaborator:
                 if prov.startswith("specialist:"):
                     try:
                         self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
-                    except Exception:  # noqa: BLE001 â€” defensive
+                    except Exception:  # noqa: BLE001 — defensive
                         log.exception(
                             "depth: note_domain_keep failed for provenance=%r",
                             prov,
@@ -4360,7 +4360,7 @@ class WritebackCollaborator:
             changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
-        except Exception:  # noqa: BLE001 â€” defensive
+        except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
         # A round with no measured variant is not a data point for the plateau window.
         if not is_revalidation_task and (winners or result.get("losers")):
@@ -4416,7 +4416,7 @@ class WritebackCollaborator:
         # Register framework-rewrite switches as search levers. Done for both KEEP
         # verdicts: a bundle that cleared the gate is on and gets leave-one-out
         # attribution, while an inert KEEP is dormant and gets additive
-        # attribution. ``kept_inert`` deliberately does not lift current_best â€”
+        # attribution. ``kept_inert`` deliberately does not lift current_best —
         # the code is applied but every switch is off, so the running
         # configuration is unchanged.
         levers = result.get("framework_levers")
@@ -4959,13 +4959,13 @@ class WritebackCollaborator:
         Layers, in the order a consumer must apply them to reconstruct the exact
         stack ``current_best`` was measured on:
 
-          * ``config``  â€” cumulative server args + env vars (the reversible layer).
-          * ``source_snapshots`` â€” ordered durable source-layer snapshots
+          * ``config``  — cumulative server args + env vars (the reversible layer).
+          * ``source_snapshots`` — ordered durable source-layer snapshots
             (``scope=source_patch`` entries), each a self-contained directory
             (see :mod:`source_snapshot`) that reconstructs the patched framework
             tree independent of the mutable live checkout.
-          * ``overlay_pythonpath`` â€” the authored-kernel overlay prefix.
-          * ``base_launch_recipe`` â€” the baseline Magpie recipe to launch from.
+          * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
+          * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
 
         This is the single source of truth the GEAK handoff forwards so the
         baseline ref is materialized from the SAME layers as ``current_best``
@@ -5063,7 +5063,7 @@ class WritebackCollaborator:
 
         Recovers half-applied / orphaned KEEPs through the same lift the live
         path uses, then compensates the validation watermark by enqueuing a
-        single full-stack end-to-end rebench. Idempotent â€” only runs on a
+        single full-stack end-to-end rebench. Idempotent — only runs on a
         resumed session and every recovery step dedupes, so a second pass is a
         no-op.
         """
@@ -5142,7 +5142,7 @@ class WritebackCollaborator:
                 )
 
         # (4) Validation-watermark compensation: unvalidated
-        # KEEPs (claimed gain not yet end-to-end confirmed) â†’ flag + enqueue ONE
+        # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
         # full-stack rebench. The flag + watermark are reconciled from the
         # measured tput when that rebench promotes (see _promote_to_shared_state).
         stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
@@ -5175,7 +5175,7 @@ class WritebackCollaborator:
 
         Reconstructs the winning-variant dict from a persisted ``delegated_result``
         and routes it through :meth:`_lift_to_current_best`, which dedupes by
-        ``(action, variant_name)`` â€” so replay is idempotent. Used by both the
+        ``(action, variant_name)`` — so replay is idempotent. Used by both the
         pending-integrate (Gap C) and orphaned-KEEP (Gap B) resume recovery
         paths. Returns ``True`` only when a new stack entry was appended.
 
@@ -5291,7 +5291,7 @@ class WritebackCollaborator:
         for patch in patches:
             try:
                 ok, err = _git_apply_reverse(root_path, Path(patch))
-            except Exception as exc:  # noqa: BLE001 â€” rollback is best-effort
+            except Exception as exc:  # noqa: BLE001 — rollback is best-effort
                 summary["failed"].append({"patch": patch, "error": repr(exc)})
                 continue
             if ok:
@@ -5314,7 +5314,7 @@ class WritebackCollaborator:
         try:
             shutil.rmtree(path, ignore_errors=True)
             return True
-        except Exception:  # noqa: BLE001 â€” GC is best-effort
+        except Exception:  # noqa: BLE001 — GC is best-effort
             return False
 
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
@@ -5504,7 +5504,7 @@ class WritebackCollaborator:
 
                 sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
                 summary["swept_jit_dir"] = jit_dir
-            except Exception:  # noqa: BLE001 â€” sweep is best-effort
+            except Exception:  # noqa: BLE001 — sweep is best-effort
                 log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
 
         state.enablement.last_build_failure = {
@@ -5517,7 +5517,7 @@ class WritebackCollaborator:
                 if getattr(task, "state", "") == "running":
                     await self.tasks.transition(task_id, "failed", evidence={"failure_class": "resume_interrupted"})
                     summary["failed_row"] = True
-            except Exception:  # noqa: BLE001 â€” reclaim backstop still applies
+            except Exception:  # noqa: BLE001 — reclaim backstop still applies
                 log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
 
         state.pending_targeted_build = {}
@@ -5574,7 +5574,7 @@ class WritebackCollaborator:
                 "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
                 tracked_tid,
             )
-        except Exception:  # noqa: BLE001 â€” best-effort
+        except Exception:  # noqa: BLE001 — best-effort
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
@@ -5582,8 +5582,8 @@ class WritebackCollaborator:
 
         ``integrate_patch`` KEEPs are well-defined (a ``kept`` status means the
         single-variant bench + accuracy gate passed and the patch was committed),
-        so a kept-but-absent one is a crash before the append landed â†’ replay it
-        (idempotent), unless its run workspace is gone â†’ discard + alert. ``explore``
+        so a kept-but-absent one is a crash before the append landed → replay it
+        (idempotent), unless its run workspace is gone → discard + alert. ``explore``
         / ``framework`` KEEPs are ambiguous (the stack they landed on is only
         known to the round that ran), so they are surfaced as a ``medium``
         alert rather than resurrected. Whatever the stack ends up as
@@ -5656,7 +5656,7 @@ class WritebackCollaborator:
                             {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
                         )
                 else:
-                    # explore / framework: ambiguous vs eviction â€” never
+                    # explore / framework: ambiguous vs eviction — never
                     # resurrect; surface for the operator.
                     report["warnings"].append(
                         {
@@ -5697,12 +5697,12 @@ class WritebackCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
-        # fix-point 7 (2b) â€” when the win is a GEAK e2e result, source the
+        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
         # revalidation config from result.json (the SINGLE source of truth), NOT
         # from stack materialization. This guarantees the same-harness rebench
         # launches byte-for-byte the config GEAK optimized (flags + parsed env +
         # authored overlay), independent of whether the optimization is a MoE
-        # tuned-config / kernel / flag winner â€” no case-by-case markers. The
+        # tuned-config / kernel / flag winner — no case-by-case markers. The
         # consumer (_promote_to_shared_state) asserts config identity + effect
         # before stamping validated, and falls back to 2a (GEAK harness) on miss.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
@@ -6079,7 +6079,7 @@ class WritebackCollaborator:
         to a phase *transition* via ``_on_phase_entered``; a resume only restores
         ``phase`` from state.json and never re-enters the current phase. Without
         this, a session that crashed mid ``KERNEL_AGENT`` sits idle until the
-        phase budget cap fires, then hands SWEEP an empty result â€” the whole
+        phase budget cap fires, then hands SWEEP an empty result — the whole
         delegation is silently lost.
 
         General across every crash timing (not case-by-case): the decision is
@@ -6122,7 +6122,7 @@ class WritebackCollaborator:
                 state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
                 try:
                     state.save(self.session_dir)
-                except Exception:  # noqa: BLE001 â€” defensive
+                except Exception:  # noqa: BLE001 — defensive
                     log.exception("resume: save after re-arming skip_to_sweep failed")
                 log.info(
                     "resume: KERNEL GEAK already completed this phase; "
@@ -6135,7 +6135,7 @@ class WritebackCollaborator:
         )
         try:
             await self._on_enter_kernel(from_phase="resume")
-        except Exception:  # noqa: BLE001 â€” resume re-entry must never kill the session
+        except Exception:  # noqa: BLE001 — resume re-entry must never kill the session
             log.exception("resume: KERNEL re-entry hook failed")
 
     @property

@@ -289,7 +289,7 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     text = (cmd or "").strip()
     if not text:
         return False
-    # Reject command substitution / backticks / newlines outright â€” these can
+    # Reject command substitution / backticks / newlines outright — these can
     # smuggle an arbitrary payload regardless of tokenization.
     if re.search(r"[`\n]|\$\(", text):
         return False
@@ -379,7 +379,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     Runs each allowlisted command non-interactively with a per-command timeout,
     appending combined output to ``<log_dir>/enablement_setup.log``. Commands
     that fail the allowlist are skipped (never executed). A non-zero install is
-    recorded but does NOT hard-fail the integration â€” the subsequent boot/gate
+    recorded but does NOT hard-fail the integration — the subsequent boot/gate
     is the source of truth for runnability.
 
     Args:
@@ -522,8 +522,8 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
-    A ``recorded_root`` â€” carried from the authoring stage through
-    ``done_payload["patch_roots"]`` â€” is authoritative and skips probing
+    A ``recorded_root`` — carried from the authoring stage through
+    ``done_payload["patch_roots"]`` — is authoritative and skips probing
     entirely.
 
     Without a recorded root, the decision falls through to
@@ -810,7 +810,7 @@ def _git_apply_collect_feedback(
         three_way: Whether to fall back to ``-3`` on first failure.
 
     Returns:
-        ``(ok, err, feedback)`` â€” feedback is ``None`` on success.
+        ``(ok, err, feedback)`` — feedback is ``None`` on success.
     """
     from ._nogit_patch import _P_LEVELS
 
@@ -941,8 +941,8 @@ def _git_quarantine_unmerged(framework_root: Path, paths: list[str]) -> tuple[bo
     """Bank unresolved-merge paths in a stash entry that is never popped back.
 
     ``git stash`` refuses to run at all while the index carries unmerged
-    entries, so they are staged first â€” staging is what marks a conflict
-    resolved â€” and the working-tree content, conflict markers and all, is what
+    entries, so they are staged first — staging is what marks a conflict
+    resolved — and the working-tree content, conflict markers and all, is what
     gets banked. Recover it with ``git stash list | grep hyperloom-quarantine``.
 
     Emptying the index is not the same as ending the merge: ``MERGE_HEAD``
@@ -1043,10 +1043,10 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     Returns:
         ``(state, note)`` where ``state`` is one of:
 
-        - ``"clean"`` â€” working tree was already clean, safe to proceed.
-        - ``"stashed"`` â€” dirty tree was successfully stashed; ``note`` is the
+        - ``"clean"`` — working tree was already clean, safe to proceed.
+        - ``"stashed"`` — dirty tree was successfully stashed; ``note`` is the
           stash ref to restore when the candidate finishes.
-        - ``"failed"`` â€” tree is dirty but stash command failed; callers
+        - ``"failed"`` — tree is dirty but stash command failed; callers
           MUST NOT proceed with destructive operations.
     """
     cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
@@ -1063,7 +1063,7 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     if not cp.stdout.strip():
         return "clean", ""
     # git refuses to stash while an unresolved merge stands, so every later
-    # candidate would abort here forever. Clear it â€” but bank the content
+    # candidate would abort here forever. Clear it — but bank the content
     # instead of overwriting it. Usually this is wreckage from an earlier cycle;
     # nothing here can prove that, and a merge the operator started themselves
     # is not ours to throw away. Quarantine keeps both cases recoverable at the
@@ -1210,7 +1210,7 @@ def _resolve_patch_paths(
 ) -> list[Path]:
     """Resolve the list of patch files to apply.
 
-    Order: ``params.patches`` â†’ ``specialist_done.patches_written`` â†’
+    Order: ``params.patches`` → ``specialist_done.patches_written`` →
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
 
@@ -1382,7 +1382,7 @@ def _resolve_artifact_specs(
 ) -> tuple[list[_ArtifactSpec], list[dict[str, str]]]:
     """Resolve non-diff tuned artifacts to install.
 
-    Order: ``params.artifacts`` â†’ ``specialist_done.artifacts_written``. Each
+    Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
     resolved inside a framework root. Malformed / out-of-sandbox entries are
@@ -1853,7 +1853,7 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
             }
 
-        # Critic-verdict gate â€” enforced BEFORE any side effect (setup replay,
+        # Critic-verdict gate — enforced BEFORE any side effect (setup replay,
         # stash, patch/artifact apply, pod fan-out). Paths that bypass PolicyGate
         # (notably a queued/resume-dispatched task) are not re-validated there, so
         # a forged coordinator.db row with no genuine Critic verdict must be
@@ -2014,7 +2014,7 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
-        except Exception as exc:  # noqa: BLE001 â€” preflight is best-effort advisory
+        except Exception as exc:  # noqa: BLE001 — preflight is best-effort advisory
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
@@ -2024,7 +2024,7 @@ class IntegratePatchExecutor:
                 from ...framework.stack_actions import ProvisionResult as _PR
 
                 result = _PR(ok=False, log_path=result.log_path, error="adapter probe failed after provision")
-        except Exception as exc:  # noqa: BLE001 â€” provision failure is a clean revert, not a crash
+        except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2072,7 +2072,7 @@ class IntegratePatchExecutor:
         try:
             if attempt_dir.exists():
                 shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001 â€” GC is best-effort
+        except Exception:  # noqa: BLE001 — GC is best-effort
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(
@@ -2127,7 +2127,7 @@ class IntegratePatchExecutor:
                 fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
                 fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
             )
-        except Exception as exc:  # noqa: BLE001 â€” fetch failure is a clean revert
+        except Exception as exc:  # noqa: BLE001 — fetch failure is a clean revert
             log.exception("integrate_patch: localization fetch raised")
             return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
 
@@ -2486,7 +2486,7 @@ class IntegratePatchExecutor:
                     "ts": _now_iso(),
                 }
                 shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 â€” sentinel is best-effort
+            except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
@@ -2821,7 +2821,7 @@ class IntegratePatchExecutor:
         * ``accuracy is None`` -> eval-origin fails closed
           (``correctness_ok=False``): the trigger *was* an accuracy failure, so a
           candidate that produces no score has not shown it fixed anything.
-          boot-origin stays ``None`` (KEEP but provisional) â€” it only ever
+          boot-origin stays ``None`` (KEEP but provisional) — it only ever
           claimed to make the model boot, and eval-less runs must not be blocked.
 
         On KEEP the benched env/arg layers are reported as
@@ -3168,7 +3168,7 @@ class IntegratePatchExecutor:
             argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
             if argv:
                 subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)  # noqa: S603
-        except Exception:  # noqa: BLE001 â€” refresh is best-effort
+        except Exception:  # noqa: BLE001 — refresh is best-effort
             log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
         # Manifest via the existing snapshot mechanism.
         try:
@@ -3193,7 +3193,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:  # noqa: BLE001 â€” manifest is best-effort durability
+        except Exception:  # noqa: BLE001 — manifest is best-effort durability
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -3319,7 +3319,7 @@ class IntegratePatchExecutor:
         # rather than to a switch. On a live session a four-switch bundle reached
         # +65.5% and was reverted whole on the gate, discarding three switches that
         # were never implicated along with the one that was. Default-off code costs
-        # nothing to keep and explore can bisect it per lever â€” but only if the tree
+        # nothing to keep and explore can bisect it per lever — but only if the tree
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
@@ -3396,7 +3396,7 @@ class IntegratePatchExecutor:
         if not gate_pass:
             # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
             # is behind a switch that defaults OFF, so keeping the code with the
-            # switches unset changes nothing at runtime â€” which makes reverting
+            # switches unset changes nothing at runtime — which makes reverting
             # it the more expensive choice. The bundle failed as a bundle, but a
             # bundle usually mixes rewrites that pay with one that does not, and
             # some of them are enablers that cannot pay until measured together
@@ -3406,7 +3406,7 @@ class IntegratePatchExecutor:
             # A quality regression does not condemn the bundle either, for the same
             # reason: the switches are benched together, so a moved output says
             # "at least one of these is wrong", not "all of them are". The bundle
-            # stays inert and explore bisects it per lever â€” the verdict carries
+            # stays inert and explore bisects it per lever — the verdict carries
             # ``quality_unverified`` so nothing downstream mistakes it for a clean
             # keep. What still condemns it is failing parity, handled above: code
             # that is not inert when disabled would skew every later measurement,
@@ -3609,7 +3609,7 @@ class IntegratePatchExecutor:
                             rel_paths,
                             Path(source_snapshot_dir) / "realized.patch",
                         )
-        except Exception:  # noqa: BLE001 â€” snapshot is best-effort durability
+        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
         return _with_stash_restore(
@@ -3677,9 +3677,9 @@ class IntegratePatchExecutor:
         makes it safe to keep unprofitable rewrite code on disk, what makes a
         per-lever measurement mean anything, and what keeps the baseline
         comparable across a session that has accumulated several rewrite patches.
-        It is also the invariant an LLM is most likely to break by accident â€” by
+        It is also the invariant an LLM is most likely to break by accident — by
         reading the switch once at import, inverting a default, or restructuring
-        code outside the guard â€” and nothing else in the pipeline would notice: a
+        code outside the guard — and nothing else in the pipeline would notice: a
         switches-on bench that improves throughput looks like a success whether or
         not the switches-off path still works.
 
@@ -3726,7 +3726,7 @@ class IntegratePatchExecutor:
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
-        except Exception as exc:  # noqa: BLE001 â€” a failed probe must not read as a pass
+        except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
             return {
                 "ran": True,
                 "ok": False,
@@ -3736,8 +3736,8 @@ class IntegratePatchExecutor:
         accuracy_pass = parity_evidence.get("accuracy_pass")
         if not isinstance(parity_tput, (int, float)) or parity_tput <= 0:
             # No measurement is not evidence of a behavioural change. The patch is
-            # still reverted â€” leaving an unverified rewrite on disk would skew every
-            # later measurement â€” but the verdict must not claim the invariant was
+            # still reverted — leaving an unverified rewrite on disk would skew every
+            # later measurement — but the verdict must not claim the invariant was
             # tested and broken. On a live session this exact branch discarded a
             # +4.7% patch whose parity leg had in fact measured 0.5% from base, and
             # recording that as a violation would have taught later sessions a lesson
@@ -3897,7 +3897,7 @@ class IntegratePatchExecutor:
                 "status": "kept_inert",
                 # True when the bundle moved the output with every switch on. The
                 # code is still kept, because the switches are benched together and
-                # that verdict does not say which one is at fault â€” explore bisects
+                # that verdict does not say which one is at fault — explore bisects
                 # per lever from here. The flag exists so nothing downstream reads
                 # this as a clean keep.
                 "quality_unverified": accuracy_pass is False,
@@ -4104,7 +4104,7 @@ class IntegratePatchExecutor:
                 pr_url,
                 float(tps_delta_pct),
             )
-        except Exception as exc:  # noqa: BLE001 â€” KB write is best-effort
+        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
             log.warning(
                 "integrate_patch: framework KB writeback failed: %r",
                 exc,
@@ -4118,7 +4118,7 @@ class IntegratePatchExecutor:
         dispatcher cancels in-flight actions on shutdown and on a spent
         wall-clock budget, and ``CancelledError`` derives from ``BaseException``.
         Unhandled, it leaves the patch in the framework tree and the operator's
-        auto-stash on the stack â€” and the budget case does not end the process,
+        auto-stash on the stack — and the budget case does not end the process,
         so CLOSE would report against a tree carrying a patch nothing ever
         graded.
 
@@ -4317,7 +4317,7 @@ class IntegratePatchExecutor:
                     if target.exists():
                         target.unlink()
                 reverted.append(str(rec.get("rel_target") or target))
-            except OSError as exc:  # noqa: BLE001 â€” best-effort restore
+            except OSError as exc:  # noqa: BLE001 — best-effort restore
                 log.warning("integrate_patch: failed to revert artifact %s: %r", target, exc)
         return reverted
 
@@ -4534,7 +4534,7 @@ class IntegratePatchExecutor:
                 ).get("accuracy")
                 if isinstance(measured, (int, float)):
                     measured_accuracy = float(measured)
-            except Exception:  # noqa: BLE001 â€” advisory value only
+            except Exception:  # noqa: BLE001 — advisory value only
                 log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
 
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
@@ -4552,7 +4552,7 @@ class IntegratePatchExecutor:
                     enablement_accuracy = float(acc)
                 enablement_accuracy_task = str(eval_results.get("task") or "")
                 enablement_accuracy_metric = str(eval_results.get("metric") or "")
-            except Exception:  # noqa: BLE001 â€” eval may not produce a result
+            except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
         # Guarded: an empty root would send the recursive scan over the cwd.
