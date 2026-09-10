@@ -13,19 +13,32 @@ import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
 from hyperloom.inference_optimizer.session.lock import SessionLock
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def test_supervisor_restart_disables_cli_terminal_reports(tmp_path: Path) -> None:
-    """A resumable watchdog stop must not enable either CLI final-report writer."""
-    enabled = ocli._terminal_reports_enabled("supervisor_restart_requested")
-    if enabled:
-        reports = tmp_path / "reports"
-        reports.mkdir()
-        (reports / "final.md").write_text("terminal", encoding="utf-8")
-        (reports / "final.json").write_text("{}", encoding="utf-8")
+def _terminal_report_names(session_dir: Path) -> list[str]:
+    return sorted(path.name for path in (session_dir / "reports").glob("final.*"))
 
-    terminal_reports = sorted(path.name for path in (tmp_path / "reports").glob("final.*"))
-    assert terminal_reports == []
+
+def test_supervisor_restart_writes_no_cli_terminal_reports(tmp_path: Path) -> None:
+    """A resumable watchdog stop must not run either CLI final-report writer."""
+    ocli._write_cli_terminal_reports(tmp_path, SharedState(session_id="s"), "supervisor_restart_requested")
+
+    assert _terminal_report_names(tmp_path) == []
+
+
+def test_terminal_stop_writes_both_cli_terminal_reports(tmp_path: Path) -> None:
+    """A terminal stop keeps the crash-safe reports the CLI has always written."""
+    ocli._write_cli_terminal_reports(tmp_path, SharedState(session_id="s"), "signal")
+
+    assert _terminal_report_names(tmp_path) == ["final.json", "final.md"]
+
+
+def test_a_finished_close_sequence_keeps_the_cli_out_of_final_md(tmp_path: Path) -> None:
+    """final.md is the sequencer's artifact; the CLI only stands in when the sequencer never wrote it."""
+    ocli._write_cli_terminal_reports(tmp_path, SharedState(session_id="s", close_sequence_done=True), "signal")
+
+    assert _terminal_report_names(tmp_path) == ["final.json"]
 
 
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:

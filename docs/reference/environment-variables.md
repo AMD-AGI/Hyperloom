@@ -681,9 +681,9 @@ guarantee that varies silently by host is not a guarantee.
 | Variable | Default | Description |
 |---|---|---|
 | `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
-| `HYPERLOOM_SUPERVISOR` | `1` | Whether the optimizer starts an out-of-band supervisor process that watches for a coordinator that died or whose tick stopped advancing. |
+| `HYPERLOOM_SUPERVISOR` | `1` | Whether the optimizer starts an out-of-band supervisor process that watches for a coordinator that died or went silent. Liveness is read from two signals, not the tick alone: the session lock's heartbeat and the tick counter. |
 | `HYPERLOOM_SUPERVISOR_ENFORCE` | unset (off) | Whether the supervisor may end a process tree. A wedged coordinator is sent SIGTERM regardless — that is the channel its signal drain reads while the loop is busy. Off by default, a coordinator that does not answer that stop, and a dead one's leftovers, are left alone and the refusal is recorded in `runtime/supervisor/status.json`. Ending a tree additionally requires a reap backend whose success is proof, so enforcement with the default `process_group` unit will refuse to kill and say so. |
-| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at `3600` and floored at `1800` | How long the coordinator's tick may go without advancing before the supervisor calls it wedged. Derived from the session budget so the window always fits inside the run it watches; setting this overrides the derivation. |
+| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at `3600` and floored at `1800` | How long *every* coordinator liveness signal may stay stale before the supervisor calls it wedged. The age it compares against the window is `min(tick_age, heartbeat_age)` when the session lock carries a heartbeat, and the tick age alone when it does not, so a long action that keeps the heartbeat fresh is not mistaken for a stall. Derived from the session budget so the window always fits inside the run it watches; setting this overrides the derivation. |
 
 The supervisor never opens `coordinator.db` — it sits on a network filesystem
 where a second writer risks the message bus and the task registry — and never
@@ -692,6 +692,13 @@ transitions round state while the coordinator is alive. Its files live under
 writes `reports/final.json` itself, marked `producer: "supervisor"`; that record
 never replaces a full report, and the coordinator's own crash-safe fallback never
 replaces it.
+
+That terminal record is only written for a coordinator that went away on its own.
+A coordinator the supervisor had already asked to stop went away because the
+supervisor ordered a restart, which is not a session outcome: no `stop_reason` is
+recorded and neither `reports/final.json` nor `reports/final.md` is written. Those
+are exactly the markers `robustness_monitor.sh` reads to call a session finished,
+so leaving them unwritten is what lets it relaunch the run with `--resume-from`.
 
 ---
 

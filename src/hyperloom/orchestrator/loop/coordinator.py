@@ -1678,7 +1678,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._resumable_stop = resumable_stop
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            if not resumable_stop:
+            if resumable_stop:
+                # No stop_reason, because the session stays resumable; the end time still has to be
+                # stamped, or the next leg cannot bank the phase segment this one spent.
+                if not self.shared_state.stop_ts:
+                    self.shared_state.stop_ts = now_iso()
+            else:
                 # Resuming a terminal session can break out before stop_reason is set.
                 self.shared_state.set_stop_reason(
                     stop_reason

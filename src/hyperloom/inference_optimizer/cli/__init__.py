@@ -1310,6 +1310,34 @@ def _terminal_reports_enabled(stop_reason: str | None) -> bool:
     return stop_reason != SUPERVISOR_RESTART_REASON
 
 
+def _write_cli_terminal_reports(session_dir: Path, state: Any, stop_reason: str | None) -> None:
+    """Write the CLI's crash-safe ``reports/final.json`` and ``final.md``.
+
+    Both are terminal artifacts, so a resumable stop writes neither. ``final.md``
+    is only the CLI's to write when the CLOSE sequencer never got there.
+    """
+    if not _terminal_reports_enabled(stop_reason):
+        return
+    try:
+        from ..breakdown import write_minimal_final_json
+
+        with timed_teardown_step(state, "final_json"):
+            final_json = write_minimal_final_json(session_dir)
+        print(f"Final summary     : {final_json}")
+    except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
+        log.exception("crash-safe final.json write failed (non-fatal)")
+    if getattr(state, "close_sequence_done", False):
+        return
+    try:
+        from ..breakdown import write_minimal_final_report
+
+        with timed_teardown_step(state, "final_md"):
+            final_md = write_minimal_final_report(session_dir)
+        print(f"Final report      : {final_md}")
+    except Exception:  # noqa: BLE001
+        log.exception("emergency final report write failed (non-fatal)")
+
+
 def _new_preflight_failure_session_dir(
     args: argparse.Namespace,
     *,
@@ -2329,7 +2357,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
-        resumable_stop = not _terminal_reports_enabled(stop_reason)
         # Stopping the leases and the agent subprocesses is itself a step that
         # can hang, so it happens while the supervisor is still watching; the
         # supervisor is stood down only once it has returned.
@@ -2348,16 +2375,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 # Drop the lock after the pulse can no longer write its body.
                 with timed_teardown_step(state, "session_lock"):
                     session_lock.release()
-        # Crash-safe reports/final.json.
-        if not resumable_stop:
-            try:
-                from ..breakdown import write_minimal_final_json
-
-                with timed_teardown_step(state, "final_json"):
-                    final_json = write_minimal_final_json(session_dir)
-                print(f"Final summary     : {final_json}")
-            except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
-                log.exception("crash-safe final.json write failed (non-fatal)")
+        _write_cli_terminal_reports(session_dir, state, stop_reason)
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         sequencer_done = getattr(state, "close_sequence_done", False)
         if sequencer_done:
@@ -2388,16 +2406,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 print(f"Session breakdown : {breakdown_path}")
             except Exception:  # noqa: BLE001
                 log.exception("session_breakdown finalize failed (non-fatal)")
-            # Safety-net reports/final.md write (no-op when the sequencer's final.md already exists).
-            if not resumable_stop:
-                try:
-                    from ..breakdown import write_minimal_final_report
-
-                    with timed_teardown_step(state, "final_md"):
-                        final_md = write_minimal_final_report(session_dir)
-                    print(f"Final report      : {final_md}")
-                except Exception:  # noqa: BLE001
-                    log.exception("emergency final report write failed (non-fatal)")
             # Live Langfuse push (opt-in, default off): reconcile + flush, then splice the post-flush receipt into the
             # session_breakdown.json langfuse section.
             try:
