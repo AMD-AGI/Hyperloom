@@ -41,8 +41,13 @@ Everything comes from `<session_dir>/reports/trace/`:
    `USER_DATA_PATH` is unset). `--output-dir` overrides; `--max-depth N` trims
    the tree without changing any total.
 
-3. **Render the HTML page too** when the answer is for a person rather than for
-   a computation:
+3. **Render the HTML page** when the answer is for a person rather than for a
+   computation. A run that finished normally has already written it to
+   `<SESSION_DIR>/reports/hyperloom_report.html` — the CLI renders it as the
+   last report step of every teardown, so reach for the command below only for
+   a session that predates that, one killed before teardown, or when you want a
+   different `--max-depth`. Re-rendering is safe; it overwrites in place.
+   (`HYPERLOOM_SKIP_HTML_REPORT=1` turns the automatic write off.)
 
    ```bash
    PYTHONPATH=src python3 -m hyperloom.inference_optimizer.tools.render_hyperloom_html_report \

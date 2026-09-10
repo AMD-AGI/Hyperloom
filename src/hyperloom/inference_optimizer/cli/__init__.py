@@ -2988,6 +2988,33 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
+        # Session HTML report. Both teardown branches converge here, so the page
+        # is a product of every finished run rather than something rebuilt by
+        # hand afterwards. Placed before the artifact package so the zip carries
+        # it, and after the SBD write so the outcome ladder it joins is present.
+        # A session with no ledger is a skip, not a failure: rendering one would
+        # publish a page whose every number is empty.
+        if os.environ.get("HYPERLOOM_SKIP_HTML_REPORT", "").strip() not in {"", "0"}:
+            print("HTML report       : (skipped; HYPERLOOM_SKIP_HTML_REPORT set)")
+        else:
+            try:
+                from ..tools.dump_llm_call_report import load_ledgers
+                from ..tools.render_hyperloom_html_report import DEFAULT_OUTPUT, render
+
+                html_path: Path | None = None
+                with timed_teardown_step(state, "html_report"):
+                    turns, details = load_ledgers(session_dir)
+                    if turns or details:
+                        html_path = session_dir / "reports" / DEFAULT_OUTPUT
+                        html_path.parent.mkdir(parents=True, exist_ok=True)
+                        html_path.write_text(render(session_dir), encoding="utf-8")
+                if html_path is None:
+                    print("HTML report       : (skipped; no LLM call ledger under reports/trace/)")
+                else:
+                    print(f"HTML report       : {html_path}")
+            except Exception:  # noqa: BLE001 — a report must never mask stop_reason
+                log.exception("session HTML report write failed (non-fatal)")
+
         # Safety-net artifact package -> /workspace, for paths that leave
         # close_sequence_done False and never run the sequencer. Best-effort;
         # runs after the SBD/final.md + Langfuse flush so the freshest products
