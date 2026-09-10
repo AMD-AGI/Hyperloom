@@ -75,11 +75,11 @@ def test_empty_accepted_env_map_does_not_restore_raw_assignments() -> None:
 
 def test_accepted_env_map_preserves_values_and_filters_loader_keys() -> None:
     value = '{"path": "a b", "pattern": "x=y;z"}'
-    config = {"env_map": {"SGLANG_TEST_CONFIG": value, "PYTHONPATH": "/untrusted", "bad-key": "1"}}
+    config = {"env_map": {"SGLANG_TEST_CONFIG": value, "PYTHONPATH": "/untrusted"}}
     assert ch._accepted_config_as_variant(config) == ("", {"SGLANG_TEST_CONFIG": value})
 
 
-@pytest.mark.parametrize("env_map", [None, "RUN_EVAL=true", [], {"RUN_EVAL": True}, {1: "x"}])
+@pytest.mark.parametrize("env_map", [None, "RUN_EVAL=true", [], {"RUN_EVAL": True}, {1: "x"}, {"bad-key": "1"}])
 def test_invalid_accepted_env_map_does_not_fall_back_to_raw_string(env_map) -> None:
     with pytest.raises(ValueError, match="env_map must map strings to strings"):
         ch._accepted_config_as_variant({"env": "RUN_EVAL=true;", "env_map": env_map})

@@ -414,7 +414,6 @@ async def test_geak_harness_rejects_missing_or_failed_fresh_accuracy(
         "accepted_config": {"flags": "--block-size 32"},
     }
     before = deepcopy((ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated))
-    operations = []
 
     async def _fake_sweep(**_kwargs):
         return {
@@ -422,20 +421,14 @@ async def test_geak_harness_rejects_missing_or_failed_fresh_accuracy(
             "promotion_measurement": {"output_throughput": 120.0, "accuracy": fresh_accuracy},
         }
 
-    def _record_operation(*_args, **kwargs):
-        operations.append(kwargs)
-
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.recorder.instrument.record_geak_operation", _record_operation
-    )
     out = await coord._validate_geak_via_geak_harness(reason="inconclusive_orchestrator_rebench")
 
     assert out == {"validated": False, "status": "no_promote", "reason": expected_reason}
     assert (ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated) == before
-    assert operations[-1]["status"] == "failed"
-    assert operations[-1]["result"]["failure_reason"] == expected_reason
-    assert operations[-1]["result"]["baseline_accuracy"] == 0.8
+    assert ss.geak_result["revalidation_status"] == "no_promote"
+    assert ss.geak_result["failure_reason"] == expected_reason
+    assert ss.geak_result["baseline_accuracy"] == 0.8
 
 
 @pytest.mark.asyncio
@@ -469,53 +462,6 @@ async def test_geak_harness_accepts_fresh_accuracy_within_native_tolerance(
     assert coord.shared_state.cumulative_gain_validated == 20.0
     entry = next(entry for entry in coord.shared_state.optimization_stack if entry.get("action") == "geak_e2e")
     assert entry["accuracy"] == fresh_accuracy
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("through_recheck", [False, True])
-async def test_terminal_accuracy_rejection_revokes_provisional_adoption(tmp_path, monkeypatch, through_recheck):
-    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    state = coord.shared_state
-    state.baseline_accuracy = 0.8
-    state.geak_result = {
-        **_ok_result(final=150.0),
-        "kernel_journey_path": _journey_with_validated_keeps(tmp_path, [1.5]),
-    }
-    state.geak_pending = {"status": "awaiting_rebench"}
-    instrument.record_kernel_e2e(
-        tmp_path,
-        kernel_id="k0",
-        integrated=True,
-        validated=True,
-        decision="KEEP",
-        e2e_gain_pct=50.0,
-        route_strategy="geak",
-        result={"base_tput": 100.0, "new_tput": 150.0},
-    )
-    assert any(row["decision"] == "KEEP" for row in assemble_parts(tmp_path)["adoptions"])
-
-    async def fresh_replay(**_kwargs):
-        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", fresh_replay)
-    if through_recheck:
-        await coord._promote_to_shared_state(
-            "explore",
-            {"status": "succeeded", "output_throughput": None, "winners": []},
-            task=_revalidate_task(expected_hash="candidate"),
-        )
-    else:
-        await coord._validate_geak_via_geak_harness(reason="native_recheck_unavailable")
-    assert state.current_best["tput"] == 110.0
-    assert state.cumulative_gain_validated == 0.0
-    assert state.geak_pending == {}
-    assert state.geak_result["revalidation_status"] == "no_promote"
-    parts = assemble_parts(tmp_path)
-    assert parts["adoptions"]
-    assert all(row["decision"] == "REVERT" and row["validated"] is False for row in parts["adoptions"])
-    assert all(row["status"] == "revoked" for row in parts["adoptions"])
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
@@ -730,9 +676,6 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
     assert coord.shared_state.resume_pending_revalidation
     assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert coord.shared_state.geak_result["revalidation_error"] == reason
-    kernels = assemble_parts(tmp_path)["kernel_journey"]["kernels"]
-    assert kernels[0]["e2e"]["decision"] == "REVERT"
-    assert kernels[0]["e2e"]["rejection_reason"] == reason
 
 
 @pytest.mark.asyncio

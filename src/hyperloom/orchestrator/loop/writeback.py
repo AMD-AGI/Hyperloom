@@ -4467,6 +4467,7 @@ class WritebackCollaborator:
                         measured_tput=float(measured) if measured_ok else 0.0,
                         current_best_tput=float(cb_tput or 0.0),
                         reason=native_rejection or "graded_comparison_rejected",
+                        attempt_id=str(task.idempotency_key or task.task_id),
                     )
                     result["status"] = "no_promote"
                     result[PROMOTION_REFUSED_KEY] = True
@@ -4522,11 +4523,11 @@ class WritebackCollaborator:
                         )[:500]
                         self.shared_state.geak_result = geak_result
                         self._record_geak_rebench_conclusion(
-                            final_status="fallback_failed",
+                            final_status=geak_result["revalidation_status"],
                             final_error=str(geak_result.get("revalidation_error") or ""),
                         )
                         self.shared_state.geak_pending = {}
-                        result["status"] = refusal if refusal == INCOMPARABLE_REVALIDATION else "failed"
+                        result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
                         result[PROMOTION_REFUSED_KEY] = True
                     else:
                         promoted = True

@@ -1021,7 +1021,9 @@ class KernelPhase(PhaseHandler):
             env_spec = self.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
-            _finish_skip({"status": "error", "error_class": "invalid_env_spec", "error": str(exc)}, record_delegation=False)
+            _finish_skip(
+                {"status": "error", "error_class": "invalid_env_spec", "error": str(exc)}, record_delegation=False
+            )
             return
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
@@ -1928,16 +1930,9 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         current_best_tput: float,
         reason: str,
+        attempt_id: str = "geak_final_validation",
     ) -> None:
         """Close a measured candidate without recording an adoption."""
-        KernelPhase._reject_geak_kernel_journey(
-            self,
-            result,
-            measured_tput=measured_tput,
-            current_best_tput=current_best_tput,
-            provenance="geak_promote_rejected",
-            rejection_reason=reason,
-        )
         rejected_result = dict(result)
         rejected_result["revalidation_status"] = "no_promote"
         rejected_result["revalidation_error"] = reason
@@ -1949,21 +1944,17 @@ class KernelPhase(PhaseHandler):
         }
         self.shared_state.geak_result = rejected_result
         self.shared_state.geak_pending = {}
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="final_validation_failed",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result=rejected_result,
-                status="failed",
-                validated=False,
-                measured_tput=measured_tput,
-                validation_source="geak_promote_rejected",
+        recorder = KernelPhase._kernel_timeline(self)
+        if recorder is not None:
+            recorder.record_geak_rebench_attempt(
+                attempt_id=attempt_id,
+                base_tput=current_best_tput,
+                measured_tput=measured_tput if measured_tput > 0 else None,
+                decision="no_promote",
+                decision_reason=reason,
+                status="no_promote",
             )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 final validation rejection recording failed", exc_info=True)
+            recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
     def _promote_geak_from_candidate(
         self,
@@ -2041,7 +2032,8 @@ class KernelPhase(PhaseHandler):
             from hyperloom.common.coerce import to_str_list
             from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-            from ..actions.executors._grid_server_args import compose_server_args
+            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+            from ..actions.executors._grid_server_args import compose_server_args, remove_server_args
 
             accepted_controls = _accepted_config_controls(result.get("accepted_config"))
             prior_controls = _accepted_config_controls(cb_now)
@@ -2069,6 +2061,15 @@ class KernelPhase(PhaseHandler):
                     remove_args=launch_controls.get("remove_args"),
                     args_mode="replace" if complete else "append",
                 )
+                if not complete and launch_controls.get("remove_args"):
+                    # A legacy delta can re-enable a removed flag. The retained
+                    # snapshot is complete, so stale removals would prune it again.
+                    accepted_identity = canonical_fingerprint(accepted_flags, {})
+                    launch_controls["remove_args"] = [
+                        spec
+                        for spec in launch_controls["remove_args"]
+                        if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
+                    ]
                 launch_envs = dict(cb_now.get("extra_envs") or {})
                 for key in accepted_controls.get("unset_envs", []):
                     launch_envs.pop(key, None)

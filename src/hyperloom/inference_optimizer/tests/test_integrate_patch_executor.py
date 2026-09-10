@@ -563,16 +563,13 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unrelated_patch_root_cannot_redirect_selected_patch(tmp_path: Path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-
+async def test_unrelated_patch_root_cannot_redirect_selected_patch(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     intended = tmp_path / "sglang"
     unrelated = tmp_path / "aiter"
     init_git_repo(intended)
     init_git_repo(unrelated)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(intended), str(unrelated)])
     _write_specialist_workspace(
         session_dir,
         "partial-roots",
@@ -592,9 +589,7 @@ async def test_unrelated_patch_root_cannot_redirect_selected_patch(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-
+async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     alias = tmp_path / "session-alias"
@@ -603,7 +598,6 @@ async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path, mo
     unrelated = tmp_path / "sglang"
     init_git_repo(intended)
     init_git_repo(unrelated)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(intended), str(unrelated)])
     patch = alias / "runs" / "specialist" / "complete-roots" / "worktree" / "patches" / "001_test.patch"
     _write_specialist_workspace(
         alias,
