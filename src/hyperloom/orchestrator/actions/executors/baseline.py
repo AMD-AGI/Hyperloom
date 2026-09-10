@@ -2320,66 +2320,63 @@ class BaselineExecutor:
         # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
         # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
         # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
-        if (
-            result.get("status") != "succeeded"
-            and not eval_already_off
-            and self._is_eval_rooted_failure(result)
-            and self._is_server_unreachable_eval_failure(result)
-        ):
-            log.warning(
-                "baseline_executor: the accuracy eval failed because the server was unreachable, not because the "
-                "eval reached a verdict; recording an ordinary baseline failure rather than an enablement gap."
-            )
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("eval_failed_server_unreachable")
-        elif result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
-            _, evidence = self._eval_failure_evidence(result)
-            if self._eval_enablement_active(ctx):
-                from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
-
+        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+            if self._is_server_unreachable_eval_failure(result):
                 log.warning(
-                    "baseline_executor: eval-rooted failure; routing to "
-                    "enablement instead of salvaging (RUN_EVAL stays on)."
-                )
-                self._stamp_eval_failure_contract(
-                    ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
-                )
-                return result
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-                log.error(
-                    "baseline_executor: failure is eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark) on a genuine baseline, "
-                    "whose whole purpose is to establish the accuracy "
-                    "reference. NOT retrying with RUN_EVAL=false: a "
-                    "throughput-only baseline cannot satisfy the accuracy gate, "
-                    "so the retry would burn a second full benchmark and the "
-                    "run would stop anyway. Stopping now — fix the accuracy "
-                    "eval (see the benchmark stdout/stderr for the run_eval "
-                    "error) rather than disabling RUN_EVAL."
+                    "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
+                    "the eval reached a verdict; recording an ordinary baseline failure rather than an enablement "
+                    "gap."
                 )
                 result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                result["accuracy_source"] = "eval_unavailable"
-                self._request_eval_rooted_baseline_stop(ctx, result)
-                return result
-            log.warning(
-                "baseline_executor: failure looks eval-rooted (InferenceX "
-                "run_eval aborted the benchmark); retrying once with "
-                "RUN_EVAL=false to salvage the throughput baseline without "
-                "the accuracy gate."
-            )
-            retry = await self._run_pass(
-                ctx,
-                recorder=recorder,
-                attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                force_disable_eval=True,
-            )
-            retry.setdefault("nonfatal_warnings", [])
-            retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-            if retry.get("status") == "succeeded":
-                retry["accuracy_source"] = "eval_unavailable"
-            eval_disabled_by_fallback = True
-            result = retry
+                result["nonfatal_warnings"].append("eval_failed_server_unreachable")
+            else:
+                _, evidence = self._eval_failure_evidence(result)
+                if self._eval_enablement_active(ctx):
+                    from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+                    log.warning(
+                        "baseline_executor: eval-rooted failure; routing to "
+                        "enablement instead of salvaging (RUN_EVAL stays on)."
+                    )
+                    self._stamp_eval_failure_contract(
+                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                    )
+                    return result
+                if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX "
+                        "run_eval aborted the benchmark) on a genuine baseline, "
+                        "whose whole purpose is to establish the accuracy "
+                        "reference. NOT retrying with RUN_EVAL=false: a "
+                        "throughput-only baseline cannot satisfy the accuracy gate, "
+                        "so the retry would burn a second full benchmark and the "
+                        "run would stop anyway. Stopping now — fix the accuracy "
+                        "eval (see the benchmark stdout/stderr for the run_eval "
+                        "error) rather than disabling RUN_EVAL."
+                    )
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
+                    result["accuracy_source"] = "eval_unavailable"
+                    self._request_eval_rooted_baseline_stop(ctx, result)
+                    return result
+                log.warning(
+                    "baseline_executor: failure looks eval-rooted (InferenceX "
+                    "run_eval aborted the benchmark); retrying once with "
+                    "RUN_EVAL=false to salvage the throughput baseline without "
+                    "the accuracy gate."
+                )
+                retry = await self._run_pass(
+                    ctx,
+                    recorder=recorder,
+                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
+                    force_disable_eval=True,
+                )
+                retry.setdefault("nonfatal_warnings", [])
+                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+                if retry.get("status") == "succeeded":
+                    retry["accuracy_source"] = "eval_unavailable"
+                eval_disabled_by_fallback = True
+                result = retry
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
