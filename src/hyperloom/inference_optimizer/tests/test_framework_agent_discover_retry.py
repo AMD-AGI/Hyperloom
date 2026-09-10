@@ -12,7 +12,7 @@ from typing import Any
 
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
@@ -191,7 +191,7 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
     assert rows[0]["evidence"]["failure_count"] == 3
-    assert rows[0]["evidence"]["retry_limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert rows[0]["evidence"]["retry_limit"] == _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     assert rows[0]["evidence"]["batches_discovered"] == 2
     assert "ts" in rows[0]
     assert rows[0]["ts_unix"] > 0
