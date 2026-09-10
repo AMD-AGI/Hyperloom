@@ -1365,6 +1365,49 @@ for the user-facing summary.
   `LocalRecipeStore.put_recipe` now additionally returns `prior_counts` and
   `counts` (per-field sizes before/after the write) to support the delta.
 
+### Fixed
+
+- **`what_worked` / `what_failed` rows were stored as empty strings, so the
+  scout re-researched work a prior session had already proven.** The Coordinator
+  is the only producer of these rows and stamps them with
+  `{name, extra_server_args, extra_envs, gain_pct, source}`
+  (`writeback._build_recipe_payload`). The store normalised each row down to the
+  arbor pair — `_normalise_str_dicts(what_worked, ("description",
+  "measured_impact"))` — a vocabulary the Coordinator never writes. Nothing
+  translated between the two, so every value was dropped on the way to disk:
+
+  ```
+  sent:   {"name": "mtp_on", "extra_server_args": "--speculative-num-steps 3",
+           "extra_envs": {...}, "gain_pct": 4.2, "source": "https://pr/123"}
+  stored: {"description": "", "measured_impact": ""}
+  ```
+
+  Not a missing field — the row count survived and every value was `""`.
+  `phases/prelude._warm_recipe_proven_items` reads `name` and skips rows without
+  one, so it always returned `[]`, and the `already_proven` list the scout is
+  handed in `phases/internal` carried only the current session's accepted
+  variants. Cross-session proven work was invisible.
+
+  `Finding` and `Failure` now carry the producer's fields as hyperloom superset
+  fields, the same convention as `Pitfall.severity` (arbor consumers ignore
+  them), and `_normalise_experience` preserves them. `description` falls back to
+  `name`, so an arbor consumer gets operator-readable text where it previously
+  got `""`. A row carrying only the arbor pair still serialises byte-identically,
+  so the wire shape is unchanged for rows that never had these fields.
+
+  Both halves of this seam were already tested — one test asserts writeback
+  stamps `name`, another asserts prelude reads it — but the prelude test
+  hand-injected the row, so nothing exercised the persistence step between them,
+  which is where the data died. The added tests write through
+  `LocalRecipeStore` and assert on what comes back.<br/>
+  **Operator note**: the explore dedup pre-fill
+  (`_inject_warm_recipe_history_into_ledger`) is still inert. It fingerprints
+  from `extra_server_args` / `extra_envs`, and the Coordinator does not record
+  those on `what_failed` rows — `per_variant_outcomes` carries them (plus an
+  already-computed `fingerprint`) but `_record_explore_round_gaps` drops both
+  when it appends the gap attempt. Storage no longer stands in the way; the
+  remaining fix is producer-side.
+
 ### Removed
 
 - **Remote Cortex KB, end to end**: every path that could reach a remote Cortex

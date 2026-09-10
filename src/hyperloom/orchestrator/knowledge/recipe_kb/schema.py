@@ -70,21 +70,89 @@ def _normalize_best_config(best_config: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _experience_extras(row: Finding | Failure) -> dict[str, Any]:
+    """Return the hyperloom superset fields that are set on an experience row.
+
+    Emitted only when populated so a row carrying just the arbor pair serialises
+    exactly as it did before these fields existed.
+
+    Args:
+        row: The finding or failure to read.
+
+    Returns:
+        The superset fields to merge into the row's dict form.
+    """
+    out: dict[str, Any] = {}
+    if row.name:
+        out["name"] = row.name
+    if row.extra_server_args:
+        out["extra_server_args"] = row.extra_server_args
+    if row.extra_envs:
+        out["extra_envs"] = dict(row.extra_envs)
+    if row.gain_pct is not None:
+        out["gain_pct"] = float(row.gain_pct)
+    if row.source:
+        out["source"] = row.source
+    return out
+
+
+def _experience_kwargs(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Parse the hyperloom superset fields off a serialised experience row.
+
+    Args:
+        d: The row's dict form.
+
+    Returns:
+        Keyword arguments for :class:`Finding` / :class:`Failure`.
+    """
+    envs = d.get("extra_envs")
+    gain = d.get("gain_pct")
+    return {
+        "name": str(d.get("name") or ""),
+        "extra_server_args": str(d.get("extra_server_args") or ""),
+        "extra_envs": ({str(k): str(v) for k, v in envs.items()} if isinstance(envs, Mapping) else {}),
+        "gain_pct": (float(gain) if isinstance(gain, (int, float)) and not isinstance(gain, bool) else None),
+        "source": str(d.get("source") or ""),
+    }
+
+
 # Arbor-aligned sub-shapes
 @dataclass
 class Finding:
-    """An "X helped" insight — what worked + the measured impact."""
+    """An "X helped" insight — what worked + the measured impact.
+
+    ``name`` / ``extra_server_args`` / ``extra_envs`` / ``gain_pct`` / ``source``
+    are hyperloom superset fields the Coordinator stamps (same convention as
+    ``Pitfall.severity``; arbor consumers ignore them). The warm-start paths read
+    them back by name to build the scout's already-proven list and to fingerprint
+    prior attempts, so they have to survive the round trip.
+    """
 
     description: str
     measured_impact: str
+    name: str = ""
+    extra_server_args: str = ""
+    extra_envs: dict[str, str] = field(default_factory=dict)
+    gain_pct: float | None = None
+    source: str = ""
 
 
 @dataclass
 class Failure:
-    """An "X didn't help" insight — what failed + the reason."""
+    """An "X didn't help" insight — what failed + the reason.
+
+    Carries the same hyperloom superset fields as :class:`Finding`; the explore
+    dedup gate is pre-filled from these rows, which needs the variant name and,
+    when the producer records them, the args/envs to fingerprint.
+    """
 
     description: str
     reason: str
+    name: str = ""
+    extra_server_args: str = ""
+    extra_envs: dict[str, str] = field(default_factory=dict)
+    gain_pct: float | None = None
+    source: str = ""
 
 
 @dataclass
@@ -255,9 +323,12 @@ class Recipe:
             "best_config": dict(self.best_config),
             "best_throughput": float(self.best_throughput),
             "what_worked": [
-                {"description": f.description, "measured_impact": f.measured_impact} for f in self.what_worked
+                {"description": f.description, "measured_impact": f.measured_impact, **_experience_extras(f)}
+                for f in self.what_worked
             ],
-            "what_failed": [{"description": f.description, "reason": f.reason} for f in self.what_failed],
+            "what_failed": [
+                {"description": f.description, "reason": f.reason, **_experience_extras(f)} for f in self.what_failed
+            ],
             "remaining_gaps": [{"description": g.description, "metrics": g.metrics} for g in self.remaining_gaps],
             "pitfalls": [{"description": p.description, "severity": p.severity} for p in self.pitfalls],
             "lessons": [{"statement": l.statement, "measured_impact": l.measured_impact} for l in self.lessons],
@@ -340,16 +411,18 @@ class Recipe:
             best_throughput=float(d.get("best_throughput") or 0.0),
             what_worked=[
                 Finding(
-                    description=str(f.get("description") or ""),
+                    description=str(f.get("description") or f.get("name") or ""),
                     measured_impact=str(f.get("measured_impact") or ""),
+                    **_experience_kwargs(f),
                 )
                 for f in (d.get("what_worked") or [])
                 if isinstance(f, dict)
             ],
             what_failed=[
                 Failure(
-                    description=str(f.get("description") or ""),
+                    description=str(f.get("description") or f.get("name") or ""),
                     reason=str(f.get("reason") or ""),
+                    **_experience_kwargs(f),
                 )
                 for f in (d.get("what_failed") or [])
                 if isinstance(f, dict)

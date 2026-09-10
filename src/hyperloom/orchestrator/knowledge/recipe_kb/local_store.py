@@ -327,8 +327,8 @@ class LocalRecipeStore:
                 "precision": precision,
                 "best_config": dict(best_config or {}),
                 "best_throughput": float(best_throughput),
-                "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
-                "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
+                "what_worked": _normalise_experience(what_worked, ("description", "measured_impact")),
+                "what_failed": _normalise_experience(what_failed, ("description", "reason")),
                 "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
                 "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
@@ -680,6 +680,45 @@ def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list
         if d is None:
             continue
         out.append({k: str(d.get(k) or "") for k in keys})
+    return out
+
+
+def _normalise_experience(items: list[Any] | None, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Coerce ``what_worked`` / ``what_failed`` rows, keeping the replay fields.
+
+    Like :func:`_normalise_str_dicts` for the arbor-facing *keys*, but preserving
+    the hyperloom superset fields the Coordinator stamps on these rows
+    (``name`` / ``extra_server_args`` / ``extra_envs`` / ``gain_pct`` /
+    ``source``) — the same superset convention as ``Pitfall.severity``. The
+    warm-start replay and explore-dedup paths read them back by name, and
+    reducing a row to the arbor pair alone dropped every value the Coordinator
+    had written.
+
+    ``description`` falls back to ``name`` so an arbor consumer still gets
+    operator-readable text instead of an empty string.
+    """
+    out: list[dict[str, Any]] = []
+    for it in items or []:
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        row: dict[str, Any] = {k: str(d.get(k) or "") for k in keys}
+        name = str(d.get("name") or "").strip()
+        if name:
+            row["name"] = name
+            if "description" in row and not row["description"]:
+                row["description"] = name
+        for key in ("extra_server_args", "source"):
+            value = str(d.get(key) or "").strip()
+            if value:
+                row[key] = value
+        envs = d.get("extra_envs")
+        if isinstance(envs, dict) and envs:
+            row["extra_envs"] = {str(k): str(v) for k, v in envs.items()}
+        gain = d.get("gain_pct")
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+            row["gain_pct"] = float(gain)
+        out.append(row)
     return out
 
 
