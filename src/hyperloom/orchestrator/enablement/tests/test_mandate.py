@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.enablement_ops (discovery + authoring)."""
+"""Tests for hyperloom.orchestrator.enablement.mandate (discovery + authoring)."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from hyperloom.agents.framework.enablement import (
+from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     EnablementRequest,
     FailureSignature,
     classify_failure,
 )
-from hyperloom.agents.framework.enablement_ops import (
+from hyperloom.orchestrator.enablement.mandate import (
     ENABLEMENT_PATCH_INVARIANTS,
     ENABLEMENT_SETUP_GUIDANCE,
     _FRAMEWORK_ROOT_HINT,
@@ -254,11 +254,11 @@ def _roots_sig() -> FailureSignature:
 def test_returns_real_roots_when_probe_finds_something():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
             return_value=("/sgl-workspace/vllm/", "/opt/rocm/"),
         ),
         patch(
-            "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
+            "hyperloom.orchestrator.enablement.mandate.summarise_framework_root_discovery",
             return_value="vllm=ok",
         ),
     ):
@@ -269,7 +269,7 @@ def test_returns_real_roots_when_probe_finds_something():
 
 def test_falls_back_to_generic_when_probe_empty():
     with patch(
-        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+        "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
         return_value=(),
     ):
         hints = _resolve_actual_root_hints("vllm")
@@ -279,7 +279,7 @@ def test_falls_back_to_generic_when_probe_empty():
 
 def test_falls_back_on_probe_exception():
     with patch(
-        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+        "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
         side_effect=RuntimeError("no roots"),
     ):
         hints = _resolve_actual_root_hints("vllm")
@@ -289,15 +289,15 @@ def test_falls_back_on_probe_exception():
 def test_version_appended_when_package_installed():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
             return_value=("/sgl-workspace/vllm/",),
         ),
         patch(
-            "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
+            "hyperloom.orchestrator.enablement.mandate.summarise_framework_root_discovery",
             return_value="vllm=ok",
         ),
         patch(
-            "hyperloom.agents.framework.enablement_ops._resolve_package_version",
+            "hyperloom.orchestrator.enablement.mandate._resolve_package_version",
             return_value="0.9.1+rocm",
         ),
     ):
@@ -308,11 +308,11 @@ def test_version_appended_when_package_installed():
 def test_build_mandate_uses_resolved_roots_in_task_description():
     with (
         patch(
-            "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+            "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
             return_value=("/sgl-workspace/vllm/", "/opt/rocm/"),
         ),
         patch(
-            "hyperloom.orchestrator.framework.paths.summarise_framework_root_discovery",
+            "hyperloom.orchestrator.enablement.mandate.summarise_framework_root_discovery",
             return_value="vllm=ok",
         ),
     ):
@@ -334,9 +334,51 @@ def test_build_mandate_explicit_root_hints_override_discovery():
 
 def test_build_mandate_falls_back_gracefully_when_no_roots():
     with patch(
-        "hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots",
+        "hyperloom.orchestrator.enablement.mandate.resolve_kernel_search_roots",
         return_value=(),
     ):
         mandate = build_mandate(_roots_req(), signature=_roots_sig())
     assert _FRAMEWORK_ROOT_HINT in mandate.source_root_hints
     assert _FRAMEWORK_ROOT_HINT in mandate.task_description
+
+
+def test_enablement_setup_guidance_in_mandate() -> None:
+    """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
+    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.orchestrator.enablement.mandate import ENABLEMENT_SETUP_GUIDANCE
+
+    req = EnablementRequest(
+        framework="vllm",
+        model="GLM-5.2",
+        repo_url="https://github.com/ROCm/vllm.git",
+        launch_log="ValueError: weights were not initialized from checkpoint",
+        gpu_type="mi300x",
+    )
+    m = build_mandate(req)
+    assert "ENVIRONMENT SETUP" in m.task_description
+    assert "setup_commands" in m.task_description
+    assert ENABLEMENT_SETUP_GUIDANCE
+
+
+def test_enablement_progress_contract_in_mandate() -> None:
+    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty exit."""
+    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.orchestrator.enablement.mandate import ENABLEMENT_PROGRESS_GUIDANCE
+
+    req = EnablementRequest(
+        framework="vllm",
+        model="deepseek-ai-DeepSeek-V4-Flash",
+        repo_url="https://github.com/ROCm/vllm.git",
+        launch_log=(
+            "The checkpoint you are trying to load has model type `deepseek_v4` "
+            "but Transformers does not recognize this architecture."
+        ),
+        gpu_type="mi355x",
+    )
+    m = build_mandate(req)
+    assert "PROGRESS DELIVERABLE" in m.task_description
+    # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
+    # advance even one step".
+    assert "ADVANCES the boot" in m.task_description
+    assert "proposal_set=[]" in m.task_description
+    assert ENABLEMENT_PROGRESS_GUIDANCE

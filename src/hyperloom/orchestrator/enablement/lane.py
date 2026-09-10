@@ -23,7 +23,7 @@ from ..loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
-from ..phases._enablement_artifacts import snapshot_round, write_setting_script
+from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import create_in_cursor

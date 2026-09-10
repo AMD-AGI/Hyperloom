@@ -3,8 +3,10 @@
 
 """Enablement discovery + authoring operations.
 
+Moved from ``hyperloom.agents.framework.enablement_ops``.
+
 Two halves of the enablement flow that both build on a
-:class:`.enablement.FailureSignature`:
+:class:`.FailureSignature`:
 
 * **Discovery** — given a failure signature, decide which repos to scout for an
   enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
@@ -27,9 +29,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from .enablement import EnablementRequest, FailureSignature
-from .keywords import extract_keywords, score_title_with_anti_signal
-from .repo_map import bridge_repo_urls
+from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
+from hyperloom.agents.framework.repo_map import bridge_repo_urls
+from ..framework.paths import resolve_kernel_search_roots, summarise_framework_root_discovery
 
 
 # ---------------------------------------------------------------------------
@@ -218,31 +221,26 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     appends version info for the target framework package.
     """
     try:
-        from hyperloom.orchestrator.framework.paths import (
-            resolve_kernel_search_roots,
-            summarise_framework_root_discovery,
-        )
-
         roots = resolve_kernel_search_roots()
-        if roots:
-            hints: list[str] = list(roots)
-            hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
-            pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
-            pkg_name = pkg_map.get(framework, framework)
-            ver = _resolve_package_version(pkg_name)
-            if ver:
-                hints.append(f"({pkg_name} installed version: {ver})")
-            # Always include the ROCm/HIP root hint (authoring sub-agent always
-            # has /opt/rocm in scope for ROCm-side fixes, regardless of whether
-            # probe discovered it or not).
-            if not any(_ROCM_HIP_ROOT_HINT in h for h in hints):
-                hints.append(_ROCM_HIP_ROOT_HINT)
-            # Keep the generic framework hint as context even when real paths exist.
-            if not any(_FRAMEWORK_ROOT_HINT in h for h in hints):
-                hints.append(_FRAMEWORK_ROOT_HINT)
-            return hints
-    except Exception:  # noqa: BLE001 — discovery is best-effort
-        pass
+    except Exception:  # noqa: BLE001 — probe failure is best-effort
+        return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    if roots:
+        hints: list[str] = list(roots)
+        hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
+        pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
+        pkg_name = pkg_map.get(framework, framework)
+        ver = _resolve_package_version(pkg_name)
+        if ver:
+            hints.append(f"({pkg_name} installed version: {ver})")
+        # Always include the ROCm/HIP root hint (authoring sub-agent always
+        # has /opt/rocm in scope for ROCm-side fixes, regardless of whether
+        # probe discovered it or not).
+        if not any(_ROCM_HIP_ROOT_HINT in h for h in hints):
+            hints.append(_ROCM_HIP_ROOT_HINT)
+        # Keep the generic framework hint as context even when real paths exist.
+        if not any(_FRAMEWORK_ROOT_HINT in h for h in hints):
+            hints.append(_FRAMEWORK_ROOT_HINT)
+        return hints
     return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
 
 

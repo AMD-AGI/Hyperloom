@@ -23,7 +23,7 @@ from hyperloom.orchestrator.delivery.archive import (
     ROLE_SERVER_LOG,
     ROLE_SPECIALIST_RESULT,
 )
-from hyperloom.orchestrator.phases._enablement_artifacts import (
+from hyperloom.orchestrator.enablement.artifacts import (
     _FILE_SIZE_LIMIT,
     _LOG_TRUNCATION_NOTE,
     _SERVER_LOG_TAIL_LIMIT,
