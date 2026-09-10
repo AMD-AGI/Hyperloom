@@ -26,8 +26,7 @@ def _resolve_magpie_python() -> str:
                 [
                     py,
                     "-c",
-                    "import importlib.util as u, sys; "
-                    "sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
+                    "import importlib.util as u, sys; sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
                 ],
                 timeout=10,
             )
