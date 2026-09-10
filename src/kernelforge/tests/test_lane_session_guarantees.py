@@ -67,15 +67,15 @@ def _tree(root: Path) -> Path:
     return root
 
 
-def _record_backend_specs(monkeypatch) -> list[AgentRunSpec]:
+def _record_backend_specs(monkeypatch, *, stop_hooks: bool = True) -> list[AgentRunSpec]:
     """Route every implementer session to a backend that records its spec."""
     specs: list[AgentRunSpec] = []
 
     class Backend:
-        """Stand in for a hook-capable provider without running one."""
+        """Stand in for a provider without running one."""
 
         name = "claude"
-        capabilities = AgentCapabilities(resumable=True, stop_hooks=True)
+        capabilities = AgentCapabilities(resumable=True, stop_hooks=stop_hooks)
 
         def __init__(self, runtime):
             self.runtime = runtime
@@ -114,9 +114,10 @@ def _run_lane_session(
     monkeypatch,
     *,
     serialized_driver: str | None = None,
+    stop_hooks: bool = True,
 ) -> tuple[AgentRunSpec, Path]:
     """Run one lane session the way a fan-out round runs it."""
-    specs = _record_backend_specs(monkeypatch)
+    specs = _record_backend_specs(monkeypatch, stop_hooks=stop_hooks)
     factory = _lane_factory(tmp_path)
     lane_dir = _tree(tmp_path / "lanes" / "1")
 
@@ -125,6 +126,24 @@ def _run_lane_session(
 
     assert len(specs) == 1
     return specs[0], lane_dir
+
+
+def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
+    """The gate's callbacks are built for the provider that runs them, or not at all.
+
+    A backend that ignores ``AgentRunSpec.hooks`` drops the whole group without
+    a word. Attaching one anyway made the call site read as protection the
+    session does not have, which is the inference the lane gate's old refusal
+    was there to prevent and the one this leaves no room for.
+    """
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, stop_hooks=False)
+
+    assert spec.hooks is None
+    # The rest of the lane's protection is unchanged: it does not travel in the
+    # hooks, and none of it depends on the provider running them.
+    assert spec.driver_script
+    assert spec.target_files
+    assert spec.allow_dirty_baseline is True
 
 
 def test_a_lane_session_is_given_the_protected_path_hooks(tmp_path, monkeypatch):
