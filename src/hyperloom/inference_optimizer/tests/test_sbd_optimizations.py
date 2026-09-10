@@ -10,96 +10,530 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
-    collect_optimization_stack,
     collect_recorded_optimizations,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
-def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
-    """The collective lane settles its own verdict, outside the integrate queue.
-
-    No kernel recorder fires for it, so without a record of its own the change
-    is invisible to the read model: the patch lands, the workload moves, and
-    every point it earned reports as belonging to no step.
-    """
-    instrument.record_collective_promotion(
-        tmp_path,
-        integration_id="integration-1",
-        kernel_id="k007",
-        baseline_tput=100.0,
-        new_tput=130.0,
-        gain_pct=30.0,
-        patch_path="/ws/collective.patch",
-        collective_op="all_reduce",
-        world_size=8,
-        ts="2026-01-01T00:00:20+00:00",
+def _record_kernel_ledger_fixture(
+    session_dir,
+    *,
+    integration_id,
+    baseline_tput,
+    new_tput,
+    gain_pct,
+    graded_objective=None,
+    ts="2026-01-01T00:00:20+00:00",
+):
+    """Add ledger-axis fixtures; the kernel recorder itself records output gain only."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(instrument, "_now_iso_safe", lambda: ts)
+        instrument.record_kernel_e2e(
+            session_dir,
+            kernel_id=integration_id,
+            integrated=True,
+            validated=True,
+            decision="KEEP",
+            e2e_gain_pct=gain_pct,
+            result={"base_tput": baseline_tput, "new_tput": new_tput},
+            occurrence=integration_id,
+        )
+    parts = assemble_parts(session_dir)
+    [operation] = [row for row in parts["operations"] if row["name"] == integration_id]
+    instrument.record_operation(
+        session_dir,
+        operation_id=operation["operation_id"],
+        producer="kernel-agent",
+        outputs={"graded_objective": graded_objective},
     )
+    for measurement in parts["measurements"]:
+        if measurement["operation_id"] == operation["operation_id"] and measurement["name"] == "e2e_gain_pct":
+            instrument.record_measurement(
+                session_dir,
+                measurement_id=measurement["measurement_id"],
+                producer="kernel-agent",
+                metric_basis="total" if graded_objective == "total_throughput" else "output",
+            )
+
+
+@pytest.mark.parametrize("lane", ["gemm", "kernel"])
+def test_promotion_recorder_keeps_unknown_gain_unknown(tmp_path, lane):
+    if lane == "gemm":
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            result={
+                "status": "ok",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": 150.0,
+                "e2e_gain_pct": None,
+            },
+        )
+    else:
+        _record_kernel_ledger_fixture(
+            tmp_path,
+            integration_id="unknown-gain",
+            baseline_tput=100.0,
+            new_tput=150.0,
+            gain_pct=None,
+        )
+
     parts = assemble_parts(tmp_path)
-    operations = list(parts.get("operations") or [])
-    measurements = list(parts.get("measurements") or [])
-    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
-    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": 100.0})
-    warnings: list[str] = []
+    assert not any(row["name"] == "e2e_gain_pct" for row in parts["measurements"])
+    [adoption] = parts["adoptions"]
+    assert adoption.get("gain_pct") is None
+    result = collect_recorded_optimizations(
+        "s1",
+        parts["operations"],
+        parts["measurements"],
+        parts["adoptions"],
+        [],
+        [],
+        [],
+        [],
+    )
+    assert result["attempts"][0]["local_gain_pct"] is None
+    assert result["entries"][0]["gain_pct"] is None
+
+
+@pytest.mark.parametrize("lane", ["gemm", "kernel"])
+@pytest.mark.parametrize(
+    ("objective", "recorded_gain"),
+    [
+        pytest.param("total_throughput", 20.0, id="total"),
+        pytest.param("output_throughput", 50.0, id="explicit_output"),
+        pytest.param(None, 50.0, id="legacy_output"),
+        pytest.param("total_throughput", None, id="unknown_total_gain"),
+    ],
+)
+def test_promotion_ledger_uses_recorded_objective_not_output_pair(tmp_path, lane, objective, recorded_gain):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-objective",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+        phase="BASELINE",
+    )
+    if lane == "gemm":
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            result={
+                "status": "ok",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": 150.0,
+                "e2e_gain_pct": recorded_gain,
+            },
+            graded_objective=objective,
+        )
+    else:
+        _record_kernel_ledger_fixture(
+            tmp_path,
+            integration_id="objective-promotion",
+            baseline_tput=100.0,
+            new_tput=150.0,
+            gain_pct=recorded_gain,
+            graded_objective=objective,
+            ts="2026-01-01T00:00:20+00:00",
+        )
+
+    parts = assemble_parts(tmp_path)
+    [baseline] = [row for row in parts["operations"] if row["name"] == "baseline"]
+    [adoption] = parts["adoptions"]
+    [operation] = [row for row in parts["operations"] if row["operation_id"] == adoption["operation_id"]]
+    by_id = {row["measurement_id"]: row for row in parts["measurements"]}
+    [baseline_reading] = [by_id[mid] for mid in baseline["measurement_refs"]]
+    assert (baseline_reading["value"], baseline_reading["metric_basis"]) == (100.0, "output")
+    assert operation["outputs"]["graded_objective"] == objective
+    assert adoption["gain_pct"] == recorded_gain
+    pinned = {by_id[mid]["name"]: by_id[mid] for mid in adoption["measurement_ids"]}
+    assert (pinned["baseline_throughput"]["value"], pinned["baseline_throughput"]["metric_basis"]) == (100.0, "output")
+    assert (pinned["final_throughput"]["value"], pinned["final_throughput"]["metric_basis"]) == (150.0, "output")
+    if recorded_gain is None:
+        assert "e2e_gain_pct" not in pinned
+    else:
+        assert pinned["e2e_gain_pct"]["value"] == recorded_gain
+        assert pinned["e2e_gain_pct"]["metric_basis"] == ("total" if objective == "total_throughput" else "output")
 
     result = collect_recorded_optimizations(
         "s1",
-        operations,
-        measurements,
-        list(parts.get("adoptions") or []),
-        list(parts.get("artifacts") or []),
+        parts["operations"],
+        parts["measurements"],
+        parts["adoptions"],
+        parts.get("artifacts") or [],
         [],
         [],
-        warnings,
+        [],
     )
 
-    entry = result["entries"][0]
-    assert entry["optimization_kind"] == "kernel_collective"
+    assert result["schema_version"] == 5
+    assert result["source_of_truth"] == "recorder"
+    assert result["available"] is True
+    [attempt] = result["attempts"]
+    [entry] = result["entries"]
+    assert attempt["decision"] == "KEEP"
+    assert attempt["decision_source"] == "adoption.decision"
+    assert attempt["validation_basis"] == "e2e_validation"
+    assert attempt["measurement_source"] == "adoption_pinned"
+    assert attempt["local_gain_pct"] == recorded_gain
+    assert attempt["local_gain_source"] == ("adoption.gain_pct" if recorded_gain is not None else "")
+    assert entry["adopted_attempt_id"] == attempt["attempt_id"] == operation["operation_id"]
+    assert entry["adoption_id"] == adoption["adoption_id"]
     assert entry["source"] == "kernel_agent"
-    assert entry["backend"] == "forge"
-    assert entry["gain_method"] == "baseline_chain"
-    assert result["summary_by_kind"]["kernel_collective"]["total_gain_pct"] == 30.0
+    assert entry["optimization_kind"] == ("gemm_tuning" if lane == "gemm" else "kernel_optimization")
+    if recorded_gain is None:
+        assert entry["gain_pct"] is None
+    else:
+        assert entry["gain_pct"] == pytest.approx(recorded_gain)
+    if objective != "total_throughput":
+        assert entry["gain_method"] == "baseline_chain"
+    projected_measurements = {row["name"]: row for row in attempt["measurements"]}
+    assert projected_measurements["baseline_throughput"]["metric_basis"] == "output"
+    assert projected_measurements["final_throughput"]["metric_basis"] == "output"
+    if recorded_gain is not None:
+        assert projected_measurements["e2e_gain_pct"]["metric_basis"] == pinned["e2e_gain_pct"]["metric_basis"]
+    credited_gain = entry["gain_pct"] or 0.0
+    assert entry["cumulative_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["ledger_total_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["attributed_total_gain_pct"] == pytest.approx(credited_gain)
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["keep_count"] == 1
+    if entry["gain_pct"] is None:
+        assert entry["gain_method"] == "missing"
+        assert result["validation"]["unmeasured_keep_count"] == 1
+
+
+def test_promotion_ledger_does_not_sum_different_gain_axes(tmp_path):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-mixed-objectives",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for integration_id, before, after, gain, objective, ts in (
+        ("output-step", 100.0, 150.0, 50.0, "output_throughput", "2026-01-01T00:00:10+00:00"),
+        ("total-step", 150.0, 165.0, 20.0, "total_throughput", "2026-01-01T00:00:20+00:00"),
+    ):
+        _record_kernel_ledger_fixture(
+            tmp_path,
+            integration_id=integration_id,
+            baseline_tput=before,
+            new_tput=after,
+            gain_pct=gain,
+            graded_objective=objective,
+            ts=ts,
+        )
+    instrument.record_session_validation(
+        tmp_path,
+        baseline_tput=1000.0,
+        validated_tput=1200.0,
+        validated_gain_pct=20.0,
+        stack_len=2,
+        source="kernel_integrate",
+        measurement_basis="e2e_rebench",
+        graded_objective="total_throughput",
+        ts="2026-01-01T00:00:30+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    output_entry, total_entry = result["entries"]
+    assert output_entry["gain_pct"] is None
+    assert output_entry["local_gain_pct"] == 50.0
+    assert total_entry["gain_pct"] == 20.0
+    assert total_entry["local_gain_pct"] == 20.0
+    assert total_entry["cumulative_gain_pct"] == 20.0
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert result["validation"]["validated_total_gain_pct"] == 20.0
+    assert result["validation"]["ledger_total_gain_pct"] == 20.0
+    assert result["validation"]["validation_basis"] == "e2e_rebench"
+    assert result["validation"]["keep_count"] == 2
+    assert any("gain basis" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("objective", ["total_throughput", "output_throughput"], ids=["total", "output"])
+def test_gemm_ledger_credits_changes_in_session_baseline_gain(tmp_path, monkeypatch, objective):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-gemm-chain",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for cycle, after, gain, ts in (
+        (1, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        (2, 130.0, 30.0, "2026-01-01T00:00:20+00:00"),
+    ):
+        monkeypatch.setattr(instrument, "_now_iso_safe", lambda: ts)
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            macro_cycle=cycle,
+            result={
+                "status": "complete",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": after,
+                "e2e_gain_pct": gain,
+            },
+            graded_objective=objective,
+        )
+    parts = assemble_parts(tmp_path)
+    gemm_operations = [row for row in parts["operations"] if row["kind"] == "gemm_tuning"]
+    assert len(gemm_operations) == 2
+    assert {row["macro_cycle"] for row in gemm_operations} == {1, 2}
+    assert all(row["extensions"]["gemm"]["result"]["baseline_tput"] == 100.0 for row in gemm_operations)
+    assert sorted(row["gain_pct"] for row in parts["adoptions"]) == [20.0, 30.0]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    first, second = result["entries"]
+    assert [first["gain_pct"], second["gain_pct"]] == [20.0, 10.0]
+    assert [first["local_gain_pct"], second["local_gain_pct"]] == [20.0, 30.0]
+    assert [first["cumulative_gain_pct"], second["cumulative_gain_pct"]] == [20.0, 30.0]
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 30.0
+    assert result["validation"]["ledger_total_gain_pct"] == 30.0
     assert result["validation"]["attributed_total_gain_pct"] == 30.0
     assert result["validation"]["unattributed_gain_pct"] == 0.0
-    assert warnings == []
+    assert not any("belongs to no attempt" in warning for warning in warnings)
 
 
-def test_collective_stack_entry_keeps_campaign_evidence():
-    state = {
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "collective",
-                "variant_name": "forge_collective",
-                "engine": "forge_collective",
-                "kernel_id": "k007",
-                "tput": 130.0,
-                "ts": "1970-01-01T00:00:20+00:00",
-                "collective_op": "all_reduce",
-                "world_size": 8,
-                "collective_attempt_id": "attempt-1",
-                "integration_id": "integration-1",
+def test_kernel_total_gains_without_total_anchors_do_not_form_a_chain(tmp_path):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-kernel-total",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for integration_id, before, after, gain, ts in (
+        ("first-total", 100.0, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        ("second-total", 120.0, 132.0, 10.0, "2026-01-01T00:00:20+00:00"),
+    ):
+        _record_kernel_ledger_fixture(
+            tmp_path,
+            integration_id=integration_id,
+            baseline_tput=before,
+            new_tput=after,
+            gain_pct=gain,
+            graded_objective="total_throughput",
+            ts=ts,
+        )
+    parts = assemble_parts(tmp_path)
+    throughputs = [row for row in parts["measurements"] if row["name"] in {"baseline_throughput", "final_throughput"}]
+    assert all(row["metric_basis"] == "output" for row in throughputs)
+    assert sorted(row["gain_pct"] for row in parts["adoptions"]) == [10.0, 20.0]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    first, second = result["entries"]
+    assert first["gain_pct"] == 20.0
+    assert first["chain_continuous"] is False
+    assert second["local_gain_pct"] == 10.0
+    assert second["gain_pct"] is None
+    assert second["chain_continuous"] is False
+    assert result["validation"]["ledger_total_gain_pct"] == 20.0
+    assert result["validation"]["unmeasured_keep_count"] == 1
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert any("total" in warning and "gain basis" in warning for warning in warnings)
+
+
+def test_unknown_gain_breaks_later_gemm_increment_attribution(tmp_path, monkeypatch):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-unknown-gap",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for cycle, after, gain, ts in (
+        (1, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        (2, 140.0, 40.0, "2026-01-01T00:00:30+00:00"),
+    ):
+        monkeypatch.setattr(instrument, "_now_iso_safe", lambda: ts)
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            macro_cycle=cycle,
+            result={
+                "status": "complete",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": after,
+                "e2e_gain_pct": gain,
             },
-        ],
-    }
+            graded_objective="total_throughput",
+        )
+    _record_kernel_ledger_fixture(
+        tmp_path,
+        integration_id="unknown-middle-anchor",
+        baseline_tput=120.0,
+        new_tput=132.0,
+        gain_pct=10.0,
+        graded_objective="total_throughput",
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
 
-    entry = collect_optimization_stack(state)[0]
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
 
-    assert entry["collective_op"] == "all_reduce"
-    assert entry["world_size"] == 8
-    assert entry["collective_attempt_id"] == "attempt-1"
-    assert entry["integration_id"] == "integration-1"
-    assert entry["validated"] is True
+    first, unanchored, last = result["entries"]
+    assert [first["gain_pct"], unanchored["gain_pct"], last["gain_pct"]] == [20.0, None, None]
+    assert [first["local_gain_pct"], unanchored["local_gain_pct"], last["local_gain_pct"]] == [20.0, 10.0, 40.0]
+    assert last["gain_method"] == "missing"
+    assert last["chain_continuous"] is False
+    assert result["validation"]["attributed_total_gain_pct"] == 20.0
+    assert result["validation"]["unmeasured_keep_count"] == 2
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert warnings
+
+
+@pytest.mark.parametrize("with_ineligible_keep", [False, True], ids=["attributable_only", "with_ineligible_keep"])
+def test_session_validation_checkpoint_does_not_reconcile_against_later_keeps(tmp_path, with_ineligible_keep):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-checkpoint",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    if with_ineligible_keep:
+        instrument.record_action_operation(
+            tmp_path,
+            action="integrate_patch",
+            task_id="ineligible-before-checkpoint",
+            status="kept",
+            decision="KEEP",
+            result={
+                "status": "kept",
+                "base_tput": 100.0,
+                "output_throughput": 100.0,
+                "delta_pct": 0.0,
+                "validated": True,
+                "attribution_eligible": False,
+                "metric_basis": "output",
+                "ts": "2026-01-01T00:00:05+00:00",
+            },
+        )
+    _record_kernel_ledger_fixture(
+        tmp_path,
+        integration_id="before-checkpoint",
+        baseline_tput=100.0,
+        new_tput=120.0,
+        gain_pct=20.0,
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:10+00:00",
+    )
+    instrument.record_session_validation(
+        tmp_path,
+        baseline_tput=100.0,
+        validated_tput=120.0,
+        validated_gain_pct=20.0,
+        stack_len=2 if with_ineligible_keep else 1,
+        source="kernel_promote",
+        measurement_basis="e2e_rebench",
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:15+00:00",
+    )
+    _record_kernel_ledger_fixture(
+        tmp_path,
+        integration_id="after-checkpoint",
+        baseline_tput=120.0,
+        new_tput=132.0,
+        gain_pct=10.0,
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    assert [entry["gain_pct"] for entry in result["entries"]] == [20.0, 12.0]
+    validation = result["validation"]
+    assert validation["validated_total_gain_pct"] == 20.0
+    assert validation["validated_at_stack_len"] == (2 if with_ineligible_keep else 1)
+    assert validation["non_attributable_keep_count"] == int(with_ineligible_keep)
+    assert validation["ledger_total_gain_pct"] == 32.0
+    assert validation["attributed_total_gain_pct"] == 32.0
+    assert validation["reconciliation_gap_pct"] is None
+    assert validation["attribution_gap_pct"] is None
+    assert validation["validation_basis"] == "e2e_rebench"
+    assert validation["validation_source"] == "kernel_promote"
+    assert any("stale" in warning and "checkpoint" in warning for warning in warnings)
+    assert not any("but the run promoted" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("explicit_output", [False, True], ids=["intvty", "explicit_output"])
+@pytest.mark.parametrize("provenance", ["e2e_rebench", "e2e_decision_round"])
+def test_session_validation_records_objective_without_replacing_provenance(
+    tmp_path, monkeypatch, explicit_output, provenance
+):
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    if explicit_output:
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", GRADED_OUTPUT)
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        benchmark_mode="agentx",
+        baseline_tput=100.0,
+        baseline_perf={"total_throughput": 1000.0, GRADED_INTVTY: 200.0},
+    )
+    # The interactivity axis carries figures unlike either throughput axis, so the recorded pair names which one the
+    # run was graded on rather than matching by coincidence.
+    measurement = {"output_throughput": 150.0, "total_token_throughput": 1200.0, GRADED_INTVTY: 240.0}
+
+    assert coord.writeback._update_cumulative_gain_validated(
+        150.0, measurement, source="recorder_objective_test", measurement_basis=provenance
+    )
+
+    parts = assemble_parts(tmp_path)
+    [operation] = parts["operations"]
+    gain = 50.0 if explicit_output else 20.0
+    objective = GRADED_OUTPUT if explicit_output else GRADED_INTVTY
+    assert operation["outputs"]["validated_gain_pct"] == pytest.approx(gain)
+    assert operation["outputs"]["measurement_basis"] == provenance
+    assert operation["outputs"].get("graded_objective") == objective
+    measurements = {row["name"]: row for row in parts["measurements"]}
+    assert measurements["baseline_throughput"]["value"] == (100.0 if explicit_output else 200.0)
+    assert measurements["throughput"]["value"] == (150.0 if explicit_output else 240.0)
+    assert measurements["gain"]["value"] == pytest.approx(gain)
+    result = collect_recorded_optimizations("s1", parts["operations"], parts["measurements"], [], [], [], [], [])
+    assert result["validation"]["validated_total_gain_pct"] == pytest.approx(gain)
+    assert result["validation"]["validation_basis"] == provenance
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
-    """The declared shape must cover the keys the collector actually writes.
-
-    ``session_breakdown.json`` is a published contract, and the TypedDict is
-    what downstream code reads it through, so a bucket the producer emits but
-    the schema omits shows up as an empty section rather than an error. The
-    KERNEL_AGENT bucket sat in exactly that state.
-    """
+    """The declared shape must cover the keys the collector actually writes."""
     from hyperloom.inference_optimizer.breakdown.schema import PhaseBreakdown
 
     state = {
@@ -127,12 +561,7 @@ def test_phase_breakdown_schema_declares_every_emitted_bucket():
 
 
 def test_a_session_whose_records_never_arrived_says_so(tmp_path):
-    """An optimized session with no recorder parts is a gap, not a zero.
-
-    Rebuilding the section from ``state.json`` made a run whose fragments went
-    missing look exactly like a run that adopted nothing. The stack in
-    ``state.json`` is read only to tell those two apart.
-    """
+    """An optimized session with no recorder parts is a gap, not a zero."""
     state = {
         "session_id": "export",
         "baseline_tput": 100.0,
@@ -171,19 +600,15 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
 
 
 def test_the_key_that_says_records_are_missing_is_there_when_they_are_not(tmp_path):
-    """``available`` has to answer on both paths to be worth asking.
-
-    Distinguishing a session whose records never landed from one that adopted
-    nothing is what this section is for, and a consumer cannot make that call
-    against a key that only appears when the answer is no.
-    """
-    instrument.record_collective_promotion(
+    """``available`` has to answer on both paths to be worth asking."""
+    instrument.record_session_validation(
         tmp_path,
-        integration_id="integration-1",
-        kernel_id="k007",
         baseline_tput=100.0,
-        new_tput=130.0,
-        gain_pct=30.0,
+        validated_tput=130.0,
+        validated_gain_pct=30.0,
+        stack_len=1,
+        source="integrate_patch",
+        measurement_basis="e2e_rebench",
         ts="2026-01-01T00:00:20+00:00",
     )
     parts = assemble_parts(tmp_path)
@@ -375,12 +800,7 @@ def test_recorded_optimizations_exclude_ineligible_keeps_from_entries():
 
 
 def test_entries_are_a_gain_ledger_that_points_back_at_its_attempt():
-    """``entries`` must not restate what its attempt already says.
-
-    Descriptive detail lives on the attempt and is reached through
-    ``adopted_attempt_id``. A field present in both places has to carry the
-    same value in both, so that reading either one gives the same answer.
-    """
+    """``entries`` must not restate what its attempt already says."""
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
     result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
@@ -412,12 +832,7 @@ def test_attempt_gain_is_never_named_like_the_baseline_relative_one():
 
 
 def test_recorded_optimizations_report_gain_against_the_session_baseline():
-    """Two adoptions from the gemma session, with its real measured numbers.
-
-    Each executor measures against whatever it started from, so the two local
-    gains (7.09% and 10.95%) cannot simply be added. Reported gain is measured
-    against the session baseline, which is itself a recorded measurement.
-    """
+    """Two adoptions from the gemma session, with its real measured numbers."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -453,9 +868,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
             "validated": True,
             "agent": "kernel_agent",
             "gain_pct": 7.0904327726706935,
-            # An earlier PRELUDE patch had already moved the workload off the
-            # baseline before this kernel started, which is why the kernel's
-            # own starting point is not 4726.94.
+            # An earlier PRELUDE patch had already moved the workload off the baseline before this kernel started,
+            # which is why the kernel's own starting point is not 4726.94.
             "throughput_before": 4744.5975753,
             "throughput_after": 5081.0100767,
             "adopted_at": "2026-08-08T06:56:21+00:00",
@@ -483,9 +897,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     assert second["gain_pct"] == 11.769809
     assert second["local_gain_pct"] == 10.949641
     assert second["cumulative_gain_pct"] == 19.260175
-    # Per-agent totals add up to what the attempts claim, not to the session's
-    # end-to-end move; the difference is stated instead of being handed to the
-    # kernel that happened to run next.
+    # Per-agent totals add up to what the attempts claim, not to the session's end-to-end move; the difference is
+    # stated instead of being handed to the kernel that happened to run next.
     assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 7.116912
     assert result["summary_by_agent"]["framework_agent"]["attributable_gain_pct"] == 11.769809
     validation = result["validation"]
@@ -493,8 +906,8 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     assert validation["attributed_total_gain_pct"] == 18.886722
     assert validation["unattributed_gain_pct"] == 0.373453
     assert validation["attribution_gap_pct"] == 0.373453
-    # The audit identity that has to survive rounding: what the session moved
-    # is what the attempts claim plus what nobody claims.
+    # The audit identity that has to survive rounding: what the session moved is what the attempts claim plus what
+    # nobody claims.
     assert (
         validation["attributed_total_gain_pct"] + validation["unattributed_gain_pct"]
         == validation["validated_total_gain_pct"]
@@ -503,12 +916,7 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
 
 
 def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
-    """The 0.37pp that started the leaderboard argument, in isolation.
-
-    A patch moves the workload off the baseline and is never adopted. The
-    kernel that runs next must report what it itself added, not what it
-    inherited.
-    """
+    """The 0.37pp that started the leaderboard argument, in isolation."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -541,8 +949,8 @@ def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
     result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     entry = result["entries"][0]
-    # It started at 1100 and left at 1210, so it added 11pp of the baseline —
-    # not the 21pp it would inherit by being measured from the baseline.
+    # It started at 1100 and left at 1210, so it added 11pp of the baseline — not the 21pp it would inherit by being
+    # measured from the baseline.
     assert entry["gain_pct"] == 11.0
     assert entry["cumulative_gain_pct"] == 21.0
     assert result["validation"]["unattributed_gain_pct"] == 10.0
@@ -550,13 +958,7 @@ def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
 
 
 def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
-    """A step with no finishing throughput used to be paid for twice.
-
-    Its own figure went into the total, and then the next step's head start —
-    which is that same figure — was booked again as drift. The percentage is
-    measured against where the step started, so the missing reading can be put
-    back and the chain carried on.
-    """
+    """A step with no finishing throughput used to be paid for twice."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -596,8 +998,7 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
             "throughput_before": 1000.0,
             "throughput_after": 1100.0,
         },
-        # A GEMM adoption carries the speedup it was decided on and no
-        # throughput at all.
+        # A GEMM adoption carries the speedup it was decided on and no throughput at all.
         {
             "adoption_id": "ad-gemm",
             "operation_id": "op-gemm",
@@ -625,20 +1026,14 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
     assert middle["gain_pct"] == 5.5
     assert middle["chain_continuous"] is False
     assert last["gain_pct"] == 9.5
-    # The session moved 1000 -> 1250. Booking the middle step's effect once
-    # gives exactly that; booking it again as the last step's drift gave 30.
+    # The session moved 1000 -> 1250.
     assert last["cumulative_gain_pct"] == 25.0
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert any("recorded no finishing throughput" in warning for warning in warnings)
 
 
 def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
-    """A total summed from the ledger can never be found to disagree with it.
-
-    The run promotes an end-to-end figure of its own when it validates. That
-    figure is the one the section reports, and the ledger's sum is kept beside
-    it so the two can be seen to part company.
-    """
+    """A total summed from the ledger can never be found to disagree with it."""
     operations = [
         {
             "operation_id": "op-baseline",
@@ -694,11 +1089,7 @@ def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
 
 
 def test_each_promotion_leaves_its_own_checkpoint(tmp_path):
-    """Two checkpoints that measure the same number are still two checkpoints.
-
-    Keying on the value would collapse them, which is the trap an earlier fix
-    already had to dig the measurement ids out of.
-    """
+    """Two checkpoints that measure the same number are still two checkpoints."""
     for stack_len, ts in ((1, "2026-01-01T01:00:00+00:00"), (2, "2026-01-01T02:00:00+00:00")):
         instrument.record_session_validation(
             tmp_path,
@@ -778,12 +1169,7 @@ def test_a_keep_no_accuracy_gate_ruled_on_is_counted_as_such():
 
 
 def test_both_sides_of_the_record_name_a_patch_author_the_same_way():
-    """The rule used to exist twice, and a copy that drifts moves gain.
-
-    The write side stamps an owner when the patch lands; the read side has to
-    name one for sessions recorded before it did. They answer with the same
-    function or they eventually answer differently.
-    """
+    """The rule used to exist twice, and a copy that drifts moves gain."""
     from hyperloom.inference_optimizer.breakdown.recorder.instrument import _resolve_agent
 
     cases = [
@@ -905,11 +1291,7 @@ def test_an_adoption_whose_operation_was_never_recorded_is_reported():
 
 
 def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_path):
-    """A singleton fragment is named for its producer, so two mean two claims.
-
-    Only the newest survives, and the loser does not merge into it: its whole
-    payload goes. Nothing downstream can see that it was ever written.
-    """
+    """A singleton fragment is named for its producer, so two mean two claims."""
     for producer, ts in (("coordinator", "2026-01-01T01:00:00+00:00"), ("kernel-agent", "2026-01-01T02:00:00+00:00")):
         instrument.record_run_snapshot(
             tmp_path,
@@ -924,12 +1306,7 @@ def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_
 
 
 def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_path):
-    """Merging partial updates is the point; disagreeing on a field is not.
-
-    Repeated updates from one producer merge into its own fragment long before
-    assembly, so two payloads for one id are two producers, and the later
-    timestamp decides the value with nothing said about the one it replaced.
-    """
+    """Merging partial updates is the point; disagreeing on a field is not."""
     for producer, decision in (("coordinator", "KEEP"), ("kernel-agent", "REVERT")):
         instrument.record_adoption(
             tmp_path,
@@ -946,13 +1323,7 @@ def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_p
 
 
 def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
-    """The mirror of an orphan adoption, and the one that moves a number.
-
-    The step is skipped by the gain walk, but the workload still moved, so the
-    next adopted step starts higher than the ledger expects and the difference
-    is booked as gain belonging to nobody. Unreported, that reads as ordinary
-    drift rather than as a record that never arrived.
-    """
+    """The mirror of an orphan adoption, and the one that moves a number."""
     operations = [
         {
             "operation_id": "op-base",
@@ -1119,13 +1490,7 @@ def test_adoption_throughput_outranks_overwritten_measurements():
 
 
 def test_an_adoption_citing_overwritten_evidence_says_so():
-    """Archives predating per-occurrence ids cannot be repaired, only labelled.
-
-    The frozen values still stand, but the readings the adoption points at were
-    written over by a later re-measure. Presenting the two side by side without
-    a word is what made this look like the numbers had been edited after the
-    fact.
-    """
+    """Archives predating per-occurrence ids cannot be repaired, only labelled."""
     operations = [
         {
             "operation_id": "op-k1",
@@ -1191,13 +1556,7 @@ def test_intact_pinned_evidence_is_not_called_stale():
 
 
 def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
-    """Recorded ids are unreadable by necessity, so the ordinal is added here.
-
-    An id has to be reproducible from the record being written, since several
-    producers replay their records after a resume, which rules out numbering
-    them as they arrive. The plain ordinal a reader wants is therefore assigned
-    on the way out, where every reading is in hand at once.
-    """
+    """Recorded ids are unreadable by necessity, so the ordinal is added here."""
     operations = [
         {
             "operation_id": "op-k1",
@@ -1243,8 +1602,8 @@ def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
     attempt = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])["attempts"][0]
     numbered = {row["value"]: row for row in attempt["measurements"]}
 
-    # The reading the decision was made on is the first of its name, even
-    # though the operation happens to reference the later one first.
+    # The reading the decision was made on is the first of its name, even though the operation happens to reference
+    # the later one first.
     assert numbered[5081.01]["occurrence"] == 0
     assert numbered[5100.76]["occurrence"] == 1
     assert numbered[5081.01]["occurrences_of_name"] == 2
@@ -1273,15 +1632,7 @@ def _ledger_with_baseline(tmp_path, baseline_tput: float):
 
 
 def test_a_reproduced_warm_replay_is_an_adopted_step_in_the_ledger(tmp_path):
-    """A replay the run promoted has to reach the ledger as an adopted step.
-
-    The keep decision belongs to the promote path, not to the replay executor,
-    which settles on ``succeeded`` either way. Mirroring the action before that
-    ruling recorded every replay as discarded, so a reproduced one was pushed
-    onto the stack and moved ``cumulative_gain_validated`` while the canonical
-    streams held no adoption for it: ``entries`` came back empty on a session
-    that had measurably gained, and its whole gain read as unattributed.
-    """
+    """A replay the run promoted has to reach the ledger as an adopted step."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",
@@ -1307,19 +1658,14 @@ def test_a_reproduced_warm_replay_is_an_adopted_step_in_the_ledger(tmp_path):
     assert entry["source"] == "warm_replay"
     assert entry["gain_method"] == "baseline_chain"
     assert entry["gain_pct"] == pytest.approx(198.94, abs=0.01)
-    # The ledger and the gain the run promoted are the same number, so the
-    # session reports no reconciliation gap.
+    # The ledger and the gain the run promoted are the same number, so the session reports no reconciliation gap.
     assert result["validation"]["ledger_total_gain_pct"] == pytest.approx(198.94, abs=0.01)
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert result["validation"]["keep_count"] == 1
 
 
 def test_a_replay_that_did_not_reproduce_stays_out_of_the_ledger(tmp_path):
-    """Drift is a measured non-result, and must not be credited as a keep.
-
-    The fix for the discarded-reproduced replay must not reach the other way
-    and let a replay that missed the bar claim gain it never earned.
-    """
+    """Drift is a measured non-result, and must not be credited as a keep."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",
@@ -1345,11 +1691,7 @@ def test_a_replay_that_did_not_reproduce_stays_out_of_the_ledger(tmp_path):
 
 
 def test_a_replay_promoted_without_an_accuracy_verdict_says_so(tmp_path):
-    """Adopting on a keep verdict alone is a different record from passing a gate.
-
-    A replay is admitted when its eval could not be scored, so the ledger has to
-    carry that it was never checked rather than report it as validated.
-    """
+    """Adopting on a keep verdict alone is a different record from passing a gate."""
     instrument.record_action_operation(
         tmp_path,
         action="replay_warm_recipe",

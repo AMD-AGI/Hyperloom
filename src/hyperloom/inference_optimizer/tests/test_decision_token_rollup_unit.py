@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Token rollup arithmetic for the ``decision_trace`` / ``token_usage`` sections.
-
-Pins the counter families apart: visible prompt/completion, cache, and hidden
-reasoning output. ``grand_total`` is documented as the all-in spend, so a
-reasoning model's hidden output has to be in it — while ``total_out`` keeps
-counting only what the model actually said.
-"""
+"""Token rollup arithmetic for the ``decision_trace`` / ``token_usage`` sections."""
 
 from __future__ import annotations
 

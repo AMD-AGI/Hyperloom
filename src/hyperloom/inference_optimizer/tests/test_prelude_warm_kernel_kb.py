@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE preparation of the inference Recipe's kernel section.
-
-PRELUDE reads nested ``value.kernel.gemm/fusion/rewrite`` through
-:class:`KernelAgentKB` from the same already-downloaded inference Recipe used by
-Explore and Framework. The Recipe replay task grades the combined set once.
-"""
+"""PRELUDE preparation of the inference Recipe's kernel section."""
 
 from __future__ import annotations
 
@@ -322,7 +317,6 @@ def test_multi_file_manifest_and_target_snapshot_both_roll_back(
             "target_file": str(target),
             "snapshot_dir": str(materialized),
             "kernel_repo": str(live),
-            "allow_unknown_target": True,
         },
         session_dir=session_dir,
         kernel_id="multi",
@@ -637,8 +631,8 @@ async def test_loaded_zero_mutation_plan_clears_warm_pending(
 
 @pytest.mark.asyncio
 async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None:
-    # A fusion patch only takes effect with its recorded env switches; applying
-    # the file alone re-measures the unfused path and reverts a good champion.
+    # A fusion patch only takes effect with its recorded env switches; applying the file alone re-measures the unfused
+    # path and reverts a good champion.
     target = tmp_path / "serving" / "model.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("old", encoding="utf-8")
@@ -674,8 +668,8 @@ async def test_fusion_env_switches_reach_the_measurement(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_gemm_without_env_var_is_deferred(tmp_path: Path) -> None:
-    # Nothing names the env var that should carry the tuned table, so there is
-    # no safe way to re-apply it: defer rather than guess.
+    # Nothing names the env var that should carry the tuned table, so there is no safe way to re-apply it: defer
+    # rather than guess.
     record = _kernel_record(
         tmp_path,
         {"gemm": {"optimizations": [{"tuned_file": "kernel/gemm/t.csv"}]}},

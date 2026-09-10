@@ -34,8 +34,8 @@ from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_text
 
-# Framework apply-back artifacts live beside, never inside, the artifact paths the
-# nested standalone FlyDSL forge-loop owns (``forge_experiments/best*``).
+# Framework apply-back artifacts live beside, never inside, the artifact paths the nested standalone FlyDSL forge-loop
+# owns (``forge_experiments/best*``).
 APPLYBACK_NAMESPACE = "rewrite_applyback"
 _IMPORT_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -352,7 +352,6 @@ async def _run_agent(
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,
-        reasoning_effort="max",
         additional_directories=[str(reference_path.parent)],
         allow_untracked=True,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),
@@ -370,8 +369,8 @@ async def _run_agent(
         backend.run(run_spec),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
-    # A turn cap or SDK error leaves a half-rewired integration that passes host
-    # validation and every gate after it, so it must be raised rather than published.
+    # A turn cap or SDK error leaves a half-rewired integration that passes host validation and every gate after it,
+    # so it must be raised rather than published.
     if result.end_reason != "agent_stopped":
         raise RuntimeError(f"apply-back agent did not finish normally: {result.end_reason or 'unknown'}")
     return backend.name, backend.runtime.model
@@ -451,8 +450,7 @@ def _validate_worktree_changes(
                 )
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("apply-back pre-commit validation timed out") from error
-            # Formatting hooks conventionally return 1 after fixing files. Stage
-            # their deterministic output and run once more to require a clean pass.
+            # Formatting hooks conventionally return 1 after fixing files.
             staged = _git(worktree, "add", "-A", "--", ".")
             if staged.returncode != 0:
                 raise RuntimeError(f"could not restage pre-commit changes: {staged.stderr.strip()}")
@@ -465,8 +463,8 @@ def _validate_worktree_changes(
         checked = _git(worktree, "diff", "--cached", "--check")
         if checked.returncode != 0:
             raise RuntimeError(f"post-format apply-back diff check failed: {checked.stdout.strip()}")
-        # Hooks can add files of their own or normalize an edit back to its
-        # committed state, so the final staged set is what the patch will carry.
+        # Hooks can add files of their own or normalize an edit back to its committed state, so the final staged set
+        # is what the patch will carry.
         changed_files = _staged_paths(worktree)
         if not changed_files:
             raise RuntimeError("apply-back pre-commit hooks reverted every repository change")
@@ -564,8 +562,7 @@ def _collect_patch(
     changed_files = [path for path in names_raw.split("\0") if path]
     atomic_write_text(patch_path, patch)
 
-    # Verify against the pristine base, not against the agent's already-modified
-    # worktree. This is the same state Hyperloom applies the patch to.
+    # Verify against the pristine base, not against the agent's already-modified worktree.
     reset = _git(worktree, "reset", "--hard", base_commit)
     if reset.returncode != 0:
         raise RuntimeError(f"could not reset patch verification worktree: {reset.stderr.strip()}")
@@ -596,13 +593,7 @@ def _publish_patch(
     patch: str,
     changed_files: list[str],
 ) -> tuple[str, str, str, str]:
-    """Publish the framework patch into the apply-back-owned artifact namespace.
-
-    The bundle layout follows forge-loop's canonical contract, but under
-    ``rewrite_applyback/`` so a standalone FlyDSL best can never occupy the
-    authoritative framework apply-back path, and an apply-back publication can
-    never overwrite the nested loop's own best.
-    """
+    """Publish the framework patch into the apply-back-owned artifact namespace."""
     workspace = Path(spec.workspace).resolve()
     root = workspace / "forge_experiments"
     namespace_root = root / APPLYBACK_NAMESPACE
@@ -706,8 +697,8 @@ def _publish_patch(
         if temporary.exists():
             shutil.rmtree(temporary, ignore_errors=True)
 
-    # The bundle is complete on disk before either pointer becomes readable, so a
-    # hard kill can only leave the previous publication or nothing at all.
+    # The bundle is complete on disk before either pointer becomes readable, so a hard kill can only leave the
+    # previous publication or nothing at all.
     _atomic_write_json(manifest_path, manifest)
     _atomic_write_json(result_path, manifest)
     return (

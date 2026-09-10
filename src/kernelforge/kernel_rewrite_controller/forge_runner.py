@@ -96,9 +96,15 @@ def build_forge_loop_invocation(
     task_dir: Path,
     worktree: OperatorWorktree,
     deadline_unix: float,
+    driver: Path,
 ) -> ForgeLoopInvocation:
-    """Map one controller task onto the existing named-kernel forge-loop CLI."""
-    driver = (Path(task_dir).resolve() / task.driver_path).resolve()
+    """Map one controller task onto the existing named-kernel forge-loop CLI.
+
+    ``driver`` is the workspace copy produced by ``stage_operator_driver``, not
+    the published task file: forge-loop hands the driver's directory to the
+    preparation agent, which has to be inside the repository.
+    """
+    driver = Path(driver).resolve()
     result_json = Path(task_dir).resolve() / "forge-result.json"
     remaining_hours = max(0.0, (float(deadline_unix) - time.time()) / 3600.0)
     max_hours = max(1.0, remaining_hours)
@@ -146,6 +152,8 @@ def build_forge_loop_invocation(
         command.extend(["--source-files", ",".join(str(path) for path in worktree.source_files)])
     if task.target_functions:
         command.extend(["--target-functions", ",".join(task.target_functions)])
+    if task.world_size > 1:
+        command.extend(["--nproc-per-node", str(task.world_size)])
     return ForgeLoopInvocation(
         command=tuple(command),
         workspace=worktree.workspace,
@@ -220,9 +228,8 @@ def run_forge_loop(
         start_new_session=True,
     )
     timed_out = False
-    # Counted rather than logged per tick: the probe fires about once a second
-    # for up to ninety minutes, so one line each would bury the run while none
-    # at all hides a probe that never worked and cost every interim publication.
+    # Counted rather than logged per tick: the probe fires about once a second for up to ninety minutes, so one line
+    # each would bury the run while none at all hides a probe that never worked and cost every interim publication.
     probe_failures = 0
     while True:
         remaining = invocation.deadline_unix - time.time()

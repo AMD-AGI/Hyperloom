@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for aiter dense tuner stdout parsing + strict status separation (WP-3).
-
-Format B fixtures are the *real* comparison table observed from the aiter
-a8w8_blockscale tuner on a Qwen3-14B FP8 manifest run (the sample that exposed
-forge's parser/status gap: rc==0 + 4/4 UPDATE but reported no_improvement).
-"""
+"""Tests for aiter dense tuner stdout parsing + strict status separation (WP-3)."""
 
 from __future__ import annotations
 
@@ -63,8 +58,8 @@ class TestParser:
         assert _parse_tuner_stdout("no shapes here\njust noise", "") == []
 
 
-# aiter prints "N/A" for Pre/Improve% and marks the row NEW when a shape had no
-# prior tuned entry (nothing to compare the freshly tuned config against).
+# aiter prints "N/A" for Pre/Improve% and marks the row NEW when a shape had no prior tuned entry (nothing to compare
+# the freshly tuned config against).
 _NEW_SHAPES_TABLE = """
 --- Would update (2 shapes) ---
 Shape                                    |    Pre(us) |   Post(us) |   Improve |             Action
@@ -75,8 +70,7 @@ Re-run with --update_improved to apply.
 
 
 class TestParseNewShapes:
-    """Regression: an all-new-shape run must parse (not silently vanish and be
-    misreported as no_improvement, which skips E2E validation of the new configs)."""
+    """Regression: an all-new-shape run must parse (not silently vanish and be misreported as no_improvement, which skips E2E validation of the new configs)."""
 
     def test_new_rows_are_parsed_as_is_new(self):
         rows = _parse_tuner_stdout(_NEW_SHAPES_TABLE, "")
@@ -104,8 +98,8 @@ class TestParseNewShapes:
         assert new.get("is_new") is True and new["improved"] is False
 
     def test_all_new_summary_is_ok_with_unverified_not_improved(self):
-        # Align with bf16: shapes without a baseline are unverified, not losers.
-        # status=ok + n_improved=0 (do not claim improved).
+        # Align with bf16: shapes without a baseline are unverified, not losers. status=ok + n_improved=0 (do not
+        # claim improved).
         s = _summarize_shape_results(_parse_tuner_stdout(_NEW_SHAPES_TABLE, ""))
         assert s["status"] == "ok"
         assert s["total"] == 2 and s["n_improved"] == 0 and s["n_unverified"] == 2
@@ -128,12 +122,7 @@ class TestSummarize:
 
 
 class TestCandidateCsvFallback:
-    """Fallback for the aiter output mode that prints only a
-    "Successfully tuned shapes" summary (no per-shape table) but still writes a
-    valid candidate CSV. With no untuned baseline the rows are tuned-but-
-    unverified: the summary reports ok + n_unverified>0 (bf16-aligned), not
-    no_improvement. Promotion happens through candidate=True -- see
-    test_force_candidate_wiring.test_candidate_csv_fallback_forces_candidate."""
+    """Fallback for the aiter output mode that prints only a "Successfully tuned shapes" summary (no per-shape table) but still writes a valid candidate CSV."""
 
     def _write_candidate(self, tmp_path):
         p = tmp_path / "candidate_a8w8_blockscale.csv"
@@ -152,8 +141,8 @@ class TestCandidateCsvFallback:
         assert rows[0]["tuned_us"] == 269.71
         assert rows[0]["default_us"] is None
         assert rows[0]["speedup"] is None
-        # No baseline in this mode: rows are tuned-but-unverified, never claimed
-        # as improved (the e2e run, not the micro summary, decides KEEP).
+        # No baseline in this mode: rows are tuned-but-unverified, never claimed as improved (the e2e run, not the
+        # micro summary, decides KEEP).
         assert not any(r["improved"] for r in rows)
         assert all(r["tuned_unverified"] for r in rows)
 
@@ -174,10 +163,8 @@ class TestCandidateCsvFallback:
         assert len(rows) == 1 and rows[0]["M"] == 64 and rows[0]["tuned_us"] == 12.34
 
     def test_fallback_empty_stdout_with_candidate_is_unverified(self, tmp_path):
-        # Mirror run_aiter_dense_tuner's decision: empty stdout parse but a
-        # candidate CSV with rows -> shape_results recovered from the candidate.
-        # The tuned artifact exists (total>0, so NOT empty_output) but has no
-        # measured baseline, so the summary reports ok with unverified_shapes>0.
+        # Mirror run_aiter_dense_tuner's decision: empty stdout parse but a candidate CSV with rows -> shape_results
+        # recovered from the candidate.
         stdout_rows = _parse_tuner_stdout("Successfully tuned 2 shapes\n", "")
         assert stdout_rows == []
         shape_results = stdout_rows or _parse_candidate_csv(self._write_candidate(tmp_path))
@@ -239,16 +226,15 @@ class TestBuildReportStrictStatus:
         assert rep.micro_decision == "candidate"
 
     def test_empty_plus_failed_is_partial_failure(self):
-        # A crash alongside an empty run is reported as partial_failure: the
-        # failure outranks the empty result so it cannot disappear behind a
-        # sibling tuner's outcome. (It is still never "no_improvement".)
+        # A crash alongside an empty run is reported as partial_failure: the failure outranks the empty result so it
+        # cannot disappear behind a sibling tuner's outcome. (It is still never "no_improvement".)
         rep = _report([_res("empty_output"), _res("failed", error="boom", name="fmoe_ck")])
         assert rep.micro_decision == "partial_failure"
         assert [f["tuner"] for f in rep.failed_tuners] == ["fmoe_ck"]
 
     def test_failed_plus_no_improvement_is_partial_failure(self):
-        # The exact shape of the week-long blind spot: one tuner crashes, another
-        # legitimately finds nothing, and the batch used to read as "no headroom".
+        # The exact shape of the week-long blind spot: one tuner crashes, another legitimately finds nothing, and the
+        # batch used to read as "no headroom".
         rep = _report(
             [
                 _res("failed", error="boom", error_class="subprocess_error"),
@@ -265,8 +251,8 @@ class TestBuildReportStrictStatus:
         assert len(rep.failed_tuners) == 2
 
     def test_candidate_outranks_partial_failure_but_failure_stays_visible(self):
-        # A deployable artifact must not be thrown away because a sibling tuner
-        # crashed -- but the crash still has to be reported.
+        # A deployable artifact must not be thrown away because a sibling tuner crashed -- but the crash still has to
+        # be reported.
         cand = _res(
             "ok",
             total_shapes=4,
@@ -288,9 +274,8 @@ class TestBuildReportStrictStatus:
         assert "failed_tuners" not in rep.to_dict()
 
     def test_all_new_shapes_forced_candidate_requires_e2e(self):
-        # What run_aiter_dense_tuner emits for an all-new-shape run: micro shows no
-        # improvement (best==1.0) but candidate is forced so the freshly tuned
-        # configs are validated end-to-end instead of dropped.
+        # What run_aiter_dense_tuner emits for an all-new-shape run: micro shows no improvement (best==1.0) but
+        # candidate is forced so the freshly tuned configs are validated end-to-end instead of dropped.
         new_shapes = _res(
             "no_improvement",
             total_shapes=2,

@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run a generated script under conditions we chose, not conditions it chose.
-
-The script is the one input to this system nobody reviewed, so it runs as a
-child process in its own directory with its own wall clock, and everything it
-produces is read back from files rather than from what it says on stdout.
-
-Two behaviours are deliberate:
-
-* **A crash is a result, not an exception.** A kernel that faults the GPU takes
-  the process down without Python ever seeing it -- observed on this hardware,
-  where some kernels write outside the output buffer and abort the interpreter.
-  A tuner that dies has failed the gate; it has not failed the run.
-* **A timeout keeps what was already written.** A script cut off part-way may
-  still have produced usable rows, and the contract check downstream is the
-  thing entitled to judge them. This is the same lesson as the tuner whose
-  partial CSV used to be thrown away because the exit code was 124.
-"""
+"""Run a generated script under conditions we chose, not conditions it chose."""
 
 from __future__ import annotations
 
@@ -68,19 +52,7 @@ def run_generated_tuner(
     gpu_id: str = "0",
     env_overrides: dict[str, str] | None = None,
 ) -> SandboxResult:
-    """Execute ``script`` and report what survived.
-
-    Args:
-        script: The generated tuner.
-        work_dir: Directory the child runs in and writes to.
-        expect: Files it was told to produce; their presence is what "ok" means,
-            because a script's own exit code says nothing reliable here -- the
-            aiter tuners in this same pipeline exit 1 on complete success.
-        timeout_s: Wall clock before the child is killed.
-        gpu_id: Restricted to one device so a generated script cannot occupy the
-            box.
-        env_overrides: Extra environment for the child.
-    """
+    """Execute ``script`` and report what survived."""
     work_dir.mkdir(parents=True, exist_ok=True)
     expect = expect or []
     # Anything left from an earlier attempt would be read as this run's output.
@@ -95,8 +67,8 @@ def run_generated_tuner(
         {
             "HIP_VISIBLE_DEVICES": gpu_id,
             "CUDA_VISIBLE_DEVICES": gpu_id,
-            # A generated script has no business reaching the network, and saying so
-            # costs nothing even though it is not enforcement.
+            # A generated script has no business reaching the network, and saying so costs nothing even though it is
+            # not enforcement.
             "no_proxy": "*",
         }
     )
@@ -131,9 +103,7 @@ def run_generated_tuner(
     try:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-_TAIL_CHARS:]
     except OSError as exc:
-        # The log is for diagnosis only. Whether the run produced the CSV is
-        # decided below from the files themselves, so an unreadable log must
-        # not change the verdict -- it only costs us the explanation.
+        # The log is for diagnosis only.
         tail = f"(the run's log at {log_path} could not be read: {exc})"
 
     produced = [str(p) for p in expect if p.is_file()]

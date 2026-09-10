@@ -1,33 +1,43 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PolicyGate — single chokepoint: every parsed Intent passes through ``validate_intent`` before side-effects."""
+"""PolicyGate — the single chokepoint every parsed Intent passes before any side effect.
+
+The gate decides synchronously from the intent, the role registry and static
+config, and makes no database call. Three rules need resources it cannot read
+-- the bring-up round holding the machine, a specialist's GPU request and a
+lease extension -- and take their answer from ``policy/projection.py``. Those
+refusals are labelled advisory because they are read off a snapshot rather than
+off the resource, and they deny: the acquire at the side-effect boundary is the
+second gate, not the first one.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
-    is_rocm_hip_writable_path,
     resolve_session_framework_root,
-    resolve_source_file_allowlist,
     resolved_within,
-    source_file_candidates,
 )
-from ..bus.gpu_pool import (
-    resolve_gpu_specialist_devices,
-    resolve_whole_machine_devices,
-)
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
+)
+from .projection import (
+    RULE_GPU_EXCEEDS_CAPACITY,
+    RULE_GPU_POOL_DISABLED,
+    RULE_LEASE_NOT_LIVE,
+    RULE_ROUND_IN_FLIGHT,
+    ResourceFacts,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -143,6 +153,10 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # needs its own name to answer only for itself.
 GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
 
+# Reference measurement action; the bring-up round guard is called for every
+# action too, and answers only for this one.
+BASELINE_ACTION_NAME: str = "baseline"
+
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -164,7 +178,7 @@ def detect_gpu_count() -> int:
             ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
             count parsed from ``rocm-smi``; 0 when nothing can be probed.
     """
-    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
         if raw is None:
             continue
@@ -208,74 +222,6 @@ def research_lane_ceiling() -> int:
     if gpus > 0:
         return 2 * gpus
     return RESEARCH_LANE_CEILING_FALLBACK
-
-
-def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
-    """Configured GPU specialist capacity (separate from serving lanes; 0 disables ``needs_gpu=true`` dispatch).
-
-    Args:
-        shared_state (Any | None): optional SharedState whose
-            ``gpu_specialist_capacity`` is read first; when ``None`` the value
-            comes from the ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY`` env
-            var.
-
-    Returns:
-        int: the configured GPU specialist capacity (0 when unset or
-            unparseable).
-    """
-    if shared_state is not None:
-        try:
-            return max(0, int(getattr(shared_state, "gpu_specialist_capacity", 0) or 0))
-        except (TypeError, ValueError):
-            return 0
-    try:
-        return max(0, int(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0") or "0"))
-    except ValueError:
-        return 0
-
-
-def _serving_tp_for_policy(shared_state: Any | None = None) -> int:
-    """Resolve serving TP for policy-time specialist GPU validation.
-
-    Mirrors ``Coordinator._resolve_serving_tp`` so PolicyGate rejects requests
-    that the dispatcher would later materialize into an unschedulable GPU lease.
-    """
-    if shared_state is not None:
-        try:
-            tp = int(getattr(shared_state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            tp = 0
-        if tp > 0:
-            return tp
-    try:
-        return max(0, int(os.environ.get("TP", "0") or 0))
-    except ValueError:
-        return 0
-
-
-def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
-    """Actual policy-time GPU specialist pool size after serving carve."""
-    ceiling = gpu_specialist_ceiling(shared_state)
-    if ceiling <= 0:
-        return 0
-    return len(
-        resolve_gpu_specialist_devices(
-            ceiling,
-            serving_tp=_serving_tp_for_policy(shared_state),
-        ),
-    )
-
-
-def _whole_machine_pool_size() -> int:
-    """Policy-time size of the whole-machine (framework/bench) GPU pool.
-
-    Mirrors ``Coordinator.framework_gpu_pool`` (``resolve_whole_machine_devices``):
-    every visible card, with *no* serving carve and no
-    ``gpu_specialist_capacity`` gate. Used to validate whole-machine, time-shared
-    GPU specialists (framework-authoring + bench) which the dispatcher routes to
-    ``framework_gpu_pool`` rather than the serving-disjoint pool.
-    """
-    return len(resolve_whole_machine_devices())
 
 
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
@@ -411,7 +357,9 @@ _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
 }
 
 
-# SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir or a framework source allowlist (checked recursively).
+# SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
+# (checked recursively). SOURCE_LIKE_FIELDS are exempt -- they name framework
+# source, which lives outside it by construction.
 PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     {
         "trace_input",
@@ -434,12 +382,9 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` and `framework_source_root` may point at trusted installed source
-# scopes outside the session directory. Real-path containment prevents escapes.
+# Exempt from path validation: where a patch may land is decided by the
+# integration step that applies it.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
-
-# Payload fields that name files modified by patch/install actions.
-ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file", "resolved_patch_targets"})
 
 # Coordinator-owned warm replay may deploy a KB patch into the active framework
 # checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
@@ -448,39 +393,6 @@ ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file",
 _WARM_REPLAY_ACTION = "replay_warm_recipe"
 _REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
 _MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
-
-# Placeholder/not-found sentinels that upstream lookups (or an LLM restating
-# a miss as prose) can leave in a SOURCE_LIKE_FIELDS value instead of leaving
-# the field empty. Treated as an absent field, not a bogus path: a resolver
-# miss should degrade the delegate gracefully, not deny the whole intent.
-# Includes the vendor-label and TraceLens placeholder forms pinned by
-# reject_non_path_source()'s own test (test_source_resolution_guards.py
-# _SENTINELS) -- those reach here verbatim when a stale/cached candidate
-# still carries a placeholder TraceLens meant to zero at the producer.
-#
-# Not made redundant by tracelens_analysis.reject_non_path_source(): that
-# guard only runs inside _finalize_candidates(), so it only protects
-# source_file values that flowed through the TraceLens candidate pipeline. A
-# delegate request can still carry one of these placeholders some other way
-# (an LLM restating a miss as prose directly into a task field, or a resumed
-# session replaying kernel_candidates.json written before this producer guard
-# existed) and this is the last check before PolicyGate would otherwise deny
-# or admit it as a bogus path.
-_SOURCE_FILE_ABSENT_SENTINELS: frozenset[str] = frozenset(
-    {
-        "not found",
-        "none",
-        "n/a",
-        "null",
-        "unknown",
-        "unresolved",
-        "missing",
-        "tbd",
-        "<unresolved>",
-        "aiter (vendor)",
-        "triton (vendor)",
-    }
-)
 
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
@@ -540,9 +452,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # leg's CLOSE transition back the right to speak for this one.
         "resumed_ts",
         "max_minutes",
-        # Absolute session deadline. Forging it is the same as forging the
-        # budget: a value in the future reissues time the session already spent.
-        "deadline_unix",
+        # Budget spent so far and the instant it is charged up to: a smaller
+        # total or a later anchor reissues time the session already spent.
+        "elapsed_charged_sec",
+        "leg_anchor_unix",
+        # Who granted extra budget and why; grants come from an operator flag.
+        "budget_extensions",
         # Sizes the closing reserve, so it decides how much of ``max_minutes``
         # is still usable: locking the budget without locking this one leaves
         # the same forgery one field over -- a large value spends the session
@@ -651,9 +566,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
-        "last_collective",
-        "collective_attempts",
-        "collective_only_mode",
         # closing_phase and baseline_config_path are Coordinator-only fact
         # fields, locked here so non-coordinator roles cannot mutate them via
         # UPDATE_STATE.
@@ -670,13 +582,16 @@ class PolicyGate:
     """Validate every intent emitted by an agent reactor.
 
     ``strict_paths`` (or ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``) requires
-    PATH_LIKE_FIELDS to resolve under session_dir / the source-file allowlist.
+    PATH_LIKE_FIELDS to resolve under session_dir.
     """
 
     role_registry: dict[str, "AgentRole"]
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
+    # Default-constructed, the three resource rules refuse nothing and every
+    # attempt goes straight to its acquire.
+    resources: ResourceFacts = field(default_factory=ResourceFacts)
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
@@ -741,6 +656,8 @@ class PolicyGate:
         self,
         action_name: str,
         params: dict[str, Any] | None,
+        *,
+        task_id: str = "",
     ) -> None:
         """Re-validate a persisted queued task before executor dispatch.
 
@@ -752,6 +669,8 @@ class PolicyGate:
         Args:
             action_name: The task ``kind`` / delegate action name.
             params: Task params deserialized from the DB row.
+            task_id: The persisted row's id; a bring-up dispatched as the holder
+                of an open round is not refused by that round.
 
         Raises:
             PolicyDenied: When the task fails path-containment or structural
@@ -777,11 +696,7 @@ class PolicyGate:
         # Coordinator-dispatched internal actions get path checks only.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate_body(
-            role,
-            payload,
-            check_source=False,
-        )
+        self._validate_delegate_body(role, payload, check_source=False, task_id=task_id)
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
@@ -840,6 +755,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_source: bool = True,
+        task_id: str = "",
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
 
@@ -850,6 +766,8 @@ class PolicyGate:
             check_source: When True, enforce the guards that only apply to an
                 agent-emitted intent. Dispatch replay passes False because the
                 task row does not persist the originating role.
+            task_id: The dispatched row's id, when there is one; a bring-up
+                that holds the open round is not refused by that round.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -866,10 +784,13 @@ class PolicyGate:
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
+        # Outside ``check_source``: a forged row is exactly the second bring-up
+        # the round exists to keep off the machine, and the row that holds the
+        # round is admitted by its own id rather than by skipping the channel.
+        self._validate_baseline_not_mid_round(action_name, task_id=task_id)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
             self._validate_coordinator_managed_action(action_name, intent_kind="delegate")
-            self._validate_baseline_not_mid_authoring(action_name)
             # Robustness delegates nothing beyond its own declared action set.
             if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
                 raise PolicyDenied(
@@ -927,14 +848,14 @@ class PolicyGate:
             None: returns silently when the proposal is permitted.
 
         Raises:
-            PolicyDenied: if ``action_name`` is missing, kernel_agent-owned,
-                or fails one of the mirrored action gates.
+            PolicyDenied: if ``action_name`` is missing or fails one of the
+                mirrored action gates.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
-        self._validate_baseline_not_mid_authoring(action_name)
+        self._validate_baseline_not_mid_round(action_name)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -976,28 +897,36 @@ class PolicyGate:
             hint="read the outcome in SharedState rather than ordering a second run.",
         )
 
-    def _validate_baseline_not_mid_authoring(self, action_name: str) -> None:
-        """Deny an LLM ``baseline`` while an enablement authoring round is in flight.
+    def _validate_baseline_not_mid_round(self, action_name: str, *, task_id: str = "") -> None:
+        """Deny a baseline while a bring-up round holds the machine.
 
-        A specialist rewriting the framework underneath the round leaves the
-        anchor describing neither the old stack nor the new one. The
-        Coordinator's own revalidation dispatch does not reach this guard.
+        A second bring-up fights the first for the same cards and ports, and a
+        specialist rewriting the framework underneath the round leaves the
+        anchor describing neither the old stack nor the new one. The round's
+        own holder is admitted: it already won the acquire ``RoundStore.open``
+        decides.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The proposed, delegated or dispatched action name.
+            task_id: The dispatched row's id; empty on the agent channels,
+                where no row exists yet.
 
         Raises:
-            PolicyDenied: when a baseline is proposed mid-authoring-round.
+            PolicyDenied: When a round was holding the machine at the last
+                update and this attempt is not its holder.
         """
-        if action_name != "baseline" or self.shared_state is None:
+        if action_name != BASELINE_ACTION_NAME:
             return
-        inflight = self.shared_state.enablement.inflight_task_id
-        if not inflight:
+        facts = self.resources
+        if not facts.round_excludes or (task_id and task_id == facts.excluding_round_holder):
             return
         raise PolicyDenied(
-            f"baseline: an enablement authoring round is in flight (task={inflight})",
-            rule="enablement_round_in_flight",
-            hint="wait for the enablement specialist to finish and rearm before re-running baseline.",
+            (
+                f"baseline: bring-up round {facts.excluding_round_id!r} "
+                f"(holder={facts.excluding_round_holder!r}) holds the machine while its lease is live"
+            ),
+            rule=RULE_ROUND_IN_FLIGHT,
+            hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1219,7 +1148,7 @@ class PolicyGate:
         internally whether tuning applies to the workload. What this now refuses
         is the *channel*: the lane is dispatched once at phase entry from a lane
         budget, so a per-tick re-issue would spend time the allocation never
-        granted. Mirrors how the fusion and collective lanes are already closed.
+        granted. Mirrors how the fusion lane is already closed.
 
         Args:
             action_name (str): the action name being checked.
@@ -1460,52 +1389,44 @@ class PolicyGate:
         self._validate_specialist_gpu_request(params)
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
-        """Validate a specialist's optional GPU request against the GPU
-        specialist-pool ceiling.
+        """Validate a specialist's optional GPU request.
 
-        Shared by the domain-anchored and freeform gates so a
-        ``scope='freeform'`` dispatch that sets ``needs_gpu`` is governed by the
-        same ceiling. No-op when the dispatch needs no GPU. A bench-enabled
-        specialist (``mode=patch`` & ``bench=true``) is auto-treated as
-        ``needs_gpu`` here, mirroring the Coordinator's dispatch-time default.
+        The request's shape is judged here: whether the dispatch needs cards at
+        all (a bench-enabled patch specialist does whether or not it says so,
+        mirroring the dispatcher) and whether the count it names is positive.
+        The pool-size arms come off the projection;
+        ``SpecialistGpuPool.try_acquire`` hands out the cards.
 
         Args:
-            params (dict[str, Any]): the specialist dispatch ``params`` carrying
-                ``needs_gpu`` and optional ``gpu_count``.
+            params: The specialist dispatch ``params`` carrying ``needs_gpu``
+                and an optional ``gpu_count``.
 
         Raises:
-            PolicyDenied: when ``gpu_count`` is invalid, the GPU specialist pool
-                is disabled, or the request exceeds the pool ceiling.
+            PolicyDenied: When ``gpu_count`` is not positive, or the request
+                exceeds the pool the projection last saw.
         """
-        needs_gpu_raw = params.get("needs_gpu", False)
-        if isinstance(needs_gpu_raw, str):
-            needs_gpu = needs_gpu_raw.strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "y",
-                "on",
-            )
-        else:
-            needs_gpu = bool(needs_gpu_raw)
-        if not needs_gpu:
-            from ..specialists.profile import resolve_specialist_profile
-
-            if resolve_specialist_profile(params).reserves_benchmark_lane:
-                needs_gpu = True
-        if not needs_gpu:
-            return
-        serving_tp = _serving_tp_for_policy(self.shared_state)
         from ..specialists.profile import (
             resolve_specialist_profile,
             uses_whole_machine_gpu_lane,
         )
 
+        needs_gpu_raw = params.get("needs_gpu", False)
+        if isinstance(needs_gpu_raw, str):
+            needs_gpu = needs_gpu_raw.strip().lower() in ("1", "true", "yes", "y", "on")
+        else:
+            needs_gpu = bool(needs_gpu_raw)
+        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
+        if not needs_gpu and reserves_bench_lane:
+            needs_gpu = True
+        if not needs_gpu:
+            return
+        facts = self.resources
+        serving_tp = facts.serving_tp
+        whole_machine = uses_whole_machine_gpu_lane(params)
         # Whole-machine bench specialists lease from ``framework_gpu_pool``, so
-        # their default gpu_count matches the dispatcher: serving_tp when known,
-        # else the whole-machine pool capacity (the serving_tp == 0 case).
-        if uses_whole_machine_gpu_lane(params) and serving_tp == 0:
-            default_gpu_count = _whole_machine_pool_size() or 1
+        # their default count matches the dispatcher.
+        if whole_machine and serving_tp == 0:
+            default_gpu_count = facts.whole_machine_pool or 1
         else:
             default_gpu_count = serving_tp or 1
         gpu_count_raw = params.get("gpu_count", default_gpu_count)
@@ -1522,41 +1443,37 @@ class PolicyGate:
                 "delegate{action='specialist'}: gpu_count must be > 0 when needs_gpu=true",
                 rule="specialist_gpu_request_invalid",
             )
-        ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0 and not (uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0):
+        # A bench specialist gets at least serving TP whatever it asked for:
+        # it takes the serving lane with it, so a smaller lease cannot run.
+        if reserves_bench_lane and serving_tp > gpu_count:
+            gpu_count = serving_tp
+        if not facts.read:
+            # Nothing has read the pool sizes, so there is no pool size to
+            # judge against; the acquire refuses if the pool cannot fund it.
+            return
+        if facts.gpu_specialist_capacity <= 0 and not (whole_machine and facts.whole_machine_pool > 0):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
-                rule="specialist_gpu_pool_disabled",
+                rule=RULE_GPU_POOL_DISABLED,
                 hint=(
-                    "Start the session with --gpu-specialist-capacity > 0 "
-                    "or set INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY "
-                    "before dispatching GPU specialists."
+                    "Start the session with --gpu-specialist-capacity > 0 or set "
+                    "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY before dispatching GPU specialists."
                 ),
             )
-
-        if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
-            gpu_count = serving_tp
-        # Whole-machine, time-shared specialists validate against the
-        # whole-machine pool, not the serving-disjoint pool: they route to
-        # ``framework_gpu_pool`` and serialize with serving, so the carve
-        # does not apply (else they'd be denied when serving owns the node).
-        if uses_whole_machine_gpu_lane(params):
-            effective_pool_size = _whole_machine_pool_size()
-            pool_desc = "whole-machine GPU pool"
-        else:
-            effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
-            pool_desc = "serving-disjoint GPU specialist pool"
-        if gpu_count > effective_pool_size:
+        pool_size = facts.whole_machine_pool if whole_machine else facts.gpu_specialist_pool
+        pool_desc = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
+        if gpu_count > pool_size:
             raise PolicyDenied(
-                "delegate{action='specialist'}: "
-                f"effective gpu_count={gpu_count} exceeds {pool_desc} "
-                f"size={effective_pool_size} "
-                f"(configured capacity={ceiling}, serving_tp={serving_tp})",
-                rule="specialist_gpu_request_exceeds_capacity",
+                (
+                    f"delegate{{action='specialist'}}: effective gpu_count={gpu_count} "
+                    f"exceeds {pool_desc} size={pool_size} (configured "
+                    f"capacity={facts.gpu_specialist_capacity}, serving_tp={facts.serving_tp})"
+                ),
+                rule=RULE_GPU_EXCEEDS_CAPACITY,
                 hint=(
-                    "Lower params.gpu_count for non-bench probes, omit it for "
-                    "bench specialists only when the pool has at least serving "
-                    "TP free cards, or start a session with a larger GPU pool."
+                    "Lower params.gpu_count for non-bench probes, omit it for bench "
+                    "specialists only when the pool has at least serving TP free "
+                    "cards, or start a session with a larger GPU pool."
                 ),
             )
 
@@ -1715,13 +1632,18 @@ class PolicyGate:
     def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
         """Validate an ``EXTEND_LEASE`` intent.
 
+        The per-step bound is static config; whether the task still holds a
+        lease comes off the projection, and ``TaskRegistry.extend_lease``
+        applies the extension.
+
         Args:
-            payload (dict[str, Any]): the payload carrying ``task_id``,
-                ``extra_sec`` and an optional ``reason``.
+            payload: The payload carrying ``task_id``, ``extra_sec`` and an
+                optional ``reason``.
 
         Raises:
-            PolicyDenied: when ``task_id`` is missing or ``extra_sec`` is not a
-                positive integer within :data:`EXTEND_LEASE_MAX_SEC`.
+            PolicyDenied: When ``task_id`` is missing, ``extra_sec`` is not a
+                positive integer within :data:`EXTEND_LEASE_MAX_SEC`, or no
+                such task was running when the projection was taken.
         """
         task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
@@ -1742,6 +1664,14 @@ class PolicyGate:
                     "a lease must not outlive the session budget."
                 ),
             )
+        live = self.resources.live_task_ids
+        if live is None or task_id in live:
+            return
+        raise PolicyDenied(
+            f"extend_lease: task {task_id!r} was not running when the resource facts were read",
+            rule=RULE_LEASE_NOT_LIVE,
+            hint="Re-read get_running_tasks; a finished task's lease cannot be extended.",
+        )
 
     def _path_under_session(self, value: str) -> bool:
         """Return whether a path resolves inside the active session_dir.
@@ -1762,18 +1692,6 @@ class PolicyGate:
         except (OSError, RuntimeError):
             return False
         return v == sd or v.is_relative_to(sd)
-
-    def _path_in_source_allowlist(self, value: str) -> bool:
-        """Return whether a path falls under a trusted installed source scope.
-
-        Args:
-            value (str): the path string to test.
-
-        Returns:
-            bool: True when ``value`` resolves to or under a configured editable
-            source root, active site/dist-packages root, or ROCm source root.
-        """
-        return any(resolved_within(value, p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
@@ -1948,8 +1866,8 @@ class PolicyGate:
                 fields.
 
         Raises:
-            PolicyDenied: when a path-like value escapes session_dir and its
-                applicable allowlists.
+            PolicyDenied: when a path-like value escapes session_dir and the
+                trace allowlist that a trace field may also resolve under.
         """
         if self.session_dir is None or not self.strict_paths:
             return
@@ -1983,42 +1901,9 @@ class PolicyGate:
                 return
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
-                if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
-                    log.info(
-                        "role=%r %s payload field %r=%r is an absent-value "
-                        "sentinel; treating as omitted and admitting the delegate",
-                        role.name,
-                        intent_type.value,
-                        key,
-                        node,
-                    )
-                    return
-                if any(
-                    self._path_in_source_allowlist(c) or self._path_under_session(c)
-                    for c in source_file_candidates(node)
-                ):
-                    return
-                raise PolicyDenied(
-                    f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is not under session_dir or a trusted "
-                    f"installed source scope from "
-                    f"{list(resolve_source_file_allowlist())!r}",
-                    rule="source_file_outside_trusted_scope",
-                    hint=(
-                        "source_file and framework_source_root must resolve under "
-                        "an active site/dist-packages, configured framework root, "
-                        "or session directory"
-                    ),
-                )
+                return
             if key not in PATH_LIKE_FIELDS:
                 return
-            if key in ROCM_WRITE_PATH_FIELDS and not is_rocm_hip_writable_path(node):
-                raise PolicyDenied(
-                    f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is a ROCm runtime path, not HIP source",
-                    rule="rocm_runtime_write_denied",
-                    hint="ROCm writes are limited to source, header, and CMake files",
-                )
             if not self._path_under_session(node):
                 if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:
@@ -2275,7 +2160,6 @@ __all__ = [
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
-    "ROCM_WRITE_PATH_FIELDS",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",

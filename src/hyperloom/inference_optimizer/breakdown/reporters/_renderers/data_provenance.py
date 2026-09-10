@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Data-provenance renderer — per-section source-artifact probes explaining why a section is empty/partial.
-
-No producer currently emits ``data_provenance`` — no collector, recorder
-section, or exporter key writes it — so the section is skipped on every
-session today; the renderer is retained for breakdowns that carry the field.
-"""
+"""Data-provenance renderer — per-section source-artifact probes explaining why a section is empty/partial."""
 
 from __future__ import annotations
 
@@ -16,14 +11,7 @@ from ..base import RenderedSection, md_table, register_renderer
 
 
 def _sources_summary(sources: list[dict[str, Any]]) -> str:
-    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional.
-
-    Args:
-        sources: Probe records, each with ``found`` and ``required`` flags.
-
-    Returns:
-        A summary string of found/total counts, or ``"—"`` when empty.
-    """
+    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional."""
     if not sources:
         return "—"
     total = len(sources)
@@ -35,20 +23,7 @@ def _sources_summary(sources: list[dict[str, Any]]) -> str:
 
 @register_renderer("data_provenance")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the data-provenance section as a per-section probe table.
-
-    Shows, for each tracked section, whether it was populated and which
-    required source artifacts were missing, so empty/partial sections are
-    explainable. Skipped whenever the breakdown carries no
-    ``data_provenance`` entries, which is currently every session.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered section, or a skipped placeholder when
-            no provenance entries exist.
-    """
+    """Render the data-provenance section as a per-section probe table."""
     entries_raw = breakdown.get("data_provenance")
     entries: list[dict[str, Any]] = entries_raw if isinstance(entries_raw, list) else []
     if not entries:

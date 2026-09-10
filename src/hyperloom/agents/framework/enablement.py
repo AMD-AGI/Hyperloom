@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement failure-signature classifier.
-
-Parses a server-launch log / Python traceback / build error into a structured
-:class:`FailureSignature` — a failure ``kind`` plus the offending file/symbol
-a downstream authoring sub-agent should target. Performs no network, LLM, or
-filesystem access.
-"""
+"""Enablement failure-signature classifier."""
 
 from __future__ import annotations
 
@@ -32,9 +26,8 @@ TOKENIZER_ERROR = "tokenizer_error"
 SERVE_FLAG = "serve_flag"
 # Resource constraints (OOM, TP/GPU count) are NOT code acquisition targets.
 RESOURCE_CONSTRAINT = "resource_constraint"
-# Accuracy-eval triggers (values match _accuracy_gate EVAL_KIND_*): a booting
-# baseline whose accuracy is below the floor, an eval cut short because
-# generation never terminated, and a crashed eval run.
+# Accuracy-eval triggers (values match _accuracy_gate EVAL_KIND_*): a booting baseline whose accuracy is below the
+# floor, an eval cut short because generation never terminated, and a crashed eval run.
 ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
@@ -65,23 +58,7 @@ FAILURE_KINDS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class FailureSignature:
-    """Structured classification of a launch/import/build failure.
-
-    Attributes:
-        kind: One of :data:`FAILURE_KINDS`.
-        offending_file: Best-guess source file the fix should target
-            (from the last traceback frame or an inline path), or ``""``.
-        offending_symbol: Best-guess symbol (arch name, function, module,
-            dtype, undefined symbol), or ``""``.
-        raw_excerpt: The matched log line(s), trimmed, for audit.
-        confidence: Heuristic confidence in ``[0.0, 1.0]``; ``0.0`` for
-            :data:`UNKNOWN`.
-        bridge_layer: Where a bridging patch most likely lands
-            (``"framework"``, ``"rocm_hip"``, ``"build"``, or ``""``).
-        secondary_kinds: Other failure kinds whose rules also matched, most
-            specific first (excludes the primary ``kind``). Empty when only one
-            rule matched.
-    """
+    """Structured classification of a launch/import/build failure."""
 
     kind: str
     offending_file: str = ""
@@ -93,19 +70,11 @@ class FailureSignature:
 
     @property
     def is_actionable(self) -> bool:
-        """True when the signature is anything other than :data:`UNKNOWN`.
-
-        Returns:
-            bool: ``True`` unless ``kind`` is :data:`UNKNOWN`.
-        """
+        """True when the signature is anything other than :data:`UNKNOWN`."""
         return self.kind != UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output.
-
-        Returns:
-            dict[str, Any]: A dataclass-derived dict of all fields.
-        """
+        """Serialize to a plain dict for JSON output."""
         return asdict(self)
 
 
@@ -114,17 +83,7 @@ class FailureSignature:
 
 @dataclass(frozen=True)
 class CapabilityGap:
-    """Thin overlay on FailureSignature exposing code-acquisition semantics.
-
-    ``requires_code_acquisition`` is False for resource-constraint failures
-    (OOM / GPU count) since those cannot be fixed by patching source code.
-
-    Attributes:
-        kind: Forwarded from the underlying :class:`FailureSignature`.
-        bridge_layer: Forwarded from the underlying signature.
-        requires_code_acquisition: False when the failure kind is
-            :data:`RESOURCE_CONSTRAINT`; True otherwise.
-    """
+    """Thin overlay on FailureSignature exposing code-acquisition semantics."""
 
     kind: str
     bridge_layer: str = ""
@@ -132,11 +91,7 @@ class CapabilityGap:
 
     @classmethod
     def from_signature(cls, sig: FailureSignature) -> "CapabilityGap":
-        """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`.
-
-        ``requires_code_acquisition`` is False when ``sig.kind`` is
-        :data:`RESOURCE_CONSTRAINT`.
-        """
+        """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`."""
         return cls(
             kind=sig.kind,
             bridge_layer=sig.bridge_layer,
@@ -182,10 +137,8 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Mm]odel architecture[s]?\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is|are)?\s*not\s+supported"),
             re.compile(r"[Uu]nsupported\s+model\s+architecture[:\s]+['\"]?([A-Za-z0-9_]+)"),
             re.compile(r"[Aa]rchitectures?\s+\[?['\"]([A-Za-z0-9_]+)['\"].*?not\s+(?:yet\s+)?supported"),
-            # Transformers/HF: a checkpoint whose ``model_type`` predates the
-            # installed transformers (or vLLM's ModelConfig validation wrapping
-            # it). Captures the model_type token so the bridge can name it. This
-            # is the DeepSeek-V4 "brand-new arch on an old stack" signature.
+            # Transformers/HF: a checkpoint whose ``model_type`` predates the installed transformers (or vLLM's
+            # ModelConfig validation wrapping it).
             re.compile(r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"),
             re.compile(r"does\s+not\s+recognize\s+this\s+architecture"),
             re.compile(r"[Tt]he\s+checkpoint\s+.*?model\s+type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?"),
@@ -194,17 +147,15 @@ _RULES: tuple[_Rule, ...] = (
         symbol_from=_grp,
     ),
     _Rule(
-        # The eval was cut short because generation never terminated, so the ~0
-        # score says nothing about answer quality. Precedes ACCURACY_BELOW_FLOOR,
-        # whose evidence string it also carries.
+        # The eval was cut short because generation never terminated, so the ~0 score says nothing about answer
+        # quality.
         kind=EVAL_GENERATION_PATHOLOGY,
         bridge_layer="",
         patterns=(re.compile(r"eval_generation_pathology"),),
         confidence=0.95,
     ),
     _Rule(
-        # A booting baseline whose accuracy is below the floor. Not a bridge-repo
-        # target — the fix is correctness of the model's real output.
+        # A booting baseline whose accuracy is below the floor.
         kind=ACCURACY_BELOW_FLOOR,
         bridge_layer="",
         patterns=(
@@ -251,9 +202,7 @@ _RULES: tuple[_Rule, ...] = (
         confidence=0.7,
     ),
     _Rule(
-        # Model params mismatch the checkpoint's tensors; the strict weight-init
-        # check refuses to boot. Kept distinct from SHAPE_MISMATCH so it registers
-        # as a different (deeper) failure for enablement progress detection.
+        # Model params mismatch the checkpoint's tensors; the strict weight-init check refuses to boot.
         kind=MISSING_WEIGHT,
         bridge_layer="framework",
         patterns=(
@@ -289,9 +238,8 @@ _RULES: tuple[_Rule, ...] = (
         symbol_from=_grp,
     ),
     _Rule(
-        # Resource constraints: OOM, insufficient GPU count, TP requirements.
-        # bridge_layer="" means no bridge repo is searched and CapabilityGap marks
-        # requires_code_acquisition=False — do not try to patch for these.
+        # Resource constraints: OOM, insufficient GPU count, TP requirements. bridge_layer="" means no bridge repo is
+        # searched and CapabilityGap marks requires_code_acquisition=False — do not try to patch for these.
         kind=RESOURCE_CONSTRAINT,
         bridge_layer="",
         patterns=(
@@ -346,9 +294,7 @@ _RULES: tuple[_Rule, ...] = (
         symbol_from=_grp,
     ),
     _Rule(
-        # LAST rule: a generic eval-run crash. Kept lowest-priority so a
-        # co-occurring import/serve-flag/tokenizer/HIP signature in the same log
-        # wins as the primary root cause and this only surfaces as secondary.
+        # LAST rule: a generic eval-run crash.
         kind=EVAL_RUNTIME_FAILURE,
         bridge_layer="",
         patterns=(
@@ -366,21 +312,7 @@ _INLINE_PATH = re.compile(r"([/\w.\-]+\.(?:py|cpp|cc|cu|hip|h|hpp|cuh))(?::\d+)?
 
 
 def _extract_offending_file(text: str, *, near: int | None = None) -> str:
-    """Return the most relevant source file from a traceback / build log.
-
-    When ``near`` is given, prefer the traceback frame / inline path closest to
-    (and at or before) that offset. Otherwise fall back to the last Python
-    traceback frame, then the last inline source-path mention. Returns ``""``
-    when nothing matches.
-
-    Args:
-        text: The raw log / traceback text.
-        near: Optional character offset of the primary rule match; frames at or
-            before it are preferred.
-
-    Returns:
-        str: A file path, or ``""`` when none is found.
-    """
+    """Return the most relevant source file from a traceback / build log."""
     if near is not None:
         for finder in (_TB_FRAME, _INLINE_PATH):
             before = [m for m in finder.finditer(text) if m.start() <= near]
@@ -397,16 +329,7 @@ def _extract_offending_file(text: str, *, near: int | None = None) -> str:
 
 
 def _excerpt_for(match: re.Match[str], text: str, span: int = 200) -> str:
-    """Return a trimmed one-line-ish excerpt around a regex match.
-
-    Args:
-        match: The regex match whose neighbourhood to excerpt.
-        text: The full source text.
-        span: Max characters to keep from the match start.
-
-    Returns:
-        str: The trimmed excerpt (whitespace collapsed).
-    """
+    """Return a trimmed one-line-ish excerpt around a regex match."""
     start = match.start()
     raw = text[start : start + span]
     return re.sub(r"\s+", " ", raw).strip()
@@ -426,18 +349,7 @@ class _RuleHit:
 
 
 def _collect_hits(text: str) -> list[_RuleHit]:
-    """Return the first matching pattern per rule, in :data:`_RULES` order.
-
-    At most one hit per rule kind (the first pattern that fires), so a rule is
-    not double-counted when several of its patterns match.
-
-    Args:
-        text: The raw log / traceback text.
-
-    Returns:
-        list[_RuleHit]: Hits ordered as the rules are declared (most specific
-        first); empty when nothing matches.
-    """
+    """Return the first matching pattern per rule, in :data:`_RULES` order."""
     hits: list[_RuleHit] = []
     for rule in _RULES:
         for pat in rule.patterns:
@@ -449,22 +361,7 @@ def _collect_hits(text: str) -> list[_RuleHit]:
 
 
 def classify_failure(log_text: str) -> FailureSignature:
-    """Classify a launch/import/build failure into a :class:`FailureSignature`.
-
-    Collects every rule in :data:`_RULES` that matches, elects a primary by
-    ``(rule_index, match_start)``, and surfaces the remaining matched kinds as
-    :attr:`FailureSignature.secondary_kinds`. Confidence rises slightly with
-    each corroborating rule. Returns an :data:`UNKNOWN` signature
-    (``confidence=0.0``) when nothing matches.
-
-    Args:
-        log_text: Raw server-launch stderr/stdout, Python traceback, or
-            build-error text.
-
-    Returns:
-        FailureSignature: The classification result; ``kind == UNKNOWN`` when
-        no rule matches (including for empty/blank input).
-    """
+    """Classify a launch/import/build failure into a :class:`FailureSignature`."""
     text = log_text or ""
     if not text.strip():
         return FailureSignature(kind=UNKNOWN)
@@ -503,19 +400,7 @@ def classify_failure(log_text: str) -> FailureSignature:
 
 @dataclass(frozen=True)
 class EnablementRequest:
-    """Top-level request describing a non-runnable ``(model, backend)`` combo.
-
-    Attributes:
-        framework: Serving framework (``sglang`` / ``vllm`` / ``atom`` ...).
-        model: Model id / path that fails to launch.
-        repo_url: Canonical framework repo URL (see :mod:`repo_map`).
-        launch_log: Raw failure text fed to :func:`classify_failure`.
-        work_dir: Scratch root for candidate worktrees.
-        gpu_type: Target GPU (``mi300x`` ...); feeds keyword ranking.
-        launch_probe: Command that must exit 0 for the combo to count as
-            "runs" (the runnable gate). Empty disables the probe.
-        max_search_candidates: Cap on bridging PRs to consider.
-    """
+    """Top-level request describing a non-runnable ``(model, backend)`` combo."""
 
     framework: str
     model: str
@@ -523,23 +408,11 @@ class EnablementRequest:
     launch_log: str = ""
     work_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "framework-agent-enablement")
     gpu_type: str = ""
-    launch_probe: str = ""
     max_search_candidates: int = 5
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRequest":
-        """Parse a JSON payload into an :class:`EnablementRequest`.
-
-        Args:
-            raw: Decoded JSON with at least ``framework``, ``model``,
-                ``repo_url``.
-
-        Returns:
-            EnablementRequest: The parsed request.
-
-        Raises:
-            ValueError: If a required field is missing/empty.
-        """
+        """Parse a JSON payload into an :class:`EnablementRequest`."""
         framework = str(raw.get("framework") or "").strip().lower()
         if not framework:
             raise ValueError("framework is required")
@@ -558,18 +431,12 @@ class EnablementRequest:
                 str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))
             ).expanduser(),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
-            launch_probe=str(raw.get("launch_probe") or "").strip(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),
         )
 
     @property
     def signature(self) -> FailureSignature:
-        """Classify :attr:`launch_log` on demand.
-
-        Returns:
-            FailureSignature: Result of :func:`classify_failure` over
-            ``launch_log``.
-        """
+        """Classify :attr:`launch_log` on demand."""
         return classify_failure(self.launch_log)
 
 
@@ -578,120 +445,39 @@ class EnablementRequest:
 
 def runnable_decision(
     *,
-    probe_returncode: int | None,
+    booted: bool | None,
     correctness_ok: bool | None,
-    probe_timed_out: bool = False,
-    before_signature: FailureSignature | None = None,
-    after_signature: FailureSignature | None = None,
+    boot_timed_out: bool = False,
 ) -> tuple[bool, str]:
     """Decide whether an enablement patch made the combo *run*.
 
-    Returns KEEP only when the launch probe now exits 0 (and did not time out)
-    and, when a correctness check was run, it passed. When both
-    ``before_signature`` and ``after_signature`` are supplied, the same
-    actionable failure re-appearing after the patch returns REVERT.
+    ``booted`` is the boot verdict off the attempt's ladder observation, never a
+    throughput number: a server that comes up and serves slowly has been
+    enabled. Whether the boot got *further* than the last one is a separate
+    question, answered by ladder arithmetic over two boot observations.
 
     Args:
-        probe_returncode: Launch-probe exit code; ``None`` if the probe did not
-            run.
+        booted: Whether the attempt reached a serving server; ``None`` when no
+            observation was recorded and the question was never answered.
         correctness_ok: Minimal-correctness result; ``None`` if not evaluated.
-        probe_timed_out: Whether the probe hit its wall-clock budget.
-        before_signature: Failure signature before applying the patch.
-        after_signature: Failure signature captured from the post-patch probe
-            output (``UNKNOWN`` / non-actionable when it booted cleanly).
+        boot_timed_out: Whether the attempt was reaped on its wall-clock budget.
 
     Returns:
         tuple[bool, str]: ``(runs, reason)``.
     """
-    if probe_timed_out:
-        return False, "launch probe timed out"
-    if probe_returncode is None:
-        return False, "launch probe did not run"
-    if probe_returncode != 0:
-        return False, f"launch probe exited {probe_returncode} (still not runnable)"
-    if (
-        before_signature is not None
-        and after_signature is not None
-        and after_signature.is_actionable
-        and after_signature.kind == before_signature.kind
-    ):
-        return False, f"same failure {after_signature.kind} persists after patch"
+    if boot_timed_out:
+        return False, "the bring-up was reaped on its budget"
+    if booted is None:
+        return False, "no boot observation was recorded for this attempt"
+    if not booted:
+        return False, "the server did not come up (still not runnable)"
     if correctness_ok is False:
-        return False, "launch succeeded but minimal correctness check failed"
-    return True, "combo now launches" + ("" if correctness_ok is None else " and passes minimal correctness")
+        return False, "the server came up but the minimal correctness check failed"
+    return True, "the server now comes up" + ("" if correctness_ok is None else " and passes minimal correctness")
 
 
-def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
-    """A coarse, taxonomy-independent identity for a failure signature.
-
-    The identity is ``(kind, offending_file, normalized_excerpt)`` where the
-    excerpt is whitespace-collapsed, lower-cased, truncated, and has numeric
-    operands masked to ``#`` so differing operands compare equal but a genuinely
-    different error does not. This lets two ``UNKNOWN`` crashes still be told
-    apart when the error text / offending site changed.
-
-    Args:
-        sig: The failure signature (may be ``None``).
-
-    Returns:
-        tuple[str, str, str]: ``(kind, offending_file, normalized_excerpt)``.
-    """
-    if sig is None:
-        return ("", "", "")
-    excerpt = re.sub(r"\s+", " ", (sig.raw_excerpt or "")).strip().lower()
-    excerpt = re.sub(r"\d+", "#", excerpt)[:160]
-    return (sig.kind or "", (sig.offending_file or "").strip(), excerpt)
-
-
-def _has_failure(sig: FailureSignature | None) -> bool:
-    """True when a signature represents a real (post-)boot failure, not a clean boot.
-
-    A real failure is either actionable OR carries error text / an offending
-    file; a clean boot is a non-actionable signature with no content.
-    """
-    if sig is None:
-        return False
-    if sig.is_actionable:
-        return True
-    return bool((sig.raw_excerpt or "").strip() or (sig.offending_file or "").strip())
-
-
-def enablement_made_progress(
-    before_signature: FailureSignature | None,
-    after_signature: FailureSignature | None,
-) -> bool:
-    """Whether a patch advanced the boot to a *new, deeper* failure.
-
-    Enablement gaps are frequently serial: clearing one crash reveals a deeper
-    one. A patch that clears the original crash but stops at a different failure
-    has made forward progress and must be kept/stacked, not reverted.
-
-    Progress is judged by whether the failure *identity* changed
-    (:func:`_failure_identity`), not by whether the enumerated ``kind`` changed,
-    so a novel ``UNKNOWN`` gap still registers as progress. A clean boot
-    (``after`` carries no error text) is the terminal runnable case handled by
-    :func:`runnable_decision`, not progress here.
-
-    Args:
-        before_signature: Failure signature before applying the patch.
-        after_signature: Failure signature captured from the post-patch probe.
-
-    Returns:
-        bool: ``True`` when the patch moved the boot to a new failure identity.
-    """
-    # No post-patch failure at all -> clean boot, handled by runnable_decision.
-    if not _has_failure(after_signature):
-        return False
-    if not _has_failure(before_signature):
-        # No prior failure to compare: any post-patch failure is a first step.
-        return True
-    return _failure_identity(after_signature) != _failure_identity(before_signature)
-
-
-# Evidence that a dtype/capability miss is backed by a *compiled* op rather
-# than pure-Python guard logic: a native symbol, an .so/kernel/op reference, or
-# a named compiled backend. Used only to promote UNSUPPORTED_DTYPE to a build
-# candidate; never fires for a plain Python NotImplementedError guard.
+# Evidence that a dtype/capability miss is backed by a *compiled* op rather than pure-Python guard logic: a native
+# symbol, an .so/kernel/op reference, or a named compiled backend.
 _NATIVE_EVIDENCE_RE = re.compile(
     r"undefined symbol|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
     r"\bkernel\b|custom[_ ]?op|torch\.ops|extension module|"
@@ -704,13 +490,7 @@ def is_targeted_build_candidate(
     signature: FailureSignature,
     launch_log: str = "",
 ) -> bool:
-    """Whether a residual gap is a *compiled* component miss.
-
-    Pure logic gate the escalation layer calls before enqueueing any build. A
-    pure-Python miss must never qualify here. Returns ``True`` for a
-    build/native/HIP-kernel gap, or an ``UNSUPPORTED_DTYPE`` gap whose evidence
-    (``offending_symbol`` + ``launch_log``) names a compiled symbol/op.
-    """
+    """Whether a residual gap is a *compiled* component miss."""
     if signature is None:
         return False
     if signature.bridge_layer in ("build", "rocm_hip"):
@@ -744,7 +524,6 @@ __all__ = [
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",
-    "enablement_made_progress",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

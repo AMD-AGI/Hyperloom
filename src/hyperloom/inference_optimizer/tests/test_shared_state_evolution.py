@@ -116,8 +116,9 @@ def test_fact_layer_md5_matches_post_save(tmp_path):
 
 
 def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
-    """A v1-like dict with unknown scoreboard keys loads, drops the unknowns,
-    and is stamped to the latest schema version (no flags, no raise)."""
+    """A v1-like dict with unknown scoreboard keys loads, drops the unknowns, and is stamped to the latest schema
+    version (no flags, no raise).
+    """
     payload = {
         "session_id": "legacy",
         "baseline_tput": 100.0,
@@ -360,15 +361,7 @@ def test_v5_migration_prefers_the_current_spelling(tmp_path):
 
 
 def test_class_constants_are_not_persisted_fields():
-    """A constant must be ``ClassVar`` (or module-level), never a bare annotation.
-
-    A bare annotation makes it a dataclass field, which puts a value that was
-    never session state into every ``state.json``, accepts it back on load, and
-    exposes it to ``apply_changes`` -- ``CORE_STATE_FIELDS`` locks the fields
-    someone thought to lock, and nobody locks a constant. Naming is the only
-    signal available here, so this keys on the SCREAMING_CASE convention the
-    file already follows.
-    """
+    """A constant must be ``ClassVar`` (or module-level), never a bare annotation."""
     leaked = sorted(f.name for f in dataclasses.fields(SharedState) if f.name.isupper())
     assert not leaked, (
         f"constants declared as dataclass fields (annotate them ClassVar[...] or move them to module level): {leaked}"
@@ -376,12 +369,7 @@ def test_class_constants_are_not_persisted_fields():
 
 
 def test_the_profile_identity_keys_stay_off_disk(tmp_path):
-    """The projection keys decide trace staleness; a stored copy must not.
-
-    An existing session's state.json still carries the key from when it was a
-    field, and ``__init__`` no longer accepts it, so loading one has to ignore
-    the key rather than raise.
-    """
+    """The projection keys decide trace staleness; a stored copy must not."""
     sd = tmp_path / "session"
     sd.mkdir()
     SharedState(session_id="s").save(sd)
@@ -401,7 +389,6 @@ def test_v4_nested_enablement_roundtrips(tmp_path):
     sd.mkdir()
     s = SharedState()
     s.enablement.launch_log = "mla_gluon requires batch_size=1"
-    s.enablement.attempts = 3
     s.enablement.kept_patches = ["/p/a.patch", "/p/b.patch"]
     s.save(sd)
     raw = json.loads((sd / "state.json").read_text())
@@ -410,7 +397,6 @@ def test_v4_nested_enablement_roundtrips(tmp_path):
     assert "enablement_launch_log" not in raw, "flat keys must not appear in v4 output"
     loaded = SharedState.load_or_init(sd)
     assert loaded.enablement.launch_log == "mla_gluon requires batch_size=1"
-    assert loaded.enablement.attempts == 3
     assert loaded.enablement.kept_patches == ["/p/a.patch", "/p/b.patch"]
 
 
@@ -466,12 +452,7 @@ def _applyback_evidence():
 
 
 def _record_applyback_keep(state, **overrides):
-    """Queue one apply-back KEEP the way its surviving producer does.
-
-    The handler whose result envelope used to carry this provenance into the
-    ledger is gone, so the attempt row is written directly and queued through
-    the helper both remaining producers share.
-    """
+    """Queue one apply-back KEEP the way its surviving producer does."""
     from hyperloom.orchestrator.kernel._kernel_decisions import (
         _queue_kernel_keep,
         _stable_kernel_task_key,

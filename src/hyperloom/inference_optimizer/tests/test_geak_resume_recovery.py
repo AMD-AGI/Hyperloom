@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_SKIP_TO_SWEEP
@@ -47,13 +48,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A result written before a coordinator crash must be recovered on resume.
-
-    Recovery records the win as an unvalidated candidate (into ``geak_result`` +
-    ``geak_pending``) and enqueues the main-flow rebench; it does not promote the
-    self-reported value into current_best / the gain ledger. The headline is only
-    written once the rebench validates it.
-    """
+    """A result written before a coordinator crash must be recovered on resume."""
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
     result = {
@@ -120,13 +115,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A new cycle must rerun GEAK, not promote a stale prior-cycle result.
-
-    ``geak/`` is a fixed path, so a prior cycle's ``result.json`` survives into
-    the next KERNEL entry. When state already recorded that win the recovery
-    short-circuit must not fire, else every later cycle silently reuses the first
-    cycle's result.
-    """
+    """A new cycle must rerun GEAK, not promote a stale prior-cycle result."""
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
     result = {
@@ -166,8 +155,8 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 
     await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
-    # The recovery short-circuit must not have fired; the normal path resolves
-    # the runner (and here aborts via the injected error).
+    # The recovery short-circuit must not have fired; the normal path resolves the runner (and here aborts via the
+    # injected error).
     assert resolved, "new cycle must re-run GEAK, not reuse stale result.json"
 
 
@@ -176,12 +165,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GEAK must baseline the same engine Hyperloom measured.
-
-    A missing max-model-len or GPU memory-utilization handoff lets GEAK/e2e
-    launch a subtly different vLLM server than the Hyperloom baseline, which
-    turns kernel wins into non-reproducible E2E deltas.
-    """
+    """GEAK must baseline the same engine Hyperloom measured."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
@@ -220,3 +204,183 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
     assert handoff["raw_baseline_tput"] == 100.0
     assert handoff["e2e_metric"] == "output"
+    # No AgentX recipe here, so the launcher hint stays absent and GEAK keeps
+    # deriving the script that actually launched the baseline.
+    assert "launch_server_script" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AgentX baseline must hand GEAK the builtin server script.
+
+    Without it GEAK derives its launcher from the recipe's ``benchmark_script``,
+    which AgentX has pinned to the aiperf client -- so it runs a CLIENT under
+    ``MAGPIE_RUN_PHASE=server``, gets no pid back, and aborts the bench before a
+    single repeat lands in ``bench_runs.jsonl``.
+    """
+    benchmarks = tmp_path / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "aiperf_client.sh"):
+        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+    recipe = tmp_path / "baseline_config.with_envs.yaml"
+    recipe.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "runner_type": "mi355x",
+                    "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
+                    "benchmark_script": "aiperf_client.sh",
+                    "inferencex_path": str(benchmarks.parent),
+                    "workload_spec": {
+                        "kind": "agentx_trace_replay",
+                        "client": "aiperf",
+                        "scenario": "inferencex-agentx-mvp",
+                        "corpus": "semianalysis_cc_traces_weka_062126",
+                        "duration_s": 3600,
+                        "geak_loop_duration_s": 900,
+                        "concurrency": 8,
+                        "metric_basis": "aggregate_output_tok_s",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=168.99,
+        current_best={"action": "baseline", "tput": 168.99},
+        model_path="/models/Kimi-K3",
+        gpu_type="mi355x",
+        isl=1024,
+        osl=1024,
+        conc=8,
+        baseline_config_path=str(recipe),
+    )
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("TP", "8")
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
+    spec = handoff.get("workload_spec") or {}
+    assert spec.get("kind") == "agentx_trace_replay"
+    assert spec.get("client") == "aiperf"
+
+
+@pytest.mark.asyncio
+async def test_geak_handoff_forwards_the_actual_gpu_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handoff must carry the run's real pin, not the literal card 0 (#1312).
+
+    GEAK writes its own visible-devices mask for every server it launches. With
+    no pin in the handoff it defaults to physical GPU 0, so a run pinned to the
+    last card silently benchmarks on card 0 and OOMs against whatever else holds
+    it. ``gpu_ids`` stays HIP-logical (the consumer inherits the ROCR mask);
+    ``gpu_pin`` carries the absolute mask for consumers that write ROCR
+    themselves.
+    """
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=100.0, model_path="/models/m", gpu_type="mi355x")
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("TP", "1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["schema_version"] >= 3
+    assert handoff["gpu_pin"] == {
+        "var": "ROCR_VISIBLE_DEVICES",
+        "value": "7",
+        "ids": [7],
+        "count": 1,
+        "source": "process_env",
+    }
+    # Logical inside the inherited mask: index 0 IS physical card 7.
+    assert handoff["gpu_ids"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A materialized recipe always carries an autofilled ROCR mask (#1321 review).
+
+    ``materialize_config_with_envs`` writes ``ROCR_VISIBLE_DEVICES=0..tp-1``
+    into ``benchmark.envs`` whenever the mask is absent, and that file is what
+    ``state.baseline_config_path`` points at by the time KERNEL runs. Reading
+    the recipe first therefore overrode every HIP-pinned run with cards
+    ``0..tp-1`` — a new card-0 collision, in the change meant to remove one.
+    This is the production shape, so it is asserted end to end.
+    """
+    recipe = tmp_path / "baseline.yaml"
+    recipe.write_text(
+        "benchmark:\n  envs:\n    TP: 2\n    ROCR_VISIBLE_DEVICES: '0,1'\n    NUM_PROMPTS: 192\n",
+        encoding="utf-8",
+    )
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=100.0,
+        model_path="/models/m",
+        gpu_type="mi355x",
+        baseline_config_path=str(recipe),
+    )
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("TP", "2")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["gpu_pin"]["var"] == "HIP_VISIBLE_DEVICES"
+    assert handoff["gpu_pin"]["ids"] == [4, 5]
+    # The pre-PR value. The whole point is that this change did not move it.
+    assert handoff["gpu_ids"] == "4,5"
+    # tp comes from the same recipe as gpu_ids, so the two cannot disagree.
+    assert handoff["tp"] == 2

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""OPTIMIZE phase — hand the correct FlyDSL kernel to the existing forge-loop.
-
-forge-loop is explicitly designed to be shelled out as an isolated, hard-killable
-subprocess (see its CLI docstring), so the rewrite layer reuses it verbatim: no
-refactor, and every forge-loop capability (baseline anchor, full-suite validation,
-profiler + analyst, AVO supervisor, KB, candidate archive) applies to the FlyDSL
-kernel unchanged. We only parse its sentinel-wrapped JSON result.
-"""
+"""OPTIMIZE phase — hand the correct FlyDSL kernel to the existing forge-loop."""
 
 from __future__ import annotations
 
@@ -23,6 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from kernelforge.llm.git import git
 from kernelforge.config import Config
@@ -32,10 +26,13 @@ log = logging.getLogger(__name__)
 
 _RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 
-# forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>",
-# see loop.runner), so it is present in the captured output even when the loop is
-# later hard-killed. Used to decide whether a --result-json file belongs to THIS run.
+# forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see loop.runner), so it is
+# present in the captured output even when the loop is later hard-killed.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
+
+# How often the supervising loop wakes to check on forge-loop. It also floors how often the result file is read for
+# new bests: asking more often than the loop itself ticks cannot observe anything sooner.
+_TICK_SEC = 0.1
 
 
 def _announced_experiment_id(stdout_text: str) -> str | None:
@@ -44,15 +41,28 @@ def _announced_experiment_id(stdout_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _forge_loop_argv() -> list[str]:
-    """Invoke forge-loop with the SAME interpreter + package as THIS process.
+def _result_for_this_run(result_json: str, stdout_text: str) -> dict | None:
+    """Parse ``--result-json`` when it belongs to the run producing this output.
 
-    Prefer ``sys.executable -m kernelforge.cli`` — the exact entry the
-    ``kernelforge`` console script maps to (``kernelforge.cli:main``) — so an
-    editable install or a multi-venv PATH cannot launch a DIFFERENT installed
-    version than the code running right now (cf. ``python -m pip`` over ``pip``).
-    Fall back to the PATH console script only if there is no usable interpreter.
+    forge-loop refreshes this file on every KEEP, which is what lets a caller observe the KEEP stream. A file left by
+    an earlier run is rejected on the experiment id; before the loop announces one, the file is not trusted yet.
     """
+    announced = _announced_experiment_id(stdout_text)
+    if not announced:
+        return None
+    try:
+        payload = json.loads(Path(result_json).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("experiment_id") or "") != announced:
+        return None
+    return payload
+
+
+def _forge_loop_argv() -> list[str]:
+    """Invoke forge-loop with the SAME interpreter + package as THIS process."""
     if sys.executable:
         return [sys.executable, "-m", "kernelforge.cli"]
     exe = shutil.which("kernelforge")
@@ -175,11 +185,14 @@ def run_optimize(
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
+    on_new_best: Callable[[dict], None] | None = None,
+    new_best_poll_sec: float = 5.0,
 ) -> dict:
     """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
 
-    Returns {} when forge-loop cannot be launched or its result cannot be parsed
-    (the caller then reports flydsl_best_ms as unknown).
+    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
+    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
+    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
     """
     if result_json is None:
         result_json = str(Path(experiments_dir) / "forge_loop_result.json")
@@ -213,11 +226,8 @@ def run_optimize(
         "--target-functions",
         spec.builder_symbol,
         # The outer rewrite pipeline exclusively owns rewrite KB read/write.
-        # Prevent the nested optimizer from touching the generic forge-loop KB.
         "--no-experience-kb",
-        # The rewrite driver has already passed its independent dual-path
-        # preparation and preflight. The single-path forge-loop preparer has a
-        # different contract and must never rewrite it.
+        # The rewrite driver has already passed its independent dual-path preparation and preflight.
         "--no-prepare-task",
         "--supervisor-backend",
         supervisor_backend,
@@ -228,9 +238,8 @@ def run_optimize(
         cmd += ["--gpu-type", config.gpu_type]
     if deadline_unix and deadline_unix > 0:
         cmd += ["--deadline-unix", str(deadline_unix)]
-    # Propagate the selected model only when one is configured; an empty
-    # agent_model lets forge-loop resolve its own default from the environment
-    # (KERNEL_AGENTS_MODEL). ``Config`` exposes the model as ``agent_model`` —
+    # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
+    # default from the environment (CLAUDE_MODEL / CODEX_MODEL). ``Config`` exposes the model as ``agent_model`` --
     # there is no ``config.model``.
     if config.agent_model:
         cmd += ["--model", config.agent_model]
@@ -240,8 +249,7 @@ def run_optimize(
     log.info("optimize: launching forge-loop over %s", spec.flydsl_kernel_name)
     print(f"  [forge-rewrite] optimize: {' '.join(cmd)}", flush=True)
 
-    # Stream forge-loop output through stdout for the caller while collecting it
-    # to parse the sentinel-wrapped result.
+    # Stream forge-loop output through stdout for the caller while collecting it to parse the sentinel-wrapped result.
     collected: list[str] = []
     kernel_path = Path(spec.flydsl_kernel)
     fallback_content = kernel_path.read_bytes() if kernel_path.is_file() else None
@@ -262,10 +270,7 @@ def run_optimize(
         def _stream_output() -> None:
             for line in proc.stdout:
                 collected.append(line)
-                # The outer rewrite publishes the same __FORGE_RESULT__ contract
-                # as forge-loop. Keep the nested sentinel for local parsing, but
-                # do not leak it to callers that must see only the final
-                # framework-level patch result.
+                # The outer rewrite publishes the same __FORGE_RESULT__ contract as forge-loop.
                 if "__FORGE_RESULT__" in line:
                     continue
                 sys.stdout.write(line)
@@ -277,6 +282,29 @@ def run_optimize(
             daemon=True,
         )
         stream_thread.start()
+        published_commit = ""
+
+        def _publish_new_best() -> str:
+            """Hand the caller the current best once per distinct commit."""
+            if on_new_best is None:
+                return published_commit
+            payload = _result_for_this_run(result_json, "".join(collected))
+            if payload is None:
+                return published_commit
+            commit = str(payload.get("best_commit") or "")
+            if not commit or commit == published_commit:
+                return published_commit
+            try:
+                on_new_best(payload)
+            except Exception as error:  # noqa: BLE001 - publishing never breaks OPTIMIZE
+                log.warning(
+                    "optimize: new-best callback failed (%s: %s)",
+                    type(error).__name__,
+                    error,
+                )
+            return commit
+
+        next_poll = time.monotonic()
         while _poll_process(proc) is None:
             if stop_at_unix and time.time() >= stop_at_unix:
                 terminated_for_deadline = True
@@ -287,15 +315,19 @@ def run_optimize(
                 )
                 _terminate_process_group(proc)
                 break
-            time.sleep(0.1)
+            if on_new_best is not None and time.monotonic() >= next_poll:
+                published_commit = _publish_new_best()
+                next_poll = time.monotonic() + max(_TICK_SEC, new_best_poll_sec)
+            time.sleep(_TICK_SEC)
         _wait_process(proc)
         stream_thread.join(timeout=5.0)
+        # The loop may have recorded a KEEP between the last poll and its exit,
+        # including one it produced while being terminated for the deadline.
+        published_commit = _publish_new_best()
     except Exception as e:  # noqa: BLE001 - a launch/stream failure must not crash the whole rewrite pipeline
-        # Honor this function's contract ("Returns {} when forge-loop cannot be
-        # launched"): a missing kernelforge on PATH, a bad interpreter, or a
-        # malformed command must NOT propagate a traceback out of run_rewrite (which
-        # would skip the final result + sentinel). The caller then keeps the
-        # port-only baseline as the final result.
+        # Honor this function's contract ("Returns {} when forge-loop cannot be launched"): a missing kernelforge on
+        # PATH, a bad interpreter, or a malformed command must NOT propagate a traceback out of run_rewrite (which
+        # would skip the final result + sentinel).
         log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
         print(
             f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",
@@ -310,13 +342,8 @@ def run_optimize(
         return {"terminated_for_deadline": True} if terminated_for_deadline else {}
     stdout_text = "".join(collected)
 
-    # Trust --result-json only if it belongs to THIS run, keyed on experiment_id.
-    # forge-loop writes the file on every new best (not only at the end) and stamps
-    # its experiment_id into it, and announces that same id on stdout. So even when
-    # the loop is hard-killed (e.g. an outer time-budget SIGTERM) AFTER it produced a
-    # better kernel, the file it left is still this run's result and we report it. A
-    # mismatched/absent id means the file is stale (a prior run reusing this
-    # experiments-dir) and is ignored.
+    # Trust --result-json only if it belongs to THIS run, keyed on experiment_id. forge-loop writes the file on every
+    # new best (not only at the end) and stamps its experiment_id into it, and announces that same id on stdout.
     expected_id = _announced_experiment_id(stdout_text)
     try:
         parsed = json.loads(Path(result_json).read_text())
@@ -326,8 +353,8 @@ def run_optimize(
     if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
         result = parsed
 
-    # Otherwise fall back to the stdout sentinel — inherently this run's output
-    # (captured live), and only emitted on a clean exit.
+    # Otherwise fall back to the stdout sentinel — inherently this run's output (captured live), and only emitted on a
+    # clean exit.
     m = _RESULT_RE.search(stdout_text) if not result else None
     if m is not None:
         try:

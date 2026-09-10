@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Registry-backed enablement adapters for runtime acquisition.
-
-One adapter per serving framework decides whether a :class:`CapabilityGap` is
-runtime-acquirable, builds the :class:`EnablementStackAction` that acquires it,
-provisions that action into an *attempt-local* venv (never ``/opt/venv``), and
-probes the result for the expected files/symbols.
-
-Isolation & safety:
-
-* vLLM ROCm provisioning pins ROCm torch from a host-allowlisted index and
-  refuses to fall back to a PyPI CUDA wheel.
-* Only wheel / editable-ref acquisition here; compiled builds are deferred to
-  the targeted-build path.
-* Every subprocess goes through an injectable ``run(argv, env, cwd)`` shim so the
-  pure argv/env/version logic is CI-testable without ROCm / network.
-"""
+"""Registry-backed enablement adapters for runtime acquisition."""
 
 from __future__ import annotations
 
@@ -43,26 +28,21 @@ from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionRes
 log = logging.getLogger(__name__)
 
 
-# Operator-configured allowlists (comma-separated). A candidate index / origin
-# must match one of these prefixes or provisioning is refused (supply-chain
-# safety). The ROCm index also seeds the default vLLM adapter index.
+# Operator-configured allowlists (comma-separated).
 _VLLM_ROCM_INDEX_ENV = "HYPERLOOM_VLLM_ROCM_INDEX_URL"
 _INDEX_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST"
 _ORIGIN_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST"
 
-# Per-provision hard timeout: wheel/editable install must fit inside the
-# integrate lane TTL. Long compiles are deferred to the targeted-build path.
+# Per-provision hard timeout: wheel/editable install must fit inside the integrate lane TTL.
 _PROVISION_TIMEOUT_SEC = 1800
 
-# Gaps that a runtime candidate might repair. RESOURCE_CONSTRAINT is excluded
-# (CapabilityGap.requires_code_acquisition is False for it).
+# Gaps that a runtime candidate might repair.
 _RUNTIME_ACQUIRABLE_KINDS: frozenset[str] = frozenset(
     {MISSING_MODEL_ARCH, UNSUPPORTED_DTYPE, NOT_IMPLEMENTED, TOKENIZER_ERROR, SERVE_FLAG}
 )
 
 
-# Injectable subprocess shim: (argv, env, cwd) -> CompletedProcess. Tests pass a
-# fake to exercise the pure argv/env/version logic without ROCm / network.
+# Injectable subprocess shim: (argv, env, cwd) -> CompletedProcess.
 RunFn = Callable[[list[str], dict[str, str], "str | None"], subprocess.CompletedProcess]
 
 
@@ -93,14 +73,9 @@ def _is_allowlisted(value: str, prefixes: tuple[str, ...]) -> bool:
     return any(v.startswith(p) for p in prefixes)
 
 
-# ---------------------------------------------------------------------------
 # ROCm safety checks (injectable Python)
-# ---------------------------------------------------------------------------
 def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
-    """True when ``python_path``'s torch is a ROCm build (torch.version.hip set).
-
-    A CUDA torch must never be swapped into a ROCm attempt runtime.
-    """
+    """True when ``python_path``'s torch is a ROCm build (torch.version.hip set)."""
     argv = [python_path, "-c", "import torch,sys; sys.exit(0 if getattr(torch.version,'hip',None) else 1)"]
     try:
         cp = run(argv, dict(os.environ), None)
@@ -110,10 +85,7 @@ def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool
 
 
 def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
-    """True when vLLM imports AND reports a ROCm platform.
-
-    Confirms ``current_platform.is_rocm()``.
-    """
+    """True when vLLM imports AND reports a ROCm platform."""
     probe = (
         "import sys\n"
         "import torch\n"
@@ -149,16 +121,9 @@ def _installed_version(python_path: str, package: str, *, run: RunFn = _default_
     return (getattr(cp, "stdout", "") or "").strip()
 
 
-# ---------------------------------------------------------------------------
 # Adapters
-# ---------------------------------------------------------------------------
 class BaseAdapter:
-    """Base enablement adapter.
-
-    Subclasses override the acquisition hooks (``supports`` /
-    ``build_stack_action`` / ``provision`` / ``probe``) and, where localization
-    is supported, ``build_localization_action`` / ``editable_refresh_argv``.
-    """
+    """Base enablement adapter."""
 
     framework: str = ""
 
@@ -167,15 +132,7 @@ class BaseAdapter:
         self._run = run
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap`` via a runtime.
-
-        Args:
-            gap: The projected capability gap.
-
-        Returns:
-            bool: False for the base/null adapter and for gaps that do not
-            require code acquisition (e.g. resource constraints).
-        """
+        """Whether this adapter can attempt to repair ``gap`` via a runtime."""
         return False
 
     def build_stack_action(
@@ -186,43 +143,15 @@ class BaseAdapter:
         model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
-        """Build a candidate stack action, or None when unsupported/no-evidence.
-
-        Args:
-            gap: The projected capability gap.
-            framework: Target framework name.
-            model: Model id/path being enabled.
-            gpu_type: Target GPU type (routes ROCm index selection).
-
-        Returns:
-            EnablementStackAction | None: A candidate action, or None when this
-            adapter cannot produce an evidence-backed candidate.
-        """
+        """Build a candidate stack action, or None when unsupported/no-evidence."""
         return None
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Provision ``action`` into an attempt-local venv under ``attempt_dir``.
-
-        Args:
-            action: The stack action to acquire.
-            attempt_dir: Attempt root; the venv is created at ``attempt_dir/venv``.
-
-        Returns:
-            ProvisionResult: ``ok=False`` for unsupported adapters.
-        """
+        """Provision ``action`` into an attempt-local venv under ``attempt_dir``."""
         return ProvisionResult(ok=False, error=f"{self.framework or 'null'} adapter does not provision")
 
     def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
-        """Validate the provisioned runtime carries the expected capability.
-
-        Args:
-            result: The provision result to probe.
-            action: The action whose ``expected_files`` / ``expected_symbols``
-                gate the probe.
-
-        Returns:
-            bool: True when the runtime looks usable.
-        """
+        """Validate the provisioned runtime carries the expected capability."""
         return result.ok
 
     def build_localization_action(
@@ -234,48 +163,29 @@ class BaseAdapter:
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
-        """Build a code-localization action, or None (unsupported).
-
-        Args:
-            gap: The projected capability gap.
-            framework: Target framework name.
-            model: Model id/path being enabled.
-            candidate_ref: A discovered merged-PR ref (e.g. ``"PR:1234"`` or a
-                PR html_url).
-            repo_url: Origin-allowlisted repo URL to localize from.
-
-        Returns:
-            EnablementStackAction | None: A ``pr_backport`` action, or None when
-            the adapter cannot localize (base/null default).
-        """
+        """Build a code-localization action, or None (unsupported)."""
         return None
 
     def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
-        """Return the argv that re-installs an editable checkout, or None.
-
-        Args:
-            venv_python: The attempt-venv interpreter.
-            checkout: Path to the editable source checkout.
-
-        Returns:
-            list[str] | None: A ``pip install -e`` argv, or None when the tree
-            is a plain (non-editable) install that needs no refresh.
-        """
+        """Return the argv that re-installs an editable checkout, or None."""
         return None
 
-    def source_import_root(self, framework_root: str) -> str:
-        """Return the import root relative to a source snapshot's ``files/`` dir.
+    def argv_parser_source(self) -> str:
+        """Return Python source defining ``_build_parser()`` for this framework.
 
-        A dist-packages install stores modules at the tree root, so ``""`` is
-        correct; a repo checkout that nests them (e.g. under ``python/``)
-        overrides this.
-
-        Args:
-            framework_root: Absolute path to the framework checkout or install.
+        The source runs in the interpreter that will serve, so an argv is judged
+        by the installed parser that would actually reject it rather than by a
+        table of accepted spellings kept here.
 
         Returns:
-            str: The import-root path component, or ``""``.
+            str: The function source, or ``""`` when this framework exposes no
+            parser the probe can reach -- which is an unavailable verdict, not
+            an accepting one.
         """
+        return ""
+
+    def source_import_root(self, framework_root: str) -> str:
+        """Return the import root relative to a source snapshot's ``files/`` dir."""
         return ""
 
 
@@ -305,18 +215,7 @@ class _VenvProvisionMixin(BaseAdapter):
     """Shared attempt-venv creation + pip-install plumbing for real adapters."""
 
     def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
-        """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python).
-
-        System site packages are inherited so the attempt runtime reuses the
-        already-present ROCm torch/aiter instead of re-downloading them; only
-        the target framework wheel/checkout is layered on top.
-
-        Args:
-            attempt_dir: Attempt root directory.
-
-        Returns:
-            tuple[Path, Path]: ``(bin_dir, python_path)``.
-        """
+        """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python)."""
         venv_root = attempt_dir / "venv"
         argv = [sys.executable, "-m", "venv", "--system-site-packages", str(venv_root)]
         cp = self._run(argv, dict(os.environ), None)
@@ -333,17 +232,7 @@ class _VenvProvisionMixin(BaseAdapter):
         index_url: str = "",
         editable: str = "",
     ) -> subprocess.CompletedProcess:
-        """Run one ``pip install`` into the attempt venv.
-
-        Args:
-            python_path: Attempt interpreter.
-            specs: Package specs to install (empty when ``editable`` is set).
-            index_url: Extra pip index (host-allowlisted by the caller).
-            editable: Editable source path (``-e``), or empty.
-
-        Returns:
-            subprocess.CompletedProcess: The pip result.
-        """
+        """Run one ``pip install`` into the attempt venv."""
         argv = [str(python_path), "-m", "pip", "install", "--upgrade"]
         if index_url:
             argv += ["--extra-index-url", index_url]
@@ -394,6 +283,22 @@ class VllmRocmAdapter(_VenvProvisionMixin):
 
     framework = "vllm"
 
+    def argv_parser_source(self) -> str:
+        """Return the source that builds vLLM's OpenAI-server parser.
+
+        The parser class moved packages between releases, so both spellings are
+        tried; a release answering to neither raises out of ``_build_parser``.
+        """
+        return (
+            "def _build_parser():\n"
+            "    from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
+            "    try:\n"
+            "        from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+            "    except ImportError:\n"
+            "        from vllm.utils import FlexibleArgumentParser\n"
+            "    return make_arg_parser(FlexibleArgumentParser())\n"
+        )
+
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
         if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
@@ -408,19 +313,15 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
-        """Build a vLLM ROCm wheel candidate; None when no ROCm index is configured.
-
-        Refuses to produce a candidate unless a ROCm index is configured — never
-        falls back to a generic PyPI (CUDA) wheel for a ROCm run.
-        """
+        """Build a vLLM ROCm wheel candidate; None when no ROCm index is configured."""
         if not self.supports(gap):
             return None
         index_url = os.environ.get(_VLLM_ROCM_INDEX_ENV, "").strip()
         if not index_url:
             log.info("VllmRocmAdapter: no %s configured; refusing PyPI CUDA fallback", _VLLM_ROCM_INDEX_ENV)
             return None
-        # An explicit index allowlist, when set, must match; without one the
-        # operator-set ROCm index is trusted by construction.
+        # An explicit index allowlist, when set, must match; without one the operator-set ROCm index is trusted by
+        # construction.
         allow = _allowlist(_INDEX_ALLOWLIST_ENV)
         if allow and not _is_allowlisted(index_url, allow):
             log.warning("VllmRocmAdapter: index_url %r not in allowlist", index_url)
@@ -504,6 +405,22 @@ class SglangAdapter(_VenvProvisionMixin):
             return ""
         root = Path(framework_root)
         return "python" if (root / "python" / "sglang").is_dir() else ""
+
+    def argv_parser_source(self) -> str:
+        """Return the source that builds sglang's server-args parser.
+
+        ``sglang.launch_server`` exposes no parser at module scope, so the
+        parser is built here and handed to the framework's own registrar --
+        the shape ``atom`` already used.
+        """
+        return (
+            "def _build_parser():\n"
+            "    import argparse\n"
+            "    from sglang.srt.server_args import ServerArgs\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    ServerArgs.add_cli_args(parser)\n"
+            "    return parser\n"
+        )
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
@@ -611,14 +528,20 @@ class SglangAdapter(_VenvProvisionMixin):
 
 
 class AtomAdapter(BaseAdapter):
-    """Atom adapter: no runtime acquisition, but Python localization.
-
-    Atom is a wheel-installed (non-git) tree; a Python-only PR backport localizes
-    via the executor's no-git apply. There is no editable refresh (importlib
-    picks up the file changes on the next boot).
-    """
+    """Atom adapter: no runtime acquisition, but Python localization."""
 
     framework = "atom"
+
+    def argv_parser_source(self) -> str:
+        """Return the source that builds atom's engine-args parser."""
+        return (
+            "def _build_parser():\n"
+            "    import argparse\n"
+            "    from atom.model_engine.arg_utils import EngineArgs\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    EngineArgs.add_cli_args(parser)\n"
+            "    return parser\n"
+        )
 
     def build_localization_action(
         self,
@@ -665,16 +588,7 @@ _ADAPTERS: dict[str, type[BaseAdapter]] = {
 
 
 def get_adapter(framework: str | None, *, run: RunFn = _default_run) -> BaseAdapter:
-    """Return the adapter for ``framework``; a NullAdapter for unknown names.
-
-    Args:
-        framework: Framework name (case-insensitive).
-        run: Injectable subprocess shim threaded into the adapter.
-
-    Returns:
-        BaseAdapter: The matching adapter instance, or a :class:`NullAdapter`
-        (never raises) for an unknown framework.
-    """
+    """Return the adapter for ``framework``; a NullAdapter for unknown names."""
     key = str(framework or "").strip().lower()
     cls = _ADAPTERS.get(key)
     if cls is None:

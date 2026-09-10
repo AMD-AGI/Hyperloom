@@ -1,32 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Turning a proposed candidate into something the referee can time.
-
-The referee deliberately refuses to interpret a config: a candidate only means
-anything against the backend it names, and a wrong guess about what it meant
-would be timed as if it were right. So somebody has to supply the three
-things it cannot write generically -- what the unmodified path is, how to run
-a candidate, and how to tell whether the answer is correct.
-
-That is what this module is, for the tables we can actually dispatch today.
-A table with no adapter here yields ``None``, and the attempt stops at the
-referee with "no dispatch supplied" -- which is the right outcome, because the
-alternative is emitting a tuner nobody re-timed.
-
-Two things in here were learned by getting them wrong on real hardware:
-
-* **Time graph replays, not individual calls.** Python dispatch on MI355X
-  costs ~12us, and the kernels under test are 5-13us. Handing the referee raw
-  single-kernel callables buries every candidate under the same overhead and
-  compresses the ratios toward 1.0, which reads as "nothing to tune here".
-* **Do not measure error element by element.** Dividing by each reference
-  element (however floored) lets any output that lands near zero dominate, and
-  a large-K random GEMM produces plenty of those. By that measure the
-  unmodified ``torch.matmul`` scores 1.375 against its own fp32 reference, so
-  a gate on it rejects the default path. Error is measured against the
-  magnitude of the reference as a whole.
-"""
+"""Turning a proposed candidate into something the referee can time."""
 
 from __future__ import annotations
 
@@ -36,30 +11,21 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Back-to-back invocations inside one captured graph. Large enough that the
-# per-replay overhead is small against the kernel, small enough to capture.
+# Back-to-back invocations inside one captured graph.
 GRAPH_INNER = 20
 
-# Fresh-input correctness repeats, worst result counted. One check passes an
-# intermittently wrong kernel roughly at random; this is not hypothetical, four
-# such kernels were selected as winners on this hardware before it was
-# understood.
+# Fresh-input correctness repeats, worst result counted.
 CORRECTNESS_TRIALS = 8
 
-# See the module docstring for why this is not an element-wise ratio.
+# Bound the aggregate referee error metric, not an element-wise relative ratio.
 MAX_RELATIVE_ERROR = 5e-2
 
-# Tables this module knows how to exercise. Everything else is honestly absent
-# rather than approximated.
+# Tables this module knows how to exercise.
 SUPPORTED_TABLES = ("bf16_tuned_gemm.csv",)
 
 
 def adapters_for(table: str) -> Any | None:
-    """Return the dispatch adapter for a table, or None if we have none.
-
-    None is a real answer: the runner then stops before the referee rather
-    than emitting candidates nobody re-timed.
-    """
+    """Return the dispatch adapter for a table, or None if we have none."""
     if table == "bf16_tuned_gemm.csv":
         return _Bf16DenseAdapter()
     log.info(
@@ -89,16 +55,7 @@ def parse_config(cfg: Any) -> dict[str, Any]:
 
 
 def shape_key(shape: str) -> tuple[int, int, int]:
-    """``"16x1536x7168"`` into ``(16, 1536, 7168)``.
-
-    Raises ``ValueError`` on anything else. It used to return ``()`` instead,
-    which did not spare any caller: every one of them unpacks the result into
-    three names, so a malformed shape became a bare ``ValueError`` about tuple
-    lengths several frames away -- and ``"16x1536"`` parsed "successfully" into
-    a 2-tuple that failed the same way. Failing here says which shape and why;
-    the caller in ``cli.py`` already treats that as "tier3 attempt failed;
-    tuning continues".
-    """
+    """``\"16x1536x7168\"`` into ``(16, 1536, 7168)``."""
     parts = str(shape).split("x")
     if len(parts) != 3:
         raise ValueError(f"tier3 shape must be MxNxK, got {shape!r}")
@@ -110,11 +67,7 @@ def shape_key(shape: str) -> tuple[int, int, int]:
 
 
 class _Bf16DenseAdapter:
-    """Dispatch, baseline and correctness for row-major bf16 A[M,K] x B[N,K]^T.
-
-    Holds the operands per shape so timing measures the kernel rather than
-    allocation, and rebuilds against fresh ones for every correctness trial.
-    """
+    """Dispatch, baseline and correctness for row-major bf16 A[M,K] x B[N,K]^T."""
 
     def __init__(self) -> None:
         self._operands: dict[tuple[int, ...], tuple[Any, Any]] = {}
@@ -140,11 +93,7 @@ class _Bf16DenseAdapter:
         return self._operands[key]
 
     def as_graph(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Replay many invocations per call, so dispatch cost is amortised.
-
-        Falls back to the raw callable when capture fails: a kernel that cannot
-        be captured is still worth timing, just less precisely.
-        """
+        """Replay many invocations per call, so dispatch cost is amortised."""
         torch = self._torch()
         try:
             side = torch.cuda.Stream()
@@ -173,9 +122,8 @@ class _Bf16DenseAdapter:
         key = shape_key(shape)
 
         def dispatch(cand: dict[str, Any]) -> Callable[[], Any] | None:
-            # The correctness check runs straight after this and needs to know
-            # which candidate is in play, because it has to rebuild against
-            # fresh inputs rather than reuse this callable's fixed operands.
+            # The correctness check runs straight after this and needs to know which candidate is in play, because it
+            # has to rebuild against fresh inputs rather than reuse this callable's fixed operands.
             self._in_play[shape] = cand
             call = self._build(key, cand)
             return self.as_graph(call) if call is not None else None
@@ -208,11 +156,7 @@ class _Bf16DenseAdapter:
         self._hipb_ready = True
 
     def _build(self, key: tuple[int, int, int], cand: dict[str, Any]) -> Callable[[], Any] | None:
-        """One candidate as a callable, or None when we cannot dispatch it.
-
-        None is recorded by the referee as "not dispatchable", which is a
-        result worth having; approximating what the candidate meant is not.
-        """
+        """One candidate as a callable, or None when we cannot dispatch it."""
         import aiter
 
         torch = self._torch()
@@ -328,9 +272,5 @@ class _Bf16DenseAdapter:
 
 
 def relative_error(got: Any, ref: Any) -> float:
-    """Largest deviation, against the magnitude of the reference as a whole.
-
-    Not element-wise: see the module docstring for the measurement that
-    rejected the default path.
-    """
+    """Largest deviation, against the magnitude of the reference as a whole."""
     return float((got.float() - ref).abs().max() / ref.abs().mean())

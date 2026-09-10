@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -30,15 +24,7 @@ from ._common import (
 
 # Kernel backend invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts.
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        list[Path]: Every kernel-agent run directory across the canonical and
-        two legacy layouts. Empty when none exist.
-    """
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts."""
     candidates: list[Path] = []
     # Canonical: <sd>/kernel-agent/runs/<sid>/
     new_root = session_dir / "kernel-agent" / "runs"
@@ -65,27 +51,7 @@ def _parse_invocation_attempt(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Parse one ``optimization_attempts.jsonl`` row into an Invocation.
-
-    Per-attempt fields are read from ``attempt`` directly. Kernel-level
-    artifacts (verification / result) are referenced by path only — the
-    KEEP/PARTIAL/REVERT decision is NOT stamped here because
-    ``results/<kid>.json`` and ``verification/<kid>.json`` describe the
-    kernel's BEST attempt, not every attempt. Stamping happens in
-    :func:`_stamp_kernel_level_decisions` after all attempts are parsed.
-
-    Args:
-        attempt (dict[str, Any]): One row from ``optimization_attempts.jsonl``.
-        run_dir (Path): The kernel-agent run directory the attempt belongs to.
-        session_dir (Path): Absolute session root (used to relativize paths).
-        warnings (list[str]): Shared warnings list (kept for signature
-            symmetry; not mutated here).
-
-    Returns:
-        dict[str, Any]: An Invocation dict for this single attempt, with
-        kernel-level decision / verification fields left unset for later
-        stamping.
-    """
+    """Parse one ``optimization_attempts.jsonl`` row into an Invocation."""
     kid = str(attempt.get("kernel_id") or "")
     backend = str(attempt.get("backend") or "").lower()
     attempt_id = str(
@@ -146,20 +112,7 @@ def _stamp_kernel_level_decisions(
     session_dir: Path,
     warnings: list[str],
 ) -> None:
-    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single best attempt per kernel.
-
-    Reads kernel-level ``results/<kid>.json`` + ``verification/<kid>.json``;
-    the best attempt is chosen by backend hint, else highest micro_speedup
-    (ties: latest ts). Other attempts keep their per-attempt decision.
-
-    Args:
-        invocations (list[dict[str, Any]]): All parsed per-attempt invocations
-            (mutated in place — the best attempt per kernel is stamped).
-        run_dirs (list[Path]): The kernel-agent run directories the
-            invocations came from.
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place).
-    """
+    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single best attempt per kernel."""
     # Group by (run_id, kernel_id); same kid in different run_dirs is separate.
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for inv in invocations:
@@ -188,24 +141,15 @@ def _stamp_kernel_level_decisions(
             continue  # nothing to stamp
 
         def _attempt_key(a: dict[str, Any]) -> tuple[float, str]:
-            """Sort key selecting the best attempt for a kernel.
-
-            Args:
-                a (dict[str, Any]): One attempt invocation.
-
-            Returns:
-                tuple[float, str]: ``(micro_speedup, ts)`` with a missing
-                speedup treated as ``-inf`` so it sorts last.
-            """
+            """Sort key selecting the best attempt for a kernel."""
             spd = a.get("micro_speedup")
             return (
                 float(spd) if isinstance(spd, (int, float)) else float("-inf"),
                 str(a.get("ts") or ""),
             )
 
-        # Attribute the KEEP to the adopted backend via
-        # ``verification.best_attempt_id`` then ``best_backend``; the micro/ts
-        # heuristic is a last resort (it can pick a FAILED lane).
+        # Attribute the KEEP to the adopted backend via ``verification.best_attempt_id`` then ``best_backend``; the
+        # micro/ts heuristic is a last resort (it can pick a FAILED lane).
         best = None
         if isinstance(verification, dict):
             want_id = str(verification.get("best_attempt_id") or "")
@@ -247,18 +191,7 @@ def _shape_kernel_metadata(
     result: dict[str, Any],
     attempt: dict[str, Any],
 ) -> dict[str, Any]:
-    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own.
-
-    Args:
-        result (dict[str, Any]): The kernel-level ``results/<kid>.json`` dict
-            (may be empty).
-        attempt (dict[str, Any]): The per-attempt record used as a fallback
-            source.
-
-    Returns:
-        dict[str, Any]: Shaped kernel metadata (name, source file, shapes,
-        gpu_pct, arithmetic_intensity).
-    """
+    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own."""
     meta = result.get("kernel_metadata") if isinstance(result, dict) else None
     if isinstance(meta, dict) and meta:
         return {
@@ -278,15 +211,7 @@ def _shape_kernel_metadata(
 
 
 def _infer_run_dir_kernel_id(run_dir: Path) -> str:
-    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``, only when the dir holds a single kid.
-
-    Args:
-        run_dir (Path): A kernel-agent run directory.
-
-    Returns:
-        str: The single kernel id inferred from ``results`` / ``verification``
-        filenames, or ``""`` when zero or more than one is present.
-    """
+    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``, only when the dir holds a single kid."""
     kids: set[str] = set()
     for sub in ("results", "verification"):
         d = run_dir / sub
@@ -302,17 +227,7 @@ def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, forge_invocations)`` from optimization attempts.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        The ``(geak, forge)`` invocation lanes, each sorted by
-        ``(kernel_id, ts)``.
-    """
+    """Return ``(geak_invocations, forge_invocations)`` from optimization attempts."""
     all_invocations: list[dict[str, Any]] = []
     run_dirs = _kernel_agent_run_dirs(session_dir)
     for run_dir in run_dirs:
@@ -359,26 +274,12 @@ def _read_kernel_candidates(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Return the ``hot_kernels`` array from ``kernel_candidates.json``.
-
-    Resolves via the orchestrator-recorded path, then the new and legacy
-    on-disk layouts (glob fallbacks), then ``last_trace_analyze.hot_kernels_top15``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: The resolved ``hot_kernels`` list, or ``[]`` when
-        no source yields a non-empty list.
-    """
+    """Return the ``hot_kernels`` array from ``kernel_candidates.json``."""
     sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
-        # Re-root the (usually container) path under session_dir via the
-        # kernel-agent[-workspace] anchors before glob.
+        # Re-root the (usually container) path under session_dir via the kernel-agent[-workspace] anchors before glob.
         p = Path(str(raw_path))
         candidate_paths.append(p)
         for anchor in ("kernel-agent-workspace", "kernel-agent"):
@@ -401,12 +302,12 @@ def _read_kernel_candidates(
         data = _load_json_safe(path, warnings)
         if isinstance(data, dict):
             hk = data.get("hot_kernels")
-            # Only accept a non-empty list, else an on-disk ``hot_kernels: []``
-            # would wrongly short-circuit the state fallback below.
+            # Only accept a non-empty list, else an on-disk ``hot_kernels: []`` would wrongly short-circuit the state
+            # fallback below.
             if isinstance(hk, list) and hk:
                 return hk
-    # Final fallback: state.last_trace_analyze.hot_kernels_top15 (the
-    # orchestrator's truncated copy), used when the on-disk file is missing.
+    # Final fallback: state.last_trace_analyze.hot_kernels_top15 (the orchestrator's truncated copy), used when the
+    # on-disk file is missing.
     inline = sk.get("hot_kernels_top15") if isinstance(sk, dict) else None
     if isinstance(inline, list):
         return inline
@@ -416,14 +317,7 @@ def _read_kernel_candidates(
 def _index_invocations_by_kernel(
     invs: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Fold per-attempt invocations into a per-kernel summary.
-
-    Args:
-        invs (list[dict[str, Any]]): Per-attempt invocation records.
-
-    Returns:
-        dict[str, dict[str, Any]]: Per-kernel summary keyed by ``kernel_id``.
-    """
+    """Fold per-attempt invocations into a per-kernel summary."""
     out: dict[str, dict[str, Any]] = {}
     for inv in invs:
         kid = str(inv.get("kernel_id") or "")
@@ -461,27 +355,7 @@ def _collect_detected_kernels(
     forge: list[dict[str, Any]] | None = None,
     cap: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the canonical per-kernel lifecycle row, keyed by ``kernel_id``.
-
-    Merges static profile fields (from ``kernel_candidates.json``,
-    preferred, else ``benchmark_report.kernel_summary``),
-    ``selected_for_optimization``, per-lane ``geak`` / ``forge``
-    summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        geak (list[dict[str, Any]]): GEAK-lane invocations.
-        warnings (list[str]): Shared warnings list (mutated in place).
-        forge (list[dict[str, Any]] | None): Forge-lane invocations. Defaults
-            to ``None`` (treated as empty).
-        cap (int | None): Optional maximum number of rows to return (highest
-            GPU share first). Defaults to ``None`` (no cap).
-
-    Returns:
-        list[dict[str, Any]]: Per-kernel lifecycle rows sorted by descending
-        GPU share, truncated to ``cap`` when given.
-    """
+    """Build the canonical per-kernel lifecycle row, keyed by ``kernel_id``."""
     forge = forge or []
     by_kid: dict[str, dict[str, Any]] = {}
 
@@ -510,9 +384,7 @@ def _collect_detected_kernels(
             "optimization_notes": str(k.get("optimization_notes") or ""),
         }
 
-    # 2) benchmark_report.kernel_summary fallback for the tail of trace kernels
-    #    that didn't make the top-N candidates. Dedupe by name against the
-    #    candidates entries; new fallback entries get a short ``rNNN`` alias.
+    # 2) benchmark_report.kernel_summary fallback for the tail of trace kernels that didn't make the top-N candidates.
     name_to_kid = {e["name"]: kid for kid, e in by_kid.items() if e.get("name")}
     residual_counter = 0
     for task_dir, report_path in _scan_profile_reports(session_dir):
@@ -547,8 +419,8 @@ def _collect_detected_kernels(
                 continue
 
             input_kid = str(k.get("kernel_id") or "")
-            # Keep the input kernel_id when it's already a short alias (e.g.
-            # ``k002``); mangled C++ symbols get a generated ``rNNN`` alias.
+            # Keep the input kernel_id when it's already a short alias (e.g. ``k002``); mangled C++ symbols get a
+            # generated ``rNNN`` alias.
             is_short_alias = input_kid and input_kid != name_str and len(input_kid) <= 8 and input_kid not in by_kid
             if is_short_alias:
                 alias = input_kid
@@ -615,9 +487,7 @@ def _collect_detected_kernels(
         if kid in integ_gain_by_kid:
             entry["integrate_gain_pct"] = integ_gain_by_kid[kid]
         if kid in adopted_kids:
-            # Disambiguate which lane's patch was kept. Pick the KEPT lane
-            # with the highest micro-speedup; fall back to 'kernel_agent' when
-            # integrate KEPT but no single lane shows a KEEP.
+            # Disambiguate which lane's patch was kept.
             kept_lanes: list[tuple[str, float]] = []
             for lane in ("geak", "forge"):
                 row = entry.get(lane)
@@ -653,19 +523,7 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Shape the orchestrator's recommended hot-kernels list.
-
-    Reads ``state.last_trace_analyze.hot_kernels_top15`` and projects each
-    entry to the report's recommended-kernel shape.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        list[dict[str, Any]]: One row per recommended kernel (id / name /
-        gpu_pct / recommended backends + actions / bottleneck). Empty when no
-        trace-analyze recommendations exist.
-    """
+    """Shape the orchestrator's recommended hot-kernels list."""
     sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
@@ -692,22 +550,7 @@ def _collect_optimized_kernels(
     state: dict[str, Any],
     forge: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fold per-attempt invocations into per-kernel optimization summaries.
-
-    Aggregates all lanes' attempts per kernel (counts, best micro-speedup,
-    best artifact, decision history) and cross-references
-    ``state.kernel_opt_attempts`` to recover decisions whose on-disk
-    verification was rotated away.
-
-    Args:
-        geak (list[dict[str, Any]]): GEAK-lane invocations.
-        state (dict[str, Any]): Parsed ``state.json``.
-        forge (list[dict[str, Any]] | None): Forge-lane invocations.
-
-    Returns:
-        list[dict[str, Any]]: Per-kernel optimization summaries sorted by
-        ``kernel_id``.
-    """
+    """Fold per-attempt invocations into per-kernel optimization summaries."""
     by_kid: dict[str, dict[str, Any]] = {}
     for invs in (geak, forge or []):
         for inv in invs:
@@ -746,8 +589,8 @@ def _collect_optimized_kernels(
                     "ts": inv.get("ts"),
                 }
             )
-    # Cross-reference the stable task ledger (covers ordinal reuse and rotated
-    # on-disk verification), falling back to legacy per-ordinal state.
+    # Cross-reference the stable task ledger (covers ordinal reuse and rotated on-disk verification), falling back to
+    # legacy per-ordinal state.
     ko_attempts = state.get("kernel_opt_task_attempts") or state.get("kernel_opt_attempts") or {}
     if isinstance(ko_attempts, dict):
         for ledger_id, ent in ko_attempts.items():
@@ -773,19 +616,13 @@ def _collect_optimized_kernels(
 
 
 def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
-    """Report whether a ledger row represents an adopted kernel patch.
-
-    ``validated`` tracks single-kernel gain attribution, not adoption. GEAK
-    joint rebench rows and later failed revalidations can be ``validated=False``
-    while the kernel was still promoted with a proven overlay or an earlier
-    ``KEEP`` attempt.
-    """
+    """Report whether a ledger row represents an adopted kernel patch."""
     if ent.get("last_decision") == "KEEP":
         return True
     source = str(ent.get("source") or "")
     if source != "geak_e2e":
-        # Forge / integrate writers stamp REVERT on the entry itself; a prior
-        # KEEP attempt must not resurrect a kernel that was later rejected.
+        # Forge / integrate writers stamp REVERT on the entry itself; a prior KEEP attempt must not resurrect a kernel
+        # that was later rejected.
         return False
     attempts = ent.get("attempts") or []
     has_keep = any(isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts)
@@ -795,19 +632,7 @@ def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
 
 
 def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collect KEEP-promoted (adopted) kernel patch entries.
-
-    Reads ``state.kernel_integrate_attempts`` and keeps entries that were
-    promoted (``KEEP`` or proven GEAK overlay / historical ``KEEP``).
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        list[dict[str, Any]]: One row per adopted kernel patch (kernel id,
-        patch / target paths, extra server args, validated e2e gain, status,
-        adoption timestamp, attempt count). Empty when none were adopted.
-    """
+    """Collect KEEP-promoted (adopted) kernel patch entries."""
     out: list[dict[str, Any]] = []
     integ = state.get("kernel_integrate_attempts") or {}
     if isinstance(integ, dict):
@@ -823,9 +648,8 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "target_file": str(ent.get("target_file") or ""),
                     "extra_server_args": str(ent.get("extra_server_args") or ""),
                     "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-                    # Writers that cannot attribute the measured gain to this
-                    # one kernel say so; everything else stays validated, as
-                    # every pre-existing writer's row was.
+                    # Writers that cannot attribute the measured gain to this one kernel say so; everything else stays
+                    # validated, as every pre-existing writer's row was.
                     "validated": bool(ent.get("validated", True)),
                     "last_status": str(ent.get("last_status") or ""),
                     "adopted_at": str(ent.get("updated_at") or ""),
@@ -838,19 +662,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _collect_rejected_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collect rejected / retired kernel patch entries.
-
-    Reads ``state.rejected_kernel_patches`` and additionally surfaces any
-    ``state.rejected_kernel_ids`` that never made it into the patch list
-    (marked with ``reason="retired"``).
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        list[dict[str, Any]]: One row per rejected kernel (id, reason, patch /
-        target paths, attempt count, best gain, timestamp).
-    """
+    """Collect rejected / retired kernel patch entries."""
     out: list[dict[str, Any]] = []
     rejected = state.get("rejected_kernel_patches") or []
     if isinstance(rejected, list):
@@ -895,22 +707,7 @@ def collect_kernel_lifecycle(
     warnings: list[str],
     forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Collect the kernel-lifecycle section.
-
-    Bundles the five per-kernel views — detected, recommended, optimized,
-    adopted, and rejected — into one section.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        geak (list[dict[str, Any]]): GEAK-lane invocations.
-        warnings (list[str]): Shared warnings list (mutated in place).
-        forge (list[dict[str, Any]] | None): Forge-lane invocations (own lane).
-
-    Returns:
-        dict[str, Any]: ``{"detected", "recommended", "optimized", "adopted",
-        "rejected"}`` lists.
-    """
+    """Collect the kernel-lifecycle section."""
     forge = forge or []
     return {
         "detected": _collect_detected_kernels(session_dir, state, geak, warnings, forge=forge),
@@ -929,21 +726,7 @@ def collect_kernel_optimization_summary(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/kernel_optimization_summary.json`` into its section.
-
-    Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
-    mirrored verbatim (producer additions ride through) apart from shape
-    guards on the iterated containers + an added ``report_path``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on
-            malformed input).
-
-    Returns:
-        dict[str, Any]: The mirrored summary section (with a ``report_path``),
-        or ``{}`` when the file is absent / not a JSON object.
-    """
+    """Mirror ``reports/kernel_optimization_summary.json`` into its section."""
     path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
     if not path.exists():
         # Quiet on absence (mirrors collect_kernel_roofline).
@@ -1042,12 +825,7 @@ def _recover_conc_sweep_summary_from_runs(
     *,
     metric_key: str = GRADED_OUTPUT,
 ) -> dict[str, Any]:
-    """Recover a conc_sweep summary from raw run workspaces when the report is stale.
-
-    ``metric_key`` is the axis the recovered speedups are taken on. A recovery
-    that supersedes a report has to reuse that report's own axis, or the
-    section silently swaps one quantity for another.
-    """
+    """Recover a conc_sweep summary from raw run workspaces when the report is stale."""
     runs_dir = session_dir / "runs" / "conc_sweep"
     if not runs_dir.exists():
         return {}
@@ -1101,30 +879,7 @@ def collect_conc_sweep_summary(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/conc_sweep_summary.json`` into its section.
-
-    Missing → recover from ``runs/conc_sweep``, returning the recovered
-    payload + a warning when it yields successful pairs, else ``{}``;
-    malformed → ``{}`` + warning. Otherwise mirrored verbatim (only
-    ``comparison`` shape-guarded) + ``report_path``, except that a mirrored
-    report with zero successful pairs is superseded by the recovered payload
-    (``source="recovered_from_runs"``, ``schema_version="recovered-v1"``, the
-    mirrored path kept as ``original_report_path``) when recovery finds pairs,
-    taken on the axis that report named. A recovery standing in for an absent
-    report has no axis to read and takes the default.
-    Do not synthesize the optional blocks the producer omits when
-    ``status="skipped"``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on
-            malformed input).
-
-    Returns:
-        dict[str, Any]: The mirrored conc-sweep summary (with a
-        ``report_path``), the run-workspace recovery payload, or ``{}`` when
-        the file is absent / not a JSON object and recovery finds no pairs.
-    """
+    """Mirror ``reports/conc_sweep_summary.json`` into its section."""
     path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
     if not path.exists():
         recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
@@ -1148,8 +903,8 @@ def collect_conc_sweep_summary(
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
 
-    # Fall back to run-workspace recovery only when the authoritative report
-    # has no successful pairs (also skips the full runs/ scan on the healthy path).
+    # Fall back to run-workspace recovery only when the authoritative report has no successful pairs (also skips the
+    # full runs/ scan on the healthy path).
     if _conc_sweep_successful_pairs(out) == 0:
         reported_metric = str((out.get("summary") or {}).get("metric") or "").strip()
         recovered = _recover_conc_sweep_summary_from_runs(
@@ -1162,23 +917,11 @@ def collect_conc_sweep_summary(
     return out
 
 
-# Optimization stack — raw KEEP ledger passthrough with the full per-entry
-# evidence the summarised sections drop.
+# Optimization stack — raw KEEP ledger passthrough with the full per-entry evidence the summarised sections drop.
 def collect_optimization_stack(
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Mirror ``state.optimization_stack[]`` to the breakdown; never raises.
-
-    Each entry is stamped ``validated`` (within
-    ``cumulative_gain_validated_stack_len``). Returns ``[]`` when absent.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        list[dict[str, Any]]: One normalized stack entry per KEEP (each flagged
-        ``validated``), or ``[]`` when the stack is absent.
-    """
+    """Mirror ``state.optimization_stack[]`` to the breakdown; never raises."""
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
         return []
@@ -1199,17 +942,7 @@ def _normalize_optimization_stack_entry(
     *,
     validated: bool,
 ) -> dict[str, Any]:
-    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim.
-
-    Args:
-        raw (dict[str, Any]): One raw ``optimization_stack`` entry.
-        validated (bool): Whether the entry falls within the validated stack
-            length.
-
-    Returns:
-        dict[str, Any]: The coerced stack entry with optional evidence fields
-        (gemm-tuning and collective) included only when present in ``raw``.
-    """
+    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim."""
     # Known fields — coerced types
     out: dict[str, Any] = {
         "action": str(raw.get("action") or ""),
@@ -1246,45 +979,18 @@ def _normalize_optimization_stack_entry(
         out["operation_kind"] = str(raw.get("operation_kind") or "")
     if "scope" in raw:
         out["scope"] = str(raw.get("scope") or "")
-    # collective-specific evidence (optional); ``integration_id`` /
-    # ``collective_attempt_id`` join the entry back to its campaign record.
-    if "collective_op" in raw:
-        out["collective_op"] = str(raw.get("collective_op") or "")
-    if "world_size" in raw:
-        out["world_size"] = raw.get("world_size")
-    if "collective_attempt_id" in raw:
-        out["collective_attempt_id"] = str(raw.get("collective_attempt_id") or "")
     if "integration_id" in raw:
         out["integration_id"] = str(raw.get("integration_id") or "")
     return out
 
 
 def _resolve_gemm_engine(record: dict[str, Any]) -> str:
-    """Resolve the GEMM-tuning engine label for a run/stack record.
-
-    Prefer ``engine``, then ``backend`` (the forge lane records its tuner
-    there), then fall back to ``geak`` for records that carry neither.
-    """
+    """Resolve the GEMM-tuning engine label for a run/stack record."""
     return str(record.get("engine") or record.get("backend") or "geak")
 
 
 def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
-    """Build the top-level ``gemm_tuning`` section from session state; never raises.
-
-    Assembles one run per ``state.gemm_tuning_attempts[]`` entry (falling back
-    to ``last_gemm_tuning`` when the history is absent), tags each with its
-    tuning ``engine`` (``geak`` today, ``forge`` later), and cross-references
-    ``optimization_stack`` so a run whose ``tuned_file`` was kept is marked
-    ``adopted`` with the kept gain. Gain is mirrored here for the optimization
-    layer while ``attribution`` remains the authoritative roll-up.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        dict[str, Any]: A ``GemmTuning`` envelope (``runs`` + adopted summary),
-        or ``{}`` when the session ran no GEMM tuning.
-    """
+    """Build the top-level ``gemm_tuning`` section from session state; never raises."""
     attempts = state.get("gemm_tuning_attempts")
     if not isinstance(attempts, list) or not attempts:
         last = state.get("last_gemm_tuning")
@@ -1420,129 +1126,13 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: Integrate-gate evidence copied verbatim onto every collective record. The
-#: E2E verdict, not the microbenchmark, decides whether a campaign is adopted.
-_COLLECTIVE_INTEGRATION_FIELDS = (
-    "integration_id",
-    "integration_decision",
-    "patch_cleanup_status",
-    "integration_result_status",
-    "integration_revert_status",
-    "integration_finalize_status",
-    "integration_recovery_action",
-    "integration_error_class",
-    "integration_error",
-    "integration_report_path",
-    "integration_workspace",
-    "integration_ts",
-)
-
-
-def _normalize_collective_record(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one collective campaign record into the exported shape."""
-    world_size_raw = raw.get("world_size")
-    try:
-        world_size = int(world_size_raw) if world_size_raw not in (None, "") else None
-    except (TypeError, ValueError):
-        world_size = None
-
-    out: dict[str, Any] = {
-        "collective_attempt_id": str(raw.get("collective_attempt_id") or ""),
-        "experiment_id": str(raw.get("experiment_id") or ""),
-        "kernel_id": str(raw.get("kernel_id") or ""),
-        "kernel_name": str(raw.get("kernel_name") or ""),
-        "collective_op": str(raw.get("collective_op") or ""),
-        "world_size": world_size,
-        "engine": str(raw.get("engine") or raw.get("backend") or ""),
-        "status": str(raw.get("status") or ""),
-        "decision": str(raw.get("decision") or ""),
-        "kept": bool(raw.get("kept")),
-        "salvaged": bool(raw.get("salvaged")),
-        "requires_e2e_validation": bool(raw.get("requires_e2e_validation")),
-        "iterations": raw.get("iterations"),
-        "kernel_speedup": _to_float(raw.get("kernel_speedup")),
-        "gpu_pct": _to_float(raw.get("gpu_pct")),
-        "duration_sec": _to_float(raw.get("duration_sec")),
-        "ts": str(raw.get("ts") or ""),
-        "source_file": str(raw.get("source_file") or ""),
-        "kernel_repo": str(raw.get("kernel_repo") or ""),
-        "workspace": str(raw.get("workspace") or ""),
-        "patch_path": str(raw.get("patch_path") or raw.get("patch") or ""),
-        "error_class": str(raw.get("error_class") or ""),
-        "error": str(raw.get("error") or ""),
-        "integration_gain_pct": _to_float(raw.get("integration_gain_pct")),
-        "integration_base_tput": _to_float(raw.get("integration_base_tput")),
-        "integration_new_tput": _to_float(raw.get("integration_new_tput")),
-    }
-    for field in _COLLECTIVE_INTEGRATION_FIELDS:
-        value = raw.get(field) or ""
-        if not value and field == "patch_cleanup_status":
-            # Resume compat: older state.json records use "integration_status".
-            value = raw.get("integration_status") or ""
-        out[field] = str(value)
-    if isinstance(raw.get("bandwidth"), dict):
-        out["bandwidth"] = raw["bandwidth"]
-    if isinstance(raw.get("artifact_files"), list):
-        out["artifact_files"] = [str(item) for item in raw["artifact_files"]]
-    return out
-
-
-def collect_collective(state: dict[str, Any]) -> dict[str, Any]:
-    """Build the top-level ``collective`` section from session state; never raises.
-
-    Mirrors the SharedState collective lane fields so a campaign stays auditable
-    even when it never reaches ``optimizations`` — a lane that wins its
-    microbenchmark but loses the E2E gate leaves no trace there.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        dict[str, Any]: A ``Collective`` envelope (``only_mode`` / ``attempts``
-        / ``last``), or ``{}`` when the lane never ran.
-    """
-    raw_attempts = state.get("collective_attempts")
-    if not isinstance(raw_attempts, list):
-        raw_attempts = []
-    last_raw = state.get("last_collective")
-    if not isinstance(last_raw, dict):
-        last_raw = {}
-    if not raw_attempts and not last_raw:
-        return {}
-
-    attempts = [_normalize_collective_record(item) for item in raw_attempts if isinstance(item, dict)]
-    envelope: dict[str, Any] = {
-        "only_mode": bool(state.get("collective_only_mode")),
-        "attempts": attempts,
-    }
-    if last_raw:
-        envelope["last"] = _normalize_collective_record(last_raw)
-    return envelope
-
-
 def collect_source_files(
     session_dir: Path,
     baseline_path: str | None,
     profile_reports: list[str],
     sweep_reports: list[str],
 ) -> dict[str, Any]:
-    """Build the ``source_files`` map of key on-disk artifacts.
-
-    Always surfaces the manifest / state / baseline references and the
-    critic / robustness workdirs (when present), and conditionally adds the
-    profile / sweep / kernel-attempt list categories when non-empty (empty
-    list-valued categories are omitted so the renderer doesn't show
-    ``count=0`` rows).
-
-    Args:
-        session_dir (Path): Absolute session root.
-        baseline_path (str | None): Relative path to the baseline report.
-        profile_reports (list[str]): Relative profile report paths.
-        sweep_reports (list[str]): Relative sweep report paths.
-
-    Returns:
-        dict[str, Any]: The source-files map.
-    """
+    """Build the ``source_files`` map of key on-disk artifacts."""
     kernel_attempts = [
         _rel(run_dir / "optimization_attempts.jsonl", session_dir) or str(run_dir / "optimization_attempts.jsonl")
         for run_dir in _kernel_agent_run_dirs(session_dir)

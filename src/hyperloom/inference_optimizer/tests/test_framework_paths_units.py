@@ -15,10 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.framework import paths as fp
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.framework.paths import (
-    probe_framework_source_roots_for_env,
-    resolve_source_file_allowlist,
-)
+from hyperloom.orchestrator.framework.paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
@@ -53,49 +50,6 @@ class TestNormalizeRoot:
     def test_empty_input_returns_empty(self):
         assert fp._normalize_root("") == ""
         assert fp._normalize_root("   ") == ""
-
-
-class TestResolveSourceFileAllowlist:
-    def test_default_when_env_empty(self, monkeypatch):
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
-        # The enablement ROCm/HIP roots are always merged (default-on capability).
-        assert fp.resolve_source_file_allowlist() == (fp._DEFAULT_SOURCE_ROOTS + fp._ROCM_HIP_SOURCE_ROOTS)
-
-    def test_merges_discovered_roots(self, monkeypatch):
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ("/venv/site-packages/",))
-        monkeypatch.setattr(
-            fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
-        )
-        roots = fp.resolve_source_file_allowlist()
-        assert fp._DEFAULT_SOURCE_ROOTS[0] in roots
-        assert "/venv/site-packages/" in roots
-        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
-
-    def test_appends_extra_roots_unique_in_order(self, monkeypatch):
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-            "/opt/custom/sglang:/sgl-workspace/aiter:/opt/other/vllm",
-        )
-        out = fp.resolve_source_file_allowlist()
-        n = len(fp._DEFAULT_SOURCE_ROOTS)
-        assert out[:n] == fp._DEFAULT_SOURCE_ROOTS
-        assert "/opt/custom/sglang/" in out
-        assert "/opt/other/vllm/" in out
-        assert out.count("/sgl-workspace/aiter/") == 1
-
-    def test_discovers_active_site_packages_root(self, tmp_path, monkeypatch):
-        root = tmp_path / "lib" / "python3.12" / "site-packages"
-        root.mkdir(parents=True)
-        monkeypatch.setattr(fp.site, "getsitepackages", lambda: [str(root)])
-        monkeypatch.setattr(fp.site, "getusersitepackages", lambda: "")
-        monkeypatch.setattr(fp.sysconfig, "get_path", lambda _key: None)
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
-        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
-        assert f"{root}/" in fp.resolve_source_file_allowlist()
 
 
 class TestFindSpecOrigin:
@@ -143,30 +97,18 @@ class TestGlobInstallPackageRoots:
         assert any("dist-packages/aiter_meta/" in r for r in roots)
 
 
-class TestResolvePatchTargetRoots:
-    def test_includes_static_fallback_when_discovery_empty(self, monkeypatch):
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
-        roots = fp.resolve_patch_target_roots()
-        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
-        assert "/aiter_meta/csrc/" in roots
-
-    def test_includes_flydsl_roots(self):
-        assert "/opt/flydsl/" in fp.resolve_patch_target_roots()
+class TestResolveFlydslSourceRoots:
+    def test_includes_default_roots(self):
+        assert "/opt/flydsl/" in fp.resolve_flydsl_source_roots()
 
     @pytest.mark.parametrize("env_key", ["DSL2_ROOT", "FLYDSL_ROOT"])
     def test_honours_flydsl_root_env(self, monkeypatch, env_key):
         monkeypatch.setenv(env_key, "/checkouts/FlyDSL")
-        roots = fp.resolve_patch_target_roots()
+        roots = fp.resolve_flydsl_source_roots()
         # Both variants: the apply gate matches a lower-cased path verbatim,
         # while a path-resolving consumer needs the real case.
         assert "/checkouts/FlyDSL/" in roots
         assert "/checkouts/flydsl/" in roots
-
-    def test_source_file_allowlist_excludes_flydsl(self, monkeypatch):
-        monkeypatch.setenv("FLYDSL_ROOT", "/checkouts/flydsl")
-        allowlist = fp.resolve_source_file_allowlist()
-        assert not any("flydsl" in root.lower() for root in allowlist)
 
 
 class TestResolveKernelSearchRoots:
@@ -188,20 +130,6 @@ class TestResolveKernelSearchRoots:
         monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
         assert fp.resolve_kernel_search_roots() == (f"{present}/",)
 
-    def test_excludes_bare_site_packages_parents(self, monkeypatch, tmp_path):
-        """Only package dirs, never the whole site-packages tree.
-
-        The allowlist reports the parent so an editability check can contain any
-        installed file; grepping it would scan every wheel on the host.
-        """
-        parent = tmp_path / "dist-packages"
-        (parent / "vllm").mkdir(parents=True)
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: (f"{parent}/",))
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (f"{parent}/vllm/",))
-        roots = fp.resolve_kernel_search_roots()
-        assert f"{parent}/vllm/" in roots
-        assert f"{parent}/" not in roots
-
     def test_empty_when_nothing_is_installed(self, monkeypatch):
         """No searchable root is reported as such, not as a silent success."""
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
@@ -211,6 +139,27 @@ class TestResolveKernelSearchRoots:
         monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ("/gone/flydsl/",))
         assert fp.resolve_kernel_search_roots() == ()
 
+    def test_includes_roots_named_by_the_discovery_env(self, monkeypatch, tmp_path):
+        """install.sh writes the probed roots back for the next process."""
+        first = tmp_path / "custom-sglang"
+        second = tmp_path / "custom-vllm"
+        first.mkdir()
+        second.mkdir()
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv(
+            "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+            f"{first}:{second}",
+        )
+        roots = fp.resolve_kernel_search_roots()
+        assert f"{first}/" in roots
+        assert f"{second}/" in roots
+
+    def test_drops_a_non_absolute_discovery_env_root(self, monkeypatch):
+        """A relative root cannot name a tree, so it never becomes one."""
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "relative/path")
+        assert not any("relative/path" in root for root in fp.resolve_kernel_search_roots())
+
     def test_includes_explicit_framework_checkout(self, monkeypatch, tmp_path):
         """An editable checkout is invisible to importlib; the env var finds it."""
         checkout = tmp_path / "my-vllm"
@@ -218,6 +167,30 @@ class TestResolveKernelSearchRoots:
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
         assert f"{checkout}/" in fp.resolve_kernel_search_roots()
+
+
+class TestResolveKnownSourcePrefixes:
+    """Classification prefixes, not directories anyone opens.
+
+    A kernel path reaches the classifier from a trace or a patch manifest
+    produced on a serving pod, so a root absent from the host doing the
+    classifying still names real source on the host that emitted it.
+    """
+
+    def test_keeps_static_layouts_that_are_absent_here(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        prefixes = fp.resolve_known_source_prefixes()
+        assert "/app/ATOM/atom/" in prefixes
+        assert "/aiter_meta/csrc/" in prefixes
+
+    def test_includes_flydsl_roots(self):
+        assert "/opt/flydsl/" in fp.resolve_known_source_prefixes()
+
+    def test_is_not_existence_filtered_unlike_the_search_roots(self, monkeypatch):
+        """The two resolvers answer different questions and must not converge."""
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ("/gone/vllm/",))
+        assert "/gone/vllm/" in fp.resolve_known_source_prefixes()
+        assert "/gone/vllm/" not in fp.resolve_kernel_search_roots()
 
 
 class TestEveryKernelSourcePackageIsDiscoverable:
@@ -312,9 +285,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             ),
         )
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
-        # Isolate from the always-on enablement ROCm/HIP root (may exist on disk).
-        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{present}/"
 
@@ -362,9 +333,8 @@ class TestProbeFrameworkSourceRootsForEnv:
             (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
-        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
-        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{shared}/"
 
@@ -379,11 +349,6 @@ class TestDefaultSourceRootsIncludesXdit:
             f"_DEFAULT_SOURCE_ROOTS missing xDiT entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
         )
 
-    def test_xdit_root_visible_in_resolve_allowlist(self):
-        """The public resolver must also surface the xDiT root."""
-        out = fp.resolve_source_file_allowlist()
-        assert any("/app/xDiT" in r for r in out)
-
     def test_xfuser_in_framework_packages(self):
         """xfuser must be in _FRAMEWORK_PACKAGES for importlib discovery."""
         assert "xfuser" in fp._FRAMEWORK_PACKAGES
@@ -395,10 +360,6 @@ class TestDefaultSourceRootsIncludesXdit:
     def test_custom_in_framework_buckets(self):
         """custom must be in _FRAMEWORK_BUCKETS for root discovery summaries."""
         assert "custom" in fp._FRAMEWORK_BUCKETS
-
-    def test_xdit_in_static_patch_fallback_roots(self):
-        """/app/xDiT/ must be in the static patch fallback roots."""
-        assert any("/app/xDiT" in r for r in fp._STATIC_PATCH_FALLBACK_ROOTS)
 
 
 class TestScriptableRepoRootDiscovery:
@@ -414,7 +375,7 @@ class TestScriptableRepoRootDiscovery:
         (checkout / "hyvideo").mkdir(parents=True)
         monkeypatch.setenv("CUSTOM_REPO_PATH", str(checkout))
 
-        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
     def test_dir_alias_also_discovered(self, tmp_path, monkeypatch):
         checkout = tmp_path / "my-framework"
@@ -422,12 +383,12 @@ class TestScriptableRepoRootDiscovery:
         monkeypatch.delenv("CUSTOM_REPO_PATH", raising=False)
         monkeypatch.setenv("CUSTOM_DIR", str(checkout))
 
-        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
     def test_missing_checkout_is_ignored(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "absent"))
 
-        assert not any("absent" in r for r in fp.resolve_source_file_allowlist())
+        assert not any("absent" in r for r in fp.resolve_kernel_search_roots())
 
 
 class TestGenericFrameworkRepoPath:
@@ -445,7 +406,7 @@ class TestGenericFrameworkRepoPath:
         (checkout / "pkg").mkdir(parents=True)
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(checkout))
 
-        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
     def test_generic_env_works_for_a_non_scriptable_framework(self, tmp_path, monkeypatch):
         """An editable vllm tree is not discoverable by importlib or site-packages."""
@@ -455,7 +416,7 @@ class TestGenericFrameworkRepoPath:
         monkeypatch.setenv("FRAMEWORK", "vllm")
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(checkout))
 
-        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
     def test_prefixed_value_still_wins_so_nothing_existing_changes(self, tmp_path, monkeypatch):
         """Both are accepted, and the prefixed one keeps its precedence."""
@@ -466,14 +427,14 @@ class TestGenericFrameworkRepoPath:
         monkeypatch.setenv("CUSTOM_REPO_PATH", str(prefixed))
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(generic))
 
-        roots = fp.resolve_source_file_allowlist()
+        roots = fp.resolve_kernel_search_roots()
         assert f"{prefixed}/" in roots
         assert roots.index(f"{prefixed}/") < roots.index(f"{generic}/")
 
     def test_missing_generic_checkout_is_ignored(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tmp_path / "absent"))
 
-        assert not any("absent" in r for r in fp.resolve_source_file_allowlist())
+        assert not any("absent" in r for r in fp.resolve_kernel_search_roots())
 
     def test_summary_accepts_repo_dirname(self, tmp_path, monkeypatch):
         """The checkout dir is xDiT, not xdit — summary must still say ok."""
@@ -527,11 +488,6 @@ class TestDefaultSourceRootsIncludesAtom:
         assert any("/app/ATOM/atom" in r for r in fp._DEFAULT_SOURCE_ROOTS), (
             f"_DEFAULT_SOURCE_ROOTS missing atom entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
         )
-
-    def test_atom_root_visible_in_resolve_allowlist(self):
-        """The public resolver must also surface the atom root."""
-        out = fp.resolve_source_file_allowlist()
-        assert any("/app/ATOM/atom" in r for r in out)
 
 
 class TestProbeIncludesAtomWhenInstalled:
@@ -689,50 +645,7 @@ class TestAtomPathPresentInAllThreeLocations:
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
 
 
-# ROCm/HIP enablement source roots (default-on)
-
-
-class TestRocmHipSourceRoots:
-    """The ROCm/HIP source-edit capability is always on (enablement path)."""
-
-    def test_always_returns_rocm_root(self):
-        """No opt-in gate: the ROCm/HIP roots are always surfaced."""
-        assert fp.resolve_rocm_hip_source_roots() == ("/opt/rocm/",)
-
-    def test_merged_into_allowlist_by_default(self, monkeypatch):
-        """/opt/rocm/ is always present in the resolved allowlist."""
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        assert "/opt/rocm/" in fp.resolve_source_file_allowlist()
-
-    def test_aiter_allowed(self):
-        """aiter stays in the default allowlist too."""
-        assert any("/aiter/" in r for r in fp._DEFAULT_SOURCE_ROOTS)
-
-    def test_rocm_write_filter_allows_source_not_runtime(self):
-        assert fp.is_rocm_hip_writable_path("/opt/rocm/include/hip/hip_runtime.h") is True
-        assert fp.is_rocm_hip_writable_path("/opt/rocm/lib/libhip_hcc.so") is False
-        assert fp.is_rocm_hip_writable_path("/sgl-workspace/vllm/foo.py") is True
-
-    def test_rocm_write_filter_checks_resolved_symlink_suffix(self, tmp_path):
-        """A source-looking symlink to a runtime object remains read-only."""
-        link = tmp_path / "patch_me.py"
-        link.symlink_to("/opt/rocm/lib/libamdhip64.so")
-
-        assert fp.is_rocm_hip_writable_path(str(link)) is False
-
-
 # Source-root resolution + prompt injection
-def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        "/custom/vllm/:/extra/pkg/",
-    )
-    roots = resolve_source_file_allowlist()
-    assert "/sgl-workspace/vllm/" in roots
-    assert "/custom/vllm/" in roots
-    assert "/extra/pkg/" in roots
-
-
 def test_prompt_renders_framework_source_roots(registry=None):
     registry = registry or ACTION_CATALOGUE
     custom = ("/custom/sglang/", "/opt/venv/lib/python3.12/site-packages/vllm/")
@@ -804,7 +717,7 @@ def test_detect_strategy_accepts_dist_packages_vllm_py(
         "known_target_roots",
         lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",),
     )
-    strat = apply_tool._detect_strategy(target, allow_unknown_target=False)
+    strat = apply_tool._detect_strategy(target)
     assert strat["compiled"] is False
 
 

@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ask an agent to author a tuner from a mandate.
-
-``kernelforge.llm`` is imported inside the call, never at module scope. The standalone
-wheel is meant to be the only thing a GPU box has to install to tune, and a test
-asserts it imports with no ``kernelforge`` present; pulling an agent provider
-in at import time would quietly make the LLM stack a tuning dependency. Absent,
-this returns "unavailable" and the caller carries on without a generated tuner,
-which is the same outcome as the gate being closed.
-
-The agent writes one file and is told what it will be judged on. It is not shown
-the existing tuners: the point of this tier is a capability nothing else has, and
-a script derived from one that does is either the wrong shape or evidence the
-gate should not have opened.
-"""
+"""Ask an agent to author a tuner from a mandate."""
 
 from __future__ import annotations
 
@@ -90,15 +77,7 @@ def generate_tuner(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     retry_note: str = "",
 ) -> GeneratedTuner:
-    """Author a tuner script into ``work_dir``; never raises.
-
-    Args:
-        mandate: What the script has to cover and produce.
-        work_dir: Sandbox directory; the agent may only write here.
-        model: Provider model override, or "" for the configured default.
-        timeout_s: Wall clock for the authoring session.
-        retry_note: Why the previous attempt was rejected, when retrying.
-    """
+    """Author a tuner script into ``work_dir``; never raises."""
     work_dir.mkdir(parents=True, exist_ok=True)
     script_path = work_dir / "tuner.py"
 
@@ -109,6 +88,7 @@ def generate_tuner(
             resolve_agent_runtime,
             select_default_agent_provider,
         )
+        from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
     except ImportError as exc:
         return GeneratedTuner(
             False,
@@ -118,12 +98,17 @@ def generate_tuner(
         )
 
     try:
-        # ``resolve_agent_runtime`` needs a provider name; picking one is a
-        # separate step that also checks the CLI is actually installed. Passing
-        # the model lets a Codex model route to Codex rather than to whichever
-        # backend happens to be registered first.
+        # ``resolve_agent_runtime`` needs a provider name; picking one is a separate step that also checks the CLI is
+        # actually installed.
         chosen = select_default_agent_provider(model)
-        runtime = resolve_agent_runtime(chosen.name, model=model, timeout_sec=timeout_s)
+        runtime = resolve_agent_runtime(
+            chosen.name,
+            # The model variable is per-provider, so it is only readable once
+            # the provider is settled.
+            model=model or resolve_agent_model(chosen.name),
+            timeout_sec=timeout_s,
+            reasoning_effort=resolve_agent_reasoning_effort(),
+        )
         backend = create_registered_backend(runtime)
     except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")

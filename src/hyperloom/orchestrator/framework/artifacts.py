@@ -1,51 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK candidate-level artifacts + outcome classification.
-
-Deterministic, LLM-free observability helpers for the FRAMEWORK_AGENT phase:
-
-- :func:`candidate_key` is the canonical candidate identity (precedence
-  ``candidate_id or pr_url or ref``) used for candidate selection, dedup,
-  progress-row keying, and task idempotency across the whole pump.
-- :func:`summarize_candidate_outcomes` classifies a batch's progress rows
-  into ``empty_discovery`` / ``tested_no_keep`` / ``tested_with_keep`` so the
-  phase-done summary, report, and robustness advisory can tell "discovered
-  nothing" apart from "tested candidates but none cleared the gate".
-
-All helpers here are pure.
-"""
+"""FRAMEWORK candidate-level artifacts + outcome classification."""
 
 from __future__ import annotations
 
 from typing import Any
 
 
-# Per-candidate terminal statuses that mean the candidate reached the apply/bench
-# stage (as opposed to being filtered before any source change).
+# Per-candidate terminal statuses that mean the candidate reached the apply/bench stage (as opposed to being filtered
+# before any source change).
 _TESTED_STATUSES: frozenset[str] = frozenset({"kept", "reverted", "applied_no_bench", "apply_failed", "bench_reverted"})
 
 
 def candidate_key(row: dict[str, Any] | None) -> str:
-    """Canonical dedup/progress key for a FRAMEWORK candidate or progress row.
-
-    The single source of truth for "which candidate is this" across the whole
-    FRAMEWORK_AGENT pump: candidate selection, dedup, progress-row keying, task
-    idempotency, and the known-id set all derive from this so a candidate that
-    carries only a ``pr_url`` (no ``candidate_id``) can never dedup against a
-    progress row keyed on its ``candidate_id`` (and vice-versa).
-
-    Precedence is ``candidate_id or pr_url or ref``. Progress rows persist this
-    value in their ``candidate_id`` field, so passing a progress row back
-    through here is idempotent.
-
-    Args:
-        row: A candidate dict or ``framework_agent_phase_progress`` row (or
-            ``None``).
-
-    Returns:
-        The candidate key, or ``""`` when none of the identity fields are set.
-    """
+    """Canonical dedup/progress key for a FRAMEWORK candidate or progress row."""
     if not isinstance(row, dict):
         return ""
     return str(row.get("candidate_id") or row.get("pr_url") or row.get("ref") or "")
@@ -56,19 +25,7 @@ def summarize_candidate_outcomes(
     *,
     batch_id: str | None = None,
 ) -> dict[str, Any]:
-    """Classify FRAMEWORK progress rows into a phase-outcome summary.
-
-    Args:
-        progress: ``framework_agent_phase_progress`` rows (each a dict carrying
-            ``status`` / ``kept`` / ``batch_id``).
-        batch_id: When set, only rows for this batch are counted; otherwise all
-            rows are counted.
-
-    Returns:
-        ``{"total", "keeps", "tested", "by_status", "outcome_class"}`` where
-        ``outcome_class`` is one of ``empty_discovery`` (no rows),
-        ``tested_with_keep`` (>=1 KEEP), or ``tested_no_keep``.
-    """
+    """Classify FRAMEWORK progress rows into a phase-outcome summary."""
     rows = [r for r in (progress or []) if isinstance(r, dict)]
     if batch_id is not None:
         rows = [r for r in rows if str(r.get("batch_id") or "") == str(batch_id)]

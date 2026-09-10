@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from hyperloom.common.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+    normalize_reasoning_effort,
+)
 from kernelforge.knowledge.experience_store import KnowledgeConfig
 from kernelforge.resources import default_project_root, resource_path
 
@@ -33,6 +38,69 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def resolve_agent_model(agent_backend: str) -> str:
+    """Resolve the model id from the environment ladder Hyperloom publishes.
+
+    Forge no longer ships alongside Hyperloom, it ships *inside* it, and an
+    operator configuring a box should not have to learn a second vocabulary for
+    the same decision. There is exactly one rung, and it is the platform's:
+    ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
+    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. The two
+    are written out separately rather than sharing one helper because they
+    answer different questions -- that one picks the model for Hyperloom's own
+    calls into a Forge campaign, this one picks the model an agent session
+    runs -- and the shared piece worth deduplicating is the variable names,
+    which is exactly what this change makes identical.
+
+    Forge used to consult private variables above that pair -- first
+    ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``, then a provider-neutral
+    ``FORGE_AGENT_MODEL`` -- from when it was a separate project that had to
+    name its own settings. Inside Hyperloom every one of those is a second
+    spelling of a setting the platform already names, and a second spelling is
+    only ever a second place for a box to be misconfigured. The Hyperloom-side
+    resolver never had them, so deleting them is what makes the two ladders the
+    same ladder rather than two that agree by coincidence.
+
+    Only a settled backend has an answer here. ``auto`` gets ``""``: which
+    provider runs is not known until :meth:`Config.agent_runtime` has checked
+    which CLI is actually installed, and answering early with ``CLAUDE_MODEL``
+    would hand a Claude model id to Codex on a box where the Claude CLI is
+    missing -- a 400 from the gateway, not a fallback.
+    """
+    backend = (agent_backend or "").strip().lower()
+    if backend == "codex":
+        return os.getenv("CODEX_MODEL", "").strip()
+    if backend == "claude":
+        return os.getenv("CLAUDE_MODEL", "").strip()
+    return ""
+
+
+def resolve_agent_reasoning_effort() -> str:
+    """Resolve the reasoning effort, honouring Hyperloom's project-wide value.
+
+    ``HYPERLOOM_REASONING_EFFORT`` already sets the effort for Hyperloom's own
+    LLM calls; a box that sets it means it for the whole run, and a Forge
+    campaign that ignored it would be the one component quietly running at a
+    different depth than the operator asked for.
+    ``FORGE_AGENT_REASONING_EFFORT`` stays above it for the run that wants Forge
+    specifically turned up or down. Both name a level in
+    :data:`REASONING_EFFORT_LEVELS`; a value outside it is refused here, by
+    name, rather than carried into the campaign to fail at the provider once
+    the run is already hours deep.
+    """
+    for name in ("FORGE_AGENT_REASONING_EFFORT", "HYPERLOOM_REASONING_EFFORT"):
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            continue
+        effort = normalize_reasoning_effort(raw)
+        if not effort:
+            raise ValueError(
+                f"{name}={raw!r} is not a reasoning effort; expected one of {', '.join(REASONING_EFFORT_LEVELS)}"
+            )
+        return effort
+    return DEFAULT_REASONING_EFFORT
 
 
 def _env_json_object(name: str) -> dict:
@@ -67,7 +135,7 @@ class Config:
     agent_model: str = ""
     agent_cli: str = ""
     agent_timeout_sec: int = 1800
-    agent_reasoning_effort: str = "high"
+    agent_reasoning_effort: str = DEFAULT_REASONING_EFFORT
     agent_sandbox_mode: str = "bypass"
     agent_precheck: bool = True
     agent_fallback_provider: str = "claude"
@@ -85,8 +153,7 @@ class Config:
     experiments_dir: Path = field(default=None)
     # There is no `knowledge_dir` here any more. It used to resolve the packaged
     # `data/knowledge_base` tree, which no caller ever read; the tree is gone and
-    # the field went with it. Knowledge the loop *produces* goes to
-    # `resources.writable_knowledge_root()`, which is a different directory.
+    # the field went with it.
     # Curated per-backend knowledge tree injected into the forge-loop system
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)
@@ -128,7 +195,11 @@ class Config:
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
         if self.agent_backend != "auto":
             get_agent_provider(self.agent_backend)
-        self.agent_reasoning_effort = (self.agent_reasoning_effort or "high").strip()
+        self.agent_reasoning_effort = normalize_reasoning_effort(
+            self.agent_reasoning_effort or DEFAULT_REASONING_EFFORT
+        )
+        if not self.agent_reasoning_effort:
+            raise ValueError(f"agent_reasoning_effort must be one of {', '.join(REASONING_EFFORT_LEVELS)}")
         self.agent_sandbox_mode = (self.agent_sandbox_mode or "bypass").strip().lower()
         self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()
         if self.agent_fallback_provider:
@@ -178,9 +249,13 @@ class Config:
         provider = self.agent_backend
         if provider == "auto":
             provider = select_default_agent_provider(self.agent_model).name
+        # The model variable is per-provider, so it can only be read once the
+        # provider is settled -- reading it before ``auto`` resolves is how a
+        # Claude model id reaches Codex.
+        model = self.agent_model or resolve_agent_model(provider)
         return resolve_agent_runtime(
             provider,
-            model=self.agent_model,
+            model=model,
             executable=self.agent_cli,
             timeout_sec=self.agent_timeout_sec,
             reasoning_effort=self.agent_reasoning_effort,
@@ -203,19 +278,14 @@ class Config:
                 gbrain_base_url=overrides.get("gbrain_url"),
                 gbrain_token=overrides.get("gbrain_token"),
             )
+        agent_backend = overrides.get("agent_backend", os.getenv("FORGE_AGENT_BACKEND", "auto"))
         return cls(
             gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
             gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
-            agent_backend=overrides.get(
-                "agent_backend",
-                os.getenv("FORGE_AGENT_BACKEND", "auto"),
-            ),
-            agent_model=overrides.get(
-                "agent_model",
-                os.getenv("FORGE_AGENT_MODEL", "").strip() or os.getenv("KERNEL_AGENTS_MODEL", "").strip(),
-            ),
+            agent_backend=agent_backend,
+            agent_model=overrides.get("agent_model", resolve_agent_model(agent_backend)),
             agent_cli=overrides.get("agent_cli", os.getenv("FORGE_AGENT_CLI", "")),
             agent_timeout_sec=int(
                 overrides.get(
@@ -223,10 +293,7 @@ class Config:
                     os.getenv("FORGE_AGENT_TIMEOUT_SEC", "1800"),
                 )
             ),
-            agent_reasoning_effort=overrides.get(
-                "agent_reasoning_effort",
-                os.getenv("FORGE_AGENT_REASONING_EFFORT", "high"),
-            ),
+            agent_reasoning_effort=overrides.get("agent_reasoning_effort", resolve_agent_reasoning_effort()),
             agent_sandbox_mode=overrides.get(
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),

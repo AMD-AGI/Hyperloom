@@ -1,32 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 2 (LLM-autonomous discovery): find fusible op chains from trace + source.
-
-Unlike :func:`locate.build_recipes` (pattern-library — capped to known templates),
-this asks the LLM to READ the launch-bound decode profile (the trace's hot kernels)
-plus the model source and PROPOSE fusible op chains itself. It therefore surfaces
-fusions no template encodes — e.g. ZAYA's eager CCA QK chain, whose kernels are
-generic ``elementwise``/``cast``/``mul`` and are thus invisible to category-based
-patterns (``rmsnorm``+``rope`` share was only ~0.02, below the pattern threshold).
-
-Discovery is no longer trace-only. The primary evidence is still the MEASURED
-trace and the REAL source, but a bounded retrieval step over ``local_knowledge``
-may additionally surface names of existing ROCm operators. Its limits matter:
-
-* Ranking uses whole-word overlap between observed kernel/category names and the
-  document text -- never substring or prefix matching, which would let ``add``
-  match ``padding`` and recommend an unrelated operator.
-* Retrieval only proposes names. It confirms nothing about shape, dtype, cache
-  layout, or numerics; every hint carries a ``score`` and the author must verify
-  the operator and record parity before keeping it.
-* A retrieved name is not an answer key. The operator still has to correspond to
-  a chain that this trace shows running back-to-back and that this source
-  actually contains.
-
-The Agent call sits behind an injectable ``llm_fn`` (text prompt -> text), so the
-prompt assembly and JSON parsing are unit-testable without a live provider.
-"""
+"""Stage 2 (LLM-autonomous discovery): find fusible op chains from trace + source."""
 
 from __future__ import annotations
 
@@ -73,22 +48,11 @@ log = logging.getLogger("forge_fusion")
 
 LlmFn = Callable[[str], str]  # prompt -> raw model text (expected to contain JSON)
 
-# Each proposed fusion costs discovery tokens plus one authoring subprocess and
-# validation pass, and that cost is paid before the E2E gate can reject it. Keep
-# the default modest; raise it deliberately via ``FORGE_MAX_FUSIONS``.
+# Each proposed fusion costs discovery tokens plus one authoring subprocess and validation pass, and that cost is paid
+# before the E2E gate can reject it.
 _DEFAULT_MAX_FUSIONS = 4
 
-# Discovery is handed read and search tools, and the first tool call ends the
-# turn. A budget of one therefore guarantees a turn_cap on any session that uses
-# the tools it was given, which is what discovery is for. Retries do not help:
-# each one opens another single-turn session. Read-only exploration is cheap
-# enough to allow a handful of turns; raise it via ``FORGE_FUSION_DISCOVERY_TURNS``.
-#
-# A handful turned out not to be enough on a large model: on DeepSeek-V4-Flash a
-# budget of 12 hit the cap on both attempts it was given, while 60 completed and
-# proposed four fusions on each of three runs. The cap is a ceiling and not a
-# budget -- a session that finishes in eight turns costs eight turns whatever the
-# ceiling is -- so it is set where exploring a large model tree fits under it.
+# Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
 
 
@@ -105,18 +69,7 @@ def _resolve_max_fusions(value: Optional[int] = None) -> int:
 def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
-    """Top GPU kernels from a kineto trace by total-duration share.
-
-    Args:
-        trace_path: Path to the ``*.trace.json[.gz]``.
-        top_n: How many kernels to return.
-        launch_bound_only: When True, drop compute-bound categories
-            (gemm/attention/conv/moe) so the list is the fusible launch-bound tail.
-
-    Returns:
-        ``[{"name", "category", "share", "count", "avg_us"}, ...]`` (share of total
-        GPU-kernel time), ordered by descending share.
-    """
+    """Top GPU kernels from a kineto trace by total-duration share."""
     p = Path(trace_path)
     try:
         opener = gzip.open if (p.suffix == ".gz" or p.name.endswith(".json.gz")) else open
@@ -181,13 +134,7 @@ def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
 
 
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
-    """Distinct kernel names ranked by total duration, compute kernels included.
-
-    :func:`hot_kernels_from_trace` deliberately drops GEMM and attention because
-    they are not fusion targets themselves. Operator retrieval still needs them:
-    an epilogue operator is identified by the GEMM it attaches to, so excluding
-    compute names would make a gated-GEMM card unreachable.
-    """
+    """Distinct kernel names ranked by total duration, compute kernels included."""
     totals: dict[str, float] = defaultdict(float)
     for event in _load_trace_events(trace_path):
         if event.get("cat") != "kernel":
@@ -212,13 +159,7 @@ def ordered_fusion_boundaries_from_trace(
     max_chain_len: int = 8,
     min_repeats: int = 2,
 ) -> list[dict[str, Any]]:
-    """Recover repeated compute-to-compute fusion boundaries from stream order.
-
-    Unlike the launch-bound hot table, this deliberately retains GEMM and
-    attention endpoints. That exposes epilogue/prologue opportunities such as a
-    GEMM followed by one activation, while also preserving longer post-processing
-    runs that end in a cache write before attention.
-    """
+    """Recover repeated compute-to-compute fusion boundaries from stream order."""
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
     for event in _load_trace_events(trace_path):
@@ -270,11 +211,7 @@ def ordered_fusion_boundaries_from_trace(
             boundary_kind = "compute_boundary"
         else:
             boundary_kind = "vertical"
-        # The trailing kernel is the NEXT compute anchor. It is kept as adjacency
-        # evidence but is not part of what can be fused: a native prologue
-        # operator fuses norm/RoPE/cache-write, never the attention kernel it
-        # feeds. The leading anchor is likewise the producer, except that an
-        # ``epilogue`` boundary may absorb it (see boundary_kind).
+        # The trailing kernel is the NEXT compute anchor.
         terminal_compute = categories[-1] if categories[-1] in compute_categories else ""
         fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
         row = aggregated.setdefault(
@@ -311,9 +248,8 @@ def ordered_fusion_boundaries_from_trace(
         if int(row["count"]) < min_repeats:
             continue
         row["avg_chain_us"] = row["total_us"] / row["count"]
-        # Ranking heuristic only, NOT a true fraction of GPU time: a kernel that
-        # sits between two compute anchors belongs to two overlapping segments,
-        # so its duration is counted once per segment and shares can sum above 1.
+        # Ranking heuristic only, NOT a true fraction of GPU time: a kernel that sits between two compute anchors
+        # belongs to two overlapping segments, so its duration is counted once per segment and shares can sum above 1.
         row["share_heuristic"] = row["total_us"] / total_kernel_us if total_kernel_us > 0 else 0.0
         rows.append(row)
     rows.sort(
@@ -360,14 +296,7 @@ def _default_knowledge_root() -> Path:
 
 
 def _tokens(text: str) -> set[str]:
-    """Whole-word tokens of ``text``.
-
-    Retrieval matches on these sets rather than on substrings: ``add`` is a
-    substring of ``padding`` and ``norm`` is a prefix of ``normalization``, and
-    neither implies the document describes the observed operation. A false recall
-    is more harmful than a miss, because the author is then instructed to
-    integrate an unrelated operator.
-    """
+    """Whole-word tokens of ``text``."""
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
@@ -384,8 +313,8 @@ _OPERATOR_MARKERS = (
 _OPERATOR_PATTERN = re.compile(r"`([A-Za-z_][A-Za-z0-9_.:]*)`")
 _DECLARED_OPERATOR_PATTERN = re.compile(r"^operator:\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*$", re.MULTILINE)
 
-# Parsed knowledge documents, keyed by (path, mtime_ns, size) so an unchanged
-# knowledge base is not re-read and re-parsed on every discovery run.
+# Parsed knowledge documents, keyed by (path, mtime_ns, size) so an unchanged knowledge base is not re-read and
+# re-parsed on every discovery run.
 _KNOWLEDGE_CACHE: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
 
 
@@ -455,19 +384,7 @@ def existing_operator_hints_from_knowledge(
     fallback_kernel_names: Optional[list[str]] = None,
     min_score_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Retrieve existing ROCm operator names using observed runtime semantics.
-
-    This is evidence retrieval, not model-name matching: documents rank by
-    whole-word overlap with the observed operation categories and kernel names,
-    and every hint carries its ``score`` so the author can tell a strong match
-    from a marginal one.
-
-    ``fallback_categories`` / ``fallback_kernel_names`` (typically the diagnosis
-    categories and hot-kernel names) are always folded in as an extra evidence
-    source. Ordered boundaries require ``min_repeats`` occurrences to exist at
-    all, so a short trace can leave them empty while the hot-kernel table still
-    proves a launch-bound chain; without this, retrieval would silently go dark.
-    """
+    """Retrieve existing ROCm operator names using observed runtime semantics."""
     root = Path(knowledge_root) if knowledge_root else _default_knowledge_root()
     if not root.is_dir():
         return []
@@ -524,34 +441,13 @@ def existing_operator_hints_from_knowledge(
     )
     if not ranked:
         return []
-    # Pre-trim marginal matches relative to the best one, so a long tail of weak
-    # hints cannot pad the prompt and inflate downstream authoring attempts.
+    # Pre-trim marginal matches relative to the best one, so a long tail of weak hints cannot pad the prompt and
+    # inflate downstream authoring attempts.
     cutoff = ranked[0][0] * min_score_ratio
     return [row for score, row in ranked[:limit] if score >= cutoff]
 
 
-# Terms a proposal may declare in ``ops``. Two consumers read the result, which
-# is why one list covers both: the op-category vocabulary that forms the KB
-# identity, plus the finer terms the compile-pass table keys on (``mla``,
-# ``quant``, ``qk_norm`` ...) which no category can express.
-#
-# Declaring beats inferring because both consumers used to keyword-match the
-# model's prose, and prose varies per run. Measured against one unchanged trace,
-# a proposal that merely mentioned writing to the KV cache picked up a ``copy``
-# category it did not fuse, and a reworded proposal stopped matching the
-# compile-pass keywords -- which changed which candidate ranked first and thus
-# which key the run looked up.
-# What a fused kernel COMPUTES. This is the fusion's identity, so every term has
-# to answer one question -- "does the kernel carry out this operation?" -- and
-# has to be recognised by ``categories_in_text``, since that is what turns the
-# declaration into the category set the KB keys on.
-#
-# ``cast`` and ``moe`` are absent because they fail that second requirement: the
-# category rules match kernel-name spellings (``_cast``, ``fused_moe``), so a
-# bare declaration of either produces no category and would be silently inert.
-# Named activations (silu/gelu/swiglu) are absent too -- ``activation`` covers
-# them for the compile-pass table, and naming one in a prompt hands the model a
-# specific fusion it was not asked to look for.
+# Terms a proposal may declare in ``ops``.
 FUSION_OP_VOCAB: frozenset[str] = frozenset(
     {
         "activation",
@@ -568,17 +464,7 @@ FUSION_OP_VOCAB: frozenset[str] = frozenset(
     }
 )
 
-# HOW the kernel is built, not what it computes: precision, architecture variant,
-# and where in the model it sits. Separated from the ops on purpose.
-#
-# Two reasons. These terms cannot be judged by the ops question -- a kernel does
-# not "perform fp8" or "perform mla" -- so mixing them into one list left the
-# model applying a rule that fit only half the entries. And they should not move
-# the key: a run that reads the same fusion as fp8 rather than quantized, or is
-# unsure whether the chain counts as attention, must still look up where the
-# previous run stored it. Measured over 20 runs, ``attention`` was the one term
-# that flipped, and it contributes nothing to identity -- nearly every decode
-# fusion sits next to attention or the MLP.
+# HOW the kernel is built, not what it computes: precision, architecture variant, and where in the model it sits.
 FUSION_TRAIT_VOCAB: frozenset[str] = frozenset(
     {
         "attention",
@@ -599,12 +485,7 @@ _TRAIT_VOCAB_FOR_PROMPT = ", ".join(sorted(FUSION_TRAIT_VOCAB))
 
 
 def _declared_terms(item: Any, field: str, vocab: frozenset[str]) -> list[str]:
-    """A proposal's declaration for ``field``, normalized; ``[]`` when unusable.
-
-    Unknown entries are dropped rather than trusted: an invented term would
-    otherwise invent an identity segment, and two runs inventing different ones
-    would split a single fusion across two keys.
-    """
+    """A proposal's declaration for ``field``, normalized; ``[]`` when unusable."""
     raw = item.get(field) if isinstance(item, dict) else None
     if isinstance(raw, str):
         raw = [raw]
@@ -635,12 +516,7 @@ def build_discovery_prompt(
     ordered_boundaries: Optional[list[dict[str, Any]]] = None,
     existing_operator_hints: Optional[list[dict[str, str]]] = None,
 ) -> str:
-    """Assemble the discovery prompt from runtime, source, and operator evidence.
-
-    No model-specific answer is encoded. Existing operator names are included only
-    when semantic retrieval ties their documented operation chain to an observed
-    repeated runtime boundary.
-    """
+    """Assemble the discovery prompt from runtime, source, and operator evidence."""
     lb = ", ".join(sorted(LAUNCH_BOUND_CATEGORIES))
     hot_lines = "\n".join(
         f"  - {k['category']:11s} {k['share'] * 100:5.1f}%  (n={k['count']}, avg={k['avg_us']:.1f}us)  {k['name'][:90]}"
@@ -661,9 +537,8 @@ def build_discovery_prompt(
             f"kind={boundary['boundary_kind']}, "
             f"removable-launches<={boundary['launches_removed_upper_bound']})"
         )
-        # The trailing compute kernel proves adjacency but is not fusable, so the
-        # fusable span is spelled out to keep the proposed chain from swallowing
-        # the attention (or other compute) kernel it feeds.
+        # The trailing compute kernel proves adjacency but is not fusable, so the fusable span is spelled out to keep
+        # the proposed chain from swallowing the attention (or other compute) kernel it feeds.
         fusable = boundary.get("fusable_categories")
         terminal = str(boundary.get("terminal_compute") or "")
         if fusable:
@@ -779,11 +654,7 @@ Constraints for each proposed fusion:
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated)
-    text, ignoring braces inside strings. Used when the enclosing JSON array is
-    unclosed because the model response was cut off at ``max_tokens`` — the
-    complete objects before the cut are still usable proposals.
-    """
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1
@@ -816,12 +687,7 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
-    """Pull JSON fusion proposals out of model text.
-
-    Tries, in order: a fenced ```json [...]``` block, then any balanced top-level
-    ``[...]`` span, then (fallback for a response truncated at ``max_tokens``) the
-    set of complete ``{...}`` objects.
-    """
+    """Pull JSON fusion proposals out of model text."""
     if not text:
         return []
     fences = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
@@ -845,9 +711,8 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
             continue
         if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
             return parsed
-    # Fallback: salvage complete objects from a truncated/unclosed array, then
-    # the object the cut left half-written -- with three quarters of responses
-    # arriving truncated, that last object is often the only one there is.
+    # Fallback: salvage complete objects from a truncated/unclosed array, then the object the cut left half-written --
+    # with three quarters of responses arriving truncated, that last object is often the only one there is.
     salvaged = _salvage_objects(text)
     repaired = _repair_truncated_object(text)
     if repaired is not None and repaired not in salvaged:
@@ -862,19 +727,11 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 
 
 # A repaired object has to carry enough of the fusion description to act on.
-# A name and an env flag alone would only send the author stage looking for
-# something the model never got round to describing.
 _REPAIRED_REQUIRED_ANY = ("op_chain", "fusion_math")
 
 
 def _repair_truncated_object(text: str) -> dict[str, Any] | None:
-    """Recover the proposal that a cut-off response left half-written.
-
-    Rewinds the trailing unclosed object to its last complete ``"key": value``
-    boundary and closes it there. Returns ``None`` unless the result still
-    describes a fusion, so a response cut inside the very first field is
-    dropped rather than turned into an empty proposal.
-    """
+    """Recover the proposal that a cut-off response left half-written."""
     depth = 0
     start = -1
     in_str = False
@@ -943,25 +800,10 @@ def parse_discovered_recipes(
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
 ) -> list[Recipe]:
-    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
-
-    ``category_shares`` are the op-category shares the trace actually measured.
-    They are used to drop a proposal whose ops were never observed at all, which
-    is the signature of an LLM inventing a fusion the workload does not perform.
-    They deliberately do NOT filter the categories that identify the fusion: a
-    fusion is the same fusion whatever a given trace happened to sample, and
-    letting run-time sampling into the identity would split one fusion across
-    several pages. This mirrors the pattern route, where the trace decides
-    whether a pattern TRIGGERS while its identity stays the fixed pattern id.
-
-    A proposal vLLM implements as a compile pass is dropped only when that pass is
-    ENABLED; when it exists, is off and is flippable it becomes a ``compile_pass``
-    recipe, and when it is absent / undecidable / pinned off by the optimization
-    level the proposal stays authoring work with ``compile_pass_note`` recording why.
-    """
+    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects."""
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    # The same file the prompt embedded, re-read so the scope gate below judges a
-    # proposal against exactly the source the model was shown.
+    # The same file the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
+    # the model was shown.
     source_text = _read_source(source_file)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
@@ -975,44 +817,21 @@ def parse_discovered_recipes(
             anchors = [anchors]
         op_chain = str(item.get("op_chain") or "")
         fusion_math = str(item.get("fusion_math") or op_chain or "")
-        # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose
-        # rationale or grep anchors, which can mention an op in passing and would
-        # attach a category the fusion does not actually involve.
+        # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose rationale or grep anchors, which
+        # can mention an op in passing and would attach a category the fusion does not actually involve.
         defining_text = " ".join([name, op_chain, fusion_math])
-        # What this fusion IS, as opposed to how this run described it. Both the
-        # category set below and the compile-pass gate further down read this one
-        # string, so it decides the key -- which is why a declaration from a fixed
-        # vocabulary is preferred over the prose. The prose remains the fallback
-        # for a model that ignores the field, at the cost of that run's identity
-        # depending on its wording.
+        # What this fusion IS, as opposed to how this run described it.
         declared = declared_ops(item)
         traits = declared_traits(item)
         identity_text = " ".join(declared) if declared else defining_text
-        # The gate keys on precision and variant words (quant, fp8, mla, kvcache)
-        # that no op category expresses, so it needs more than ``declared``.
-        # Where that comes from depends on whether the model supplied ``traits``:
-        #
-        # * It did -- use the declarations alone. They say precisely which
-        #   variant this is, and adding prose can only introduce words the model
-        #   did not mean. A wording that happens to mention the KV cache matched
-        #   ``fuse_rope_kvcache`` while its terser twin matched ``qk_norm_rope``,
-        #   and since a claimed pass rewrites the pattern id, that split the key.
-        # * It did not -- fall back to the prose. ``traits`` is the optional
-        #   field, so this is the common case, and without the fallback the gate
-        #   loses every keyword it matches on: the run then hand-writes a kernel
-        #   vLLM already ships, under a different key than a run that declared.
-        #
-        # Either way ``identity_text`` above is untouched, so the key's category
-        # segment still comes from the declaration alone.
+        # The gate keys on precision and variant words (quant, fp8, mla, kvcache) that no op category expresses, so it
+        # needs more than ``declared``.
         gate_text = " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
-        # Recover the op categories: from the declaration when there is one, else
-        # from the prose via the fixed, model-agnostic vocabulary. The KB keys on
-        # this, and ``op_chain`` is not kept on the Recipe, so it has to happen
-        # here while the field is still in scope.
+        # Recover the op categories: from the declaration when there is one, else from the prose via the fixed,
+        # model-agnostic vocabulary.
         matched_categories = categories_in_text(identity_text)
-        # Hallucination gate FIRST: a proposal whose ops the trace never measured
-        # has nothing to remove, and that is true whether we would author it or
-        # claim a framework pass for it.
+        # Hallucination gate FIRST: a proposal whose ops the trace never measured has nothing to remove, and that is
+        # true whether we would author it or claim a framework pass for it.
         if category_shares and matched_categories:
             if not any(float(category_shares.get(c, 0.0)) > 0.0 for c in matched_categories):
                 log.info(
@@ -1021,11 +840,8 @@ def parse_discovered_recipes(
                     ",".join(matched_categories),
                 )
                 continue
-        # SCOPE gate: a fusion is wired by replacing ONE call site in the file the
-        # model was shown, so a proposal claiming ops that file never performs is
-        # unwireable no matter how good the kernel is. Dropping it here costs one
-        # JSON object; keeping it costs a full authoring campaign that ends in an
-        # orphan module (see ``locate.out_of_scope_terms``).
+        # SCOPE gate: a fusion is wired by replacing ONE call site in the file the model was shown, so a proposal
+        # claiming ops that file never performs is unwireable no matter how good the kernel is.
         outside = out_of_scope_terms(source_text, [*declared, *traits])
         if outside:
             log.info(
@@ -1037,10 +853,6 @@ def parse_discovered_recipes(
             )
             continue
         # Compile-pass gate: never author a chain vLLM fuses at compile time.
-        # Matched keyword-only, because the gate's own vocabulary differs from the
-        # op-category vocabulary derived above. Reads ``identity_text`` for the
-        # same reason that does: claiming a pass rewrites the pattern id, so a
-        # match that flips on a rewording would move the key with it.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],
             text=gate_text,
@@ -1082,8 +894,8 @@ def parse_discovered_recipes(
                     )
                 )
                 continue
-            # Absent / undecidable / pinned off: the framework is NOT fusing this
-            # for us, so keep the proposal as authoring work and record why.
+            # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
+            # authoring work and record why.
             if state is not None:
                 pass_note = _unclaimable_note(state)
                 log.info("compile pass not claimed for %s: %s", name, pass_note)
@@ -1091,9 +903,8 @@ def parse_discovered_recipes(
         candidate_kind = str(item.get("candidate_kind") or "").strip().lower()
         if candidate_kind not in {"integration", "new_fusion", "replacement"}:
             candidate_kind = "integration" if existing_operator else "new_fusion"
-        # ``integration`` is only meaningful with a named operator: the authoring
-        # prompt injects its "benchmark the existing operator first" block only
-        # when both fields are set, so an operator-less integration would claim
+        # ``integration`` is only meaningful with a named operator: the authoring prompt injects its "benchmark the
+        # existing operator first" block only when both fields are set, so an operator-less integration would claim
         # the kind while silently skipping the constraint.
         if candidate_kind == "integration" and not existing_operator:
             candidate_kind = "new_fusion"
@@ -1224,18 +1035,7 @@ def registered_agent_llm_fn(
     sleep: Optional[Callable[[float], Any]] = None,
     monotonic: Optional[Callable[[], float]] = None,
 ) -> LlmFn:
-    """Adapt one registered Agent backend into discovery's text interface.
-
-    The source is already embedded in the prompt, so the session gets read/search
-    tools but no write or shell tools. ``allow_dirty_baseline`` lets the turn start
-    from a worktree the caller already left dirty, without also claiming the
-    ``read_only_resume`` contract: this is not a resume, and asserting it would opt
-    the session out of the workspace guard's read-only fast path and so demand that
-    ``cwd`` be a git worktree -- which a pip-installed framework never is. A
-    backend's explicit external-sandbox bypass remains an OS-isolation choice,
-    independent from this logical write policy. No provider fallback occurs here;
-    the caller owns runtime resolution.
-    """
+    """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
     selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
@@ -1292,13 +1092,7 @@ def registered_agent_llm_fn(
     protected = list(protected_files or [])
 
     def _record_transcript(progress: list[str], text: str) -> None:
-        """Persist what the session did, whatever the outcome.
-
-        Written on failure too: the end reason alone cannot tell a session that
-        ran out of turns apart from one the gateway dropped, and without the
-        transcript a discovery that fails every attempt leaves nothing to
-        diagnose from.
-        """
+        """Persist what the session did, whatever the outcome."""
         if not log_path:
             return
         with contextlib.suppress(OSError):
@@ -1317,7 +1111,6 @@ def registered_agent_llm_fn(
                 model=selected_model,
                 writable=False,
                 timeout_sec=max(1, int(timeout_s)),
-                reasoning_effort="high",
                 tool_policy=AgentToolPolicy(
                     read=True,
                     search=True,
@@ -1326,11 +1119,10 @@ def registered_agent_llm_fn(
                     max_turns=resolved_turns,
                 ),
                 protected_globs=["*"],
-                # Not read_only_resume: discovery only needs the "tolerate a dirty
-                # worktree" half of that flag, and claiming the resume contract
-                # disqualifies this session from the guard's read-only fast path
-                # (workspace_guard.is_read_only_session), forcing a git-worktree
-                # requirement on a cwd that is routinely a pip install root.
+                # Not read_only_resume: discovery only needs the "tolerate a dirty worktree" half of that flag, and
+                # claiming the resume contract disqualifies this session from the guard's read-only fast path
+                # (workspace_guard.is_read_only_session), forcing a git-worktree requirement on a cwd that is
+                # routinely a pip install root.
                 allow_dirty_baseline=True,
                 progress_log=progress,
             )
@@ -1344,11 +1136,8 @@ def registered_agent_llm_fn(
                 text = str(getattr(result, "text", "") or "").strip()
                 end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
                 cut_short = end_reason in {"turn_cap", "timeout"}
-                # A cut-short session still answered if it got its proposals out
-                # first, and discovery spends turns by design -- it is handed
-                # read and search tools precisely so it explores. Discarding
-                # parseable proposals because the ceiling was brushed throws away
-                # the work and retries into the same ceiling.
+                # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
+                # design -- it is handed read and search tools precisely so it explores.
                 usable = text and (not cut_short or _extract_json_array(text))
                 if usable and end_reason != "sdk_error":
                     if cut_short:
@@ -1425,17 +1214,7 @@ def discover_recipes(
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
 ) -> list[Recipe]:
-    """LLM-autonomous discovery: propose fusible chains from the trace + source.
-
-    Returns an empty list when the diagnosis is not a candidate, the source cannot
-    be read, or the LLM proposes nothing parseable. Callers inject the selected
-    provider through :func:`registered_agent_llm_fn`.
-
-    An empty list means discovery looked and found nothing. When it could not
-    look at all, ``llm_fn`` raises
-    :class:`~kernelforge.fusion.llm_failure.LlmUnavailableError` and that propagates:
-    the caller has to record an unreachable model as such, not as a verdict.
-    """
+    """LLM-autonomous discovery: propose fusible chains from the trace + source."""
     if not diagnosis.is_candidate:
         return []
     try:
@@ -1447,9 +1226,8 @@ def discover_recipes(
         return []
     hot = hot_kernels_from_trace(trace_path, top_n=top_kernels)
     ordered_boundaries = ordered_fusion_boundaries_from_trace(trace_path)
-    # Hot kernels and the diagnosis categories are folded in as a second evidence
-    # source: ordered boundaries need repeats to exist, so a short trace would
-    # otherwise leave retrieval with nothing to match against.
+    # Hot kernels and the diagnosis categories are folded in as a second evidence source: ordered boundaries need
+    # repeats to exist, so a short trace would otherwise leave retrieval with nothing to match against.
     existing_operator_hints = existing_operator_hints_from_knowledge(
         knowledge_root,
         ordered_boundaries,

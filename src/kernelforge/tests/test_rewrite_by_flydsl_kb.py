@@ -107,10 +107,7 @@ class InMemoryKBStore:
         }
 
     def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
-        # Mirrors the SDK: "merge" shallow-merges over the stored section and
-        # "replace" overwrites it. Always replacing would let a caller that
-        # relies on merge keeping the other fields pass here and lose them
-        # against the real store.
+        # Mirrors the SDK: "merge" shallow-merges over the stored section and "replace" overwrites it.
         if mode not in ("merge", "replace"):
             raise record_store.KBStoreError(f"mode must be 'merge' or 'replace', got {mode!r}")
         key = (canonical_id, session_id)
@@ -228,8 +225,7 @@ def _use_in_memory_kb_store(monkeypatch):
     return store
 
 
-# --------------------------------------------------------------------------- #
-# identity
+# --------------------------------------------------------------------------- # identity
 # --------------------------------------------------------------------------- #
 def test_a_rewrite_is_filed_under_the_flydsl_producer_identity(tmp_path, monkeypatch):
     store = _use_in_memory_kb_store(monkeypatch)
@@ -265,8 +261,8 @@ def test_a_namespaced_operator_name_stays_out_of_the_identifiers(
     tmp_path,
     monkeypatch,
 ):
-    # A logical name carries separators the identity and the session id both use,
-    # so an unnormalized one would let the operator re-partition either of them.
+    # A logical name carries separators the identity and the session id both use, so an unnormalized one would let the
+    # operator re-partition either of them.
     store = _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
     spec.op_name = "vllm::softmax"
@@ -331,9 +327,8 @@ def test_the_same_port_on_another_gpu_is_a_different_identity(tmp_path, monkeypa
         f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:flydsl:mi300x",
         SOFTMAX_IDENTITY,
     ]
-    # Artifact keys are partitioned by session id alone, so two identities
-    # sharing one would put both ports on one object and let the second
-    # overwrite the first.
+    # Artifact keys are partitioned by session id alone, so two identities sharing one would put both ports on one
+    # object and let the second overwrite the first.
     assert len({session for _, session in store.knowledge}) == 2
 
 
@@ -352,6 +347,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         best_commit="a" * 40,
         framework="vllm",
+        session_key="a" * 40,
     )
     second = kb.write_flydsl_kb_solution(
         spec,
@@ -361,6 +357,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         best_commit="b" * 40,
         framework="vllm",
+        session_key="b" * 40,
     )
 
     assert first["canonical_id"] == second["canonical_id"] == SOFTMAX_IDENTITY
@@ -383,8 +380,7 @@ def test_a_session_id_is_stable_so_one_port_stays_one_candidate():
     assert first == second
 
 
-# --------------------------------------------------------------------------- #
-# round trip
+# --------------------------------------------------------------------------- # round trip
 # --------------------------------------------------------------------------- #
 def test_a_recorded_port_is_materialized_and_revalidated(tmp_path, monkeypatch):
     _use_in_memory_kb_store(monkeypatch)
@@ -528,8 +524,7 @@ def test_the_ported_file_is_an_artifact_not_a_document_field(tmp_path, monkeypat
     assert not any("content" in name for name in value)
 
 
-# --------------------------------------------------------------------------- #
-# champion is a pointer, not a filter
+# --------------------------------------------------------------------------- # champion is a pointer, not a filter
 # --------------------------------------------------------------------------- #
 def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
     tmp_path,
@@ -539,16 +534,6 @@ def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
 
-    rejected = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=5.0,
-        flydsl_best_ms=10.0,
-        framework="vllm",
-    )
-    assert rejected == {"written": False, "reason": "no_improvement"}
-
     written = kb.write_flydsl_kb_solution(
         spec,
         str(driver),
@@ -557,7 +542,6 @@ def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
         flydsl_best_ms=10.0,
         best_commit="b" * 40,
         framework="vllm",
-        allow_non_improving=True,
     )
 
     assert written["written"] is True
@@ -611,8 +595,7 @@ def test_a_weaker_later_port_does_not_take_the_champion_pointer(tmp_path, monkey
     assert len(store.knowledge) == 2
 
 
-# --------------------------------------------------------------------------- #
-# contract gates
+# --------------------------------------------------------------------------- # contract gates
 # --------------------------------------------------------------------------- #
 def test_a_changed_driver_contract_is_rejected_and_the_seed_restored(
     tmp_path,
@@ -709,8 +692,201 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
     assert "Reference 2" in restored.reference_context
 
 
-# --------------------------------------------------------------------------- #
-# local mode uses the same record layout
+def _publish_ranked_candidates(spec, driver, config, ranks):
+    """Publish one candidate per (rank, claimed source_ms/best_ms) pair."""
+    for rank, source_ms, best_ms in ranks:
+        Path(spec.flydsl_kernel).write_text(
+            f"import flydsl\nRANK = {rank}\ndef build_softmax_module(config):\n    return lambda inputs: inputs['x']\n"
+        )
+        written = kb.write_flydsl_kb_solution(
+            spec,
+            str(driver),
+            config,
+            source_ms=source_ms,
+            flydsl_best_ms=best_ms,
+            best_commit=str(rank) * 40,
+            framework="vllm",
+            session_key=str(rank) * 40,
+        )
+        assert written["written"] is True
+
+
+def _time_candidates_by_rank(monkeypatch, spec, timings):
+    """Pass every candidate, timing each one by the RANK it declares."""
+
+    class Report:
+        all_passed = True
+        results = [type("Result", (), {"snr_db": 80.0})()]
+
+    async def validation(**_kwargs):
+        return Report()
+
+    def preflight(*_args, **_kwargs):
+        content = Path(spec.flydsl_kernel).read_text()
+        for rank, timing_ms in timings.items():
+            if f"RANK = {rank}" in content:
+                return driver_contract.PreflightReport(ok=True, timing_ms=timing_ms)
+        raise AssertionError(f"unexpected candidate timed: {content!r}")
+
+    monkeypatch.setattr(kb, "run_validation_pipeline", validation)
+    monkeypatch.setattr(kb.driver_contract, "preflight_candidate", preflight)
+
+
+def test_the_fastest_measured_candidate_wins_not_the_first_to_pass(tmp_path, monkeypatch):
+    """Correctness admits a candidate; this task's own clock picks between them.
+
+    A claim is computed over whatever cases produced it, so it does not order candidates for a task that scores
+    different ones. Taking the first that merely passed let the best-claiming record win on an unreproduced number.
+    """
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+
+    # Claims rank 1 above 2 above 3; measurement reverses that order exactly.
+    _publish_ranked_candidates(
+        spec,
+        driver,
+        config,
+        [(1, 10.0, 2.0), (2, 10.0, 3.0), (3, 10.0, 4.0)],
+    )
+    _time_candidates_by_rank(monkeypatch, spec, {1: 8.0, 2: 4.0, 3: 1.0})
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+
+    restored = asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            framework="vllm",
+        )
+    )
+
+    assert restored.applied is True
+    assert restored.best_ms == 1.0
+    assert "RANK = 3" in Path(spec.flydsl_kernel).read_text()
+    assert [attempt["reason"] for attempt in restored.attempts] == [
+        "outperformed_by_rank_3",
+        "outperformed_by_rank_3",
+        "applied",
+    ]
+
+
+def test_a_candidate_claiming_less_than_the_floor_is_never_tried(tmp_path, monkeypatch):
+    """A port that lost badly costs a full trial and teaches nothing."""
+    store = _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+
+    # Rank 2 claims 0.1x -- two hundred times off the pace of rank 1's 2.0x.
+    _publish_ranked_candidates(
+        spec,
+        driver,
+        config,
+        [(1, 10.0, 5.0), (2, 1.0, 10.0)],
+    )
+    _time_candidates_by_rank(monkeypatch, spec, {1: 5.0})
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+
+    restored = asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            framework="vllm",
+        )
+    )
+
+    assert restored.applied is True
+    assert "RANK = 1" in Path(spec.flydsl_kernel).read_text()
+    assert [attempt["reason"] for attempt in restored.attempts] == [
+        "applied",
+        "below_claim_floor",
+    ]
+    # Skipped whole: never downloaded, and never offered to the author either.
+    assert len(store.downloads) == 1
+    assert "Reference" not in restored.reference_context
+
+
+def test_a_field_entirely_under_the_floor_leaves_the_workspace_alone(tmp_path, monkeypatch):
+    """Nothing admissible means PORT runs, not that a bad seed is adopted."""
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+
+    _publish_ranked_candidates(
+        spec,
+        driver,
+        config,
+        [(1, 1.0, 10.0), (2, 1.0, 20.0)],
+    )
+    _time_candidates_by_rank(monkeypatch, spec, {})
+    seed = "def skeleton():\n    pass\n"
+    Path(spec.flydsl_kernel).write_text(seed)
+
+    restored = asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            framework="vllm",
+        )
+    )
+
+    assert restored.applied is False
+    assert restored.read_reason == "candidates_rejected"
+    assert {attempt["reason"] for attempt in restored.attempts} == {"below_claim_floor"}
+    assert Path(spec.flydsl_kernel).read_text() == seed
+
+
+def test_one_trial_cannot_spend_the_whole_search_budget(tmp_path, monkeypatch):
+    """The budget bounds the field, so it has to bound each trial in it.
+
+    A stage left at its own ceiling outlives the budget it runs under, and the first candidate then consumes a field
+    that was widened precisely so several could be measured.
+    """
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    monkeypatch.setenv("FORGE_KB_WARMSTART_BUDGET_SEC", "60")
+
+    _publish_ranked_candidates(spec, driver, config, [(1, 10.0, 5.0)])
+    stage_timeouts: list[int] = []
+
+    class Report:
+        all_passed = True
+        results = [type("Result", (), {"snr_db": 80.0})()]
+
+    async def validation(**kwargs):
+        stage_timeouts.append(kwargs["timeout_per_stage"])
+        return Report()
+
+    monkeypatch.setattr(kb, "run_validation_pipeline", validation)
+    monkeypatch.setattr(
+        kb.driver_contract,
+        "preflight_candidate",
+        lambda *_a, **_k: driver_contract.PreflightReport(ok=True, timing_ms=5.0),
+    )
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+
+    asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            framework="vllm",
+            validation_timeout_sec=1800,
+        )
+    )
+
+    # Its own ceiling is 1800s; what it may actually take is whatever is left of the 60s budget.
+    assert stage_timeouts and all(0 < timeout <= 60 for timeout in stage_timeouts)
+
+
+# --------------------------------------------------------------------------- # local mode uses the same record layout
 # --------------------------------------------------------------------------- #
 def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     spec, driver = _spec(tmp_path)
@@ -730,7 +906,6 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
         flydsl_best_ms=12.0,
         best_commit="d" * 40,
         framework="vllm",
-        allow_non_improving=True,
     )
 
     assert written["written"] is True
@@ -786,7 +961,6 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
         flydsl_best_ms=12.0,
         best_commit="e" * 40,
         framework="vllm",
-        allow_non_improving=True,
     )
 
     assert written["written"] is True
@@ -795,8 +969,7 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
     assert config.gbrain_url == ""
 
 
-# --------------------------------------------------------------------------- #
-# configuration
+# --------------------------------------------------------------------------- # configuration
 # --------------------------------------------------------------------------- #
 def test_config_defaults_and_normalizes_gpu_type_independently_from_target(
     monkeypatch,
@@ -931,9 +1104,8 @@ def test_rewrite_validates_its_kb_store_pair_without_using_gbrain():
 
 def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):
     spec, driver = _spec(tmp_path)
-    # Built directly: from_env refuses this combination, which is exactly how a
-    # misconfigured run is caught at startup. This covers the path that stays
-    # reachable when a caller supplies its own configuration.
+    # Built directly: from_env refuses this combination, which is exactly how a misconfigured run is caught at
+    # startup.
     knowledge = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=tmp_path / "knowledge",
@@ -970,14 +1142,7 @@ def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):
 
 
 def test_kb_store_rewrite_keeps_the_measurement_a_consumer_recorded(tmp_path):
-    """The remote backend must preserve a measurement across a replacing write.
-
-    ``write`` replaces the session document so a rewrite cannot leave stale
-    fields behind, but the measured value is the one field its producer never
-    wrote: a consumer recorded it after running the candidate, and the ranking
-    trusts it over the claim. Replacing it away would restore the inflated claim
-    the measurement exists to correct.
-    """
+    """The remote backend must preserve a measurement across a replacing write."""
     client = InMemoryKBStore()
     store = record_store.KBStoreRewriteRecords(client)
     source = tmp_path / "kernel.py"

@@ -40,18 +40,11 @@ from kernelforge.llm.process_reaping import (
 )
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-FALLBACK_CLAUDE_MODEL = "claude-opus-4-8"
 log = logging.getLogger(__name__)
 
 
 class _DeadlineBackport:
-    """``asyncio.timeout`` stand-in for Python 3.10 (added to stdlib in 3.11).
-
-    Cancels the running task once the delay elapses and surfaces the same
-    ``TimeoutError`` the 3.11+ context manager would, while ``expired()`` tells
-    our own deadline apart from a transport ``TimeoutError``. A delay of None
-    applies no bound, matching ``asyncio.timeout(None)``.
-    """
+    """``asyncio.timeout`` stand-in for Python 3.10 (added to stdlib in 3.11)."""
 
     def __init__(self, delay: float | None) -> None:
         self._delay = delay
@@ -77,9 +70,8 @@ class _DeadlineBackport:
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         if self._handle is not None:
             self._handle.cancel()
-        # Our cancellation surfaces as CancelledError; convert it to the same
-        # TimeoutError asyncio.timeout raises so the caller's ``except Exception``
-        # catches it (CancelledError is a BaseException on 3.10).
+        # Our cancellation surfaces as CancelledError; convert it to the same TimeoutError asyncio.timeout raises so
+        # the caller's ``except Exception`` catches it (CancelledError is a BaseException on 3.10).
         if self._expired and exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
             raise asyncio.TimeoutError from exc
         return False
@@ -98,7 +90,10 @@ def _supports_adaptive_thinking(model: str) -> bool:
     if not normalized:
         return False
     family = re.search(
-        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._]|$)",
+        # ``[`` terminates the family: an operator who spells a windowed id
+        # by hand still names ``claude-opus-5``, and reading the bracket as part
+        # of the version would drop it out of the family it belongs to.
+        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._\[]|$)",
         normalized,
     )
     if family:
@@ -111,8 +106,7 @@ def _supports_adaptive_thinking(model: str) -> bool:
         return minor >= 6
     if re.search(r"claude-3(?:[-._]|$)", normalized):
         return False
-    # Gateway aliases generally track current models. Prefer the modern API and
-    # let callers targeting a known legacy model use its canonical family name.
+    # Gateway aliases generally track current models.
     return True
 
 
@@ -123,15 +117,7 @@ def _is_turn_cap_error(error: Exception) -> bool:
 
 
 async def _reap_workspace_processes(cwd: str) -> ReapReport:
-    """Kill whatever a timed-out session left running inside its workspace.
-
-    A benchmark still running when the deadline expires outlives the CLI and
-    keeps the device busy through the canonical measurement that follows, so the
-    workspace has to be clear before this returns. Whatever could not be cleared
-    -- a process of ours that survived SIGKILL, or one that is not this
-    campaign's to kill at all -- comes back in the report, because the caller is
-    the one that can decline to measure.
-    """
+    """Kill whatever a timed-out session left running inside its workspace."""
     return await reap_processes_under(cwd, description=f"left running by a timed-out session in {cwd}")
 
 
@@ -147,14 +133,7 @@ class ClaudeUnavailableError(
 
 
 class ClaudeTimeoutError(ClaudeBackendError):
-    """The session outran its wall-clock budget before it could be resumed.
-
-    Raised only when the deadline expired before any session id existed: nothing
-    was established, so there is no handle to preserve and the failure precedes
-    the session. A local deadline is a limit the caller chose, never transport
-    weather, so :mod:`~kernelforge.agent_backends.session_resume` must not retry
-    it -- a re-run would burn the same clock to reach the same deadline.
-    """
+    """The session outran its wall-clock budget before it could be resumed."""
 
 
 def resolve_claude_cli(explicit: str = "") -> str:
@@ -230,11 +209,7 @@ def _tool_argument_digest(payload: Any) -> str:
 
 
 def _record_progress(sink: list[str] | None, message: Any) -> None:
-    """Append what this streamed message shows the agent doing.
-
-    Best-effort by construction: observability must never be able to fail a run,
-    so any surprise in the SDK's message shape is swallowed.
-    """
+    """Append what this streamed message shows the agent doing."""
     if sink is None:
         return
     try:
@@ -257,20 +232,7 @@ def _record_progress(sink: list[str] | None, message: Any) -> None:
 
 
 def _prepare_claude_environment() -> None:
-    """Apply Claude CLI environment compatibility only when selected.
-
-    ``ANTHROPIC_BASE_URL`` keeps the operator's route but loses a duplicated
-    ``/v1`` tail, because the CLI appends its own. A LiteLLM proxy publishes its
-    base that way, and left as configured the CLI answers "There's an issue with
-    the selected model ... it may not exist or you may not have access to it" --
-    a 404 on the doubled path, reported as a model and permission problem.
-
-    ``ANTHROPIC_CUSTOM_HEADERS`` is consumed by the CLI rather than passed in, so
-    it is normalized in place through the same parser the OpenAI line uses:
-    ``${VAR}`` references are resolved, and a JSON object is rewritten as the
-    newline-delimited form the CLI understands. Missing or unparseable input is
-    left alone rather than replaced with an empty value.
-    """
+    """Apply Claude CLI environment compatibility only when selected."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         os.environ.setdefault("IS_SANDBOX", "1")
     gateway = resolve_anthropic_gateway()
@@ -278,9 +240,8 @@ def _prepare_claude_environment() -> None:
         configured = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
         normalized = normalize_anthropic_base_url(gateway.base_url)
         if normalized != configured:
-            # Say so: this edits a process-wide variable the operator set, and a
-            # silent rewrite is the thing that makes an endpoint problem hard to
-            # trace in the first place.
+            # Say so: this edits a process-wide variable the operator set, and a silent rewrite is the thing that
+            # makes an endpoint problem hard to trace in the first place.
             log.info(
                 "ANTHROPIC_BASE_URL %s -> %s (the CLI appends /v1/messages itself)",
                 configured,
@@ -314,7 +275,6 @@ class ClaudeBackend:
         self.runtime = runtime or AgentRuntimeConfig(
             provider=self.name,
             model=DEFAULT_CLAUDE_MODEL,
-            fallback_model=FALLBACK_CLAUDE_MODEL,
         )
         _prepare_claude_environment()
         self._query, self._options_type = _load_claude_sdk()
@@ -367,7 +327,11 @@ class ClaudeBackend:
             "--model",
             selected_model,
             "--effort",
-            reasoning_effort.strip() or "low",
+            # The probe answers "will the campaign's configuration work", so it
+            # has to ask under that configuration: pinning ``low`` here made the
+            # probe pass on deployments where the configured effort is the thing
+            # the gateway rejects.
+            reasoning_effort.strip() or self.runtime.reasoning_effort.strip() or "low",
             "--permission-mode",
             "dontAsk",
             "--tools",
@@ -411,9 +375,6 @@ class ClaudeBackend:
         }
         if spec.reasoning_effort:
             options["effort"] = spec.reasoning_effort
-        fallback_model = getattr(self.runtime, "fallback_model", "").strip()
-        if fallback_model and fallback_model != spec.model:
-            options["fallback_model"] = fallback_model
         if spec.additional_directories:
             options["add_dirs"] = list(spec.additional_directories)
         policy = spec.tool_policy
@@ -435,9 +396,7 @@ class ClaudeBackend:
             if policy.max_turns is not None:
                 options["max_turns"] = policy.max_turns
             if _supports_adaptive_thinking(spec.model):
-                # Claude 4.6+ uses adaptive thinking. Claude 4.7+ rejects fixed
-                # budget_tokens entirely, so capability must follow the model
-                # family rather than whichever alias is currently the default.
+                # Claude 4.6+ uses adaptive thinking.
                 options["thinking"] = {"type": "adaptive"}
             elif policy.thinking_budget_tokens > 0:
                 options["thinking"] = {
@@ -486,11 +445,7 @@ class ClaudeBackend:
         options.update(self.runtime.options)
         options.update(spec.provider_options)
         if spec.env:
-            # The SDK spawns the CLI with the inherited process environment and
-            # applies this over it. Merged last rather than assigned earlier: a
-            # provider option carrying its own env would otherwise drop the
-            # session's, and that is what keeps concurrent sessions out of each
-            # other's build cache.
+            # The SDK spawns the CLI with the inherited process environment and applies this over it.
             options["env"] = {**options.get("env", {}), **spec.env}
         return options
 
@@ -521,13 +476,7 @@ class ClaudeBackend:
         feedback: str,
         usage: Any = None,
     ) -> AgentRunResult:
-        """Continue an exact prior SDK session with a new prompt.
-
-        The SDK reloads that session's full conversation, so the model answers
-        with the earlier turns in context. ``spec`` still governs THIS turn's
-        tools, hooks, and system prompt, which lets a caller resume a writable
-        implementer session under a read-only policy (see the lesson summarizer).
-        """
+        """Continue an exact prior SDK session with a new prompt."""
         if not session_id.strip():
             raise ClaudeBackendError("Claude resume requires a session ID")
         spec = spec.resolved(self.runtime)
@@ -550,13 +499,12 @@ class ClaudeBackend:
         resume_session_id: str = "",
     ) -> AgentRunResult:
         """Run one guarded SDK query (fresh or resumed) and normalize its messages."""
-        # Armed before the CLI starts rather than when the reaper runs: the
-        # ownership tag is only inherited by children exec'd after it is set,
-        # and the subreaper flag is what keeps a detached benchmark traceable to
-        # this session once the shell that started it has exited.
+        # Armed before the CLI starts rather than when the reaper runs: the ownership tag is only inherited by
+        # children exec'd after it is set, and the subreaper flag is what keeps a detached benchmark traceable to this
+        # session once the shell that started it has exited.
         install_child_subreaper()
-        # These worktrees carry the loop's own ledger and build output, so a
-        # clean-HEAD demand would refuse every session before it started.
+        # These worktrees carry the loop's own ledger and build output, so a clean-HEAD demand would refuse every
+        # session before it started.
         guard = WorkspaceGuard(spec, dirty_baseline_default=True)
         guard.prepare()
         provider_options = self._provider_options(spec)
@@ -569,40 +517,22 @@ class ClaudeBackend:
         num_turns: int | None = None
         session_id = ""
 
-        # The SDK RAISES on the turn cap (and some other mid-session failures)
-        # rather than yielding a final ResultMessage, and its stream is an
-        # unbounded ``async for`` -- nothing here stops a session that neither
-        # answers nor caps. Both are handled the same way: bound the stream with
-        # the spec's wall-clock budget, and if that budget or the turn cap trips
-        # after a session id exists, capture it instead of unwinding. The caller
-        # registers the resume handle only AFTER run() returns (see
-        # orchestrator.agent), so an exception that escapes this method loses the
-        # handle and the session can never be resumed to write a full lesson --
-        # the exact "provider cannot resume" path that produced outcome-only
-        # lessons. The init message carries the session id, so it is set before
-        # any mid-session failure; return a normal result carrying it and let
-        # the outer loop validate the on-disk candidate AND resume THIS session.
-        # Only a failure that preceded the session (no id yet, nothing to
-        # resume) still raises.
+        # The SDK RAISES on the turn cap (and some other mid-session failures) rather than yielding a final
+        # ResultMessage, and its stream is an unbounded ``async for`` -- nothing here stops a session that neither
+        # answers nor caps.
         stream_error: Exception | None = None
         timed_out = False
-        # Independent of ``timed_out``: the CLI subprocess and any detached
-        # benchmark children exist the moment the deadline fires, even before a
-        # session id is established, so they must be torn down on that path too
-        # -- otherwise a hung init leaks the process group and keeps the GPU.
+        # Independent of ``timed_out``: the CLI subprocess and any detached benchmark children exist the moment the
+        # deadline fires, even before a session id is established, so they must be torn down on that path too --
+        # otherwise a hung init leaks the process group and keeps the GPU.
         reap_on_exit = False
-        # Set on the paths that leave without a result. The guard puts the
-        # workspace back, but only after the reap below: restoring files while a
-        # detached child is still writing them would undo the restore.
+        # Set on the paths that leave without a result.
         rollback_on_exit = False
-        # What the reap could not clear out of the workspace. Non-empty means
-        # something is still holding the device, so the measurement that follows
-        # this session would be measuring it too.
+        # What the reap could not clear out of the workspace.
         contention = ""
         agen = self._query(prompt=prompt, options=options)
-        # ``asyncio.timeout(None)`` applies no bound, so a spec without a budget
-        # keeps the previous unbounded behaviour; ``expired()`` tells our own
-        # deadline apart from a bare TimeoutError surfacing from the transport.
+        # ``asyncio.timeout(None)`` applies no bound, so a spec without a budget keeps the previous unbounded
+        # behaviour; ``expired()`` tells our own deadline apart from a bare TimeoutError surfacing from the transport.
         deadline = _session_deadline(spec.timeout_sec)
         try:
             try:
@@ -611,9 +541,8 @@ class ClaudeBackend:
                         if usage is not None:
                             usage.add_from_message(message)
                         _record_progress(spec.progress_log, message)
-                        # The init SystemMessage and the final ResultMessage both
-                        # carry the session id; keep the latest non-empty one so a
-                        # caller can resume this exact conversation later.
+                        # The init SystemMessage and the final ResultMessage both carry the session id; keep the
+                        # latest non-empty one so a caller can resume this exact conversation later.
                         candidate_session = getattr(message, "session_id", "") or ""
                         if isinstance(candidate_session, str) and candidate_session:
                             session_id = candidate_session
@@ -665,22 +594,17 @@ class ClaudeBackend:
                     if spec.progress_log is not None:
                         spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
         except asyncio.CancelledError:
-            # The subprocess and any detached benchmark children are running
-            # regardless of whether a session id was established; reap them so
-            # they do not hold the GPU past this point. The caller receives the
-            # exception, but any workspace writes and the resume handle survive.
+            # The subprocess and any detached benchmark children are running regardless of whether a session id was
+            # established; reap them so they do not hold the GPU past this point.
             reap_on_exit = True
             if not session_id:
                 rollback_on_exit = True
             raise
         finally:
             if reap_on_exit:
-                # ``async for`` does not close its iterator on exit (PEP 533 was
-                # deferred), so close it to tear the CLI down, then reap any
-                # detached benchmark child that outlived it -- an orphan holding
-                # the GPU corrupts the canonical measurement that follows. This
-                # runs whether or not a session id was established: a deadline
-                # that fires during a hung init still left a process group.
+                # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
+                # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
+                # corrupts the canonical measurement that follows.
                 with suppress(Exception):
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
@@ -721,8 +645,8 @@ class ClaudeBackend:
         try:
             result.file_changes = guard.verify()
         except Exception:
-            # verify() restores the baseline itself before raising, so this
-            # covers the paths that fail earlier and must not mask them.
+            # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
+            # must not mask them.
             with suppress(Exception):
                 guard.rollback()
             raise
@@ -737,6 +661,5 @@ __all__ = [
     "ClaudeTimeoutError",
     "ClaudeUnavailableError",
     "DEFAULT_CLAUDE_MODEL",
-    "FALLBACK_CLAUDE_MODEL",
     "resolve_claude_cli",
 ]

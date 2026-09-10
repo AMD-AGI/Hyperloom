@@ -1,11 +1,4 @@
-"""Preflight timing must be recorded, and audit snapshots must be datable.
-
-The audit directory carried no timing at all, so "which stage ate the budget"
-could only be inferred from file mtimes -- and those lied: ``_audit_driver``
-used ``shutil.copy2``, which copies the SOURCE mtime onto the snapshot. Every
-driver snapshot therefore claimed the driver's own mtime instead of its capture
-time, and a timeline reconstructed from the directory was off by minutes.
-"""
+"""Preflight timing must be recorded, and audit snapshots must be datable."""
 
 from __future__ import annotations
 

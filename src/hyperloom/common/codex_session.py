@@ -1,36 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Codex Agent SDK sessions for Hyperloom's OpenAI-side runners.
-
-Hyperloom never issues bare LLM API calls: every interaction runs inside an
-agent runtime. This module is the Codex half of that contract. It wraps
-``openai_codex`` so callers inherit the SDK's shell/file tools, sandbox, turn
-management and usage accounting instead of hand-rolling a tool-calling loop.
-:class:`CodexSession` holds one runtime open across many turns for a
-persistent role; :func:`run_codex_turn` is the one-shot form for a caller
-whose work is a single turn.
-
-The SDK plumbing follows ``kernelforge.agent_backends.codex.CodexBackend``,
-but that class cannot be reused: its workspace guard requires the session cwd
-to be a git worktree and enforces KernelForge's benchmark-file protection.
-Hyperloom's Codex sessions run against plain output directories, so only the
-patterns are shared.
-
-Codex's ``read-only`` and ``workspace-write`` presets rely on bubblewrap.
-Hyperloom defaults to ``workspace-write`` and performs a real bubblewrap
-capability probe before starting the SDK, so a binary that exists but cannot
-create the required namespace fails closed. ``bypass`` is available only when
-the operator selects it with :data:`CODEX_SANDBOX_MODE_ENV`, delegating
-containment to an external sandbox boundary.
-
-Provider credentials and headers remain environment-backed. Config overrides
-contain variable names only, because the SDK forwards every override through
-the app-server command line. Each run also gets a private ``CODEX_HOME`` under
-the configured runtime/output area. Cleanup waits briefly for late helper
-writers, retries transient busy errors, and fails explicitly rather than
-silently leaking state.
-"""
+"""Codex Agent SDK sessions for Hyperloom's OpenAI-side runners."""
 
 from __future__ import annotations
 
@@ -53,26 +24,21 @@ from typing import Any, Sequence
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
 
-# Name Codex records the gateway under in its own TOML config. Only stability
-# matters: the thread's ``model_provider`` refers back to this key.
+# Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
 
 _CLIENT_NAME = "hyperloom"
 _CLIENT_TITLE = "Hyperloom"
 
-# OpenAI-side API key names in the established Codex precedence order. Codex is
-# handed the winning variable's NAME, so the secret never reaches app-server
-# argv.
+# OpenAI-side API key names in the established Codex precedence order.
 _API_KEY_ENV_FALLBACKS: tuple[str, ...] = ("OPENAI_API_KEY", "LLM_GATEWAY_KEY")
 
-# TOML bare-key charset. Header names outside it would need a quoted key, which
-# the Codex ``-c key=value`` override parser does not accept.
+# TOML bare-key charset.
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _EXACT_ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 _PRIVATE_HEADER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
 
-# Sandbox preset selector. ``bypass`` delegates all containment to an external
-# boundary and must be set explicitly by the operator.
+# Sandbox preset selector.
 CODEX_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
 DEFAULT_CODEX_SANDBOX_MODE = "workspace-write"
 # Ordered so the error raised for an unknown mode lists them predictably.
@@ -81,8 +47,7 @@ CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", "workspace-write", "read-only"
 # Private per-run Codex state is created below this directory when configured.
 HYPERLOOM_RUNTIME_DIR_ENV = "HYPERLOOM_RUNTIME_DIR"
 
-# The probe mirrors the mount/user-namespace operations Codex's bubblewrap
-# sandbox needs. A short timeout prevents a broken helper from blocking startup.
+# The probe mirrors the mount/user-namespace operations Codex's bubblewrap sandbox needs.
 _BWRAP_PROBE_TIMEOUT_SEC = 10.0
 _BWRAP_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _BWRAP_PROBE_CACHE_LOCK = threading.Lock()
@@ -90,9 +55,7 @@ _BWRAP_PROBE_CACHE_LOCK = threading.Lock()
 # Grace period for tearing a timed-out turn down before giving up on it.
 _INTERRUPT_TIMEOUT_SEC = 5.0
 
-# AsyncCodex can finish closing before a short-lived helper has released or
-# stopped writing CODEX_HOME. Cleanup is bounded so cancellation and failures
-# cannot hang indefinitely, but it waits long enough to absorb that exit race.
+# AsyncCodex can finish closing before a short-lived helper has released or stopped writing CODEX_HOME.
 _CODEX_HOME_CLEANUP_TIMEOUT_SEC = 1.0
 _CODEX_HOME_CLEANUP_GRACE_SEC = 0.1
 _CODEX_HOME_CLEANUP_SETTLE_SEC = 0.05
@@ -114,14 +77,7 @@ class CodexSessionTimeoutError(CodexSessionError):
 
 
 class CodexHomeCleanupError(CodexSessionError):
-    """Raised when a private CODEX_HOME cannot be removed within the bound.
-
-    The exception message deliberately includes only the generated directory
-    and a coarse status. Files written under CODEX_HOME may contain sensitive
-    state, so the underlying cleanup exception and child names are not exposed.
-    ``completed_result`` preserves a successful turn when cleanup failed after
-    completion; ``operation_error`` preserves a failed or cancelled operation.
-    """
+    """Raised when a private CODEX_HOME cannot be removed within the bound."""
 
     def __init__(self, path: Path, status: str) -> None:
         self.path = path
@@ -133,16 +89,7 @@ class CodexHomeCleanupError(CodexSessionError):
 
 @dataclass(frozen=True)
 class CodexSessionResult:
-    """Normalized outcome of one Codex SDK turn.
-
-    Attributes:
-        text: The agent's final response.
-        usage: Token accounting for the turn (empty when the SDK reported none).
-        thread_id: The SDK thread handle.
-        error: The in-band SDK error message, or ``""`` when the turn was clean.
-            A provider-side failure can complete the turn without an answer, so
-            callers must treat a non-empty value as a failed run.
-    """
+    """Normalized outcome of one Codex SDK turn."""
 
     text: str = ""
     usage: dict[str, int] = field(default_factory=dict)
@@ -152,14 +99,7 @@ class CodexSessionResult:
 
 @dataclass(frozen=True)
 class CodexProviderConfig:
-    """Secret-safe provider settings resolved for one Codex child process.
-
-    ``overrides`` is safe to place on the app-server command line: credentials
-    and custom-header values are represented only by environment variable
-    names. ``env_additions`` carries any private variables generated for
-    literal header values and is an immutable tuple so resolution never mutates
-    the caller's mapping invisibly.
-    """
+    """Secret-safe provider settings resolved for one Codex child process."""
 
     overrides: tuple[str, ...]
     env_additions: tuple[tuple[str, str], ...] = field(default=(), repr=False)
@@ -174,14 +114,7 @@ def _effective_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def load_codex_sdk() -> Any:
-    """Import ``openai_codex`` lazily and return the module.
-
-    Returns:
-        Any: The ``openai_codex`` module.
-
-    Raises:
-        CodexSessionUnavailableError: If the Codex SDK is not installed.
-    """
+    """Import ``openai_codex`` lazily and return the module."""
     try:
         import openai_codex  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -202,23 +135,7 @@ def api_key_env_name(
     api_key_env: str = "OPENAI_API_KEY",
     env: dict[str, str] | None = None,
 ) -> str:
-    """Return the NAME of the env var holding the OpenAI-side API key.
-
-    Mirrors the precedence in
-    :func:`hyperloom.common.llm_config.resolve_openai_client_config` so Codex
-    reads the same credential as Hyperloom's other OpenAI-side callers, while
-    only the variable name crosses into Codex's configuration.
-
-    Args:
-        api_key_env (str): Preferred env var name to check first.
-        env (dict[str, str] | None): Values to overlay on ``os.environ``.
-
-    Returns:
-        str: The name of the first env var in precedence order that is set.
-
-    Raises:
-        CodexSessionUnavailableError: If none of the candidates is set.
-    """
+    """Return the NAME of the env var holding the OpenAI-side API key."""
     return _api_key_env_name(api_key_env=api_key_env, source=_effective_env(env))
 
 
@@ -293,29 +210,7 @@ def resolve_codex_provider_config(
     base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
 ) -> CodexProviderConfig:
-    """Resolve env-backed ``model_providers`` settings for the Codex gateway.
-
-    The installed Codex CLI's ``env_key`` and ``env_http_headers`` fields map
-    provider credentials and headers to environment variable names. Resolved
-    values therefore never enter ``config_overrides``, which the Python SDK
-    forwards as app-server argv. An exact ``${VAR}`` header uses that existing
-    name; a literal or composite value is copied into a generated child-only
-    variable returned in :attr:`CodexProviderConfig.env_additions`.
-
-    Args:
-        api_key_env (str): Preferred API-key env var name.
-        base_url_env (str): Preferred base-URL env var name.
-        env (dict[str, str] | None): Values to overlay on ``os.environ``.
-
-    Returns:
-        CodexProviderConfig: Command-line-safe overrides plus child env
-        additions.
-
-    Raises:
-        CodexSessionUnavailableError: If the credential or the base URL is
-            missing, or a gateway header name cannot be expressed as a Codex
-            config key.
-    """
+    """Resolve env-backed ``model_providers`` settings for the Codex gateway."""
     return _resolve_codex_provider_config(
         api_key_env=api_key_env,
         base_url_env=base_url_env,
@@ -375,11 +270,7 @@ def codex_provider_overrides(
     base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Return provider overrides for compatibility with existing callers.
-
-    New process-launching integrations should use
-    :func:`resolve_codex_provider_config` and apply its ``env_additions``.
-    """
+    """Return provider overrides for compatibility with existing callers."""
     return resolve_codex_provider_config(
         api_key_env=api_key_env,
         base_url_env=base_url_env,
@@ -388,13 +279,7 @@ def codex_provider_overrides(
 
 
 def _writable_root_overrides(writable_roots: Sequence[Path]) -> tuple[str, ...]:
-    """Widen the ``workspace_write`` sandbox to the given roots.
-
-    The session cwd is already writable under that preset, so only the extra
-    roots are declared. Codex reads the table only when that preset is active,
-    so the override is emitted for every sandbox mode and simply goes unread
-    under the others.
-    """
+    """Widen the ``workspace_write`` sandbox to the given roots."""
     if not writable_roots:
         return ()
     roots = [str(Path(root).resolve()) for root in writable_roots]
@@ -412,26 +297,7 @@ def _validated_sandbox_mode(mode: str) -> str:
 
 
 def resolve_codex_sandbox_mode(*, sandbox_mode: str = "", env: dict[str, str] | None = None) -> str:
-    """Resolve which Codex sandbox preset family a session may use.
-
-    ``bypass`` is deliberately different from the contained modes: the
-    deployment must set ``HYPERLOOM_CODEX_SANDBOX_MODE=bypass``. A caller
-    argument may narrow the deployment policy but cannot replace the
-    operator-owned bypass opt-in.
-
-    Args:
-        sandbox_mode (str): Mode stated by the caller; outranks the
-            environment. Blank defers to :data:`CODEX_SANDBOX_MODE_ENV`.
-        env (dict[str, str] | None): Values to overlay on ``os.environ``.
-
-    Returns:
-        str: One of :data:`CODEX_SANDBOX_MODES`, defaulting to
-            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
-
-    Raises:
-        CodexSessionUnavailableError: If the resolved value names no known mode
-            or ``bypass`` lacks the operator mode opt-in.
-    """
+    """Resolve which Codex sandbox preset family a session may use."""
     return _resolve_codex_sandbox_mode(
         sandbox_mode=sandbox_mode,
         source=_effective_env(env),
@@ -528,15 +394,7 @@ def probe_codex_sandbox_capability(
     runner: Callable[..., Any] = subprocess.run,
     use_cache: bool = True,
 ) -> bool:
-    """Return whether bubblewrap can create the sandbox Codex needs.
-
-    Resolving the binary is not enough in restricted containers: the executable
-    can exist while user/mount namespace setup fails. This probe executes a
-    read-only root bind inside a new user namespace. Default probes are cached
-    by executable identity, process credentials, namespace identity, relevant
-    kernel controls and dynamic-loader environment. Resolver and runner
-    injection keep the behavior hermetic in unit tests.
-    """
+    """Return whether bubblewrap can create the sandbox Codex needs."""
     return _probe_codex_sandbox_capability(
         source=_effective_env(env),
         bwrap_resolver=bwrap_resolver,
@@ -578,25 +436,7 @@ def _probe_codex_sandbox_capability(
 
 
 def codex_sandbox(sdk: Any, *, writable_roots: Sequence[Path], sandbox_mode: str) -> Any:
-    """Map a sandbox mode and the requested write scope onto a Codex preset.
-
-    A confirmed ``bypass`` always means ``Sandbox.full_access`` because the
-    external sandbox is authoritative in that mode. The contained modes retain
-    least-privilege semantics: no writable roots yields ``read_only``, and an
-    explicit ``read-only`` mode is a ceiling a declared root cannot raise.
-
-    Args:
-        sdk (Any): The loaded ``openai_codex`` module.
-        writable_roots (Sequence[Path]): Extra roots the session may write.
-        sandbox_mode (str): A mode already resolved by
-            :func:`resolve_codex_sandbox_mode`.
-
-    Returns:
-        Any: The ``Sandbox`` preset to run the session under.
-
-    Raises:
-        CodexSessionUnavailableError: If ``sandbox_mode`` names no known mode.
-    """
+    """Map a sandbox mode and the requested write scope onto a Codex preset."""
     mode = _validated_sandbox_mode(sandbox_mode)
     if mode == "bypass":
         return sdk.Sandbox.full_access
@@ -678,19 +518,7 @@ def _cleanup_codex_home(
     sleeper: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Remove exactly one generated CODEX_HOME despite transient late writers.
-
-    Cleanup first grants helpers a short exit grace period. It then retries
-    ``ENOTEMPTY``/``EBUSY`` with bounded exponential backoff and requires the
-    path to remain absent for a short settle window, catching writers that
-    recreate it immediately after a successful removal. The synchronous wait
-    is intentional: cleanup must complete even while the surrounding asyncio
-    task is being cancelled.
-
-    Raises:
-        CodexHomeCleanupError: If the path remains busy past the bound or a
-            non-transient removal error occurs.
-    """
+    """Remove exactly one generated CODEX_HOME despite transient late writers."""
     path = Path(temporary.name)
     timeout = max(0.0, _CODEX_HOME_CLEANUP_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
     grace = max(0.0, _CODEX_HOME_CLEANUP_GRACE_SEC if grace_sec is None else grace_sec)
@@ -765,11 +593,7 @@ def _private_codex_home(
 
 
 def _usage_int(payload: dict[str, Any], key: str) -> int:
-    """Read one non-negative token count, treating unusable values as 0.
-
-    Token accounting is diagnostic, so a malformed count must not abort a run
-    that otherwise produced its artifacts.
-    """
+    """Read one non-negative token count, treating unusable values as 0."""
     value = payload.get(key)
     if isinstance(value, bool):
         return 0
@@ -781,25 +605,7 @@ def _usage_int(payload: dict[str, Any], key: str) -> int:
 
 
 def normalize_codex_usage(usage: Any) -> dict[str, int]:
-    """Normalize ``ThreadTokenUsage`` into Hyperloom's token usage fields.
-
-    Only the ``last`` breakdown is read for the counts: it covers the turn that
-    just ran, whereas ``total`` accumulates across the whole thread. Reasoning
-    tokens are reported separately because on a reasoning model they dominate
-    the output budget and are invisible in the response text.
-
-    ``model_context_window`` sits beside the breakdowns rather than inside one,
-    and is carried through when Codex states it: the compaction trigger is a
-    fraction of the window, and a model absent from the caller's own table falls
-    back to a conservative default that compacts a run early. Omitted rather than
-    zeroed when unreported, so the caller keeps whatever default it has.
-
-    Args:
-        usage (Any): The SDK usage object, or ``None``.
-
-    Returns:
-        dict[str, int]: Token counts, or ``{}`` when the SDK reported none.
-    """
+    """Normalize ``ThreadTokenUsage`` into Hyperloom's token usage fields."""
     if usage is None:
         return {}
     breakdown = usage.get("last", usage) if isinstance(usage, dict) else getattr(usage, "last", usage)
@@ -831,15 +637,7 @@ def _turn_error_message(result: Any) -> str:
 
 
 def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
-    """Normalize one completed SDK turn into a :class:`CodexSessionResult`.
-
-    Args:
-        result (Any): The SDK ``TurnResult``.
-        thread_id (str): The thread handle the turn ran on.
-
-    Returns:
-        CodexSessionResult: The normalized turn outcome.
-    """
+    """Normalize one completed SDK turn into a :class:`CodexSessionResult`."""
     return CodexSessionResult(
         text=str(getattr(result, "final_response", "") or "").strip(),
         usage=normalize_codex_usage(getattr(result, "usage", None)),
@@ -849,45 +647,7 @@ def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
 
 
 class CodexSession:
-    """One Codex Agent SDK runtime held open across many turns.
-
-    The SDK client, its child app-server process and the private
-    ``CODEX_HOME`` live for the whole session; the *thread* is the
-    conversation. :meth:`turn` opens the thread on first use and keeps it, so
-    a reactor role can carry one conversation across ticks instead of paying a
-    cold start (and a full context re-push) every time.
-    :meth:`reset_thread` drops only the conversation, which is what a
-    compaction needs — restarting the runtime would leak a child process.
-
-    Turns run with ``ApprovalMode.deny_all`` (no approval prompt can block an
-    unattended run). Thread and turn receive the same resolved sandbox preset.
-    Contained presets first pass a real bubblewrap capability probe; failure
-    never falls back to ``full_access``. ``CODEX_HOME`` is a private mode-0700
-    directory below ``HYPERLOOM_RUNTIME_DIR``, the first safe writable root, or
-    a run-local ``cwd`` fallback, and is removed by :meth:`aclose` after the
-    SDK client closes.
-
-    Args:
-        cwd (Path): Working directory for the thread; writable under the
-            ``workspace_write`` and ``full_access`` sandboxes.
-        model (str): The Codex model id.
-        developer_instructions (str): System-level instructions for the
-            thread. Read when a thread is opened, so changing it and calling
-            :meth:`reset_thread` re-scopes the next conversation.
-        writable_roots (Sequence[Path]): Extra roots the session may write.
-            Empty keeps contained sessions read-only; confirmed ``bypass``
-            remains full access because external isolation is authoritative.
-        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`. Blank defers to
-            :data:`CODEX_SANDBOX_MODE_ENV`, then to
-            :data:`DEFAULT_CODEX_SANDBOX_MODE`.
-        api_key_env (str): Preferred API-key env var name.
-        base_url_env (str): Preferred base-URL env var name.
-        codex_bin (str): Optional Codex runtime path; the SDK resolves its own
-            when empty.
-        env (dict[str, str] | None): Values overlaid on ``os.environ``. The
-            resulting mapping drives policy, credentials, config and child
-            process launch.
-    """
+    """One Codex Agent SDK runtime held open across many turns."""
 
     def __init__(
         self,
@@ -937,21 +697,11 @@ class CodexSession:
         await self.aclose()
 
     async def start(self) -> None:
-        """Resolve policy and credentials, then open the SDK client.
-
-        Idempotent: starting an already-started session is a no-op.
-
-        Raises:
-            CodexSessionUnavailableError: If the SDK is missing, or its gateway
-                config or sandbox mode is unusable.
-            CodexSessionError: If the SDK client could not be opened.
-        """
+        """Resolve policy and credentials, then open the SDK client."""
         if self._stack is not None:
             return
         effective_env = _effective_env(self.env)
-        # Tag before provider resolution so the header is mapped into
-        # ``env_http_headers`` with the gateway's own. The session snapshots its
-        # environment here, so the tag reflects the phase Codex started in.
+        # Tag before provider resolution so the header is mapped into ``env_http_headers`` with the gateway's own.
         if self.component:
             inject_attribution_env(
                 effective_env,
@@ -989,8 +739,8 @@ class CodexSession:
             *provider_config.overrides,
             *_writable_root_overrides(self.writable_roots),
         )
-        # The client is entered inside the CODEX_HOME context so unwinding
-        # closes the client first and only then removes the state it writes.
+        # The client is entered inside the CODEX_HOME context so unwinding closes the client first and only then
+        # removes the state it writes.
         stack = contextlib.AsyncExitStack()
         try:
             codex_home = stack.enter_context(
@@ -1029,15 +779,7 @@ class CodexSession:
         self._thread_id = ""
 
     async def aclose(self) -> None:
-        """Close the SDK client and remove the private state directory.
-
-        Idempotent, so a caller may close in a ``finally`` without tracking
-        whether the session ever started.
-
-        Raises:
-            CodexHomeCleanupError: If the private state directory remains busy
-                after bounded retries.
-        """
+        """Close the SDK client and remove the private state directory."""
         stack, self._stack = self._stack, None
         self._sdk = None
         self._sandbox = None
@@ -1047,11 +789,7 @@ class CodexSession:
             await stack.aclose()
 
     async def _open_thread(self) -> Any:
-        """Return the open conversation, opening one on first use.
-
-        Raises:
-            CodexSessionError: If the session was never started, or was closed.
-        """
+        """Return the open conversation, opening one on first use."""
         if self._client is None or self._sdk is None:
             raise CodexSessionError("Codex session is not started; call start() first")
         if self._thread is None:
@@ -1073,33 +811,9 @@ class CodexSession:
         timeout_sec: float,
         output_schema: dict[str, Any] | None = None,
     ) -> CodexSessionResult:
-        """Run one turn on this session's conversation.
-
-        Args:
-            prompt (str): The user prompt for the turn.
-            timeout_sec (float): Wall-clock budget for the turn. On expiry the
-                turn is interrupted and :class:`CodexSessionTimeoutError` is
-                raised.
-            output_schema (dict[str, Any] | None): JSON schema the final
-                response must match, forwarded to the provider as a
-                structured-output constraint. ``None`` leaves the reply
-                free-form. Providers that enforce OpenAI *strict* structured
-                outputs reject any object that omits
-                ``additionalProperties: false`` or a ``required`` entry, and
-                reject free-form objects outright.
-
-        Returns:
-            CodexSessionResult: The normalized turn outcome.
-
-        Raises:
-            CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
-            CodexSessionError: If the session is not started, or the SDK failed
-                for any other reason.
-        """
-        # Both, not just the client: ``start()`` sets them together and
-        # ``aclose()`` clears them together, and ``_open_thread`` reaches for the
-        # SDK as well. Naming the whole invariant is what lets a type checker
-        # follow it into the attribute accesses below.
+        """Run one turn on this session's conversation."""
+        # Both, not just the client: ``start()`` sets them together and ``aclose()`` clears them together, and
+        # ``_open_thread`` reaches for the SDK as well.
         if self._client is None or self._sdk is None:
             raise CodexSessionError("Codex session is not started; call start() before turn()")
         turn_task: asyncio.Task[Any] | None = None
@@ -1116,8 +830,8 @@ class CodexSession:
             turn_task = asyncio.create_task(turn_handle.run())
             completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
             if not completed:
-                # Teardown of an already-failed turn: the timeout below is
-                # the reported failure, so interrupt errors add no signal.
+                # Teardown of an already-failed turn: the timeout below is the reported failure, so interrupt errors
+                # add no signal.
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
                 with contextlib.suppress(Exception):
@@ -1131,9 +845,7 @@ class CodexSession:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                # Let the cancellation settle. The turn's own outcome is already
-                # decided, so the task's result is discarded rather than raised;
-                # a cancellation of *this* task still propagates.
+                # Let the cancellation settle.
                 await asyncio.gather(turn_task, return_exceptions=True)
         return normalize_codex_result(sdk_result, self._thread_id)
 
@@ -1155,44 +867,7 @@ async def run_codex_turn(
     component: str = "",
     operation: str = "",
 ) -> CodexSessionResult:
-    """Run one non-interactive Codex turn in a session of its own.
-
-    The one-shot form of :class:`CodexSession`, for callers whose work is a
-    single turn (a specialist dispatch, a one-off review). See that class for
-    the sandbox, approval and ``CODEX_HOME`` contract; the session is started
-    and closed around this turn alone.
-
-    Args:
-        prompt (str): The user prompt for the turn.
-        developer_instructions (str): System-level instructions for the thread.
-        cwd (Path): Working directory for the thread.
-        model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn.
-        writable_roots (Sequence[Path]): Extra roots the session may write.
-        sandbox_mode (str): One of :data:`CODEX_SANDBOX_MODES`.
-        api_key_env (str): Preferred API-key env var name.
-        base_url_env (str): Preferred base-URL env var name.
-        codex_bin (str): Optional Codex runtime path.
-        output_schema (dict[str, Any] | None): JSON schema the final response
-            must match.
-        env (dict[str, str] | None): Values overlaid on ``os.environ``.
-        component (str): Producer label for the turn's calls; ``""`` disables
-            attribution tagging.
-        operation (str): What the turn is being run to do.
-
-    Returns:
-        CodexSessionResult: The normalized turn outcome.
-
-    Raises:
-        CodexSessionUnavailableError: If the SDK is missing, or its gateway
-            config or sandbox mode is unusable.
-        CodexHomeCleanupError: If the private state directory remains busy
-            after bounded retries. ``completed_result`` carries a turn that
-            succeeded before cleanup failed, ``operation_error`` the failure
-            that ended the turn.
-        CodexSessionTimeoutError: If the turn outlived ``timeout_sec``.
-        CodexSessionError: If the SDK failed for any other reason.
-    """
+    """Run one non-interactive Codex turn in a session of its own."""
     session = CodexSession(
         cwd=cwd,
         model=model,

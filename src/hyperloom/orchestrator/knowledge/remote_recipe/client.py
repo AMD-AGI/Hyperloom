@@ -456,17 +456,10 @@ class RemoteRecipeClient:
         files_dir: Path,
         metric: str = "optimized_throughput",
     ) -> RemoteWriteResult:
-        """Write files, replace knowledge, then promote when the score wins.
-
-        ``metric`` names what the score means. An identity whose records are not
-        graded on serving throughput passes its own name so the incumbent is
-        only ever compared against a like-for-like reading.
-        """
+        """Write files, replace knowledge, then promote when the score wins."""
         if not math.isfinite(optimized_throughput):
             raise RemoteRecipeValidationError(f"optimized_throughput must be finite, got {optimized_throughput!r}")
-        # Defense in depth at the final shared-store boundary. Builders sanitize
-        # earlier so their outputs are safe to inspect, but callers can also
-        # construct a KnowledgeBundle directly.
+        # Defense in depth at the final shared-store boundary.
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
         if not has_replay_material({"knowledge": bundle.knowledge}):

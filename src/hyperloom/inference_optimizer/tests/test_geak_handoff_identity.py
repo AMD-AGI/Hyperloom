@@ -89,6 +89,53 @@ def test_env_spec_never_recovers_server_flags_from_unrelated_history(
     assert "--speculative-algorithm" not in json.dumps(spec)
 
 
+@pytest.mark.parametrize("snapshot", ["launch_config", "env_spec"])
+def test_current_best_snapshot_preserves_removal_controls(tmp_path: Path, snapshot: str) -> None:
+    state = _verified_current_best(tmp_path)
+    controls = {
+        "remove_args": ["--speculative-algorithm"],
+        "unset_envs": ["SGLANG_ENABLE_SPECULATIVE"],
+        "args_mode": "replace",
+    }
+    state.current_best.update(controls)
+    writer = _writeback(tmp_path, state)
+
+    config = writer._current_best_launch_config() if snapshot == "launch_config" else writer.build_env_spec()["config"]
+
+    assert {key: config.get(key) for key in controls} == controls
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("remove_args", ["--speculative-algorithm"]),
+        ("unset_envs", ["SGLANG_ENABLE_SPECULATIVE"]),
+        ("args_mode", "replace"),
+    ],
+    ids=["remove_args", "unset_envs", "args_mode"],
+)
+def test_measurement_identity_invalidates_when_removal_control_changes(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    state = _verified_current_best(tmp_path)
+    identity = state.current_best["measurement"]["launch_identity"]
+
+    state.current_best[field] = value
+
+    assert _writeback(tmp_path, state).build_env_spec()["launch_identity"] != identity
+
+
+def test_env_spec_default_removal_controls_preserve_identity(tmp_path: Path) -> None:
+    state = _verified_current_best(tmp_path)
+    writer = _writeback(tmp_path, state)
+    identity = writer.build_env_spec()["launch_identity"]
+    assert identity == "sha256:38897e72bfbf92bc52841c087b0fef16a0a9d3df23700b336d30890b6016c516"
+
+    state.current_best.update(remove_args=[], unset_envs=[], args_mode="append")
+
+    assert writer.build_env_spec()["launch_identity"] == identity
+
+
 def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_path: Path) -> None:
     recipe = tmp_path / "baseline.yaml"
     recipe.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
@@ -187,11 +234,25 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
 
 
+@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
 async def test_handoff_uses_only_matching_current_best_measurement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_removal_controls: bool
 ) -> None:
     state = _verified_current_best(tmp_path)
+    controls = (
+        {
+            "remove_args": ["--speculative-algorithm"],
+            "unset_envs": ["SGLANG_ENABLE_SPECULATIVE"],
+            "args_mode": "replace",
+        }
+        if with_removal_controls
+        else {}
+    )
+    state.current_best.update(controls)
+    state.current_best["measurement"]["launch_identity"] = _writeback(tmp_path, state).build_env_spec()[
+        "launch_identity"
+    ]
     state.model_path = "/models/glm"
     state.gpu_type = "mi355x"
     state.isl = 8192
@@ -218,6 +279,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
     assert handoff["baseline_env_spec"]["launch_identity"] == handoff["same_config_reference_identity"]
+    assert {key: handoff["baseline_env_spec"]["config"].get(key) for key in controls} == controls
 
 
 @pytest.mark.asyncio
@@ -336,12 +398,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
 async def test_handoff_hashes_observed_identity_from_server_args_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ServerArgs line proves observation even without an argv trace.
-
-    The two come from different writers, so a log can carry
-    ``server_args=ServerArgs(...)`` and no ``+ python -m sglang.launch_server``
-    line; the observed identity hash must still be published as proof.
-    """
+    """A ServerArgs line proves observation even without an argv trace."""
     state = _verified_current_best(tmp_path)
     measurement = state.current_best["measurement"]
     measurement["resolved_server_launch_flags"] = ""

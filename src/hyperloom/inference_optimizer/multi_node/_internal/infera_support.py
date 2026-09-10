@@ -1,10 +1,4 @@
-"""Pure helpers for the Infera multi-node backend.
-
-No I/O / no env reads: the CLI feeds in the SaFE GetWorkloadResponse / service
-info and these functions extract worker pod IPs, the frontend service URL, and
-the pod-side launcher argv. Kept pure so the SSH fan-out logic stays
-unit-testable without a live cluster.
-"""
+"""Pure helpers for the Infera multi-node backend."""
 
 from __future__ import annotations
 
@@ -16,26 +10,17 @@ from typing import Any
 from .server_args_safety import prepare_shell_safe_extra_args
 from .ssh_client import DEFAULT_SSH_PORT
 
-# Frontend HTTP port (SaFE common.InferaFrontendPort). Benchmarks target this
-# OpenAI-compatible endpoint, never sglang rank-0 :8888.
+# Frontend HTTP port (SaFE common.InferaFrontendPort).
 INFERA_FRONTEND_PORT = 8000
 
-# SSH control plane: hostNetwork pods on the same node share one IP, so each
-# GPU role binds a distinct MN_SSH_PORT (decode offset by ROLE_STRIDE). Within
-# a role, LWS ordinals add to the role base via LWS_WORKER_INDEX pod-side.
+# SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
+# (decode offset by ROLE_STRIDE).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
 _INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
 
 
 def ssh_role_port_offset(role: str) -> int:
-    """Return the SSH port offset for a GPU service role.
-
-    Args:
-        role: Service role (``worker`` / ``prefill`` / ``decode``).
-
-    Returns:
-        int: ``0`` for worker/prefill; ``INFERA_SSH_PORT_ROLE_STRIDE`` for decode.
-    """
+    """Return the SSH port offset for a GPU service role."""
     if (role or "").lower() == "decode":
         return INFERA_SSH_PORT_ROLE_STRIDE
     return 0
@@ -47,35 +32,13 @@ def ssh_port_for_pod(
     *,
     ssh_port_base: int = DEFAULT_SSH_PORT,
 ) -> int:
-    """Compute the sshd port a pod listens on.
-
-    Args:
-        role: Classified service role.
-        lws_index: LWS worker ordinal (leader = 0), or ``None``.
-        ssh_port_base: Base port; the platform sets ``MN_SSH_PORT`` per pod,
-            this default only applies when it does not.
-
-    Returns:
-        int: ``ssh_port_base + role_offset + lws_index``.
-    """
+    """Compute the sshd port a pod listens on."""
     idx = lws_index if isinstance(lws_index, int) else 0
     return int(ssh_port_base) + ssh_role_port_offset(role) + idx
 
 
 def idle_worker_entrypoint(*, role: str, ssh_port_base: int = DEFAULT_SSH_PORT) -> str:
-    """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``.
-
-    The port is ``role_base + LWS_WORKER_INDEX`` so multi-node LWS groups on
-    different nodes can reuse the same role base while co-located roles (e.g.
-    prefill + decode on one node under hostNetwork) bind distinct ports.
-
-    Args:
-        role: GPU service role (``worker`` / ``prefill`` / ``decode``).
-        ssh_port_base: Base SSH port written into ``MN_SSH_PORT``.
-
-    Returns:
-        str: Shell command executed as the pod entryPoint (before base64).
-    """
+    """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``."""
     role_base = int(ssh_port_base) + ssh_role_port_offset(role)
     return f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); exec {_INFERA_IDLE_SCRIPT}"
 
@@ -135,23 +98,7 @@ INFERA_BOOTSTRAP_PORT = 30001
 
 
 def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = INFERA_BOOTSTRAP_PORT) -> str:
-    """sglang PD disaggregation flags for a prefill/decode group.
-
-    Mirrors the SaFE dispatcher's ``sglangDisaggFlags`` so the SSH-launched
-    server matches the native deploy path. ``infera.sglang`` parses these via
-    argparse (it does NOT read SGLANG_DISAGGREGATION_* env), so they must be on
-    the command line.
-
-    Args:
-        mode: Disaggregation mode (``"prefill"`` or ``"decode"``); any other
-            value yields an empty string.
-        kv_transfer_backend: Optional KV transfer backend name.
-        bootstrap_port: sglang PD bootstrap rendezvous port.
-
-    Returns:
-        The space-joined sglang PD disaggregation flags, or ``""`` when
-        ``mode`` is neither prefill nor decode.
-    """
+    """sglang PD disaggregation flags for a prefill/decode group."""
     m = (mode or "").strip().lower()
     if m not in ("prefill", "decode"):
         return ""
@@ -180,31 +127,7 @@ def build_node_launch_args(
     disagg_mode: str = "",
     kv_transfer_backend: str = "",
 ) -> str:
-    """Build the argv string for launch_infera_node.py (shipped over SSH).
-
-    The same string is sent to every pod in a group; each pod self-determines
-    its node-rank from ``$LWS_WORKER_INDEX`` pod-side. ``disagg_mode``
-    (prefill/decode) folds the sglang PD flags into the launched command.
-
-    Args:
-        framework: Framework name (``"sglang"`` or ``"vllm"``).
-        model: Model path passed to the launcher.
-        tp: Tensor-parallel size.
-        nnodes: Number of nodes in the group.
-        ep: Expert-parallel size (only emitted when > 1).
-        dist_init_port: torch.distributed rendezvous port.
-        pid_file: Pod-side server pid file path.
-        log_file: Pod-side server log file path.
-        extra_args: Extra args string folded into ``--extra-args``.
-        health_port: Leader local readiness probe port.
-        health_wait_sec: Seconds to wait for local ``/health`` (0 = skip).
-        kill_only: When ``True``, build a kill-only argv that frees the GPU.
-        disagg_mode: PD disaggregation mode folded into ``extra_args``.
-        kv_transfer_backend: KV transfer backend for PD disaggregation.
-
-    Returns:
-        The shell-quoted argv string for ``launch_infera_node.py``.
-    """
+    """Build the argv string for launch_infera_node.py (shipped over SSH)."""
     parts = ["--framework", framework]
     if kill_only:
         parts.append("--kill-only")

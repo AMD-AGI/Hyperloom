@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,20 +62,7 @@ def _legacy_string_accepted_kernels(result: dict[str, Any]) -> list[str]:
 
 
 def _journey_paths(result: dict[str, Any]) -> list[Path]:
-    """Every ``kernel_journey.json`` belonging to a GEAK session, pointer first.
-
-    ``result.json`` is the *last* e2e cycle's return, so ``kernel_journey_path``
-    (or ``eval_dir``) names that cycle alone. A run that accepts kernels in cycle
-    0 and then opens a cycle 1 that accepts none leaves the pointer aimed at an
-    empty journey. Enumerate the sibling cycles so attribution survives.
-
-    Args:
-        result (dict[str, Any]): The normalized ``result.json``.
-
-    Returns:
-        list[Path]: Existing journey files. The pointer cycle is first so it wins
-            on any de-duplication; siblings follow in cycle order.
-    """
+    """Every ``kernel_journey.json`` belonging to a GEAK session, pointer first."""
     kj_path = str(result.get("kernel_journey_path") or "")
     if not kj_path:
         eval_dir = str(result.get("eval_dir") or "")
@@ -99,18 +81,7 @@ def _journey_paths(result: dict[str, Any]) -> list[Path]:
 
 
 def _geak_cand_tag_test() -> Any:
-    """Return the one test for "this id is a slot tag, not a kernel symbol".
-
-    The ledger
-    (:func:`~hyperloom.orchestrator.loop.coordinator_helpers.geak_is_cand_tag`)
-    owns the definition so the collector and the ledger cannot disagree about
-    which half of a twin is the kernel. Collectors also run offline against a
-    tarball with no orchestrator package importable; that case repeats the
-    pattern rather than giving up and keeping an arbitrary id.
-
-    Returns:
-        Any: A callable taking one id and returning True for the slot-tag form.
-    """
+    """Return the one test for \"this id is a slot tag, not a kernel symbol\"."""
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import geak_is_cand_tag
     except Exception:  # pragma: no cover - offline replay without orchestrator
@@ -126,26 +97,7 @@ def _geak_cand_tag_test() -> Any:
 
 
 def _kind_source_counts(rows: list[Any]) -> dict[str, int]:
-    """Count how each admitted kernel got its ``kind``.
-
-    Without this the report shows a kernel count and nothing else, and a reader
-    cannot tell "7 kernels GEAK declared authored" from "7 rows nobody
-    classified". A backfilled row's kind is recovered by a name join, and the
-    join does not always land; the miss has to be countable or it is silent.
-
-    The ``result`` path does not join, so its rows carry no ``kind_source``.
-    They are still classified here rather than left uncounted: measured over the
-    recorded campaign, 3 of 4 rows on that path declare no ``kind`` at all, so
-    treating the path as "always declared" would empty the counter exactly where
-    a reader needs it. Every admitted row is counted on every path.
-
-    Args:
-        rows (list[Any]): The admitted accepted-kernel descriptors.
-
-    Returns:
-        dict[str, int]: ``kind_source`` value to row count. One entry per
-        admitted row, so the values sum to ``len(rows)``.
-    """
+    """Count how each admitted kernel got its ``kind``."""
     kind_of = _geak_kind_reader()
     counts: dict[str, int] = {}
     for row in rows:
@@ -158,12 +110,7 @@ def _kind_source_counts(rows: list[Any]) -> dict[str, int]:
 
 
 def _geak_kind_reader() -> Any:
-    """Return the canonical ``kind`` reader, with an offline fallback.
-
-    Returns:
-        Any: A callable taking one acceptance spec and returning its declared
-        ``kind``, or ``None`` when it declares none.
-    """
+    """Return the canonical ``kind`` reader, with an offline fallback."""
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import geak_spec_kind
 
@@ -185,36 +132,7 @@ def _geak_kind_index(
     result: dict[str, Any],
     stack: Any = None,
 ) -> dict[str, tuple[str | None, str]]:
-    """Map every acceptance name GEAK declared to its ``kind``, and to its source.
-
-    Two artifacts declare a kind, in the same two lanes and the same spelling:
-    ``result.json``, and the ``action == "geak_e2e"`` entries of
-    ``state.optimization_stack``, which the KERNEL phase copies from the result
-    of *that* cycle.
-
-    Reading only the first loses runs. ``result.json`` is rewritten per cycle
-    and the last write wins, so a later cycle that accepts nothing blanks the
-    lanes an earlier cycle declared. The stack entry is append-only and keeps
-    them. On ``Qwen3-14B-FP8/20260816T050457Z`` the flushed ``result.json``
-    names 0 lanes while the run accepted three rows, so reading it alone leaves
-    every recovered row ``kind_source: absent`` and the exclusion cannot run on
-    them at all. (That ``state.json`` is mode 600 and was not read here; the
-    stack is trusted because the KERNEL phase writes both lanes into the entry
-    verbatim, not because this run's copy was inspected.)
-
-    Args:
-        result (dict[str, Any]): The normalized ``result.json``.
-        stack (Any): ``state["optimization_stack"]``, if available. Non-list
-            values and non-``geak_e2e`` entries are ignored.
-
-    Returns:
-        dict[str, tuple[str | None, str]]: Name to ``(kind, origin)``, where
-        ``origin`` is ``"result_json"`` or ``"stack"``. A ``kind`` of ``None``
-        means the lane exists but declared no kind. A declared kind always
-        beats an undeclared one; between two declarations the earlier artifact
-        (``result.json``) wins, so adding the stack can never change a kind the
-        run itself published.
-    """
+    """Map every acceptance name GEAK declared to its ``kind``, and to its source."""
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import (
             _geak_spec_name,
@@ -266,39 +184,7 @@ def _stamp_journey_kind(
     result: dict[str, Any],
     stack: Any = None,
 ) -> list[dict[str, Any]]:
-    """Stamp each backfilled row with a ``kind`` and say where it came from.
-
-    A journey row carries no ``kind`` field — measured over
-    ``/shared_nfs/hyperloom-claw``, 0 of 36 accepted journey rows have one. So
-    the collector could not run the ``kind == "env"`` exclusion that
-    :func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_accepted_kernel_specs`
-    runs, and the same PR would have shipped two different admission tests: the
-    ledger dropping library selections, the collector counting them as authored
-    kernels.
-
-    ``kind`` is recovered by joining the row's symbol to the same run's
-    ``result.json`` lane, which does declare it. That join only became reliable
-    once :func:`_collapse_journey_aliases` started keeping the resolved symbol
-    rather than the slot tag — the two changes are one fix in two places.
-
-    Where no lane names the row, the kind is genuinely unknown. Unknown is
-    recorded as unknown and the row is admitted: guessing "authored" would
-    inflate the kernel bucket with library picks, and guessing "env" would
-    delete real kernels from dead runs, which is the loss this collector exists
-    to recover. ``kind_source`` makes the residual countable instead of silent.
-
-    Args:
-        rows (list[dict[str, Any]]): Collapsed accepted-kernel descriptors.
-        result (dict[str, Any]): The normalized ``result.json`` for the run.
-        stack (Any): ``state["optimization_stack"]``, the second place a kind
-            is declared. See :func:`_geak_kind_index`.
-
-    Returns:
-        list[dict[str, Any]]: The same rows, each with ``kind`` and
-        ``kind_source``, and with known-env rows removed. ``kind_source`` names
-        the artifact that supplied the kind (``result_json`` or ``stack``, each
-        with an ``_undeclared`` form) or ``absent`` when neither did.
-    """
+    """Stamp each backfilled row with a ``kind`` and say where it came from."""
     index = _geak_kind_index(result, stack)
     kept: list[dict[str, Any]] = []
     for row in rows:
@@ -313,8 +199,7 @@ def _stamp_journey_kind(
                 break
         row["kind"] = kind
         row["kind_source"] = source
-        # One admission test, shared with the ledger: exclude only what is
-        # *known* to be an env selection.
+        # One admission test, shared with the ledger: exclude only what is *known* to be an env selection.
         if kind == "env":
             continue
         kept.append(row)
@@ -322,22 +207,7 @@ def _stamp_journey_kind(
 
 
 def _journey_row_symbol(row: dict[str, Any]) -> str:
-    """Return the kernel symbol a journey row carries.
-
-    ``kernel_id`` is a slug: GEAK strips the leading underscore when it builds
-    one, so the row for ``_mxfp8_linear_kernel`` has
-    ``kernel_id="mxfp8_linear_kernel"``. ``name`` keeps the symbol as written.
-    Measured over ``/shared_nfs/hyperloom-claw``, joining on ``kernel_id``
-    misses every underscore-prefixed kernel while joining on ``name`` matches
-    the ``result.json`` lane exactly, so ``name`` is the id and ``kernel_id``
-    is the fallback.
-
-    Args:
-        row (dict[str, Any]): One accepted-kernel descriptor.
-
-    Returns:
-        str: The symbol, or ``""`` when the row carries neither field.
-    """
+    """Return the kernel symbol a journey row carries."""
     return str(row.get("name") or row.get("kernel_id") or "").strip()
 
 
@@ -355,45 +225,7 @@ def _is_alias_twin_group(group: list[dict[str, Any]], is_cand_tag: Any) -> bool:
 
 
 def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse the twin rows GEAK writes for one accepted kernel.
-
-    When the profiler resolves a dispatched candidate to a library symbol, the
-    journey records the acceptance twice: once under the candidate id, carrying
-    the measurement (``gpu_pct``), and once under the resolved symbol with
-    ``gpu_pct: null``. Both rows repeat the same ``e2e_gain_pct``, so counting
-    them separately doubles the kernel.
-
-    Rows are grouped by gain (rounded — the twin is sometimes the rounded copy).
-    A group holding both a measured and an unmeasured row is one kernel: the
-    measured row survives and the other ids move to its ``aliases``. Groups
-    that are all-measured or all-unmeasured are distinct kernels and are left
-    alone, so a run that genuinely accepts two kernels of equal gain keeps both.
-
-    Which row survives and which id it is named by are two separate questions,
-    and answering them as one was a bug. The measurement only exists on the
-    candidate row, so that row survives. The *name* has to be the resolved
-    symbol, because that is the id
-    :func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_accepted_kernel_specs`
-    keeps for the same kernel — before this, ``collect_geak`` reported
-    ``c0_triton`` while ``kernel_lifecycle.adopted`` reported
-    ``dsa_sparse_attn_prefill_main_kernel``, one kernel under two names in two
-    tables of the same report.
-
-    The symbol is taken from the *unmeasured* twin, which is what the paragraph
-    above defines it to be — not from "whichever id does not look like a slot
-    tag". Both rules agree on ``c0_triton`` / ``dsa_sparse_attn_prefill_main_kernel``,
-    and they disagree on ``decode_attention_grouped_mla`` /
-    ``_fwd_grouped_kernel_stage1 (+_fwd_kernel_stage2)``, where neither id is a
-    slot tag and only the second is what ``result.json`` names. Checked against
-    all 10 twin groups in ``/shared_nfs/hyperloom-claw``: taking the unmeasured
-    twin's symbol reproduces the ledger's name in every group that has one.
-
-    Args:
-        accepted (list[dict[str, Any]]): Accepted-kernel descriptors, in order.
-
-    Returns:
-        list[dict[str, Any]]: The descriptors with alias twins folded in.
-    """
+    """Collapse the twin rows GEAK writes for one accepted kernel."""
     is_cand_tag = _geak_cand_tag_test()
 
     groups: dict[Any, list[dict[str, Any]]] = {}
@@ -417,9 +249,7 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
         unmeasured = [r for r in group if r.get("gpu_pct") is None]
         primary = measured[0]
 
-        # The unmeasured twin is the resolved symbol, by construction. When
-        # several are unmeasured, prefer one that is not a slot tag; fall back
-        # to the primary's own id so a group of slot tags still gets a name.
+        # The unmeasured twin is the resolved symbol, by construction.
         candidates = [_journey_row_symbol(r) for r in unmeasured]
         candidates = [c for c in candidates if c]
         symbols = [c for c in candidates if not is_cand_tag(c)]
@@ -448,25 +278,7 @@ def _geak_accepted_kernels_from_journey(
     warnings: list[str],
     stack: Any = None,
 ) -> list[dict[str, Any]]:
-    """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
-
-    Projects each kernel whose ``e2e`` sub-object was integrated (or decided
-    ``KEEP``/``ADOPTED``) into a compact accepted-kernel descriptor. Used to
-    back-fill an empty ``accepted_kernels`` in ``result.json``. Best-effort: a
-    missing/partial file yields ``[]`` and never raises.
-
-    Args:
-        result (dict[str, Any]): The normalized ``result.json`` (carries
-            ``kernel_journey_path`` / ``eval_dir`` used to locate the journey).
-        warnings (list[str]): Shared warnings list (mutated in place).
-        stack (Any): ``state["optimization_stack"]``, forwarded to
-            :func:`_stamp_journey_kind` so the ``env`` exclusion can still run
-            when ``result.json`` was rewritten empty by a later cycle.
-
-    Returns:
-        list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when the
-            journey is absent, unreadable, or holds no integrated kernel.
-    """
+    """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``."""
     journey_paths = _journey_paths(result)
     if not journey_paths:
         return []
@@ -533,26 +345,7 @@ def _geak_accepted_kernels_from_integrate_results(
     exp_root: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Derive the accepted kernels from the per-candidate ``integrate_result.json``.
-
-    ``kernel_journey.json`` is written once, at the end of the run, so a run
-    that was killed never has one. Each candidate's ``integrate_result.json``
-    is written as that candidate finishes, so it survives the kill. Both files
-    record the same event; only the second one is on disk after a crash.
-
-    Admission is the same test the journey backfill applies: ``gate ==
-    "accepted"`` and a positive same-config ``e2e_delta_pct``. That delta is
-    GEAK's own A/B, not an orchestrator rebench, so every row here is
-    ``validated: False``.
-
-    Args:
-        exp_root (Path): The e2e experiment root holding ``overlay/``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when
-            no candidate qualifies. Never raises.
-    """
+    """Derive the accepted kernels from the per-candidate ``integrate_result.json``."""
     overlay_root = exp_root / "overlay"
     try:
         if not overlay_root.is_dir():
@@ -583,9 +376,8 @@ def _geak_accepted_kernels_from_integrate_results(
         delta = _to_float(ir.get("e2e_delta_pct"))
         if delta is None or delta <= 0.0:
             continue
-        # The same acceptance is filed under both spellings — the candidate
-        # directory tag and the kernel's own short name. Keying on the short
-        # name, when there is one, collapses that alias twin into one row.
+        # The same acceptance is filed under both spellings — the candidate directory tag and the kernel's own short
+        # name.
         kid = str(ir.get("short_name") or "").strip() or cand.name
         if kid in seen:
             continue
@@ -598,8 +390,7 @@ def _geak_accepted_kernels_from_integrate_results(
                 "gpu_pct": _to_float(ir.get("pct_gpu_time")),
                 "micro_speedup": _to_float(ir.get("isolated_speedup")),
                 "e2e_gain_pct": delta,
-                # GEAK's own same-config A/B, with no orchestrator rebench
-                # behind it. Never present this as a validated e2e gain.
+                # GEAK's own same-config A/B, with no orchestrator rebench behind it.
                 "validated": False,
                 "decision": "KEEP",
                 "backend": "",
@@ -614,33 +405,40 @@ def _geak_accepted_kernels_from_integrate_results(
     return accepted
 
 
+def _handoff_gpu_fields(handoff: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Pull the device set + absolute GPU pin out of a handoff, if it has them.
+
+    A GEAK baseline that reads ``no_gain``/``incomplete`` because its servers
+    landed on a foreign tenant's card is otherwise indistinguishable from a
+    real result, so the breakdown records what the handoff told GEAK about the
+    run's cards (issue #1312).
+
+    Keys are inserted only when present, mirroring the writer's ``if gpu_pin:``
+    guard. An explicit ``null`` would conflate three different things: a
+    genuinely unpinned run, a pin that resolved empty, and a pre-v3 handoff on
+    disk (still produced by any session resumed from before this change).
+
+    Args:
+        handoff: The parsed ``geak/handoff.json``, or ``None``.
+
+    Returns:
+        A mapping with ``gpu_ids`` / ``gpu_ids_space`` / ``gpu_pin`` for
+        whichever keys the handoff carries; ``{}`` when it carries none.
+    """
+    out: dict[str, Any] = {}
+    for key in ("gpu_ids", "gpu_ids_space", "gpu_pin"):
+        val = (handoff or {}).get(key)
+        if val is not None:
+            out[key] = val
+    return out
+
+
 def _geak_reconstruct_from_disk(
     session_dir: Path,
     warnings: list[str],
     stack: Any = None,
 ) -> dict[str, Any] | None:
-    """Best-effort reconstruction of a GEAK run from on-disk survivors.
-
-    Scans the runner's working tree under ``<session>/geak/`` to recover what
-    actually ran when ``state.geak_result`` is empty/missing: the handoff, the
-    e2e ``exp_root`` and the stages it reached (baseline / kernels / opbench /
-    strategy), any flushed-but-unpromoted ``result.json`` status, and the
-    per-kernel ``kernel_journey`` accepted kernels.
-
-    Returns ``None`` when nothing usable is on disk (caller keeps the legacy
-    ``missing`` section). Never raises — failures append to ``warnings``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place).
-        stack (Any): ``state["optimization_stack"]``. The reconstruction runs
-            because ``state.geak_result`` is empty, but the stack can still
-            hold the ``geak_e2e`` entry an earlier cycle appended, so it is
-            often the only surviving declaration of a recovered row's kind.
-
-    Returns:
-        dict[str, Any] | None: The recovered evidence, or ``None``.
-    """
+    """Best-effort reconstruction of a GEAK run from on-disk survivors."""
     pf = session_dir / "geak"
     try:
         if not pf.is_dir():
@@ -671,6 +469,7 @@ def _geak_reconstruct_from_disk(
             "workload": handoff.get("workload"),
             "accepted_flags": handoff.get("accepted_flags"),
             "raw_baseline_tput": _to_float(handoff.get("raw_baseline_tput")),
+            **_handoff_gpu_fields(handoff),
         }
 
     # 2) a flushed-but-unpromoted result.json (absent or non-ok status).
@@ -719,22 +518,15 @@ def _geak_reconstruct_from_disk(
             warnings.append(f"geak: reconstruct kernels scan failed: {exc}")
     recon["kernels_attempted"] = kernels_attempted
 
-    # 4) per-kernel accepted kernels from the journey (reuse the projection so
-    #    the recovered section's shape matches the producer-populated one).
-    #    The journey is written last, so a killed run never has one; fall back
-    #    to the per-candidate ``integrate_result.json``, written as each
-    #    candidate finishes. Absence of both stays an empty list — a dead run
-    #    with no accepted candidate must not be given one.
+    # 4) per-kernel accepted kernels from the journey (reuse the projection so the recovered section's shape matches
+    # the producer-populated one).
     if exp_root is not None:
         kj = exp_root / "kernel_journey.json"
         source = ""
         try:
             if kj.is_file():
-                # ``flushed`` is passed for its acceptance lanes, not its
-                # status: a killed run often flushed a partial ``result.json``,
-                # and that is the only thing on disk that declares a ``kind``.
-                # When it is absent every recovered row is marked
-                # ``kind_source: absent`` rather than assumed authored.
+                # ``flushed`` is passed for its acceptance lanes, not its status: a killed run often flushed a partial
+                # ``result.json``, and that is the only thing on disk that declares a ``kind``.
                 recon["accepted_kernels"] = _geak_accepted_kernels_from_journey(
                     {
                         "kernel_journey_path": str(kj),
@@ -762,8 +554,7 @@ def _geak_reconstruct_from_disk(
         if source:
             recon["accepted_kernels_source"] = source
 
-    # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
-    #    to a handful of key paths to avoid a full rglob of the exp_root tree.
+    # 5) newest-artifact timestamp (how far the run got in wall-clock).
     candidates = [pf / "handoff.json", pf / "result.json"]
     if exp_root is not None:
         candidates += [
@@ -782,10 +573,8 @@ def _geak_reconstruct_from_disk(
     if newest > 0:
         recon["last_artifact_ts"] = datetime.fromtimestamp(newest, tz=timezone.utc).isoformat()
 
-    # 6) op-bench verdicts — each per-kernel ``opbench_result.json`` records
-    #    whether the backend bake-off found a deployable winner
-    #    (``winner_editable`` + ``isolated_speedup`` > 1). Bounded to the
-    #    top-level per-task files (the deep ``_exp`` tree is skipped).
+    # 6) op-bench verdicts — each per-kernel ``opbench_result.json`` records whether the backend bake-off found a
+    # deployable winner (``winner_editable`` + ``isolated_speedup`` > 1).
     opbench_results: list[dict[str, Any]] = []
     if exp_root is not None:
         try:
@@ -811,9 +600,8 @@ def _geak_reconstruct_from_disk(
     if opbench_results:
         recon["opbench_results"] = opbench_results
 
-    # 7) runner log tails — run_e2e stdout/stderr survivors under
-    #    ``exp_root/logs/``, the recoverable proxy for how far / why the run
-    #    got. Bounded to the newest handful, tail-only.
+    # 7) runner log tails — run_e2e stdout/stderr survivors under ``exp_root/logs/``, the recoverable proxy for how
+    # far / why the run got.
     log_tails: dict[str, str] = {}
     if exp_root is not None:
         logs_dir = exp_root / "logs"
@@ -836,15 +624,12 @@ def _geak_reconstruct_from_disk(
     if log_tails:
         recon["runner_log_tails"] = log_tails
 
-    # 8) likely_cause — a conservative classification of WHY no result reached
-    #    state, so a reader does not have to re-derive it from the raw survivors:
-    #      * ``runner_reported_failure``  — a non-ok result.json was flushed.
-    #      * ``ran_no_deployable_winner`` — op-bench ran but found no editable
-    #        winner > 1.0x, so there was simply nothing to flush as a win.
-    #      * ``killed_before_flush``      — stages were reached but neither a
-    #        kernel_journey nor a result.json landed (the in-flight result died
-    #        with the process — the incident pattern: SIGKILL / budget / hang).
-    #      * ``indeterminate``            — not enough on-disk signal to classify.
+    # 8) likely_cause — a conservative classification of WHY no result reached state, so a reader does not have to
+    # re-derive it from the raw survivors: * ``runner_reported_failure`` — a non-ok result.json was flushed. *
+    # ``ran_no_deployable_winner`` — op-bench ran but found no editable winner > 1.0x, so there was simply nothing to
+    # flush as a win. * ``killed_before_flush`` — stages were reached but neither a kernel_journey nor a result.json
+    # landed (the in-flight result died with the process — the incident pattern: SIGKILL / budget / hang). *
+    # ``indeterminate`` — not enough on-disk signal to classify.
     has_journey = "kernel_journey" in stages
     ran_opbench = "opbench" in stages or bool(opbench_results)
     any_deployable = any((r.get("isolated_speedup") or 0.0) > 1.0 and r.get("winner_editable") for r in opbench_results)
@@ -870,34 +655,18 @@ def collect_geak(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the GEAK/GEAK e2e KERNEL-phase section.
-
-    Maps ``state.geak_result`` (the normalized ``result.json`` plus runner
-    metadata) into the session-breakdown data contract: what the optimizer did
-    (per-kernel / per-head), the accepted config, the validated regimes, the
-    gain attribution, and — on a miss — the normalized failure reason.
-
-    Returns an empty ``{}`` when GEAK was never engaged.
-
-    Args:
-        session_dir (Path): Absolute session root (used to relativize paths).
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The GEAK section, or ``{}`` when not engaged.
-    """
+    """Collect the GEAK/GEAK e2e KERNEL-phase section."""
     optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
     result = state.get("geak_result")
-    # An empty ``geak_result`` dict must NOT count as engaged; engage only when
-    # the optimizer flag selected geak or a non-empty result was recorded.
+    # An empty ``geak_result`` dict must NOT count as engaged; engage only when the optimizer flag selected geak or a
+    # non-empty result was recorded.
     has_result = isinstance(result, dict) and bool(result)
     engaged = optimizer == "geak" or has_result
     if not engaged:
         return {}
     if not has_result:
-        # Engaged via the flag but no result recorded; reconstruct from the
-        # on-disk ``geak/`` working tree before surfacing ``missing``.
+        # Engaged via the flag but no result recorded; reconstruct from the on-disk ``geak/`` working tree before
+        # surfacing ``missing``.
         recon = _geak_reconstruct_from_disk(session_dir, warnings, state.get("optimization_stack"))
         if recon is None:
             return {
@@ -933,8 +702,7 @@ def collect_geak(
             "flushed_result_status": recon.get("flushed_result_status"),
             "last_artifact_ts": recon.get("last_artifact_ts"),
             "accepted_kernels": recovered_kernels,
-            # Which survivor the recovery actually read. A crashed run has no
-            # journey, so this is usually ``integrate_result_backfill``.
+            # Which survivor the recovery actually read.
             "accepted_kernels_source": (
                 str(recon.get("accepted_kernels_source") or "") or None if recovered_kernels else None
             ),
@@ -980,9 +748,8 @@ def collect_geak(
         "accepted_heads": accepted_heads,
     }
 
-    # Normalize the direct result path through the same admission rules as the
-    # orchestrator ledger: both lanes, env selections excluded, alias twins
-    # collapsed. Journey backfill runs only when this yields nothing.
+    # Normalize the direct result path through the same admission rules as the orchestrator ledger: both lanes, env
+    # selections excluded, alias twins collapsed.
     accepted_kernels_source: str | None = None
     specs = _geak_result_kernel_specs(normalized_result)
     if specs:
@@ -1003,16 +770,35 @@ def collect_geak(
         else:
             accepted_kernels = []
 
+    # The cards GEAK was told to use. Read from the handoff on disk rather than
+    # from ``geak_result``, which never carried them — and recorded on THIS
+    # path, not just the crash-recovery one, because the outcome that needs
+    # disambiguating (`no_gain`) is a completed run.
+    # An absent handoff is the normal shape for a run that never reached the
+    # handoff write (and for every pre-v3 session on disk), so it must not cost
+    # a stat+read or raise a warning — only a handoff that EXISTS and cannot be
+    # parsed is worth reporting.
+    _handoff_path = session_dir / "geak" / "handoff.json"
+    _gpu_fields: dict[str, Any] = {}
+    if _handoff_path.is_file():
+        _gpu_fields = _handoff_gpu_fields(
+            read_json(
+                _handoff_path,
+                default={},
+                require_dict=True,
+                on_error=lambda exc: warnings.append(f"geak: handoff read failed: {exc}"),
+            )
+        )
+
     section: dict[str, Any] = {
         "engaged": True,
         "status": status,
+        **_gpu_fields,
         # Failure provenance (None on success).
         "error_class": result.get("error_class"),
         "error": result.get("error"),
         "returncode": result.get("returncode"),
-        # Same-harness adjudication is terminal state, not pending work.  Keep
-        # it with the GEAK result so clearing ``state.geak_pending`` does not
-        # erase why a measured candidate was dropped.
+        # Same-harness adjudication is terminal state, not pending work.
         "revalidation_status": result.get("revalidation_status"),
         "revalidation_error_class": result.get("revalidation_error_class"),
         "revalidation_error": result.get("revalidation_error"),
@@ -1029,11 +815,9 @@ def collect_geak(
         "output_parity": result.get("output_parity"),
         # What the optimizer actually changed (per-kernel / head / config).
         "accepted_kernels": accepted_kernels,
-        # Provenance of ``accepted_kernels``: ``result``,
-        # ``kernel_journey_backfill``, or ``None``.
+        # Provenance of ``accepted_kernels``: ``result``, ``kernel_journey_backfill``, or ``None``.
         "accepted_kernels_source": accepted_kernels_source,
-        # How each admitted kernel's ``kind`` was resolved. Values sum to
-        # ``kernels_optimized`` on every path.
+        # How each admitted kernel's ``kind`` was resolved.
         "accepted_kernels_kind_sources": _kind_source_counts(accepted_kernels),
         "accepted_heads": accepted_heads,
         "kernels_optimized": len(accepted_kernels),

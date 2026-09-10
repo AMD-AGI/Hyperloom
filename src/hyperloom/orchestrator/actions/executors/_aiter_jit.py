@@ -1,30 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared aiter build-cache helpers and stale-lock cleanup.
-
-aiter has two independent runtime build trees:
-
-* ``AITER_JIT_DIR`` / ``aiter/jit/build`` for ``compile_ops`` modules.
-* ``AITER_ROOT_DIR/build`` (normally ``~/.aiter/build``) for ``cpp_itfs``
-  template modules such as paged attention.
-
-Both use zero-byte ``FileBaton`` locks with no owner pid and an unbounded
-``wait()``. A build killed mid-compile therefore blocks every later process
-that needs the same module.
-
-This module resolves and sweeps both trees. Upstream lock files do not encode an
-owner pid, so shared-cache locks are removed only after the conservative age
-threshold and only when no compiler is alive. Forge-owned private caches carry
-separate owner metadata and are cleaned by KernelForge. Build artifacts are
-never deleted.
-"""
+"""Shared aiter build-cache helpers and stale-lock cleanup."""
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -37,8 +22,7 @@ COLD_START_KERNEL_THRESHOLD = 20
 # COLD-start benchmark cap, including first-time compilation and graph capture.
 BASELINE_COLD_START_TIMEOUT_SEC = 9000
 
-# Fallback probe paths for aiter's JIT cache dir; first existing wins. Override
-# via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
+# Fallback probe paths for aiter's JIT cache dir; first existing wins.
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
@@ -50,17 +34,14 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
-# Fallback locations for cpp_itfs template builds. ``AITER_ROOT_DIR`` and the
-# current HOME are resolved dynamically before these paths.
+# Fallback locations for cpp_itfs template builds.
 AITER_CPP_BUILD_PROBE_PATHS: tuple[str, ...] = ("/root/.aiter/build",)
 
-# Mtime gate (minutes) for the lock sweep. Applied on every path, including the
-# no-live-compiler one: a fresh lock's owner cannot be identified.
+# Mtime gate (minutes) for the lock sweep.
 AITER_LOCK_STALE_MINUTES = 5
 
-# Process names that indicate an in-flight aiter/ninja compile. hipcc is a
-# wrapper whose ``name`` can surface as ``perl``/``sh``, so we also match on
-# the cmdline's first token (see ``_any_live_compiler``).
+# Process names that indicate an in-flight aiter/ninja compile. hipcc is a wrapper whose ``name`` can surface as
+# ``perl``/``sh``, so we also match on the cmdline's first token (see ``_any_live_compiler``).
 COMPILER_PROCESS_NAMES = frozenset(
     {
         "hipcc",
@@ -80,15 +61,7 @@ _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"
 
 
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
-    """Locate aiter's ``jit/`` dir via Python's import machinery.
-
-    ``jit`` is preferred over ``jit/build``. Returns an ordered candidate list;
-    empty if aiter not found.
-
-    Returns:
-        An ordered list of candidate aiter ``jit/`` directory paths, or an
-        empty list when aiter cannot be located.
-    """
+    """Locate aiter's ``jit/`` dir via Python's import machinery."""
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
@@ -152,18 +125,7 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
 def _any_live_compiler(
     build_dirs: list[Path] | None = None,
 ) -> bool | None:
-    """Return True if a compiler associated with the build trees is alive.
-
-    Used to decide whether an aiter JIT lock is dead (orphaned by a killed
-    build) or held by a legitimate in-flight compile. When ``build_dirs`` is
-    provided, a compiler counts only when its cwd or command line references
-    one of those trees. This prevents an unrelated long-running ``hipcc`` on the
-    same node from disabling cleanup forever.
-
-    Returns ``None`` when process enumeration itself fails (psutil missing or
-    erroring) — callers MUST treat ``None`` as "unknown" and refuse to delete
-    on the proven-dead fast path.
-    """
+    """Return True if a compiler associated with the build trees is alive."""
     try:
         import psutil
     except ImportError:
@@ -200,11 +162,7 @@ def _any_live_compiler(
 
 
 def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None = None) -> list[Path]:
-    """Return existing candidate directories once, preserving priority.
-
-    Candidates that cannot be stat'ed are collected into ``unreadable`` so the
-    caller can report them; skipping them silently hides a whole build tree.
-    """
+    """Return existing candidate directories once, preserving priority."""
     resolved: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -219,8 +177,8 @@ def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None =
             if not normalized.is_dir():
                 continue
         except OSError as exc:
-            # is_dir() re-raises EACCES (not in pathlib's ignored errnos), so a
-            # fallback under an unreadable root is skipped rather than fatal.
+            # is_dir() re-raises EACCES (not in pathlib's ignored errnos), so a fallback under an unreadable root is
+            # skipped rather than fatal.
             log.warning("aiter lock sweep: cannot inspect %s (%s); skipping", key, exc)
             if unreadable is not None:
                 unreadable.append(key)
@@ -231,13 +189,7 @@ def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None =
 
 
 def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] | None = None) -> list[Path]:
-    """Resolve every active aiter build tree that may contain baton locks.
-
-    An explicit argument remains a single-directory test/diagnostic override.
-    Automatic resolution covers both ``AITER_ROOT_DIR/build`` and
-    ``AITER_JIT_DIR/build`` rather than stopping at the first JIT directory.
-    Trees that cannot be stat'ed are collected into ``unreadable``.
-    """
+    """Resolve every active aiter build tree that may contain baton locks."""
     if aiter_jit_dir is not None:
         return [aiter_jit_dir]
 
@@ -256,14 +208,13 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] |
         override_path = Path(aiter_jit_override)
         candidates.extend([override_path / "build", override_path])
     if aiter_root and aiter_jit_override:
-        # Forge sets both variables for a private attempt. Treat the pair as an
-        # authoritative namespace and never wander into shared fallback trees.
+        # Forge sets both variables for a private attempt.
         return _dedupe_existing_dirs(candidates, unreadable)
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         override_path = Path(override)
-        # Preserve the legacy explicit-override contract: callers use this
-        # variable to constrain a diagnostic/test sweep to one tree.
+        # Preserve the legacy explicit-override contract: callers use this variable to constrain a diagnostic/test
+        # sweep to one tree.
         return _dedupe_existing_dirs([override_path / "build", override_path], unreadable)
     try:
         spec = importlib.util.find_spec("aiter")
@@ -302,30 +253,7 @@ def clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
     stale_minutes: int = AITER_LOCK_STALE_MINUTES,
 ) -> dict[str, Any]:
-    """Sweep aiter's JIT build trees for stale plain-file locks left by killed runs.
-
-    Killed runs leave locks that block the next compile. Only deletes locks
-    with mtime older than ``stale_minutes`` (default 5). Pass
-    ``stale_minutes=0`` is reserved for a caller that independently owns the
-    cache. Build tree resolution: caller arg (single-dir override) →
-    ``AITER_ROOT_DIR``/build (else ``$HOME/.aiter/build`` plus
-    ``AITER_CPP_BUILD_PROBE_PATHS``) together with ``AITER_JIT_DIR``, the pair
-    being authoritative when both are set → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
-    → dynamic <aiter>/jit/build → legacy fallbacks. Every resolved tree is
-    swept. Never raises (errors counted).
-
-    Args:
-        aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it
-            is resolved from env / installed aiter / legacy fallbacks.
-        stale_minutes (int): Minimum lock age in minutes before deletion
-            (default 5).
-
-    Returns:
-        dict[str, Any]: A stats dict (``dir`` — primary tree, ``dirs`` — every
-            swept tree, ``scanned``, ``deleted``, ``skipped_fresh``,
-            ``errors``, ``unreadable`` — trees that could not be stat'ed, each
-            also counted in ``errors``).
-    """
+    """Sweep aiter's JIT build trees for stale plain-file locks left by killed runs."""
     stats: dict[str, Any] = {
         "dir": None,
         "dirs": [],
@@ -379,23 +307,7 @@ def clean_stale_aiter_locks(
 def sweep_stale_aiter_locks_if_dead(
     aiter_jit_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Sweep orphaned aiter JIT locks, gated on no live compiler process.
-
-    The build dirs may be node-global and shared across concurrent benchmarks,
-    so a live ``hipcc``/``ninja`` may legitimately hold a lock. Upstream baton
-    files have no owner pid, so process liveness alone cannot prove a fresh lock
-    is orphaned. The policy is:
-
-    * live compiler present (``True``) → skip entirely (don't disturb a real
-      in-flight compile).
-    * liveness unknown (``None``, psutil missing/errored) → fall back to the
-      mtime-gated sweep so a genuinely ancient lock can still be reaped.
-    * no live compiler (``False``) → remove only locks older than the stale-age
-      threshold. Fresh locks remain protected because their owner is unknown.
-
-    Returns the underlying stats dict augmented with ``compiler_alive`` and,
-    on the skip path, ``skipped_live=True``.
-    """
+    """Sweep orphaned aiter JIT locks, gated on no live compiler process."""
     resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
     alive = _any_live_compiler(resolved_dirs)
     if alive is True:
@@ -431,12 +343,7 @@ def find_aiter_baton_wait(
     max_files: int = 20,
     tail_bytes: int = 256 * 1024,
 ) -> dict[str, str] | None:
-    """Find bounded log evidence of an aiter process blocked on a FileBaton.
-
-    Only recent benchmark/server logs are inspected and only their tails are
-    read, so classification remains cheap even when an integration workspace
-    contains large logs from multiple attempts.
-    """
+    """Find bounded log evidence of an aiter process blocked on a FileBaton."""
     try:
         candidates = [path for path in search_root.rglob("*") if path.is_file() and path.name in _BATON_LOG_NAMES]
     except OSError:
@@ -473,16 +380,331 @@ def find_aiter_baton_wait(
     return None
 
 
+COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
+
+# kernelName values with these libtypes are not linked into serving ``module_*.so``.
+NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
+
+# Longest prefix first: a bpreshuffle CSV may carry ``libtype=cktile`` rows whose
+# kernelName is ``a8w8_blockscale_cktile_*`` (no bpreshuffle infix).
+_KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
+    (
+        "a8w8_blockscale_bpreshuffle",
+        {
+            "ck": "module_gemm_a8w8_blockscale_bpreshuffle",
+            "cktile": "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+            "asm": "module_gemm_a8w8_blockscale_bpreshuffle_asm",
+        },
+    ),
+    (
+        "a8w8_blockscale",
+        {
+            "ck": "module_gemm_a8w8_blockscale",
+            "cktile": "module_gemm_a8w8_blockscale_cktile",
+            "asm": "module_gemm_a8w8_blockscale_asm",
+        },
+    ),
+    (
+        "a8w8_bpreshuffle",
+        {
+            "ck": "module_gemm_a8w8_bpreshuffle",
+            "cktile": "module_gemm_a8w8_bpreshuffle_cktile",
+        },
+    ),
+    ("a8w8", {"ck": "module_gemm_a8w8"}),
+    ("a4w4_blockscale", {"ck": "module_gemm_a4w4_blockscale"}),
+    ("a4w4", {"ck": "module_gemm_a4w4_blockscale"}),
+)
+
+# Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
+AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
+        "module_gemm_a8w8_blockscale_bpreshuffle",
+        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+        "module_gemm_a8w8_blockscale_bpreshuffle_asm",
+    ),
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": (
+        "module_gemm_a8w8_blockscale",
+        "module_gemm_a8w8_blockscale_cktile",
+        "module_gemm_a8w8_blockscale_asm",
+    ),
+    "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": (
+        "module_gemm_a8w8_bpreshuffle",
+        "module_gemm_a8w8_bpreshuffle_cktile",
+    ),
+    "AITER_CONFIG_GEMM_A8W8": ("module_gemm_a8w8",),
+    "AITER_CONFIG_GEMM_A4W4": ("module_gemm_a4w4_blockscale",),
+}
+
+
+def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
+    """True when logs show a tuned CSV kernel name missing from the compiled .so."""
+    blob = "\n".join(t for t in texts if t).lower()
+    return COMPILED_REGISTRY_MARKER in blob
+
+
+def csv_kernel_names(
+    csv_path: Path,
+    *,
+    skip_libtypes: frozenset[str] | None = None,
+) -> set[str]:
+    """Return non-empty ``kernelName`` values from a tuned GEMM CSV."""
+    names: set[str] = set()
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                name = str(row.get("kernelName") or "").strip()
+                if not name:
+                    continue
+                libtype = str(row.get("libtype") or "").strip().lower()
+                if skip_libtypes and libtype in skip_libtypes:
+                    continue
+                if skip_libtypes and not libtype and name.startswith("_ZN"):
+                    continue
+                names.add(name)
+    except OSError:
+        return set()
+    return names
+
+
+def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
+    """Serving ``module_*.so`` that should contain this JIT kernel name."""
+    lib = str(libtype or "").strip().lower() or "ck"
+    for prefix, by_lib in _KERNEL_PREFIX_TO_MODULE:
+        if kernel_name.startswith(prefix):
+            return by_lib.get(lib)
+    return None
+
+
+def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
+    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``."""
+    rows: list[tuple[str, str]] = []
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                name = str(row.get("kernelName") or "").strip()
+                if not name:
+                    continue
+                libtype = str(row.get("libtype") or "").strip().lower()
+                if libtype in NON_JIT_SO_LIBTYPES:
+                    continue
+                if not libtype and name.startswith("_ZN"):
+                    continue
+                rows.append((name, libtype))
+    except OSError:
+        return []
+    return rows
+
+
+def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
+    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
+
+    ``libtype=asm`` (and other non-JIT backends) names are not linked into
+    ``module_*.so``. A name is looked up in the module implied by its prefix and
+    ``libtype``, falling back to ``modules``. Missing .so files mean the next start
+    will compile from the current CSV, so that case is treated as covered.
+    """
+    rows = csv_jit_kernel_rows(csv_path)
+    if not rows:
+        return True
+    blobs: dict[str, bytes | None] = {}
+
+    def _read(module: str) -> bytes | None:
+        if module not in blobs:
+            so_path = jit_dir / f"{module}.so"
+            data: bytes | None = None
+            if so_path.is_file():
+                try:
+                    data = so_path.read_bytes()
+                except OSError:
+                    data = None
+            blobs[module] = data
+        return blobs[module]
+
+    for name, libtype in rows:
+        resolved = serving_module_for_kernel(name, libtype)
+        search = (resolved,) if resolved else modules
+        encoded = name.encode("utf-8")
+        saw_so = False
+        found = False
+        for module in dict.fromkeys(search):
+            data = _read(module)
+            if data is None:
+                continue
+            saw_so = True
+            if encoded in data:
+                found = True
+                break
+        if saw_so and not found:
+            return False
+    return True
+
+
+def _resolve_serving_jit_dir() -> Path | None:
+    """The aiter ``jit/`` directory that holds serving ``module_*.so`` files."""
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(Path(path) for path in _resolve_aiter_jit_dir_dynamic())
+    candidates.extend(Path(path) for path in AITER_JIT_PROBE_PATHS)
+    for path in candidates:
+        if path.is_dir():
+            return path
+    return None
+
+
+def _jit_build_dir(jit_dir: Path) -> Path:
+    return jit_dir if jit_dir.name == "build" else jit_dir / "build"
+
+
+def _unlink_serving_modules(jit_dir: Path, modules: tuple[str, ...]) -> list[str]:
+    removed: list[str] = []
+    for module in modules:
+        so_path = jit_dir / f"{module}.so"
+        if not so_path.is_file():
+            continue
+        try:
+            so_path.unlink()
+            removed.append(str(so_path))
+        except OSError as exc:
+            log.warning("failed to unlink serving so %s: %s", so_path, exc)
+    return removed
+
+
+def _invalidate_jit_build(jit_dir: Path, backup_dir: Path) -> dict[str, Any]:
+    """Move ``jit/build`` aside so the next import re-runs codegen for the new CSV."""
+    try:
+        from hyperloom.agents.kernel.tools.apply_kernel_patch import _invalidate_aiter_jit_build
+    except ImportError:
+        build = _jit_build_dir(jit_dir)
+        if not build.is_dir():
+            return {"status": "clean", "reason": "aiter jit/build/ does not exist"}
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        dest = backup_dir / f"jit_build_{time.time_ns()}"
+        shutil.move(str(build), str(dest))
+        return {"status": "ok", "src": str(build), "backup_path": str(dest)}
+    return _invalidate_aiter_jit_build(
+        target_file=jit_dir / "core.py",
+        backup_dir=backup_dir,
+        jit_build_dir=_jit_build_dir(jit_dir),
+    )
+
+
+def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
+    if not envs:
+        modules: list[str] = []
+        for names in AITER_ENV_TO_SERVING_MODULES.values():
+            modules.extend(names)
+        return tuple(dict.fromkeys(modules))
+    modules: list[str] = []
+    for key in envs:
+        modules.extend(AITER_ENV_TO_SERVING_MODULES.get(str(key), ()))
+    return tuple(dict.fromkeys(modules))
+
+
+def prepare_serving_so_for_csvs(
+    envs: dict[str, str],
+    *,
+    backup_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Skip when serving .so already covers the CSV; otherwise unlink and re-JIT.
+
+    Args:
+        envs: ``AITER_CONFIG_*`` paths about to be used to start the server.
+        backup_dir: Where to move ``jit/build`` if invalidation runs.
+
+    Returns:
+        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
+    """
+    jit_dir = _resolve_serving_jit_dir()
+    if jit_dir is None:
+        return {"action": "noop", "reason": "aiter jit dir not found"}
+    modules_needed: list[str] = []
+    for env_var, csv_path_raw in envs.items():
+        modules = AITER_ENV_TO_SERVING_MODULES.get(str(env_var), ())
+        if not modules:
+            continue
+        csv_path = Path(str(csv_path_raw))
+        if not csv_path.is_file():
+            continue
+        if serving_modules_cover_csv(jit_dir, modules, csv_path):
+            continue
+        modules_needed.extend(modules)
+        for name, libtype in csv_jit_kernel_rows(csv_path):
+            resolved = serving_module_for_kernel(name, libtype)
+            if resolved:
+                modules_needed.append(resolved)
+    modules_needed_t = tuple(dict.fromkeys(modules_needed))
+    if not modules_needed_t:
+        return {"action": "skip", "jit_dir": str(jit_dir)}
+    dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
+    removed = _unlink_serving_modules(jit_dir, modules_needed_t)
+    invalidation = _invalidate_jit_build(jit_dir, dest)
+    log.info(
+        "aiter serving so does not cover tuned CSV; unlinked %d module(s) jit_build=%s",
+        len(removed),
+        invalidation.get("status"),
+    )
+    return {
+        "action": "invalidate",
+        "jit_dir": str(jit_dir),
+        "removed": removed,
+        "jit_build": invalidation,
+    }
+
+
+def drop_serving_so_for_envs(
+    envs: dict[str, str] | None = None,
+    *,
+    backup_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds."""
+    jit_dir = _resolve_serving_jit_dir()
+    if jit_dir is None:
+        return {"action": "noop", "reason": "aiter jit dir not found"}
+    modules = _modules_for_envs(envs)
+    dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
+    removed = _unlink_serving_modules(jit_dir, modules)
+    invalidation = _invalidate_jit_build(jit_dir, dest)
+    return {
+        "action": "invalidate",
+        "jit_dir": str(jit_dir),
+        "removed": removed,
+        "jit_build": invalidation,
+    }
+
+
+def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool:
+    """True when an integrate/baseline result is a compiled-registry miss."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("error_class") or "") == "aiter_jit_registry_mismatch":
+        return True
+    return is_aiter_jit_registry_mismatch(str(result.get("error") or ""))
+
+
 __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
+    "AITER_ENV_TO_SERVING_MODULES",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
+    "COMPILED_REGISTRY_MARKER",
+    "NON_JIT_SO_LIBTYPES",
     "clean_stale_aiter_locks",
+    "csv_jit_kernel_rows",
+    "csv_kernel_names",
+    "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
+    "is_aiter_jit_registry_mismatch",
+    "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "result_is_aiter_jit_registry_mismatch",
+    "serving_module_for_kernel",
+    "serving_modules_cover_csv",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
     "_resolve_aiter_jit_dir_dynamic",

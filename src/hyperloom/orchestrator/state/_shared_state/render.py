@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState`
-(mission / phase / warm-start / search-ledger blocks).
-"""
+"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState` (mission / phase / warm-start / search-ledger blocks)."""
 
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
 
@@ -29,13 +29,7 @@ _FAILURE_EXCERPT_CHARS = 600
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
-# Numeric fields a ``trace_health_warnings[]`` entry may carry, as
-# ``(key, label, suffix)`` in render order. The compact warning line is the part
-# of the blob an LLM reads first, so a gate's numbers have to reach it: a router
-# tells a comm-bound window from a host-bound one by comparing these, not by the
-# code alone. Table-driven because the previous per-field ``if`` chain silently
-# dropped every number a newly added gate carried -- a gate now registers its
-# field here rather than growing another branch.
+# Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("idle_pct", "idle", "%"),
     ("compute_pct", "compute", "%"),
@@ -53,12 +47,7 @@ class _RenderMixin:
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
     def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger as a one-line counts summary (``""`` when empty).
-
-        Returns:
-            str: A single-line counts summary, or ``""`` when the ledger is
-                empty.
-        """
+        """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""
         mix = self.intervention_mix or []
         if not mix:
             return ""
@@ -82,15 +71,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness).
-
-        Args:
-            now (datetime | None): Reference time for elapsed / remaining
-                calculations; defaults to the current UTC time.
-
-        Returns:
-            str: The multi-line mission-progress block.
-        """
+        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness)."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -129,11 +110,8 @@ class _RenderMixin:
         elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
-            # A fallback rebench that also failed is the same unjudged drop; only
-            # ``no_material`` / ``no_promote`` are verdicts and stay silent here.
-            # A ``failed`` 2b is never retracted when the 2a fallback then
-            # promotes, so confirm the candidate really is out of the stack
-            # before calling it dropped.
+            # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
+            # verdicts and stay silent here.
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
@@ -155,12 +133,7 @@ class _RenderMixin:
         return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
-        """Render the ``current_best`` one-liner for the mission summary.
-
-        Returns:
-            str: ``action=... tput=... variant=...``, or ``"(none)"`` when
-                no current best is set.
-        """
+        """Render the ``current_best`` one-liner for the mission summary."""
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         from hyperloom.inference_optimizer import framework_registry
@@ -183,16 +156,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
-
-        Args:
-            budget_pct (dict[str, float] | None): Per-phase budget fractions;
-                defaults to :attr:`phase_budget_pct`.
-            now_unix (float | None): Reference Unix time; defaults to now.
-
-        Returns:
-            str: The compact ``=== Phase ===`` block.
-        """
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
         from ...phases.machine_state import (
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
@@ -209,7 +173,6 @@ class _RenderMixin:
         phase = (self.phase or "").strip().upper() or "UNSET"
         elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
         # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
-        # A re-entered phase needs both to be legible.
         cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
         budget_pct_for_phase = budget.get(phase, 0.0)
@@ -235,8 +198,7 @@ class _RenderMixin:
             budget_line,
             allowed_line,
         ]
-        # Whether deferring work to a later cycle is still a real option. Mirrors
-        # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
+        # Whether deferring work to a later cycle is still a real option.
         if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
             feasible = reloop and self.framework_agent_phase_enabled
@@ -261,17 +223,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase).
-
-        Args:
-            budget_pct (dict[str, float] | None): Per-phase budget fractions;
-                defaults to :attr:`phase_budget_pct`.
-            now_unix (float | None): Reference Unix time; defaults to now.
-
-        Returns:
-            str: One telemetry line per phase, or ``"(no phase history yet)"``
-                when no history exists.
-        """
+        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase)."""
         from ...phases.machine_state import (
             DEFAULT_PHASE_BUDGET_PCT,
             PHASE_NAMES,
@@ -316,28 +268,21 @@ class _RenderMixin:
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_resource_pools_summary(self) -> str:
-        """Render the GPU pool / lane capacity block.
-
-        These are the same numbers PolicyGate admits a ``needs_gpu`` dispatch
-        against, so a request can be judged schedulable before it is emitted.
-
-        Returns:
-            str: One line per pool / lane dimension.
-        """
+        """Render the GPU pool / lane capacity block."""
         from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.gate import (
-            _effective_gpu_specialist_pool_size,
-            _serving_tp_for_policy,
-            _whole_machine_pool_size,
+        from ...policy.projection import (
+            effective_gpu_specialist_pool_size,
             gpu_specialist_ceiling,
+            serving_tp_for_policy,
+            whole_machine_pool_size,
         )
 
         lines = [
-            f"serving_tp={_serving_tp_for_policy(self)}",
+            f"serving_tp={serving_tp_for_policy(self)}",
             f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={_effective_gpu_specialist_pool_size(self)}"
+            f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(self)}"
             "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={_whole_machine_pool_size()}"
+            f"whole_machine_gpu_pool={whole_machine_pool_size()}"
             "  (bench / framework-authoring specialists admit against this)",
             f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
             f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
@@ -346,15 +291,7 @@ class _RenderMixin:
         return "\n".join(lines)
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls.
-
-        Args:
-            max_lines (int): Cap on rendered lines before truncation.
-
-        Returns:
-            str: The warm-start summary block, or ``""`` when no recipe /
-                pitfalls are present.
-        """
+        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls."""
         recipe = self.warm_start_recipe or {}
         pitfalls = self.warm_start_pitfalls or []
         if not recipe and not pitfalls:
@@ -392,21 +329,11 @@ class _RenderMixin:
                 out.append(f"  · {first_line[:240]}")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
-        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows.
-
-        Args:
-            max_entries (int): Maximum number of newest gap rows to render.
-            max_attempts (int): When > 0, include the ``max_attempts`` most
-                recent attempt rows for each gap.  0 (default) shows the count
-                and last action only (prompt-compact mode).
-
-        Returns:
-            str: The rendered gaps block, or ``""`` when no gaps exist.
-        """
+        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows."""
         if not self.gaps:
             return ""
         # Newest first by last_updated_ts (fallback to first_seen_ts/insertion).
@@ -449,17 +376,7 @@ class _RenderMixin:
         return "\n".join(rows)
 
     def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched.
-
-        Matched on the proposal's own content. The ledger is keyed on the
-        variant folded together with whatever removal controls the stack
-        carried at the time, so a KEEP that changes those controls mid-round
-        would otherwise make everything benched before it look untried.
-
-        Returns:
-            Rows ranked by gap severity then recency, each carrying the
-            normalized proposal fields plus ``domain`` / ``severity``.
-        """
+        """Executable proposals from this cycle that no explore round has benched."""
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import (
@@ -512,14 +429,7 @@ class _RenderMixin:
 
     @staticmethod
     def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries.
-
-        Args:
-            row: One row from :meth:`_untested_proposal_rows`.
-
-        Returns:
-            A single ``•``-prefixed line.
-        """
+        """Render one queue row, marking each field it carries."""
         parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
         if row["atomic"]:
             parts.append("ATOMIC")
@@ -539,15 +449,7 @@ class _RenderMixin:
         return _flatten_for_prompt(" ".join(parts))
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot.
-
-        Args:
-            max_entries (int): Rows to render before collapsing the rest into a
-                count.
-
-        Returns:
-            str: The rendered queue, or ``""`` when nothing is waiting.
-        """
+        """Render the specialist proposals still waiting for a benchmark slot."""
         rows = self._untested_proposal_rows()
         if not rows:
             return ""
@@ -563,16 +465,7 @@ class _RenderMixin:
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
-        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores.
-
-        Args:
-            max_rounds (int): Maximum number of recent scored rounds to
-                render.
-
-        Returns:
-            str: The anonymized proposal-scores block, or ``""`` when no
-                recent round carries scores.
-        """
+        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores."""
         rounds = [
             r
             for r in (self.specialist_rounds or [])
@@ -669,13 +562,7 @@ class _RenderMixin:
         )
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection.
-
-        Returns:
-            str: A multi-line dump of the session's key fact-layer and
-                audit fields (baseline / current best / gains / kernel-opt
-                queue / attempts history / failures / phase status).
-        """
+        """Compact, human-readable snapshot for prompt injection."""
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -721,6 +608,8 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
+            f"agent_last_active={self._format_agent_last_active()}",
+            f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -730,18 +619,25 @@ class _RenderMixin:
         ]
         return "\n".join(lines)
 
+    def _format_agent_last_active(self) -> str:
+        """Render each agent's last completed reactor pass as a relative age.
+
+        Returns:
+            str: ``orchestration=2s ago, critic=45s ago``, or ``(none)`` when no
+                agent has run yet.
+        """
+        now = time.time()
+        parts = [
+            f"{agent}={int(max(0.0, now - ts))}s ago"
+            for agent, ts in sorted((self.agent_last_active or {}).items())
+            if isinstance(ts, (int, float)) and ts > 0
+        ]
+        return ", ".join(parts) or "(none)"
+
     # Audit-trail renderers (per-action attempts + global failure log).
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
-
-        Args:
-            entry (dict[str, Any] | None): The attempt snapshot to render.
-
-        Returns:
-            str: A compact ``status=... decision=... <metric> err=... ws=...``
-                line, or ``"(none)"`` when the entry is empty.
-        """
+        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry."""
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -757,12 +653,7 @@ class _RenderMixin:
         )
 
     def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``).
-
-        Returns:
-            str: A per-action totals summary, or ``"(no attempts recorded)"``
-                when no attempts exist.
-        """
+        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
         parts: list[str] = []
         for action in sorted(_shared_state_module()._AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
@@ -776,14 +667,7 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render the most-recent global failures, each with its excerpt tail and log path.
-
-        Returns:
-            str: A newline-separated render of the last
-                :data:`_FAILURES_RENDERED` failures (with an
-                ``[+N earlier failures]`` suffix when more exist), or
-                ``"(none)"``.
-        """
+        """Render the most-recent global failures, each with its excerpt tail and log path."""
         if not self.last_action_failures:
             return "(none)"
         rows: list[str] = []
@@ -810,12 +694,7 @@ class _RenderMixin:
         return "\n".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
-        """Render the most recent rejected kernel patches for the prompt.
-
-        Returns:
-            str | list[str]: A list of compact per-patch lines (last 5), or
-                ``"(none)"`` when no patches have been rejected.
-        """
+        """Render the most recent rejected kernel patches for the prompt."""
         if not self.rejected_kernel_patches:
             return "(none)"
         return [
@@ -828,12 +707,7 @@ class _RenderMixin:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
-        """Render the per-framework discovered-flag counts for the prompt.
-
-        Returns:
-            str: ``<framework>:backend=N/param=M`` parts joined by commas,
-                or a hint string when no flags have been discovered yet.
-        """
+        """Render the per-framework discovered-flag counts for the prompt."""
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
         parts: list[str] = []
@@ -847,21 +721,16 @@ class _RenderMixin:
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
-        """One-line render of a search variant for prompt blocks.
-
-        Args:
-            entry (dict[str, Any]): A search-variant entry (name, gain_pct,
-                tput, extra args / envs, and — for rejected rows —
-                ``error_class`` / ``reason`` / ``wall_clock_ratio_vs_baseline``).
-
-        Returns:
-            str: A single fixed-width line summarizing the variant.
-        """
+        """One-line render of a search variant for prompt blocks."""
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
-        tput = entry.get("tput") or entry.get("output_throughput")
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
         gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        # The gain column is meaningless without the axis it was taken on.
+        graded_obj = str(entry.get("graded_objective") or "").strip()
+        graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
@@ -870,22 +739,16 @@ class _RenderMixin:
         if error_class:
             parts.append(f"err={error_class}")
         reason = str(entry.get("reason") or "").strip()
-        # Threshold rejections are already conveyed by the gain column. Every other
-        # reason must survive: a bare ``no_meas`` is indistinguishable from a
-        # measured zero gain, so an overtime kill would otherwise read as "the
-        # variant helped nothing" instead of "the variant ran too long to be
-        # judged" — opposite follow-up moves. The wall-clock ratio qualifies the
-        # reason, so it rides alongside it whenever the executor recorded one.
+        # Threshold rejections are already conveyed by the gain column.
         if reason and reason not in ("not_keep", "gain_below_threshold"):
             ratio = entry.get("wall_clock_ratio_vs_baseline")
             ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            # error_excerpt on variant rows is tail-1200 (boot assertion at end);
-            # flatten+defang prevents section-header injection from untrusted log text.
+            # error_excerpt on variant rows is tail-1200 (boot assertion at end); flatten+defang prevents
+            # section-header injection from untrusted log text.
             body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
             parts.append(f"reason={body[-120:]}{ratio_s}")
 
         # Paths show last two segments; full path available via get_failure(fid).
-        # Progressive degradation: drop log=, then ws=, keeping fid= alone.
         fid = str(entry.get("failure_id") or "").strip()
         ws_raw = str(entry.get("workspace") or "").strip()
         log_raw = str(entry.get("server_log_path") or "").strip()
@@ -905,41 +768,15 @@ class _RenderMixin:
             anchor_s = ("  " + " ".join(anchors)) if anchors else ""
 
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
-
-    @staticmethod
-    def _enrich_with_tested_gain(
-        entry: dict[str, Any],
-        tested: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time.
-
-        Args:
-            entry (dict[str, Any]): The accepted-variant entry to enrich.
-            tested (dict[str, Any]): The negative ledger keyed by fingerprint,
-                used to backfill missing gain / tput.
-
-        Returns:
-            dict[str, Any]: ``entry`` itself when already complete, otherwise
-                a copy with ``gain_pct`` / ``tput`` backfilled where possible.
-        """
-        if entry.get("gain_pct") is not None and entry.get("tput") is not None:
-            return entry
-        fp = str(entry.get("fingerprint") or "")
-        snap = tested.get(fp) if fp else None
-        if not isinstance(snap, dict):
-            return entry
-        out = dict(entry)
-        if out.get("gain_pct") is None:
-            out["gain_pct"] = snap.get("gain_pct")
-        if out.get("tput") is None:
-            result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
-            out["tput"] = snap.get("tput") or (result or {}).get("output_throughput")
-        return out
+        return f"{name:28s} {gain_s:>9}{graded_obj_s}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show the last 5 accepted / 15 rejected.
+        """Multi-line render of a ``*_search`` dedup ledger.
+
+        The head line carries the counts; the body enumerates every ``tested``
+        entry, KEEPs first, with no truncation — a variant missing from the
+        ledger reads as untried and gets re-proposed.
 
         Args:
             search (dict[str, Any] | None): The search ledger to render.
@@ -949,41 +786,31 @@ class _RenderMixin:
         """
         if not search:
             return "(none)"
-        accepted = list(search.get("accepted") or [])
-        rejected = list(search.get("rejected") or [])
-        tested = search.get("tested") or {}
-        cursor = search.get("cursor", 0)
-        head = f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}"
-        # Surfaced on the head line because the per-variant bodies are capped,
-        # which can hide a whole round reaped by the overtime gate.
+        tested: dict[str, Any] = search.get("tested") or {}
+        head = (
+            f"    cursor={search.get('cursor', 0)}"
+            f"  accepted={len(search.get('accepted') or [])}"
+            f"  rejected={len(search.get('rejected') or [])}"
+            f"  tested={len(tested)}"
+        )
+        # Surfaced on the head line because a whole round reaped by the overtime gate is otherwise invisible.
         last_round = search.get("last_round")
         n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
         if n_killed:
             head += f"  killed_overtime(last_round)={n_killed}"
         out: list[str] = ["", head]
-        if accepted:
-            out.append("    accepted:")
-            for entry in accepted[-5:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append(
-                    "      • " + _RenderMixin._format_variant_line(_RenderMixin._enrich_with_tested_gain(entry, tested))
-                )
-        if rejected:
-            out.append("    rejected (last 15):")
-            for entry in rejected[-15:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append("      • " + _RenderMixin._format_variant_line(entry))
+        rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
+        if not rows:
+            return "\n".join(out)
+        rows.sort(key=lambda row: str(row[1].get("outcome") or "").upper() != "KEEP")
+        out.append("    tested:")
+        for fp, entry in rows:
+            outcome = str(entry.get("outcome") or "?").upper()
+            out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
-        """Render the optimization stack as ``action:variant`` parts.
-
-        Returns:
-            str | list[str]: A list of ``action:variant_name`` strings, or
-                ``"(none)"`` when the stack is empty.
-        """
+        """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
             return "(none)"
         parts = []
@@ -995,15 +822,7 @@ class _RenderMixin:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``.
-
-        Args:
-            text (str): The markdown text to scrub of base64 data URLs.
-
-        Returns:
-            str: The text with base64 data URLs stripped (``""`` for falsy
-                input).
-        """
+        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``."""
         if not text:
             return text or ""
         from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
@@ -1011,12 +830,7 @@ class _RenderMixin:
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``.
-
-        Returns:
-            str: The verbatim analysis.md wrapped in bookends, or a one-line
-                hint when no TraceLens snapshot is cached.
-        """
+        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
@@ -1036,8 +850,8 @@ class _RenderMixin:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # By default point at the show_analysis_md tool; set
-        # INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline the verbatim md.
+        # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
+        # the verbatim md.
         if os.getenv(
             "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
             "0",
@@ -1055,12 +869,7 @@ class _RenderMixin:
         )
 
     def _format_profiler_digest(self) -> str:
-        """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands.
-
-        Returns:
-            str: The profiler digest block, or ``"(none)"`` until a roofline
-                snapshot lands.
-        """
+        """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands."""
         from ...kernel.roofline_snapshot import build_profiler_digest
 
         digest = build_profiler_digest(
@@ -1072,19 +881,7 @@ class _RenderMixin:
         return f"\n{digest}\n"
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
-        """Render a trace-analyze cache blob as a compact prompt line.
-
-        Surfaces the trace input, candidates path, top kernel ids, reusable
-        native kernel ids, and any trace-health routing warnings.
-
-        Args:
-            blob (dict[str, Any] | None): A ``last_trace_analyze``-shaped
-                dict to render.
-
-        Returns:
-            str: The compact one-line render, or ``"(none)"`` when the blob
-                is empty.
-        """
+        """Render a trace-analyze cache blob as a compact prompt line."""
         if not blob:
             return "(none)"
         ids = [

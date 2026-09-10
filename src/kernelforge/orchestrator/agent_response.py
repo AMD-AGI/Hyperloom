@@ -11,10 +11,8 @@ from kernelforge.agent_backends.session_resume import is_api_failure
 
 log = logging.getLogger(__name__)
 
-# The block a provider CLI prepends after compacting a session that ran out of
-# context: a recap of everything so far, then an instruction to carry on. Both
-# ends are fixed strings the CLI writes, so the block can be removed exactly
-# rather than by guessing where the answer resumes.
+# The block a provider CLI prepends after compacting a session that ran out of context: a recap of everything so far,
+# then an instruction to carry on.
 _COMPACTION_BLOCK = re.compile(
     r"This session is being continued from a previous conversation that ran "
     r"out of context\..*?"
@@ -32,20 +30,7 @@ class AgentResponseIncompleteError(ValueError):
 
 
 def _without_compaction_recap(text: str, *, role: str) -> str:
-    """Drop a session recap the provider prepended to this answer.
-
-    A planning session reads source across many turns, so a long one exhausts
-    its context window and the CLI compacts it. What comes back is the recap
-    followed by the answer, and publishing both hands the Implementer a hundred
-    lines of conversation history before the plan it is meant to execute.
-
-    Only a block with both of its fixed ends is removed. Without the terminator
-    the boundary would be a guess, and a wrong guess takes the answer with it.
-
-    Reported rather than removed quietly: everything read before the compaction
-    reaches the answer only through a summary of it, which is worth knowing when
-    the answer disappoints.
-    """
+    """Drop a session recap the provider prepended to this answer."""
     stripped = _COMPACTION_BLOCK.sub("", text, count=1)
     if stripped == text:
         return text

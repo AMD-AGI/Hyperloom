@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -31,20 +25,7 @@ def collect_critic_robustness(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the critic / robustness section.
-
-    Walks ``critic-workdir/<iter>/`` for review + emit JSON (verdict, topic,
-    truncated summary, artifact paths) and ``robustness-workdir/<iter>/`` for
-    signal + action JSON, then summarizes critic verdicts.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: ``{"critic_iterations", "robustness_signals",
-        "kb_writes_summary"}``.
-    """
+    """Collect the critic / robustness section."""
     critic_iters: list[dict[str, Any]] = []
     critic_root = session_dir / "critic-workdir"
     if critic_root.exists():
@@ -101,15 +82,7 @@ def collect_critic_robustness(
 def _critic_kb_writes_summary(
     critic_iters: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``.
-
-    Args:
-        critic_iters (list[dict[str, Any]]): The parsed critic-iteration rows.
-
-    Returns:
-        dict[str, Any]: ``{"total", "by_verdict"}`` where ``by_verdict`` counts
-        each non-empty, upper-cased verdict.
-    """
+    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``."""
     by_verdict: dict[str, int] = {}
     total = 0
     for entry in critic_iters:
@@ -126,15 +99,7 @@ def _critic_kb_writes_summary(
 
 # Telemetry
 def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
-    """Find every ``benchmark_*/benchmark_report.json`` under ``runs/``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        Iterable[Path]: All benchmark reports, sorted. Empty when no ``runs/``
-        tree exists.
-    """
+    """Find every ``benchmark_*/benchmark_report.json`` under ``runs/``."""
     runs = session_dir / "runs"
     if not runs.exists():
         return ()
@@ -142,16 +107,7 @@ def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
 
 
 def _scan_run_dirs(session_dir: Path, pattern: str) -> list[Path]:
-    """Find all directories matching ``pattern`` under ``runs/``, sorted.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        pattern (str): ``rglob`` pattern (e.g. ``torch_trace*`` /
-            ``system_profile*``).
-
-    Returns:
-        list[Path]: Matching directories, sorted. Empty when none exist.
-    """
+    """Find all directories matching ``pattern`` under ``runs/``, sorted."""
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -159,14 +115,7 @@ def _scan_run_dirs(session_dir: Path, pattern: str) -> list[Path]:
 
 
 def _scan_server_logs(session_dir: Path) -> list[Path]:
-    """Find all ``server*.log`` files under ``runs/``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        list[Path]: Matching server log files, sorted. Empty when none exist.
-    """
+    """Find all ``server*.log`` files under ``runs/``."""
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -177,20 +126,7 @@ def _aggregate_gpu_monitor(
     reports: list[Path],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Aggregate GPU-monitor samples across benchmark reports.
-
-    Collects every ``gpu_monitor`` sample from the given reports and computes
-    average / max power, temperature, and average clock.
-
-    Args:
-        reports (list[Path]): Benchmark report paths to scan.
-        warnings (list[str]): Shared warnings list (mutated in place when a
-            report fails to parse).
-
-    Returns:
-        dict[str, Any]: Aggregate stats (sample count plus avg/max power,
-        avg/max temp, avg clock). ``{}`` when no samples were found.
-    """
+    """Aggregate GPU-monitor samples across benchmark reports."""
     samples: list[dict[str, Any]] = []
     for r in reports:
         d = _load_json_safe(r, warnings)
@@ -207,27 +143,13 @@ def _aggregate_gpu_monitor(
         return {}
 
     def _avg(key: str) -> float:
-        """Mean of a numeric field across the collected samples.
-
-        Args:
-            key (str): Sample field name.
-
-        Returns:
-            float: The rounded mean of present values, or ``0.0`` when none.
-        """
+        """Mean of a numeric field across the collected samples."""
         vals = [_to_float(s.get(key)) for s in samples]
         vals = [v for v in vals if v is not None]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
     def _max(key: str) -> float:
-        """Maximum of a numeric field across the collected samples.
-
-        Args:
-            key (str): Sample field name.
-
-        Returns:
-            float: The rounded max of present values, or ``0.0`` when none.
-        """
+        """Maximum of a numeric field across the collected samples."""
         vals = [_to_float(s.get(key)) for s in samples]
         vals = [v for v in vals if v is not None]
         return round(max(vals), 2) if vals else 0.0
@@ -246,21 +168,7 @@ def _collect_lane_timeline(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Per-lane capacity/occupancy summary from ``storage/coordinator.db``.
-
-    One row per lane (capacity, live_holders, lease_expired_count) plus a
-    ``__total__`` aggregate. ``live_holders`` is a point-in-time count of
-    unexpired leases, not a peak; no per-tick holders timeline is recorded.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        warnings (list[str]): Shared warnings list (mutated in place on DB
-            errors).
-
-    Returns:
-        list[dict[str, Any]]: One per-lane occupancy row plus a ``__total__``
-        aggregate row. Empty when the coordinator DB is absent / unreadable.
-    """
+    """Per-lane capacity/occupancy summary from ``storage/coordinator.db``."""
     db_path = session_dir / "storage" / "coordinator.db"
     if not db_path.exists():
         return []
@@ -346,106 +254,12 @@ def _collect_lane_timeline(
     return rows
 
 
-def _collect_orchestration_context(
-    session_dir: Path,
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Summarize the orchestration conversation's compaction loop.
-
-    Joins the SEED/DELTA census on ``state.json`` with the
-    ``orchestration_checkpoint`` events in ``storage/coordinator.db``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place on DB
-            errors).
-
-    Returns:
-        dict[str, Any]: The ``orchestration_context`` section; counts are 0
-        when the session predates the census or the DB is unreadable.
-    """
-    modes = state.get("orchestration_prompt_modes")
-    modes = modes if isinstance(modes, dict) else {}
-    seed = int(modes.get("seed") or 0)
-    delta = int(modes.get("delta") or 0)
-    tick_count = int(state.get("tick") or 0)
-
-    levels: list[int] = []
-    compactions = 0
-    degenerate = 0
-    db_path = session_dir / "storage" / "coordinator.db"
-    if db_path.exists():
-        import sqlite3 as _sqlite3
-
-        try:
-            conn = _sqlite3.connect(f"file:{db_path}?mode=ro", timeout=2.0, uri=True)
-            try:
-                cur = conn.execute(
-                    "SELECT payload FROM events WHERE payload LIKE '%orchestration_checkpoint%'",
-                )
-                for row in cur.fetchall():
-                    try:
-                        payload = json.loads(row[0] or "{}")
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    kind = str(payload.get("kind") or "")
-                    if kind == "orchestration_checkpoint":
-                        compactions += 1
-                        level = payload.get("context_tokens")
-                        if isinstance(level, int) and level > 0:
-                            levels.append(level)
-                    # The repeat-degeneracy advisory re-emits the same kind with
-                    # a severity; count only the first, per-checkpoint one.
-                    elif kind == "orchestration_checkpoint_degraded" and not payload.get("severity"):
-                        degenerate += 1
-            finally:
-                conn.close()
-        except _sqlite3.Error as exc:
-            warnings.append(f"orchestration_context: read {db_path} failed: {exc!r}")
-
-    levels.sort()
-    at_compaction: dict[str, int] = {}
-    if levels:
-        at_compaction = {
-            "min": levels[0],
-            "median": levels[len(levels) // 2],
-            "max": levels[-1],
-        }
-    pushes = seed + delta
-    return {
-        "seed_prompts": seed,
-        "delta_prompts": delta,
-        "compactions": compactions,
-        "degenerate_compactions": degenerate,
-        "tick_count": tick_count,
-        "compactions_per_tick": round(compactions / tick_count, 4) if tick_count else 0.0,
-        "delta_ratio": round(delta / pushes, 4) if pushes else 0.0,
-        "context_tokens_at_compaction": at_compaction,
-    }
-
-
 def collect_telemetry(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the telemetry section.
-
-    Gathers references to the baseline / profile benchmark reports, torch
-    traces, system profiles, and server logs on disk, aggregates GPU-monitor
-    stats across all reports, and attaches the per-lane occupancy summary.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: Telemetry section with artifact path lists, the GPU
-        monitor aggregate, and the lane timeline.
-    """
+    """Collect the telemetry section."""
     baseline_report: Path | None = None
     last_b = state.get("last_baseline") or {}
     if isinstance(last_b, dict) and last_b.get("workspace"):
@@ -467,22 +281,13 @@ def collect_telemetry(
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
-        # SEED/DELTA census + compaction rate for the orchestration loop.
-        "orchestration_context": _collect_orchestration_context(session_dir, state, warnings),
+        "orchestration_context": {"tick_count": int(state.get("tick") or 0)},
     }
 
 
 # specialist_runs section
 def _coerce_round_id(value: Any) -> int | str:
-    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises.
-
-    Args:
-        value (Any): The raw ``round_id`` value.
-
-    Returns:
-        int | str: The integer round id when ``value`` is purely numeric,
-        ``0`` for empty / ``None``, else the original string.
-    """
+    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises."""
     if value is None or value == "":
         return 0
     if isinstance(value, bool):
@@ -505,22 +310,7 @@ def collect_specialist_runs(
     *,
     include_transcripts: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build the ``specialist_runs`` section by merging ``state.specialist_rounds[]`` with on-disk transcripts; best-effort.
-
-    ``include_transcripts`` inlines the transcript bytes under each ref's ``body``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place on scan /
-            read failures).
-        include_transcripts (bool): When ``True``, inline each transcript's
-            bytes under its ``body``. Defaults to ``False`` (path-only).
-
-    Returns:
-        list[dict[str, Any]]: One shaped specialist-round row (with transcript
-        refs). Empty when no rounds exist.
-    """
+    """Build the ``specialist_runs`` section by merging ``state.specialist_rounds[]`` with on-disk transcripts; best-effort."""
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
         return []
@@ -598,16 +388,7 @@ def collect_specialist_runs(
 def _normalize_specialist_domain_breakdown(
     raw: Any,
 ) -> dict[str, dict[str, int]]:
-    """Coerce a round's per-domain breakdown to a stable int-counted shape.
-
-    Args:
-        raw (Any): The raw ``domain_breakdown`` value from a specialist round.
-
-    Returns:
-        dict[str, dict[str, int]]: Per-domain counts (dispatched /
-        proposals_total / proposals_kept / proposals_rejected). ``{}`` when
-        ``raw`` is not a dict.
-    """
+    """Coerce a round's per-domain breakdown to a stable int-counted shape."""
     if not isinstance(raw, dict):
         return {}
     norm: dict[str, dict[str, int]] = {}
@@ -624,16 +405,7 @@ def _normalize_specialist_domain_breakdown(
 
 
 def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
-    """Best-effort domain for ``task_id`` within a round; "" when unmapped (older M5 rounds).
-
-    Args:
-        round_entry (dict[str, Any]): One specialist-round record.
-        task_id (str): The task id to resolve a domain for.
-
-    Returns:
-        str: The mapped domain, an unambiguous single tag/domain, or ``""``
-        when it cannot be determined.
-    """
+    """Best-effort domain for ``task_id`` within a round; \"\" when unmapped (older M5 rounds)."""
     mapping = round_entry.get("task_domains")
     if isinstance(mapping, dict):
         v = mapping.get(task_id)

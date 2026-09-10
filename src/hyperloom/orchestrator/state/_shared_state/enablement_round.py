@@ -13,9 +13,8 @@ from typing import Any
 class EnablementRound:
     """State scoped to a single enablement repair attempt."""
 
-    # Eval-origin enablement carriers: set when the first baseline runs but its
-    # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
-    # and re-run the same eval contract. Empty for boot-origin enablement.
+    # Eval-origin enablement carriers: set when the first baseline runs but its accuracy eval fails, so the enablement
+    # pump/gate can reconstruct the trigger and re-run the same eval contract.
     origin: str = ""
     accuracy_floor: float = 0.0
     probe_config_path: str = ""
@@ -26,37 +25,33 @@ class EnablementRound:
     observed_task: str = ""
     observed_metric: str = ""
     pending: bool = False
-    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
-    # must revalidate accuracy before the run is considered enabled.
+    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline must revalidate accuracy before the
+    # run is considered enabled.
     validation_pending: bool = False
+    # How many times the pre-enablement guard has dropped a ``skip_to_close``.
+    # Bounds the guard so it can delay a close but never forbid one.
+    skip_to_close_suppressions: int = 0
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
-    # ``attempts``: number of dispatches (candidate rotation / idempotency).
-    # ``succeeded``: terminal KEEP guard.
     launch_log: str = ""
-    attempts: int = 0
+    launch_observation_path: str = ""
     succeeded: bool = False
-    # Identity of the currently-running authoring specialist; empty when no round
-    # is in flight. In-flight status is derived from the task registry, not stored.
-    inflight_task_id: str = ""
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""
-    # Authoritative per-round record: list of {"patches": [...], "artifacts": [...]}
-    # dicts, one entry per accepted round in order. kept_patches and kept_artifacts
-    # are derived from this list and kept for downstream compatibility.
+    # Authoritative per-round record: list of {"patches": [...], "artifacts": [...]} dicts, one entry per accepted
+    # round in order. kept_patches and kept_artifacts are derived from this list and kept for downstream
+    # compatibility.
     kept_rounds: list = field(default_factory=list)
-    # Flat ordered deduped patch paths derived from kept_rounds; re-applied as a
-    # base before the next round's patch.
+    # Flat ordered deduped patch paths derived from kept_rounds; re-applied as a base before the next round's patch.
     kept_patches: list = field(default_factory=list)
-    # Framework source tree the kept patches were applied against. Persisted so a
-    # phase-synthesised round, which carries no framework_root, does not drop it.
+    # Framework source tree the kept patches were applied against.
     framework_root: str = ""
-    # Ordered, deduped allowlisted env-setup shell commands prior rounds ran;
-    # re-run idempotently by integrate_patch before applying patches and booting.
+    # Ordered, deduped allowlisted env-setup shell commands prior rounds ran; re-run idempotently by integrate_patch
+    # before applying patches and booting.
     setup_commands: list = field(default_factory=list)
-    # Consecutive enablement rounds that neither became runnable nor advanced to
-    # a new failure signature; at _ENABLEMENT_MAX_STALL the loop stops with
-    # stop_reason enablement_stalled.
-    stall_streak: int = 0
+    # Digests of server argvs that have already spent their one drop-only
+    # preflight repair. A distinct argv gets exactly one; the same argv failing
+    # again is terminal.
+    argv_repairs: list = field(default_factory=list)
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.
@@ -76,14 +71,18 @@ class EnablementRound:
     last_build_failure: dict = field(default_factory=dict)
     build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
-    # Why the last round's patches were all dropped for absent targets; injected
-    # into the next round's mandate so it stops writing diffs that cannot apply.
+    # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
+    # stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
+    # Serialized ApplyFeedback records from the last round's failed ``git apply``
+    # (stderr, reject hunks, target source window), injected into the next
+    # round's mandate so it re-grounds instead of resubmitting the same diff.
+    last_apply_feedback: list = field(default_factory=list)
     # Whether the last round's kept patches targeted more than one source tree;
     # injected into the next mandate so the specialist splits them per round.
     patches_span_multiple_roots: bool = False
     # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
-    # target); re-installed as a base before the next round's patch.
+    # target); used for the specialist mandate note and session-breakdown reporting.
     kept_artifacts: list = field(default_factory=list)
 
     @classmethod

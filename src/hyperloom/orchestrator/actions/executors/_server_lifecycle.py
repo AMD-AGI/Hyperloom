@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared single-node ``server_lifecycle`` helpers.
-
-Magpie's ``server_lifecycle`` reuse protocol lets two benchmark rounds share
-one persistent server: round 1 boots it (``cleanup=false``) and round 2
-re-attaches as a client-only run (``cleanup=true``). Used by the baseline cold-start
-double-run guard. Explore reuses the server the same way across its warmup and
-decision rounds but keeps ``cleanup=false`` on both, so its teardown runs
-through :func:`teardown_lifecycle_server` rather than Magpie's own leg.
-
-Also hosts :func:`reap_orphaned_servers`, which scans this session's
-``runs/*.pid`` files at startup/resume and reaps serving processes orphaned by
-a prior monitor-process death.
-"""
+"""Shared single-node ``server_lifecycle`` helpers."""
 
 from __future__ import annotations
 
@@ -31,23 +19,25 @@ from ._subprocess_kill import TERM_GRACE_SECONDS, _process_group_alive, _signal_
 
 log = logging.getLogger(__name__)
 
-# Substrings that identify a Hyperloom-spawned serving process in
-# ``/proc/<pid>/cmdline``. A pidfile is only acted on when the live pid's
-# cmdline matches one of these, so a recycled pid running an unrelated program
-# is never signalled.
+# Substrings that identify a Hyperloom-spawned serving process in ``/proc/<pid>/cmdline``.
 _SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang serve",
+    "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
     "atom.entrypoints",
+    # The launcher's own cmdline is what the pidfile records, but the processes
+    # still holding VRAM once that launcher exits are the engine/worker ranks,
+    # and they carry none of the names above -- so the dead-leader-live-group
+    # branch below needs them too.
+    "EngineCore",
+    "VLLM::Worker",
     "launch_server",
 )
 
 
-# Magpie built-in benchmark scripts that support the server_lifecycle reuse
-# protocol. Mirrors Magpie's ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated
-# to avoid an import-time Magpie dependency).
+# Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
@@ -59,28 +49,16 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
     }
 )
 
-# Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is
-# unset; pinned into the per-round YAML so Magpie's reuse keying and our
-# teardown agree.
+# Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
+# Magpie's reuse keying and our teardown agree.
 REUSE_PORT_DEFAULT = 8888
 
-# Server-boot budget for the persistent server phase. Sized for a TB-scale
-# checkpoint, whose weight read alone outlasts a mid-size model's whole boot; a
-# hung server is still bounded by the phase and session budgets.
-# Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
+# Server-boot budget for the persistent server phase.
 SERVER_READY_TIMEOUT_SEC = 7200
 
 
 def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port.
-
-    Binds to port 0 (ephemeral) and reads back the kernel-chosen port. There
-    is a small TOCTOU window before the server actually binds, acceptable for
-    the high ephemeral range. Raises ``OSError`` if no port can be obtained.
-
-    Returns:
-        int: A currently-free TCP port.
-    """
+    """Return an OS-assigned free TCP port."""
     import socket
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -93,18 +71,7 @@ def _pick_free_port() -> int:
 
 
 def _assign_free_port(current_port: int) -> int:
-    """Return a per-session free ephemeral port for the persistent server.
-
-    Falls back to ``current_port`` if no free port can be bound. Used on the
-    common resolution path so every backend (Magpie and bypass) gets the same
-    stale/co-tenant port-collision protection.
-
-    Args:
-        current_port: Port to keep if free-port allocation fails.
-
-    Returns:
-        int: A free port, or ``current_port`` on ``OSError``.
-    """
+    """Return a per-session free ephemeral port for the persistent server."""
     try:
         return _pick_free_port()
     except OSError as exc:
@@ -117,21 +84,7 @@ def _assign_free_port(current_port: int) -> int:
 
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
-    """Inspect the materialized YAML for server_lifecycle eligibility.
-
-    Returns a dict with ``eligible`` (bool), ``framework`` (str),
-    ``port`` (int) and ``reason`` (str, populated when ineligible).
-    Reuse is single-node only, requires a Magpie built-in script, and is
-    incompatible with torch_profiler.
-
-    Args:
-        materialized_config_path: Path to the materialized benchmark YAML to
-            inspect.
-
-    Returns:
-        A dict with ``eligible`` (bool), ``framework`` (str), ``port`` (int)
-        and ``reason`` (str, populated when ineligible).
-    """
+    """Inspect the materialized YAML for server_lifecycle eligibility."""
     info: dict[str, Any] = {
         "eligible": False,
         "framework": "",
@@ -152,23 +105,19 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
-    # Backend delegation: a non-Magpie backend (e.g. bypass) decides its
-    # own server_lifecycle eligibility. Magpie returns None here so the
-    # historical script-name-based path below runs unchanged.
+    # Backend delegation: a non-Magpie backend (e.g. bypass) decides its own server_lifecycle eligibility.
     from .benchmark_backend import resolve_backend
 
     backend_verdict = resolve_backend().lifecycle_eligibility(bench)
     if backend_verdict is not None:
-        # Free-port assignment lives on this common path so a non-Magpie backend
-        # (e.g. bypass) gets the same stale/co-tenant collision protection
-        # instead of falling back to the fixed default port.
+        # Free-port assignment lives on this common path so a non-Magpie backend (e.g. bypass) gets the same
+        # stale/co-tenant collision protection instead of falling back to the fixed default port.
         if backend_verdict.get("eligible"):
             backend_verdict["port"] = _assign_free_port(int(backend_verdict.get("port", REUSE_PORT_DEFAULT)))
         return backend_verdict
 
-    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
-    # persistent server, so the reuse protocol does not apply. Bail out before
-    # the Magpie built-in-script check (whose script names are serving-only).
+    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a persistent server, so the reuse
+    # protocol does not apply.
     from hyperloom.inference_optimizer import framework_registry
 
     if str(
@@ -193,15 +142,11 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
 
-    # Use a per-session free ephemeral port for the persistent server instead of
-    # a fixed default: a stale/leaked server from a prior baseline attempt
-    # (round 1 uses cleanup=false and leaves the server running) or a co-tenant
-    # job holding the fixed port makes Magpie abort every warmup with "Reuse
-    # metadata mismatch ... server on PORT=... is incompatible", so the baseline
-    # never records an accuracy and the run wrongly stops with
-    # baseline_accuracy_failed. Resolved once here; both double-run rounds share
-    # it via inject_lifecycle -> envs.PORT (server bind, Magpie reuse keying,
-    # lm-eval base_url and teardown all agree).
+    # Use a per-session free ephemeral port for the persistent server instead of a fixed default: a stale/leaked
+    # server from a prior baseline attempt (round 1 uses cleanup=false and leaves the server running) or a co-tenant
+    # job holding the fixed port makes Magpie abort every warmup with "Reuse metadata mismatch ... server on PORT=...
+    # is incompatible", so the baseline never records an accuracy and the run wrongly stops with
+    # baseline_accuracy_failed.
     info["port"] = _assign_free_port(info["port"])
 
     info["eligible"] = True
@@ -215,18 +160,7 @@ def inject_lifecycle(
     pid_dir: Path | str,
     port: int,
 ) -> None:
-    """Mutate ``bench`` in place to enable the server_lifecycle protocol.
-
-    Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches; only
-    ``cleanup`` differs (round 1 persists, round 2 tears down).
-
-    Args:
-        bench: The benchmark config dict to mutate in place.
-        cleanup: Whether this round tears the server down (``False`` for round
-            1, ``True`` for round 2).
-        pid_dir: Shared directory for the server pid/meta files.
-        port: HTTP port pinned for the persistent server.
-    """
+    """Mutate ``bench`` in place to enable the server_lifecycle protocol."""
     ready_timeout = int(
         os.environ.get(
             "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
@@ -251,18 +185,7 @@ def teardown_lifecycle_server(
     framework: str,
     port: int,
 ) -> None:
-    """Best-effort teardown of a persistent server left by a lifecycle round.
-
-    Idempotent and never raises (safe in ``finally``); a no-op on the happy
-    path, real work only on abnormal paths. The recorded pid is signalled only
-    when its cmdline still names a Hyperloom server, so a recycled pid is not
-    killed; the pid/meta files are removed either way.
-
-    Args:
-        pid_dir: Directory holding the server pid/meta files.
-        framework: Framework name used to key the pid/meta filenames.
-        port: HTTP port used to key the pid/meta filenames.
-    """
+    """Best-effort teardown of a persistent server left by a lifecycle round."""
     base = Path(pid_dir)
     tag = f"{framework}_{port}"
     pid_file = base / f"{tag}.pid"
@@ -312,15 +235,7 @@ def teardown_lifecycle_server(
 
 
 def _pid_cmdline(pid: int) -> str:
-    """Return ``/proc/<pid>/cmdline`` as a space-joined string, or ``""``.
-
-    Args:
-        pid: The process id to read.
-
-    Returns:
-        The process command line with NULs turned into spaces, or ``""`` when
-        the process is gone or ``/proc`` is unreadable.
-    """
+    """Return ``/proc/<pid>/cmdline`` as a space-joined string, or ``\"\"``."""
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
@@ -329,17 +244,7 @@ def _pid_cmdline(pid: int) -> str:
 
 
 def _looks_like_server_process(pid: int) -> bool:
-    """Return whether ``pid``'s cmdline matches a Hyperloom serving process.
-
-    Guards against pid reuse: only a live pid whose cmdline contains a known
-    serving marker is treated as a reapable orphan.
-
-    Args:
-        pid: The candidate process id.
-
-    Returns:
-        ``True`` when the pid's cmdline names a Hyperloom-spawned server.
-    """
+    """Return whether ``pid``'s cmdline matches a Hyperloom serving process."""
     cmdline = _pid_cmdline(pid)
     if not cmdline:
         return False
@@ -369,29 +274,11 @@ def _process_group_looks_like_server(pgid: int) -> bool:
 
 
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
-    """Reap serving processes orphaned by a prior monitor-process death.
+    """Reap serving processes orphaned by a prior monitor-process death, or by a run that simply ended with a server up.
 
-    A crash that takes the optimizer down (e.g. a raylet death) leaves the
-    setsid'd SGLang/vLLM server tree alive with its ``{framework}_{port}.pid``
-    file still on disk, polluting the next benchmark on the shared port. On
-    startup/resume this scans **only the current session's** ``runs/`` pidfiles
-    and reaps each pid whose cmdline still matches a serving process (SIGTERM →
-    grace → SIGKILL on the whole group). Scoped strictly to this session's own
-    pidfiles and gated on a cmdline match, so a co-located session's server and
-    a recycled pid are both left untouched. Best-effort and never raises (safe
-    to call unconditionally at boot); a no-op for a fresh session.
-
-    A pidfile pointing at a dead pid is removed only after its process group is
-    also gone; if the leader exited but server children still occupy the group,
-    the group is reaped. A pidfile pointing at a live pid whose cmdline does NOT
-    match is left in place so a later pass can re-evaluate it.
-
-    Args:
-        session_dir: The current session directory whose ``runs/`` subtree is
-            scanned for orphaned server pidfiles.
-
-    Returns:
-        The list of pids that were signalled for reaping.
+    Scans only the current session's ``runs/`` pidfiles and reaps each pid whose cmdline still matches a serving
+    process (SIGTERM -> grace -> SIGKILL on the group), so a co-located session's server and a recycled pid are never
+    touched.
     """
     if os.name != "posix":
         return []
@@ -425,8 +312,8 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             server_pgid = recorded_pgid
 
         if pid_alive and not _looks_like_server_process(server_pid):
-            # Live pid but not one of our servers (pid reuse): do not touch the
-            # process; leave the pidfile for a later re-evaluation.
+            # Live pid but not one of our servers (pid reuse): do not touch the process; leave the pidfile for a later
+            # re-evaluation.
             log.info(
                 "orphan-reaper: pid=%d from %s no longer looks like a server (cmdline mismatch); leaving it untouched",
                 server_pid,
@@ -439,8 +326,8 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             _unlink_quietly(pid_file.with_suffix(".json"))
             continue
         if not pid_alive and not _process_group_looks_like_server(server_pgid):
-            # The original leader is gone, and the remaining/reused pgid has no
-            # server-looking member; do not risk signalling an unrelated group.
+            # The original leader is gone, and the remaining/reused pgid has no server-looking member; do not risk
+            # signalling an unrelated group.
             log.info(
                 "orphan-reaper: pid=%d from %s is gone and pgid=%d has no server-looking member; leaving it untouched",
                 server_pid,

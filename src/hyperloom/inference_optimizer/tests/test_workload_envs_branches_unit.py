@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch-coverage tests for shared workload-env materialization: GPU-count
-detection, profile-window math, per-model work-arounds, and NUM_PROMPTS
-sizing."""
+"""Branch-coverage tests for shared workload-env materialization: GPU-count detection, profile-window math, per-model work-arounds, and NUM_PROMPTS sizing."""
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -71,7 +71,6 @@ def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
-    monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
 
 
 def test_validate_server_args_rejects_bare_positionals():
@@ -81,26 +80,16 @@ def test_validate_server_args_rejects_bare_positionals():
 
 
 def test_validate_server_args_allows_multi_value_flags():
-    """argparse ``nargs="+"`` flags carry several values; the sink must accept them.
-
-    ``--cuda-graph-bs`` is a real sglang invocation and is already listed in
-    ``_MULTI_VALUE_FLAGS``. Rejecting the second value here made the integrate
-    sink refuse recipes the explore side had already run.
-    """
+    """argparse ``nargs=\"+\"`` flags carry several values; the sink must accept them."""
     args = "--cuda-graph-bs 1 2 4 8 16 24 32 48 64"
     assert validate_server_args_shell_safe(args) == args
-    # A flag not on the whitelist still gets its value plus a numeric list, so
-    # an nargs="+" flag nobody has enumerated yet is not rejected either.
+    # A flag not on the whitelist still gets its value plus a numeric list, so an nargs="+" flag nobody has enumerated
+    # yet is not rejected either.
     assert validate_server_args_shell_safe("--a 1 2 --b=3 --c x") == "--a 1 2 --b=3 --c x"
 
 
 def test_validate_server_args_still_catches_positionals_after_a_flag():
-    """The multi-value relaxation must not become "one flag opens the gates".
-
-    A first pass tracked only "have we seen any flag", so every bare token after
-    the first flag was accepted -- which is no check at all for the argv shapes
-    this guard exists to reject.
-    """
+    """The multi-value relaxation must not become \"one flag opens the gates\"."""
     with pytest.raises(ValueError, match="bare positional"):
         # --port=8000 already carries its value; run.sh is positional.
         validate_server_args_shell_safe("--port=8000 run.sh")
@@ -108,9 +97,8 @@ def test_validate_server_args_still_catches_positionals_after_a_flag():
         # --foo consumes bar; payload.json after it is not a value list.
         validate_server_args_shell_safe("--foo bar payload.json")
     with pytest.raises(ValueError, match="bare positional"):
-        # Being on the multi-value whitelist widens how MANY values a flag
-        # takes, not what they may look like: every entry on that list is a
-        # list of batch sizes.
+        # Being on the multi-value whitelist widens how MANY values a flag takes, not what they may look like: every
+        # entry on that list is a list of batch sizes.
         validate_server_args_shell_safe("--cuda-graph-bs 1 2 run.sh")
 
 
@@ -151,7 +139,9 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
-    assert envs["SGLANG_REMOVE_ME"] == "override"
+    # Named in both extra_envs and unset_envs: the removal is the more specific
+    # intent and wins, so the bare-string unset_envs form is proven to apply.
+    assert "SGLANG_REMOVE_ME" not in envs
 
 
 def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path, monkeypatch):
@@ -395,11 +385,7 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
 
 
 def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, name="model"):
-    """Write a minimal model dir whose config.json declares a sparse block size.
-
-    ``nested`` places ``sparse_attention_config`` under ``text_config`` (the
-    multimodal-wrapper layout) to exercise the merged-scope read path.
-    """
+    """Write a minimal model dir whose config.json declares a sparse block size."""
     d = tmp_path / name
     d.mkdir(exist_ok=True)
     sparse = {"sparse_attention_config": {"sparse_block_size": sparse_block_size}}
@@ -410,8 +396,8 @@ def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, na
 
 
 def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path):
-    # Config-derived: any model declaring sparse_attention_config.sparse_block_size
-    # gets that value as vLLM --block-size (default 16 aborts KV-cache init).
+    # Config-derived: any model declaring sparse_attention_config.sparse_block_size gets that value as vLLM
+    # --block-size (default 16 aborts KV-cache init).
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -421,8 +407,8 @@ def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path)
 
 
 def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
-    # sparse_attention_config nested under text_config (multimodal wrapper); the
-    # value is model-derived, not hardcoded (here 64 to prove it is read).
+    # sparse_attention_config nested under text_config (multimodal wrapper); the value is model-derived, not hardcoded
+    # (here 64 to prove it is read).
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=64, nested=True)
@@ -444,8 +430,8 @@ def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
 
 
 def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
-    # --block-size is a vLLM flag; sglang rejects it, so the injection is
-    # vLLM-scoped and must never touch a sglang run.
+    # --block-size is a vLLM flag; sglang rejects it, so the injection is vLLM-scoped and must never touch a sglang
+    # run.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -456,8 +442,7 @@ def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
 
 
 def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path):
-    # An explicit operator/explore --block-size wins; we must not append a
-    # second conflicting --block-size.
+    # An explicit operator/explore --block-size wins; we must not append a second conflicting --block-size.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
@@ -583,8 +568,8 @@ def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
 
 
 def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog):
-    # Low CONC pushes the steady-state floor above the cap, so the auto path
-    # lowers the profile OSL until the floor fits the 128-step cap.
+    # Low CONC pushes the steady-state floor above the cap, so the auto path lowers the profile OSL until the floor
+    # fits the 128-step cap.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -613,8 +598,7 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
 
 
 def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
-    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is,
-    # but a warning is emitted.
+    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is, but a warning is emitted.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -643,8 +627,7 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
 
 
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
-    # A non-baseline scriptable variant must COMPARE against the operator
-    # reference and must NOT write.
+    # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -700,8 +683,7 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
 
 
 def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
-    # No operator reference: a stable per-session reference is derived so the
-    # gate stays active. A variant COMPAREs against it, never writes.
+    # No operator reference: a stable per-session reference is derived so the gate stays active.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -714,8 +696,8 @@ def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tm
 
 
 def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_path):
-    # The baseline writes the derived per-session reference (compare off) so a
-    # subsequent variant has something to gate against.
+    # The baseline writes the derived per-session reference (compare off) so a subsequent variant has something to
+    # gate against.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -725,3 +707,101 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
+
+
+def test_agentx_workload_spec_concurrency_tracks_served_conc(monkeypatch, tmp_path):
+    # workload_spec.concurrency is the load GEAK replays with, so it MUST equal
+    # the CONC this recipe serves. apply_agentx_switch() runs before the resolved
+    # CONC is projected into envs, so reading envs would ship the base config's
+    # parser default to GEAK while the recipe served the operator's value -- GEAK
+    # then replays at a different operating point than the baseline it is meant
+    # to beat, and no downstream gate catches it because workload_spec.kind still
+    # reads agentx_trace_replay on both sides. The spec reads the resolved
+    # process env instead, so the two agree by construction.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={"CONC": 64})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["CONC"] == 8
+    assert bench["workload_spec"]["concurrency"] == 8
+
+
+def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch, tmp_path):
+    """The spec must carry the grace the CLIENT is bounded by, not the raw knob.
+
+    ``apply_agentx_switch`` overwrites ``AGENTX_WARMUP_GRACE_PERIOD`` in ``envs``
+    with the CONC-scaled value, because that is what ``aiperf_client.sh`` hands
+    aiperf as ``--warmup-grace-period``. Publishing before that overwrite would
+    record the operator's raw number in the GEAK handoff while the client ran
+    with the scaled one, so the order of the two is load-bearing.
+    """
+    from hyperloom.orchestrator.actions.executors.baseline import agentx_warmup_grace_sec
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "32")
+    # A grace declared as measured at CONC=8; warmup is linear in CONC, so the
+    # bound this round runs at is 1800 * 32/8.
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "1800")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={})
+    bench = _materialize(src, tmp_path / "out")
+
+    scaled = agentx_warmup_grace_sec()
+    assert scaled == 7200, "sanity: the scaling itself, so a failure below is the handoff"
+    assert int(bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"]) == scaled
+    assert bench["workload_spec"]["warmup_grace_period_s"] == scaled
+
+
+def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatch, tmp_path):
+    """metric_basis must follow the grader, in GEAK's own vocabulary.
+
+    An agentic replay is graded on total token throughput, which runs ~140x its
+    output figure on this corpus, so a handoff naming the output axis would aim
+    GEAK's search at a number the session never scores.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    src = _write(tmp_path / "cfg.yaml", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
+
+    # An explicit override wins in both directions, and the basis follows it.
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    bench = _materialize(src, tmp_path / "out2")
+    assert bench["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"
+
+
+def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
+    """Both sides must resolve the same fallbacks without importing each other.
+
+    ``cli.parser`` imports from ``hyperloom.orchestrator``, so an orchestrator
+    module reaching back into the parser for these numbers closes an import
+    cycle. Keeping the constants in ``hyperloom.common`` is what lets a
+    materialized recipe and the workload spec beside it agree on "unset"; a
+    future edit that re-literals either side, or re-opens the cycle to share
+    them, fails here.
+    """
+    from hyperloom.common import workload_defaults
+    from hyperloom.inference_optimizer.cli import parser
+
+    canonical = (workload_defaults.DEFAULT_ISL, workload_defaults.DEFAULT_OSL, workload_defaults.DEFAULT_CONC)
+    assert we.cli_workload_defaults() == canonical
+    assert (parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC) == canonical
+
+    # The shared module has to stay a leaf, or it cannot break the cycle.
+    tree = ast.parse(Path(workload_defaults.__file__).read_text(encoding="utf-8"))
+    imported = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module] + [
+        alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    ]
+    assert imported == ["__future__"], imported
+
+    # And the orchestrator side must not import the CLI parser at any scope.
+    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    assert "inference_optimizer.cli import parser" not in orchestrator_src
+    assert "inference_optimizer.cli.parser" not in orchestrator_src

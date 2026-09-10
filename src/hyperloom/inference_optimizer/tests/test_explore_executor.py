@@ -95,7 +95,7 @@ def _write_baseline_yaml(path: Path) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
+def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, float] | None = None) -> Path:
     workspace = slot / "benchmark_sglang_20260519_001122"
     workspace.mkdir(parents=True)
     (workspace / "benchmark_report.json").write_text(
@@ -107,7 +107,9 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
+                    "total_token_throughput": (
+                        tput * 2 if perf_axes is None else perf_axes.get("total_token_throughput")
+                    ),
                     "completed_requests": 80,
                     "duration_seconds": 25.0,
                 },
@@ -118,6 +120,8 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             }
         )
     )
+    if perf_axes is not None:
+        (workspace / "inferencex_result.json").write_text(json.dumps({"output_throughput": tput, **perf_axes}))
     return workspace
 
 
@@ -522,11 +526,267 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize("output,expected_outcome", [(20000.0, "KEEP"), (180.0, "REVERT")])
+async def test_explore_missing_axes_grades_both_sides_on_output(
+    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis, output, expected_outcome
+):
+    """Incomplete AgentX evidence degrades the pair, not just one side, to output throughput."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    base_tput = state.baseline_tput
+    if missing_from == "current_best":
+        state.current_best = {
+            "action": "explore",
+            "tput": 250.0,
+            "total_token_throughput": 25000.0,
+            "e2e_norm_intvty_p90": 300.0,
+        }
+        base_tput = 250.0
+    candidate_axes = {
+        "input_throughput": 20000.0,
+        "total_token_throughput": 40000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    incomplete = {
+        "candidate": candidate_axes,
+        "current_best": state.current_best,
+        "baseline": state.baseline_perf,
+    }[missing_from]
+    missing_keys = (
+        ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+    )
+    for key in missing_keys:
+        incomplete.pop(key, None)
+    baseline_before = dict(state.baseline_perf)
+    best_before = dict(state.current_best)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=output, perf_axes=candidate_axes)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-missing-axes"),
+            "base_tput": base_tput,
+            "grid": [{"name": "v_incomplete", "extra_args": "--incomplete-flag"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-missing-axes",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--incomplete-flag", {})]
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["tput"] == output
+    assert tested["base_tput"] == base_tput
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / base_tput - 1.0) * 100.0)
+        assert [winner["name"] for winner in out["winners"]] == ["v_incomplete"]
+        assert out["best_variant"]["name"] == "v_incomplete"
+        assert out["output_throughput"] == output
+        assert out["running_base_tput"] == output
+        assert out["losers"] == []
+    else:
+        assert tested["gain_pct"] is None
+        assert out["winners"] == []
+        assert out["best_variant"] is None
+        assert out["output_throughput"] is None
+        assert out["running_base_tput"] == base_tput
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
+    assert state.baseline_perf == baseline_before
+    assert state.current_best == best_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize("incomplete_output", [170.0, 20000.0], ids=["fallback-revert", "fallback-keep"])
+@pytest.mark.parametrize(
+    "next_intvty,next_total,intvty_outcome",
+    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
+)
+async def test_explore_missing_axes_preserves_running_grading_anchor(
+    sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
+):
+    """A fallback REVERT keeps the measured anchor; a fallback KEEP degrades the next comparison."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    observed_args: dict[str, str] = {}
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        name = slot.parent.name
+        config = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
+        observed_args[name] = config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+        output, total, intvty = {
+            "v00_v_good": (180.0, 22000.0, 330.0),
+            "v01_v_incomplete": (incomplete_output, 40000.0, 360.0),
+            "v02_v_next": (160.0, next_total, next_intvty),
+        }[name]
+        axes = {
+            "input_throughput": total - output,
+            "total_token_throughput": total,
+            "e2e_norm_intvty_p90": intvty,
+        }
+        if name == "v01_v_incomplete":
+            for key in (
+                ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+            ):
+                axes.pop(key)
+        _fake_workspace(slot, tput=output, perf_axes=axes)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-anchor-sequence"),
+            "base_tput": 200.0,
+            "grid": [
+                {"name": "v_good", "extra_args": "--good-flag"},
+                {"name": "v_incomplete", "extra_args": "--incomplete-flag"},
+                {"name": "v_next", "extra_args": "--next-flag"},
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-anchor-sequence",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = {row["name"]: row for row in out["explore_search_update"]["tested"].values()}
+    assert out["status"] == "succeeded"
+    assert len(tested) == 3
+    assert tested["v_good"]["outcome"] == "KEEP"
+    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
+    assert tested["v_good"]["tput"] == 180.0
+    assert tested["v_incomplete"]["status"] == "succeeded"
+    fallback_kept = incomplete_output > 180.0
+    assert tested["v_incomplete"]["outcome"] == ("KEEP" if fallback_kept else "REVERT")
+    assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
+    assert tested["v_incomplete"]["base_tput"] == 180.0
+    expected_base = incomplete_output if fallback_kept else 180.0
+    expected_outcome = "REVERT" if fallback_kept else intvty_outcome
+    assert tested["v_next"]["base_tput"] == expected_base
+    assert tested["v_next"]["graded_objective"] == ("output_throughput" if fallback_kept else "e2e_norm_intvty_p90")
+    if expected_outcome == "REVERT":
+        assert tested["v_next"]["gain_pct"] is None
+    else:
+        assert tested["v_next"]["gain_pct"] == pytest.approx((next_intvty / 330.0 - 1.0) * 100.0)
+    assert tested["v_next"]["outcome"] == expected_outcome
+    assert "--good-flag" in observed_args["v02_v_next"]
+    assert ("--incomplete-flag" in observed_args["v02_v_next"]) is fallback_kept
+    assert "--next-flag" in observed_args["v02_v_next"]
+    expected_winners = ["v_good"] + (["v_incomplete"] if fallback_kept else [])
+    if expected_outcome == "KEEP":
+        expected_winners.append("v_next")
+    assert [row["name"] for row in out["winners"]] == expected_winners
+    assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
+    assert out["running_base_tput"] == (160.0 if expected_outcome == "KEEP" else expected_base)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["explicit-output", "synthetic-legacy"])
+@pytest.mark.parametrize("output,expected_outcome", [(220.0, "KEEP"), (180.0, "REVERT")])
+async def test_explore_required_axes_output_modes_keep_legacy_behavior(
+    sub_agent_runner, tmp_path, monkeypatch, mode, output, expected_outcome
+):
+    """Missing total/interactivity stays irrelevant when output grading is requested."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx" if mode == "explicit-output" else "")
+    state.baseline_tput = 200.0
+    if mode == "explicit-output":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=output, perf_axes={})
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-output-mode"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_output", "extra_args": "--output-flag"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-output-mode",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--output-flag", {})]
+    assert out["status"] == "succeeded"
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    assert tested["graded_objective"] == "output_throughput"
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / 200.0 - 1.0) * 100.0)
+    else:
+        assert tested["gain_pct"] is None
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
+    assert bool(out["winners"]) is (expected_outcome == "KEEP")
+    assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
+
+
+@pytest.mark.asyncio
 async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner, tmp_path):
-    """A high-risk serving variant that clears throughput but yields no accuracy
-    verdict used to skip the gate (throughput-only fallback). That fallback is
-    removed: the variant REVERTs (the change likely broke the eval path), but
-    the run does NOT stop -- only a broken baseline halts the run."""
+    """A high-risk serving variant that clears throughput but yields no accuracy verdict used to skip the gate (throughput-only fallback)."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -584,14 +844,7 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
 
 @pytest.mark.asyncio
 async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_agent_runner, tmp_path):
-    """The gate no longer asks which knobs look risky.
-
-    ``--online_quant_config`` changes numeric precision directly, and no entry of
-    the deleted high-risk catalogue matched it, so a variant carrying it cleared
-    on throughput alone with its measured accuracy discarded. With a baseline on
-    the state it is now gated like any other variant, and no eval verdict is a
-    REVERT rather than a KEEP.
-    """
+    """The gate no longer asks which knobs look risky."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -1147,9 +1400,7 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     tmp_path,
     monkeypatch,
 ):
-    """The overtime deadline is anchored on a throughput-only baseline, so the
-    rounds it gates must measure throughput only. The warmup round is ungated and
-    remains the accuracy source."""
+    """The overtime deadline is anchored on a throughput-only baseline, so the rounds it gates must measure throughput only."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1199,13 +1450,69 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_explore_no_eval_disables_magpie_warmup_and_decision(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Session ``--no-eval`` turns Magpie RUN_EVAL off for every explore round."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.eval_disabled = True
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-session-noeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "session_noeval",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-session-noeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert seen
+    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
+    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+
+
+@pytest.mark.asyncio
 async def test_explore_cold_decision_keeps_eval(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Without server_lifecycle reuse there is no warmup round whose eval the
-    decision round could fall back on, so it must run its own accuracy gate."""
+    """Without server_lifecycle reuse there is no warmup round whose eval the decision round could fall back on, so it must run its own accuracy gate."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -1258,12 +1565,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub_agent_runner,
     tmp_path,
 ):
-    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available.
-
-    The baseline gates its cold+hot double run on ``baseline_double_run`` as well
-    as lifecycle eligibility, so warm-decision has to honour both or a hot
-    candidate is scored against a cold anchor.
-    """
+    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -1518,20 +1820,15 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     tmp_path,
     monkeypatch,
 ):
-    """A granted cap never exceeds what is left of the session.
-
-    explore derives the cap from the measured baseline (up to 4h) and never
-    consulted the budget, so a 3h session could hand a single variant more time
-    than the whole run was given.
-    """
+    """A granted cap never exceeds what is left of the session."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
     state.max_minutes = 3.0
     sub.shared_state = state
-    # Read before the run: the budget only shrinks from here, so a cap granted
-    # later can only be smaller than what this allows.
+    # Read before the run: the budget only shrinks from here, so a cap granted later can only be smaller than what
+    # this allows.
     usable_sec = state.session_budget_usable_sec()
 
     base = tmp_path / "base.yaml"
@@ -1539,8 +1836,8 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     granted: list[int] = []
 
     def _fake_run(cmd, *args, **kwargs):
-        # Only benchmark rounds carry --output-dir; the interpreter probe does not,
-        # and it is module-memoized, so counting it would make this order-dependent.
+        # Only benchmark rounds carry --output-dir; the interpreter probe does not, and it is module-memoized, so
+        # counting it would make this order-dependent.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
         granted.append(int(kwargs["timeout"]))
@@ -1576,9 +1873,8 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
 
     assert res.result["status"] == "succeeded"
     assert granted, f"the variant should have been admitted (20s expected, ~{usable_sec:.0f}s left)"
-    # The hard cap is allowed to sit a grace window past the deadline so the
-    # in-process session watchdog reaps the tree first and the kill is attributed
-    # to the budget rather than to a slow variant.
+    # The hard cap is allowed to sit a grace window past the deadline so the in-process session watchdog reaps the
+    # tree first and the kill is attributed to the budget rather than to a slow variant.
     assert all(t <= usable_sec + _SESSION_KILL_GRACE_SEC for t in granted), (
         f"caps must be clamped to the ~{usable_sec:.0f}s budget, got {granted}"
     )
@@ -1638,8 +1934,8 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
         res = await sub.run_task(task)
 
     assert granted == [], "a variant needing 600s must not start with ~60s left"
-    # Measuring nothing because the budget ran out is not the same as variants
-    # failing, and it must not be reported as a bare, unattributed failure.
+    # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
+    # a bare, unattributed failure.
     assert res.result["error_class"] == "session_time_exhausted"
     assert res.result["session_budget_untested"] == 1
     # Untested variants stay out of the ledger so a resume can retry them.
@@ -1653,13 +1949,7 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     tmp_path,
     monkeypatch,
 ):
-    """The common case: the budget expires while a variant is running, not before it.
-
-    ``run_grid`` records such a variant as ``skipped`` because nothing was
-    measured. Explore has to consume that distinction: a variant written into
-    the KB-facing ``tested`` ledger as ``FAILED`` is one a resume will skip
-    forever, and one the KB learns is a bad idea, on the evidence of a clock.
-    """
+    """The common case: the budget expires while a variant is running, not before it."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     state = SharedState()
@@ -1680,8 +1970,8 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
         if "v_reaped" not in str(slot):
             _fake_workspace(slot, tput=840.0)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        # The session deadline elapsed while this round was running, so the
-        # reaper tore the tree down and named the cause.
+        # The session deadline elapsed while this round was running, so the reaper tore the tree down and named the
+        # cause.
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -1722,8 +2012,8 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
         res = await sub.run_task(task)
 
     tested = res.result["explore_search_update"]["tested"]
-    # A variant the run reaped was never measured; recording it keeps a resume
-    # from ever retrying it, and teaches the KB a clock's verdict.
+    # A variant the run reaped was never measured; recording it keeps a resume from ever retrying it, and teaches the
+    # KB a clock's verdict.
     assert [t["name"] for t in tested.values()] == ["v_measured"]
     assert [lr["name"] for lr in res.result["losers"]] == []
     assert res.result["session_budget_untested"] == 1
@@ -1735,14 +2025,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     tmp_path,
     monkeypatch,
 ):
-    """The stop has to survive ``run_grid``'s own discarded warmup round.
-
-    With server-lifecycle reuse ineligible, explore's decision round is a plain
-    ``run_grid`` call, and ``run_grid`` runs its own warmup pass before it (on by
-    default outside pytest). Explore reads the stop off the result's
-    ``error_class``, so a warmup reap graded as ``warmup_round_failed`` reaches
-    this ledger as a measured verdict about the variant.
-    """
+    """The stop has to survive ``run_grid``'s own discarded warmup round."""
     _force_cold_decision(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
     monkeypatch.setattr(
@@ -2105,8 +2388,8 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
     """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    # The filter resolves this name in its own module, so patching the
-    # re-export on _grid_runner would leave the real ten-second probe running.
+    # The filter resolves this name in its own module, so patching the re-export on _grid_runner would leave the real
+    # ten-second probe running.
     from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 
     monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
@@ -2249,14 +2532,14 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
+# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
-    """A ctx that makes __call__ take its earliest ``return`` (missing_config),
-    exercising the wrapper without needing to drive a full benchmark round."""
+    """A ctx that makes __call__ take its earliest ``return`` (missing_config), exercising the wrapper without needing
+    to drive a full benchmark round.
+    """
     return SimpleNamespace(
         task=SimpleNamespace(
             task_id="t-explore-reap",
@@ -2268,12 +2551,9 @@ def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, monkeypatch):
-    """__call__ must reap any lingering server after _run_explore returns,
-    even on its earliest failure path (missing_config) -- not just after a
-    full benchmark round. A magpie_timeout that fires before a
-    server_lifecycle variant's pidfile is ever written leaves nothing for
-    that pidfile-based teardown to find, orphaning its server
-    (AMD-AGI/Hyperloom#1354)."""
+    """__call__ must reap any lingering server after _run_explore returns, even on its earliest failure path
+    (missing_config) -- not just after a full benchmark round.
+    """
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     executor = ExploreExecutor(session_dir=tmp_path)
     ctx = _missing_config_ctx(tmp_path)
@@ -2296,9 +2576,7 @@ async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_explore_call_skips_reap_under_pytest(tmp_path):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
-    set (pytest always sets it for a running test), mirroring the guard on
-    the per-launch preclean in ``_grid_runner.py``."""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     executor = ExploreExecutor(session_dir=tmp_path)
     ctx = _missing_config_ctx(tmp_path)
 

@@ -23,11 +23,11 @@ Claude subprocess with the per-tag prompt context and an optional isolated
 `--permission-mode bypassPermissions` and has access to all built-in
 tools except `KillShell` and `SlashCommand` (which are denied via
 `--disallowedTools` to enforce the prompt rule against global process
-cleanup). The framework checkout listed in `framework_source_roots` is
-readable and writable from the subprocess. There is no file-system
-containment. Behavioural constraints are enforced by the prompt iron-rules
-(MUST NOT write directly to `framework_source_roots`; patches go through
-`integrate_patch`) and by post-hoc Critic + PolicyGate review.
+cleanup). Only the worktree and the task workspace are passed as writable
+`--add-dir` entries; the framework source trees are readable, and there is no
+file-system containment beyond that. Behavioural constraints are enforced by
+the prompt iron-rules (patches go through `integrate_patch`, never a direct
+write to a source tree) and by post-hoc Critic + PolicyGate review.
 The worktree is a best-effort isolation aid for deployments where the
 framework is installed as a git checkout; it is absent when the framework
 is pip-installed (the default; logged as `no_git_framework_source_root`).
@@ -102,6 +102,11 @@ measure → edit → measure loop on its own cards inside its worktree.
 | `max_turns`          | int      | no       | Optional turn cap (default 1000, hard ceiling 1000; `0` means unbounded). Depth is primarily bounded by the wall-clock budget. |
 | `needs_gpu`          | bool     | no       | Request the specialist GPU pool for wall-budgeted on-GPU work (servers on a non-8888 port, profiling, autotune, benchmark loops). Default false. |
 | `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default = serving TP so a TP-coupled gap is reproducible; set explicitly to override, e.g. 1 for a single-card kernel probe). |
+| `scope`              | string   | no       | `domain` (default), `domains` for a cross-domain mandate, or `freeform` — the last unbinds the specialist from the domain catalogue and makes `task_description` its whole task. |
+| `task_description`   | string   | no       | Required when `scope='freeform'`: the prose mandate, rendered verbatim. Name the exact files and line ranges you want read — a mandate that points at `<tree>/vllm/v1/spec_decode/llm_base_proposer.py:418-434` is worth more than any list of directories. |
+| `mode`               | string   | no       | `patch` (default for patch-capable domains) or `research` (read-only; no worktree). |
+| `bench`              | bool     | no       | Give a GPU specialist a measure → edit → measure loop on its own cards. Pair with `mode=patch + needs_gpu`. |
+| `source_hint_directories` | list | no       | Directories to read first, relative to the session framework tree (e.g. `vllm/model_executor/layers/fused_moe/`) or absolute. Advisory: they order the search, they do not bound it. Defaults to the static-recon checklist's directories for this model/GPU/precision. |
 
 ## EMIT format
 
@@ -116,6 +121,8 @@ delegate{
     gap_layer         = 'framework',
     gap_evidence      = { profile_trace = '<from SharedState.last_profile_trace>' },
     needs_gpu         = false,
+    # Point the specialist at what the evidence implicates; it may read wider.
+    source_hint_directories = ['vllm/model_executor/layers/fused_moe/'],
     # Omit max_turns for the default wall-budgeted run; set it only to cap a probe early.
   },
   idempotency_key = 'specialist-framework-<gap_id>-<round_idx>',
@@ -134,7 +141,10 @@ Each specialist subprocess sees:
     source-backed research hints
   - a PR-query capability block: the `mcp__pr_monitor__*` tools plus the
     shared `PR_QUERY_REPOS` repo allowlist (self-serve, no pre-warmed feed)
-  - framework source root hints
+  - Section 7: the framework tree this session optimises (annotated git
+    checkout / installed package), the other source trees present on the
+    host, and any `source_hint_directories`. All advisory — the specialist
+    reads whatever answers the question.
   - the worktree path
   - allocated GPU ids when `needs_gpu=true`
 * A tool whitelist including `Read / Grep / Glob / Bash / Edit / Write
@@ -155,7 +165,7 @@ Each specialist subprocess sees:
 * The exit contract:
   - one `specialist_done` intent (the SpecialistRunner harvests it from
     stdout's stream-json transcript) with payload schema
-    `{ gap_canonical_id, domain, tags, proposal_set, empty, summary, ... }`.
+    `{ gap_canonical_id, domain, tags, proposal_set, summary, ... }`.
   - optionally `patches_written: [<paths in worktree/patches/>]`.
   - `new_findings`, `residual_questions`, `confidence` (0..1).
 
@@ -170,7 +180,6 @@ Each specialist subprocess sees:
     ...
   ],
   "patches_written": ["patches/001_cuda_graph_fix.patch"],   // PR-A2+: optional
-  "empty":            false,
   "summary":          "short one-liner ≤ 480 chars",
   "confidence":       0.7,
   "new_findings":     ["..."],
@@ -179,8 +188,8 @@ Each specialist subprocess sees:
 ```
 
 When the specialist times out / dies / fails parse, SpecialistRunner
-synthesises an empty `specialist_done` payload (`empty=true`,
-`proposal_set=[]`, reason filled). The Coordinator never blocks waiting
+synthesises an empty `specialist_done` payload (`proposal_set=[]`,
+`summary` and `reason` filled). The Coordinator never blocks waiting
 for a missing specialist result.
 
 ## Followup action

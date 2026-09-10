@@ -29,9 +29,8 @@ class TestCategorizeKernelName:
         assert dg.categorize_kernel_name("vectorized_elementwise CUDAFunctor_add<bf16>") == "add"
 
     def test_snake_case_aiter_fp8_kernels(self):
-        # Regression: ``_`` is a regex word char, so the torch-eager-flavoured
-        # ``\bmul\b`` / ``rms_norm`` alternations matched none of AITER's fused FP8
-        # kernels and dumped 11.9% of Qwen3-14B-FP8's GPU time into ``other``,
+        # Regression: ``_`` is a regex word char, so the torch-eager-flavoured ``\bmul\b`` / ``rms_norm`` alternations
+        # matched none of AITER's fused FP8 kernels and dumped 11.9% of Qwen3-14B-FP8's GPU time into ``other``,
         # dropping launch_bound_share to 0.083 and failing the 0.10 entry gate.
         assert dg.categorize_kernel_name("_act_mul_and_dynamic_fp8_group_quant_kernel") == "activation"
         assert dg.categorize_kernel_name("_fused_rms_fp8_group_quant_kernel") == "rmsnorm"
@@ -50,29 +49,26 @@ class TestCategorizeKernelName:
         assert dg.categorize_kernel_name("fused_moe_gemm_kernel") == "moe"
 
     def test_snake_case_kernels_from_a_second_model(self):
-        # Regression: the first pass at the fix above was calibrated on one
-        # Qwen3-14B-FP8 trace. A GLM-5.2-MXFP4 trace (MoE, MXFP4, a different
-        # serving framework) showed it was not general -- and that the
-        # pre-existing ``\bgemm\b`` had the same word-boundary flaw.
+        # Regression: the first pass at the fix above was calibrated on one Qwen3-14B-FP8 trace.
         for name in (
             "_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel_HAS_BIAS_0",
             "aiter::bf16gemm_bf16_tn_256x256",
             "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
         ):
-            # 3.7% of that trace's GPU time; ``_quant_kernel`` had filed these as
-            # ``cast``, which is launch-bound, inflating the fusible share.
+            # 3.7% of that trace's GPU time; ``_quant_kernel`` had filed these as ``cast``, which is launch-bound,
+            # inflating the fusible share.
             assert dg.categorize_kernel_name(name) == "gemm", name
         # 49% of the trace: MLA attention, previously all of it ``other``.
         assert dg.categorize_kernel_name("aiter::mla_pfl_bf16_a16w16_causal_subQ16_mqa16") == "attention"
         assert dg.categorize_kernel_name("aiter::mla_a16w16_qh64_qseqlen1_gqaratio64_v3_ps") == "attention"
-        # A matrix-core MoE GEMM that already fuses SiLU is not an unfused
-        # elementwise op: counting it as ``activation`` overstated the headroom.
+        # A matrix-core MoE GEMM that already fuses SiLU is not an unfused elementwise op: counting it as
+        # ``activation`` overstated the headroom.
         assert dg.categorize_kernel_name("mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32") == "moe"
         assert dg.categorize_kernel_name("mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3") == "moe"
         assert dg.categorize_kernel_name("moe_reduction_kernel_plain_bf16_topk9_md6144") == "moe"
         assert dg.categorize_kernel_name("void aiter::grouped_topk_kernel<hip_bfloat16, float>") == "moe"
-        # Narrow on purpose: a quant kernel that merely mentions MoE stays a
-        # fusion candidate rather than disappearing into the MoE bucket.
+        # Narrow on purpose: a quant kernel that merely mentions MoE stays a fusion candidate rather than disappearing
+        # into the MoE bucket.
         assert dg.categorize_kernel_name("void aiter::fused_mx_quant_moe_sort_kernel<std::bfloat16_t>") != "moe"
 
 
@@ -85,14 +81,7 @@ class TestDiagnoseFromShares:
         assert d.dominant_categories[0] == "add"
 
     def test_compute_bound_is_annotated_not_vetoed(self):
-        """A high GPU-busy fraction no longer rejects the model.
-
-        The busy-of-wall heuristic was calibrated on 5 models, but measured
-        counter-examples exist: GEMM-bound Qwen3-14B/32B still gained +6.2% and
-        +3.1% end to end from decode fusions. Busy-of-wall is therefore reported
-        for ranking and kept visible in the reason, while the downstream
-        validate/loop remains the real filter.
-        """
+        """A high GPU-busy fraction no longer rejects the model."""
         shares = {"gemm": 0.55, "add": 0.25, "rmsnorm": 0.20}
         d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.72)
         assert d.is_candidate
@@ -107,9 +96,8 @@ class TestDiagnoseFromShares:
         assert "launch_bound_share" in d.reason
 
     def test_low_share_but_gpu_idle_is_candidate(self):
-        # Calibration regression: GraniteMoE-like case -- LOW launch-bound share
-        # (big MoE GEMMs dilute it) but the GPU is mostly idle (dispatch-bound), so
-        # it MUST be a candidate. The old share>=0.25 gate wrongly rejected this.
+        # Calibration regression: GraniteMoE-like case -- LOW launch-bound share (big MoE GEMMs dilute it) but the GPU
+        # is mostly idle (dispatch-bound), so it MUST be a candidate.
         shares = {"gemm": 0.55, "moe": 0.27, "add": 0.10, "rmsnorm": 0.05, "rope": 0.03}
         d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.29)
         assert d.is_candidate
@@ -153,8 +141,8 @@ class TestLoadTrace:
         assert shares == {"rope": 1.0} and n == 1.0
 
     def test_missing_file_distinct_reason(self, tmp_path):
-        # A missing trace must be distinguishable from a present-but-not-fusible
-        # trace: reason is trace_unreadable, not empty_trace / launch_bound_share.
+        # A missing trace must be distinguishable from a present-but-not-fusible trace: reason is trace_unreadable,
+        # not empty_trace / launch_bound_share.
         d = dg.diagnose_trace(tmp_path / "nope.json")
         assert not d.is_candidate
         assert d.reason.startswith("trace_unreadable")

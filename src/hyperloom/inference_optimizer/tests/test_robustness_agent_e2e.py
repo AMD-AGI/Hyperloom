@@ -44,10 +44,10 @@ def robustness_agent_root() -> Path:
     return root
 
 
-def _heartbeat_intent() -> Intent:
+def _idle_intent() -> Intent:
     return Intent(
         type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": "ok"},
+        payload={"topic": "observation", "body_md": "ok"},
     )
 
 
@@ -63,18 +63,18 @@ def _seed_state(session_dir: Path, *, crash_count: int) -> SharedState:
 
 
 @pytest.mark.asyncio
-async def test_robustness_agent_real_runtime_heartbeat(
+async def test_robustness_agent_real_runtime_idle_envelope(
     session_dir: Path,
     robustness_agent_root: Path,
 ):
-    """Zero crash + empty inbox → real runtime emits a heartbeat envelope."""
+    """Zero crash + empty inbox → real runtime emits an idle envelope."""
     _seed_state(session_dir, crash_count=0)
 
     backend = RobustnessAgentBackend(
         robustness_agent_root=robustness_agent_root,
         session_dir=session_dir,
         # No runtime_caller_factory: use the real subprocess path. Disable probes
-        # so an inert CI host doesn't fire HIGH alerts that mask the heartbeat.
+        # so an inert CI host doesn't fire HIGH alerts that mask the idle intent.
         options={
             "auto_probe_inference_server": False,
             "ray_probe_enabled": False,
@@ -84,7 +84,7 @@ async def test_robustness_agent_real_runtime_heartbeat(
 
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
+            ScriptedPlan(turns=[], default_intent=_idle_intent()),
             name="orchestration",
         ),
         "critic": MockCriticBackend(),
@@ -114,8 +114,8 @@ async def test_robustness_agent_real_runtime_heartbeat(
     envelope = emit["intent_envelope"]
     assert "intents" in envelope and isinstance(envelope["intents"], list)
     assert any(
-        i["intent_type"] == "send_message" and i["payload"].get("topic") == "heartbeat" for i in envelope["intents"]
-    ), f"heartbeat missing from emit envelope: {envelope}"
+        i["intent_type"] == "send_message" and i["payload"].get("topic") == "observation" for i in envelope["intents"]
+    ), f"idle send_message missing from emit envelope: {envelope}"
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
 
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
+            ScriptedPlan(turns=[], default_intent=_idle_intent()),
             name="orchestration",
         ),
         "critic": MockCriticBackend(),
@@ -182,7 +182,7 @@ async def test_robustness_agent_workdir_is_per_turn(
 
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
+            ScriptedPlan(turns=[], default_intent=_idle_intent()),
             name="orchestration",
         ),
         "critic": MockCriticBackend(),

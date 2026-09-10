@@ -137,11 +137,11 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     assert row.get("tp") == 8
 
 
-def test_t0_anchor_writes_warm_start_snapshot_to_disk(
+def test_t0_anchor_sets_warm_start_recipe_on_state(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """``warm_start_recipe`` snapshot lands at ``runtime/recipe_kb/.kb_warm.json``."""
+    """``warm_start_recipe`` is set on the shared state after anchor lookup."""
     state = _FakeSharedState()
     run_t0_anchor(
         kb,
@@ -151,14 +151,9 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
         extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
-    warm_path = session_dir / "runtime" / "recipe_kb" / ".kb_warm.json"
-    assert warm_path.is_file()
-    import json
-
-    payload = json.loads(warm_path.read_text())
     # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
-    assert payload["tier"] == "seed_only"
-    assert payload["confidence"] == 0.0
+    assert state.warm_start_recipe.get("tier") == "seed_only"
+    assert state.warm_start_recipe.get("confidence") == 0.0
     assert state.warm_start_context.get("status") == "seed_only"
 
 
@@ -386,9 +381,7 @@ def test_t0_anchor_requires_explicit_session_dir(
         run_t0_anchor(kb, state, workload="m", hw="mi300x")
 
 
-# ---------------------------------------------------------------------------
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
-# ---------------------------------------------------------------------------
 _ACTIONABLE = {
     "best_throughput": 100.0,
     "validated_gain_pct": 10.0,
@@ -445,8 +438,8 @@ def test_cascade_l1_get_recipe_exception_is_swallowed():
 
 
 def test_cascade_l2_skips_same_cid_and_nonactionable():
-    # A row with the target cid is skipped; a bare non-actionable row is skipped;
-    # only the actionable distinct-cid row is accepted.
+    # A row with the target cid is skipped; a bare non-actionable row is skipped; only the actionable distinct-cid row
+    # is accepted.
     kb = _FakeKB(
         get_result={"canonical_id": "CID:other"},
         search_by_labels=[

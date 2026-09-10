@@ -17,31 +17,12 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 
 @pytest.fixture(autouse=True)
-def isolated_agent_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry.
-
-    ``register_agent_provider`` writes into module-level state that outlives
-    the test that called it, and the registry offers no way to unregister, so
-    the provider registered below would otherwise stay visible to every later
-    test in the same worker process. Discovery runs first so the snapshot
-    already holds the built-ins and any installed plugin; the module globals
-    are then rebound to copies that monkeypatch drops during teardown.
-    """
-    agent_registry.discover_agent_providers()
-    monkeypatch.setattr(
-        agent_registry,
-        "_providers",
-        dict(agent_registry._providers),
-    )
-    monkeypatch.setattr(
-        agent_registry,
-        "_plugin_errors",
-        dict(agent_registry._plugin_errors),
-    )
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 @pytest.fixture
-def available_agent_provider(isolated_agent_provider_registry):
+def available_agent_provider(isolated_provider_registry):
     """Register one available provider so ``auto`` backend selection resolves.
 
     ``Config.agent_backend`` defaults to ``auto``, and both built-in providers

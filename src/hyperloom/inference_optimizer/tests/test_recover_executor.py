@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :class:`RecoverExecutor`.
-
-Stubs the two side effects (rocm-smi probes, pgrep/kill) and asserts the
-result-dict shape plus the on-disk ``result.json`` audit trail.
-"""
+"""Unit tests for :class:`RecoverExecutor`."""
 
 from __future__ import annotations
 
@@ -329,9 +325,7 @@ def test_module_callable_exists():
     assert recover_executor is _instance
 
 
-# ===========================================================================
 # Fine-grained helper-method unit tests
-# ===========================================================================
 
 
 def _unit_ctx(workspace: Path | None = None, **params: Any) -> SimpleNamespace:
@@ -568,9 +562,7 @@ class TestWorkspaceHelpers:
         RecoverExecutor()._write_result_json(target, {"state": "x"})
 
 
-# ===========================================================================
 # Additional focused branch coverage
-# ===========================================================================
 
 
 from hyperloom.orchestrator.actions.executors import recover as recmod  # noqa: E402

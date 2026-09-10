@@ -4,7 +4,7 @@
 """AgentX preflight: AIPERF_BIN resolution + capability (weka-trace) check.
 
 Contract:
-- ``resolve_aiperf_bin`` prefers ``AIPERF_BIN`` env, else PATH lookup, else None.
+- ``resolve_aiperf_bin`` prefers ``AIPERF_BIN``, then the managed CLI, then PATH.
 - ``check_aiperf_capability`` raises ``AgentXPreflightError`` when the binary is
   missing OR lacks the AgentX (weka-trace) capability. It verifies *capability*,
   not mere existence. The probe is injectable so the check is testable offline.
@@ -12,7 +12,16 @@ Contract:
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
+
+from hyperloom.inference_optimizer.agentx import preflight as pf
 
 from hyperloom.inference_optimizer.agentx.preflight import (
     AgentXPreflightError,
@@ -25,15 +34,93 @@ def test_resolve_prefers_env():
     assert resolve_aiperf_bin({"AIPERF_BIN": "/venv/bin/aiperf"}) == "/venv/bin/aiperf"
 
 
-def test_resolve_none_when_absent(monkeypatch):
+def _managed_cli(state: Path) -> Path:
+    cli = state / "aiperf-venv" / "bin" / "aiperf"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    return cli
+
+
+@pytest.mark.parametrize("override", ["", " \t\n"])
+def test_resolve_managed_before_broken_path_aiperf(tmp_path, monkeypatch, override):
+    cli = _managed_cli(tmp_path / "home" / ".hyperloom")
+    monkeypatch.setattr(pf.shutil, "which", lambda *_a, **_k: "/broken/bin/aiperf")
+    env = {"HOME": str(tmp_path / "home"), "AIPERF_BIN": override, "PATH": "/broken/bin"}
+    original = dict(env)
+    assert resolve_aiperf_bin(env) == str(cli)
+    assert env == original
+
+
+def test_resolve_managed_custom_state_outranks_home(tmp_path):
+    cli = _managed_cli(tmp_path / "custom state")
+    _managed_cli(tmp_path / "home" / ".hyperloom")
+    assert resolve_aiperf_bin(
+        {"HYPERLOOM_STATE_DIR": str(tmp_path / "custom state"), "HOME": str(tmp_path / "home")}
+    ) == str(cli)
+
+
+def test_resolve_managed_empty_state_uses_home(tmp_path):
+    cli = _managed_cli(tmp_path / ".hyperloom")
+    assert resolve_aiperf_bin({"HYPERLOOM_STATE_DIR": "", "HOME": str(tmp_path)}) == str(cli)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX user database")
+@pytest.mark.parametrize("home", [None, ""])
+def test_resolve_managed_missing_home_uses_system_user(tmp_path, monkeypatch, home):
+    import pwd
+
+    cli = _managed_cli(tmp_path / "system-home" / ".hyperloom")
+    monkeypatch.setenv("HOME", str(tmp_path / "unrelated-parent-home"))
+    seen = []
+
+    def _getpwuid(uid):
+        seen.append(uid)
+        return SimpleNamespace(pw_dir=str(tmp_path / "system-home"))
+
+    monkeypatch.setattr(pwd, "getpwuid", _getpwuid)
+    env = {"HOME": home} if home is not None else {}
+    assert resolve_aiperf_bin(env) == str(cli)
+    assert seen == [os.getuid()]
+
+
+@pytest.mark.parametrize("env", [{"HYPERLOOM_STATE_DIR": "relative"}, {"HOME": "relative-home"}])
+def test_resolve_rejects_relative_state(env):
+    with pytest.raises(AgentXPreflightError, match="HYPERLOOM_STATE_DIR.*absolute") as exc:
+        resolve_aiperf_bin(env)
+    assert not exc.value.repairable
+
+
+def test_resolve_override_outranks_managed_and_invalid_state(tmp_path):
+    _managed_cli(tmp_path)
+    for state in (str(tmp_path), "relative"):
+        env = {"HYPERLOOM_STATE_DIR": state, "AIPERF_BIN": " \t/external/bin/aiperf\n"}
+        assert resolve_aiperf_bin(env) == "/external/bin/aiperf"
+
+
+@pytest.mark.parametrize("candidate_kind", ["directory", "not-executable"])
+def test_resolve_unusable_managed_falls_back_to_path(tmp_path, monkeypatch, candidate_kind):
+    cli = _managed_cli(tmp_path)
+    if candidate_kind == "directory":
+        cli.unlink()
+        cli.mkdir()
+    else:
+        if os.name != "posix":
+            pytest.skip("POSIX executable permissions")
+        cli.chmod(0o644)
+    monkeypatch.setattr(pf.shutil, "which", lambda *_a, **_k: "/fallback/aiperf")
+    assert resolve_aiperf_bin({"HYPERLOOM_STATE_DIR": str(tmp_path)}) == "/fallback/aiperf"
+
+
+def test_resolve_none_when_absent(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.agentx.preflight.shutil.which",
         lambda _n, path=None: None,
     )
-    assert resolve_aiperf_bin({}) is None
+    assert resolve_aiperf_bin({"HOME": str(tmp_path)}) is None
 
 
-def test_resolve_path_lookup_returns_which(monkeypatch):
+def test_resolve_path_lookup_returns_which(monkeypatch, tmp_path):
     seen = {}
 
     def _which(name, path=None):
@@ -43,7 +130,7 @@ def test_resolve_path_lookup_returns_which(monkeypatch):
 
     monkeypatch.setattr("hyperloom.inference_optimizer.agentx.preflight.shutil.which", _which)
     # No AIPERF_BIN override -> falls back to which(), honoring the passed env PATH.
-    assert resolve_aiperf_bin({"PATH": "/opt/venv/bin"}) == "/opt/venv/bin/aiperf"
+    assert resolve_aiperf_bin({"HOME": str(tmp_path), "PATH": "/opt/venv/bin"}) == "/opt/venv/bin/aiperf"
     assert seen == {"name": "aiperf", "path": "/opt/venv/bin"}
 
 
@@ -59,7 +146,7 @@ def test_capability_absent_raises():
         return "usage: aiperf profile [options]\n  --public-dataset ...\n"
 
     with pytest.raises(AgentXPreflightError) as ei:
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
     assert "weka-trace" in str(ei.value) or "capab" in str(ei.value).lower()
 
 
@@ -78,7 +165,7 @@ def test_capability_present_ok():
         return _CAPABLE_HELP
 
     # must not raise
-    check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+    check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
 
 
 def test_capability_rejects_build_without_progress_api():
@@ -104,7 +191,7 @@ def test_capability_rejects_pre_scenario_build():
         return "usage: aiperf profile\n  --custom-dataset-type weka-trace ...\n"
 
     with pytest.raises(AgentXPreflightError) as ei:
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
     assert "--scenario" in str(ei.value)
 
 
@@ -113,7 +200,7 @@ def test_probe_failure_raises_not_crash():
         raise OSError("cannot exec")
 
     with pytest.raises(AgentXPreflightError):
-        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe, loader_probe=lambda _bin: None)
 
 
 # --- loader-allowlist assertion ------------------------------------------------
@@ -242,6 +329,139 @@ def test_loader_probe_survives_a_hung_interpreter(monkeypatch):
 
     monkeypatch.setattr(pf.subprocess, "run", _hang)
     assert pf._default_loader_probe("/venv/bin/aiperf") is None
+
+
+@pytest.mark.parametrize("external_override", [False, True])
+def test_default_probes_scope_python_environment_to_managed_cli(tmp_path, monkeypatch, external_override):
+    cli = _managed_cli(tmp_path)
+    for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "__PYVENV_LAUNCHER__"):
+        monkeypatch.setenv(key, "parent-pollution")
+    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("AIPERF_BIN", raising=False)
+    if external_override:
+        monkeypatch.setenv("AIPERF_BIN", str(cli))
+    original = dict(os.environ)
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs.get("env")))
+        stdout = _CAPABLE_HELP if "profile" in argv else json.dumps(_NEW)
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(pf.subprocess, "run", _run)
+    check_aiperf_capability(str(cli), env=os.environ, require_progress_api=True)
+    assert calls[0][0][0] == str(cli.resolve().parent / "python")
+    assert calls[1][0] == [str(cli), "profile", "--help"]
+    for _, child_env in calls:
+        assert child_env is not None
+        assert child_env["PATH"] == original["PATH"]
+        assert child_env.get("AIPERF_BIN") == original.get("AIPERF_BIN")
+        for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "__PYVENV_LAUNCHER__"):
+            assert child_env.get(key) == (original[key] if external_override else None)
+    assert dict(os.environ) == original
+
+
+@pytest.mark.parametrize("install_kind", ["legacy", "explicit"])
+def test_loader_fallback_keeps_runtime_pythonpath(tmp_path, monkeypatch, install_kind):
+    cli = _managed_cli(tmp_path)
+    env = {"HYPERLOOM_STATE_DIR": str(tmp_path / "other-state"), "PYTHONPATH": "/host/packages"}
+    if install_kind == "explicit":
+        env.update(HYPERLOOM_STATE_DIR=str(tmp_path), AIPERF_BIN=str(cli))
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs.get("env")))
+        return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0, json.dumps(_NEW), "")
+
+    monkeypatch.setattr(pf.subprocess, "run", _run)
+    check_aiperf_capability(str(cli), env=env)
+    assert len(calls) == 2
+    assert calls[0][1] == env
+    assert calls[1][0][0] == sys.executable
+    assert "-I" not in calls[1][0]
+    assert calls[1][1] == env
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "nonzero", "empty", "invalid-json", "not-a-list"])
+def test_managed_loader_failure_cannot_be_blessed_by_host_python(tmp_path, monkeypatch, failure):
+    cli = _managed_cli(tmp_path)
+    env = {"HYPERLOOM_STATE_DIR": str(tmp_path), "PYTHONPATH": "/host/packages"}
+    before = dict(env)
+    sibling = str(cli.resolve().parent / "python")
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == sibling:
+            if failure == "missing":
+                raise FileNotFoundError(sibling)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 60)
+            stdout = {"empty": "", "invalid-json": "broken import", "not-a-list": "{}"}.get(failure, json.dumps(_NEW))
+            return subprocess.CompletedProcess(argv, 1 if failure == "nonzero" else 0, stdout, "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps(_NEW), "")
+
+    monkeypatch.setattr(pf.subprocess, "run", _run)
+    with pytest.raises(AgentXPreflightError, match="managed.*loader allowlist") as exc:
+        check_aiperf_capability(str(cli), env=env, probe=lambda _bin: _CAPABLE_HELP)
+    assert exc.value.repairable is True
+    assert [argv[0] for argv in calls] == [sibling]
+    assert env == before
+
+
+def test_managed_unreadable_allowlist_does_not_degrade_to_flag_probe(tmp_path):
+    cli = _managed_cli(tmp_path)
+    help_calls = []
+
+    def _probe(aiperf_bin):
+        help_calls.append(aiperf_bin)
+        return _CAPABLE_HELP
+
+    with pytest.raises(AgentXPreflightError, match="managed.*loader allowlist") as exc:
+        check_aiperf_capability(
+            str(cli),
+            env={"HYPERLOOM_STATE_DIR": str(tmp_path)},
+            loader_probe=lambda _bin: None,
+            probe=_probe,
+        )
+    assert exc.value.repairable is True
+    assert help_calls == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX venv CLI shebang")
+def test_managed_sibling_python_ignores_host_packages(tmp_path, monkeypatch):
+    venv = tmp_path / "state" / "aiperf-venv"
+    subprocess.run([sys.executable, "-I", "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+    python = venv / "bin" / "python"
+    purelib = Path(
+        subprocess.check_output(
+            [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
+        ).strip()
+    )
+    poison = tmp_path / "host-python310-packages"
+    for root, loaders in ((purelib, _NEW), (poison, _OLD)):
+        package = root / "aiperf" / "common"
+        package.mkdir(parents=True)
+        (package.parent / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "scenario.py").write_text(
+            f"from types import SimpleNamespace\ndef get_scenario(name):\n    return SimpleNamespace(require_loader={loaders!r})\n",
+            encoding="utf-8",
+        )
+    cli = python.with_name("aiperf")
+    cli.write_text(
+        f"#!{python}\nfrom aiperf.common.scenario import get_scenario\n"
+        f"assert get_scenario('test').require_loader == {_NEW!r}\nprint({_CAPABLE_HELP!r})\n",
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+    env = dict(os.environ, HYPERLOOM_STATE_DIR=str(venv.parent), AIPERF_BIN="")
+    env.update(PYTHONHOME="/missing-python-home", PYTHONUSERBASE=str(poison), PYTHONPLATLIBDIR="missing-lib")
+    before = dict(env)
+    check_aiperf_capability(str(cli), env=env, require_progress_api=True)
+    assert env == before
+    assert os.environ["PYTHONPATH"] == str(poison)
 
 
 def test_hung_interpreter_reaches_the_flag_fallback(monkeypatch, capsys):

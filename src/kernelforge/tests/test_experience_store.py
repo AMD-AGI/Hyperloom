@@ -45,8 +45,8 @@ def test_explicit_local_ignores_ambient_remote_credentials(tmp_path):
         }
     )
 
-    # Blanked, not merely unused: a later reader of this config cannot reach the
-    # network with credentials that are not there.
+    # Blanked, not merely unused: a later reader of this config cannot reach the network with credentials that are not
+    # there.
     assert config.mode is KnowledgeStoreMode.LOCAL
     assert config.gbrain_base_url == ""
     assert config.gbrain_token == ""
@@ -161,10 +161,8 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
     assert solution["solution_slug"] == written["solution"]
     assert solution["strategy"] == "use local tiles"
     assert solution["speedup"] == 2.0
-    # The GPU is part of the address: a run on another card resolves elsewhere
-    # rather than reading this record and filtering it out afterwards.
-    # ``local_kernel`` normalizes to ``local`` because the operator name drops
-    # its ``_kernel`` suffix.
+    # The GPU is part of the address: a run on another card resolves elsewhere rather than reading this record and
+    # filtering it out afterwards.
     assert written["kernel"].startswith("kernel:forge-loop:local:vllm:")
     assert written["kernel"].endswith(":triton:mi355x")
     assert solution["patch_content"].endswith("@@ -1 +1 @@\n-old\n+new\n")

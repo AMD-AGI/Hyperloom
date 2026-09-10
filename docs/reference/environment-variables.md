@@ -36,13 +36,13 @@ provider-side combinations and what each one enables.
 | `OPENAI_BASE_URL`      | Conditional | —    | OpenAI-side endpoint. Required together with `OPENAI_API_KEY` to enable Codex. An OpenAI-only configuration drives Orchestration through the Codex backend; Claude and GEAK stay disabled.                                                                        |
 | `OPENAI_API_KEY`       | Conditional | —    | OpenAI-side key. Pairs with `OPENAI_BASE_URL`. Never borrowed from the Anthropic side.                                                                                                                               |
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
-| `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` and `FORGE_CLAUDE_MODEL` inherit from it.                                                                    |
-| `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend. `FORGE_CODEX_MODEL` inherits from it. Model settings are never borrowed across providers.                                                                    |
+| `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
+| `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
-| `FORGE_CLAUDE_MODEL`  | No       | Inherits `CLAUDE_MODEL` | Forge Claude backend model id (fusion, rewrite, collective). Set when Forge should use a different Claude model than orchestration.                                                                                   |
-| `FORGE_CODEX_MODEL`   | No       | Inherits `CODEX_MODEL`  | Forge Codex backend model id (fusion, rewrite, collective). Set when Forge should use a different Codex model than the OpenAI-side default.                                                                          |
+| `HYPERLOOM`<br>`_REASONING`<br>`_EFFORT` | No | Provider default | Reasoning effort for Hyperloom's own LLM calls, and the effort a Forge campaign runs at unless `FORGE_AGENT_REASONING_EFFORT` names one. One of `low` / `medium` / `high` / `xhigh` / `max`. `low`–`xhigh` are what the Claude CLI and the OpenAI-compatible gateway both accept; `max` is Claude's deepest and is sent as `xhigh` on the OpenAI protocol, which rejects the name. Set it once and every component runs at the depth you asked for. Hyperloom's own calls ignore an unrecognized value; a Forge campaign refuses to start on one. |
+| `FORGE_AGENT`<br>`_REASONING`<br>`_EFFORT` | No | `high` | Forge-only reasoning effort, same five levels. Outranks `HYPERLOOM_REASONING_EFFORT`, and outranks whatever a Forge call site would have chosen — every agent session in a campaign runs at this effort. |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
@@ -101,7 +101,8 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
+  `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
@@ -249,8 +250,7 @@ Globally, on every backend including the default `geak`:
   can neither propose either action nor request `run_optimization` /
   `run_gemm_tuning` of the kernel agent; both are refused as
   `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
-  entry from a lane budget, the way the fusion and collective lanes already
-  worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
 
 On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
@@ -281,23 +281,18 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
 
 ---
 
-## Collective optimization lane
+## Collective candidate extraction
 
-The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
-entry, never as an agent request. It requires `TP > 1`, a latest-snapshot
-`Exposed Communication %` of at least 1% as parsed from the TraceLens executive
-summary, a `trace_analyze` snapshot, and a source-resolved custom collective
-candidate (`all_reduce`, `reduce_scatter` or `all_gather`) — vendor RCCL/NCCL
-symbols are opaque binaries and never qualify.
+Communication operators are optimized by the rewrite controller like any other
+operator. TraceLens still resolves them deterministically: it maps a mangled
+NCCL/RCCL kernel name back to the framework device source that issued it and
+publishes the row in `kernel_candidates.json` with
+`candidate_source: nccl_summary`. Vendor RCCL/NCCL symbols are opaque binaries
+and never resolve to an editable source, so they are never published.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
-| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion, and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
-| `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
 | `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Unset (disabled) | Truthy allows a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family. The default rejects this inference because those shapes were not observed on that device symbol. |
-| `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
-| `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Unset (wrapper default)     | Per-agent timeout in seconds, forwarded to forge-collective as `--agent-timeout-sec`. A payload `agent_timeout_sec` takes precedence.                                                              |
 
 ---
 
@@ -677,13 +672,36 @@ otherwise `score >= floor` passes.
 
 ---
 
+## Host safety: reaping, GPU claims, and the out-of-band supervisor
+
+Three mechanisms protect a host from a run that ended badly. All three default
+to the weakest, most conservative setting, because the deployment is mixed and a
+guarantee that varies silently by host is not a guarantee.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
+| `HYPERLOOM_SUPERVISOR` | `1` | Whether the optimizer starts an out-of-band supervisor process that watches for a coordinator that died or whose tick stopped advancing. |
+| `HYPERLOOM_SUPERVISOR_ENFORCE` | unset (off) | Whether the supervisor may end a process tree. A wedged coordinator is sent SIGTERM regardless — that is the channel its signal drain reads while the loop is busy. Off by default, a coordinator that does not answer that stop, and a dead one's leftovers, are left alone and the refusal is recorded in `runtime/supervisor/status.json`. Ending a tree additionally requires a reap backend whose success is proof, so enforcement with the default `process_group` unit will refuse to kill and say so. |
+| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at `3600` and floored at `1800` | How long the coordinator's tick may go without advancing before the supervisor calls it wedged. Derived from the session budget so the window always fits inside the run it watches; setting this overrides the derivation. |
+
+The supervisor never opens `coordinator.db` — it sits on a network filesystem
+where a second writer risks the message bus and the task registry — and never
+transitions round state while the coordinator is alive. Its files live under
+`<session>/runtime/supervisor/`. When it finds the coordinator's process gone it
+writes `reports/final.json` itself, marked `producer: "supervisor"`; that record
+never replaces a full report, and the coordinator's own crash-safe fallback never
+replaces it.
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated supplement to the search roots returned by `hyperloom.orchestrator.framework.paths.resolve_kernel_search_roots`, used for source search and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_RESCUE_PATHS`                | Unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root. See [Targeted builds (Rung 5)](#targeted-builds-rung-5).  |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
@@ -924,48 +942,51 @@ are tasks. Supporting another gateway means adding a preset in
 Grading defaults to output throughput alone. On an agentic replay that is the
 wrong objective: the canonical corpus averages ~114k prompt tokens against ~810
 output tokens per request, so output-only grading optimises about 1% of the
-token budget and a variant can lift decode tok/s while wrecking prefill and
-still be recorded as a win.
+token budget, and a variant can lift decode tok/s while degrading user-perceived
+latency with no visible cost.
 
-Turning this on adopts the shape InferenceX ranks a submission by. Upstream
-sweeps a concurrency ladder, keeps TTFT and inter-token-latency percentiles
-separately, and compares throughput per chip *at a fixed interactivity target* —
-it never collapses the axes into one weighted number, and trading interactivity
-away for throughput is not a result it can express. So **total token throughput
-is the objective** and **interactivity p90 is a veto**, not a weighted term.
+`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
+sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
+publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
+and token throughput per chip as the y-axis. It never collapses the axes into one
+weighted number, and it has **no fixed interactivity target** — interactivity is
+a frontier coordinate, not a constraint, so a point that trades interactivity for
+throughput moves along the frontier rather than violating a rule.
 
-The objective is graded with the same `gain_pct` and the same
-`keep_threshold_pct` as run_grid and integrate_patch: a +1% total-throughput
-lift reads 1.00 and is kept, and the threshold is the only noise filter on the
-graded quantity. A candidate whose interactivity p90 falls past the band below
-the anchor is rejected before its throughput is read.
+Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
+per-concurrency arm selection maintainers apply before submitting:
 
-Interactivity is E2E Normalized Interactivity (`OSL/E2EL`) at p90, which is the
-axis upstream reports. It includes TTFT in the denominator, unlike the per-user
-`1/ITL` figure — on a ~114k-prompt replay TTFT is most of what a user waits for,
-so grading on `1/ITL` would let a candidate double TTFT with no visible cost.
+- **KEEP** — E2E normalised interactivity P90 (slow tail) gain ≥ `keep_threshold_pct`
+  **and** token throughput per chip not worse than the noise band.
+- **REVERT** — both axes worse than the anchor.
+- **RECORDED** — neither dominates; the point is stored for reporting but not
+  promoted to the optimization stack.  A point that loses at the measured
+  concurrency may still be the frontier winner at another rung.
 
-Default-on for AgentX runs, explicit opt-in via
-`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Either AgentX signal turns it
-on: the ambient `HYPERLOOM_AGENTX=1`, or the `benchmark_mode=agentx` stamped on
-the session at seed — so a round driven from a subprocess that never inherited
-the env var still grades on the agentic axis. Serving frameworks only:
-scriptable frameworks (xDiT, custom) keep output-throughput grading regardless.
+The minimum `keep_threshold_pct` floor for AgentX sessions is 2% (`AGENTX_KEEP_THRESHOLD_FLOOR_PCT`).
+The slow-tail variance is unmeasured; this floor is a conservative placeholder.
 
-Every KEEP decision — explore, the current_best lift, integrate_patch, the
-kernel stack, and the cumulative validated gain — resolves what it grades
-through one chokepoint, so the candidate and the figure it must beat are always
-read off the same axis. Total is ~140x output on this corpus, so half-applying
-the objective would not read as a small error: it would refuse every KEEP in the
-affected lane while each individual number it logged still looked plausible.
-When either side cannot supply the graded axes (no `intvty_p90`, no total),
-both degrade to output throughput together and the reason is logged — the
-degrade is never silent and never one-sided.
+**E2E normalised interactivity P90** is defined per request as
+`r_i = E2EL_i / OSL_i` (seconds per output token), then
+`interactivity_P90 = 1 / P90({r_i})` in tok/s/user.  Upstream takes the
+percentile in seconds-per-token *before* inverting to preserve the slow-tail
+interpretation (`MODELS.md:78`).  In aiperf's export `e2e_output_token_throughput`
+is the per-request rate `OSL / E2EL_s` with `LARGER_IS_BETTER`; its **P10**
+(not P90) is therefore the slow tail — `1 / P90(ratio) = P10(rate)`.
+
+TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
+is most of what a user waits for so grading on `1/ITL` would miss it.
+
+Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
+otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
+`benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
+inherited the env var still grades on the agentic axis. Serving frameworks only;
+scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `composite_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `composite_v1` grades total token throughput under the interactivity veto. An agentic replay is the case this grading exists for, so AgentX runs get it without asking; any other explicit value (including on an AgentX run) keeps output-throughput grading. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P90 (slow tail) as the primary objective, with per-chip token throughput as a secondary guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to both axes of the 2-D domination check. A candidate whose interactivity or throughput sits within this band of the anchor is not considered strictly worse on that axis. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
@@ -996,6 +1017,12 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
+  `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  evidence probe, armed by the profile leg that collects the evidence. The deep
+  tier inflates host time by design, so setting it by hand distorts any trace
+  collected alongside it.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 

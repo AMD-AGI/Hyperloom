@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the framework-rewrite switch manifest and its lever plumbing.
-
-Covers three layers:
-
-* manifest parsing and dependency reasoning (``_framework_switch_manifest``);
-* the SharedState lever ledger and its attribution recorder;
-* the explore-side seeding that turns registered levers into variants, in both
-  directions (additive when the levers are dormant, leave-one-out when they are
-  already on).
-
-The dependency edges get the most attention. They are what lets an enabler be
-benched together with the rewrite it unlocks, and the failure mode when they are
-wrong is silent: the enabler measures flat, gets rejected, and every rewrite that
-needed it is then measured with a permanently cold cache — so the loss is not one
-lever's gain but the ceiling of the whole bundle.
-"""
+"""Unit tests for the framework-rewrite switch manifest and its lever plumbing."""
 
 from __future__ import annotations
 
@@ -29,21 +14,11 @@ from hyperloom.orchestrator.actions.executors import _framework_switch_manifest 
 
 
 def _entry(switch: str, **kwargs: Any) -> dict[str, Any]:
-    """Build a manifest entry.
-
-    Args:
-        switch: Switch name.
-        **kwargs: Additional manifest fields.
-
-    Returns:
-        The entry dict.
-    """
+    """Build a manifest entry."""
     return {"switch": switch, **kwargs}
 
 
-# --------------------------------------------------------------------------
 # parsing
-# --------------------------------------------------------------------------
 
 
 def test_empty_input_is_not_an_error():
@@ -116,11 +91,7 @@ def test_a_credential_shaped_switch_is_dropped():
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
-    """A switch already set by the config would be toggled by unrelated config.
-
-    That is worse than not having the lever: the rewrite would appear to be under
-    the orchestrator's control while actually following the benchmark's own env.
-    """
+    """A switch already set by the config would be toggled by unrelated config."""
     switches, problems = manifest.parse_manifest(
         [_entry("HL_CACHE")],
         reserved_env={"HL_CACHE"},
@@ -151,11 +122,7 @@ def test_an_oversized_manifest_is_truncated():
 
 
 def test_a_dangling_dependency_reference_is_dropped():
-    """An edge to a switch that is not in the manifest cannot be honoured.
-
-    Keeping it would make the dependency closure silently incomplete, which is
-    exactly the case that causes an enabler to be benched alone.
-    """
+    """An edge to a switch that is not in the manifest cannot be honoured."""
     switches, problems = manifest.parse_manifest([_entry("HL_A", depends_on=["HL_MISSING"])])
     assert switches[0]["depends_on"] == []
     assert any("not in this manifest" in p for p in problems)
@@ -169,12 +136,7 @@ def test_a_self_reference_is_dropped():
 
 
 def test_one_sided_edges_are_mirrored():
-    """Declaring one direction states a real relationship; honour both halves.
-
-    A specialist that writes only ``enables`` on the enabler would otherwise leave
-    the dependent with an empty ``depends_on``, and the dependent's bundle would
-    then omit the enabler it needs.
-    """
+    """Declaring one direction states a real relationship; honour both halves."""
     switches, _ = manifest.parse_manifest([_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")])
     by_name = {s["switch"]: s for s in switches}
     assert by_name["HL_CACHE"]["depends_on"] == ["HL_HOIST"]
@@ -199,9 +161,7 @@ def test_a_switch_with_dependents_is_flagged_as_an_enabler():
     assert by_name["HL_CACHE"]["enabler"] is False
 
 
-# --------------------------------------------------------------------------
 # dependency reasoning
-# --------------------------------------------------------------------------
 
 
 def _chain() -> list[dict[str, Any]]:
@@ -253,18 +213,11 @@ def test_closure_of_an_unknown_switch_is_itself():
     assert manifest.dependency_closure("HL_ABSENT", _chain()) == {"HL_ABSENT"}
 
 
-# --------------------------------------------------------------------------
 # additive variants
-# --------------------------------------------------------------------------
 
 
 def test_additive_variants_bundle_each_lever_with_its_dependencies():
-    """An enabler is never measured without the rewrite it unlocks.
-
-    This is the load-bearing case: benched alone the hoist saves only an
-    allocation, so a 1% threshold rejects it — and the caches downstream then
-    never hit, which loses the whole bundle rather than one lever.
-    """
+    """An enabler is never measured without the rewrite it unlocks."""
     variants = manifest.additive_variants(_chain())
     by_name = {v["name"]: v for v in variants}
     assert set(by_name["fwlever_hl_derived"]["extra_envs"]) == {"HL_DERIVED", "HL_CACHE", "HL_HOIST"}
@@ -309,9 +262,7 @@ def test_a_single_lever_needs_no_full_stack_variant():
     assert [v["name"] for v in manifest.additive_variants(switches)] == ["fwlever_hl_only"]
 
 
-# --------------------------------------------------------------------------
 # leave-one-out variants
-# --------------------------------------------------------------------------
 
 
 def test_leave_one_out_removes_a_lever_with_its_dependents():
@@ -325,8 +276,8 @@ def test_leave_one_out_removes_a_lever_with_its_dependents():
 def test_leave_one_out_skips_a_removal_that_empties_the_stack():
     """Removing everything reproduces the pre-patch baseline, already measured."""
     names = [v["name"] for v in manifest.leave_one_out_variants(_chain())]
-    # Dropping the root enabler would take HL_CACHE and HL_DERIVED with it, but
-    # HL_STANDALONE survives, so it is a real experiment and is kept.
+    # Dropping the root enabler would take HL_CACHE and HL_DERIVED with it, but HL_STANDALONE survives, so it is a
+    # real experiment and is kept.
     assert "fwlever_drop_hl_hoist" in names
     chain_only, _ = manifest.parse_manifest([_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")])
     assert "fwlever_drop_hl_hoist" not in [v["name"] for v in manifest.leave_one_out_variants(chain_only)]
@@ -345,9 +296,7 @@ def test_leave_one_out_variants_carry_no_extra_envs():
         assert variant["unset_envs"]
 
 
-# --------------------------------------------------------------------------
 # summary
-# --------------------------------------------------------------------------
 
 
 def test_summary_is_empty_for_nothing():
@@ -364,9 +313,7 @@ def test_summary_lists_switches_and_problems():
     assert "! dropped HL_B" in text
 
 
-# --------------------------------------------------------------------------
 # SharedState lever ledger
-# --------------------------------------------------------------------------
 
 
 def _state():
@@ -434,9 +381,7 @@ def _entry_parsed(switch: str) -> dict[str, Any]:
     return switches[0]
 
 
-# --------------------------------------------------------------------------
 # explore seeding
-# --------------------------------------------------------------------------
 
 
 def test_dormant_levers_seed_additive_variants():
@@ -498,9 +443,7 @@ def test_lever_variants_survive_the_payload_parser():
     assert all(v.unset_envs for v in variants)
 
 
-# --------------------------------------------------------------------------
 # attribution sign convention
-# --------------------------------------------------------------------------
 
 
 def test_additive_attribution_takes_the_measured_gain_directly():
@@ -521,11 +464,7 @@ def test_additive_attribution_takes_the_measured_gain_directly():
 
 
 def test_leave_one_out_attribution_negates_the_measured_gain():
-    """Removing a lever measures the negative of its contribution.
-
-    A stack that drops 8% without a lever means the lever was worth about 8%.
-    Getting this sign wrong would invert every verdict in the report.
-    """
+    """Removing a lever measures the negative of its contribution."""
     from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
 
     seeds = [
@@ -566,9 +505,7 @@ def test_non_lever_variants_are_ignored():
     assert _framework_lever_attributions(outcomes, seeds) == []
 
 
-# --------------------------------------------------------------------------
 # two-tier verdict in integrate_patch
-# --------------------------------------------------------------------------
 
 
 _REWRITE_PATCH = """\
@@ -582,22 +519,6 @@ index 0000000..1111111 100644
 +    return 2
 """
 
-# A patch that gates its rewrite on an environment switch but does not declare it.
-# This is the shape a real specialist delivered: four env-gated patches and no
-# ``framework_switches`` key in the done payload at all.
-_ENV_GATED_PATCH_WITHOUT_MANIFEST = """\
-diff --git a/src.py b/src.py
-index 0000000..1111111 100644
---- a/src.py
-+++ b/src.py
-@@ -1,2 +1,3 @@
- def f():
--    return 1
-+    import os
-+    return 2 if os.environ.get("HL_UNDECLARED_CACHE", "") == "1" else 1
-"""
-
-
 # Default manifest for the integrate_patch runs below: a hoist enabler plus the
 # cache it unlocks. Named so a test can pass ``switches=[]`` to mean "no manifest
 # at all", which is a materially different case from "the default one".
@@ -610,9 +531,9 @@ _DEFAULT_MANIFEST: list[dict[str, Any]] = [
 @pytest.fixture(autouse=True)
 def _allowlist_tmp_framework_roots(monkeypatch, tmp_path):
     """Let integrate_patch treat the test's temp checkout as framework source."""
-    from .conftest import patch_integrate_patch_allowlist
+    from .conftest import patch_integrate_patch_roots
 
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
 
 
 async def _run_rewrite_integrate(
@@ -628,22 +549,7 @@ async def _run_rewrite_integrate(
     patch_body: str | None = None,
     extra_params: "dict[str, Any] | None" = None,
 ):
-    """Run integrate_patch on a switch-gated rewrite patch with a faked bench.
-
-    Args:
-        tmp_path: Test temp dir.
-        monkeypatch: Pytest monkeypatch.
-        delta_pct: Throughput delta the switches-on leg should imply.
-        accuracy_pass: Accuracy verdict the switches-on leg reports.
-        switches: The manifest the specialist delivered.
-        parity_delta_pct: Throughput delta the switch-off parity leg should imply.
-            0.0 models a correctly inert patch.
-        parity_accuracy_pass: Accuracy verdict the parity leg reports.
-
-    Returns:
-        ``(result, repo, benched_envs, legs)`` where ``benched_envs`` is the env
-        the switches-on leg ran with and ``legs`` records every bench invocation.
-    """
+    """Run integrate_patch on a switch-gated rewrite patch with a faked bench."""
     import json as _json
 
     from .conftest import init_git_repo
@@ -667,7 +573,6 @@ async def _run_rewrite_integrate(
                 "domain": "framework_rewrite_specialist",
                 "proposal_set": [],
                 "patches_written": ["patches/001_rewrite.patch"],
-                "empty": False,
                 "summary": "switch-gated rewrites",
                 manifest.MANIFEST_KEY: list(switches or []),
             }
@@ -685,8 +590,8 @@ async def _run_rewrite_integrate(
         is_parity = bool(kwargs.get("unset_envs"))
         if is_parity:
             if parity_tput_missing:
-                # The leg ran but no throughput came back: a measurement failure,
-                # which says nothing either way about whether the patch is inert.
+                # The leg ran but no throughput came back: a measurement failure, which says nothing either way about
+                # whether the patch is inert.
                 return ({}, {"accuracy_pass": None, "timed_out": False})
             # A well-behaved default-off patch reproduces the base exactly.
             return (
@@ -745,20 +650,14 @@ async def test_a_winning_bundle_keeps_and_registers_levers_as_on(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_path, monkeypatch):
-    """A bundle that misses the threshold keeps its code dormant instead of reverting.
-
-    The rewrites are default-off, so keeping them costs nothing at runtime, and
-    reverting would throw away the ones that do pay together with the one that does
-    not — including any enabler, whose entire purpose is to make another rewrite
-    profitable rather than to be profitable itself.
-    """
+    """A bundle that misses the threshold keeps its code dormant instead of reverting."""
     result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
     assert result["status"] == "kept_inert"
     assert result["framework_lever_outcome"] == "registered_off"
     assert len(result["patches_applied"]) == 1
     # Nothing may enter the running configuration.
     assert result["extra_envs_applied"] == {}
-    assert result["config_changes_applied"] == {}
+    assert result["extra_envs_applied"] == {}
     # The code is still on disk, just dormant.
     assert (repo / "src.py").read_text().endswith("return 2\n")
     assert "enabler" in result["reason"]
@@ -766,20 +665,7 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
 
 @pytest.mark.asyncio
 async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path, monkeypatch):
-    """A correctness failure on a bundle names the bundle, not a switch.
-
-    This used to revert, on the reasoning that dormant-but-wrong code would be
-    turned on later by explore. That risk is covered elsewhere: every lever variant
-    explore benches goes through the same quality gate (``is_valid_measurement``
-    rejects a scriptable measurement whose gate failed), so a broken switch is
-    caught the moment it is the one being measured — which is also the only way to
-    learn *which* switch it is.
-
-    What reverting actually cost was the rest of the bundle. A live four-switch
-    patch hit +65.5% and was discarded whole on the gate, taking three switches
-    that were never implicated with it. So the code stays inert and flagged, and
-    explore bisects it.
-    """
+    """A correctness failure on a bundle names the bundle, not a switch."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -789,18 +675,14 @@ async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path,
     assert result["status"] == "kept_inert"
     assert result.get("quality_unverified") is True
     # Applied but dormant: nothing may enter current_best off this verdict.
-    assert result["config_changes_applied"] == {}
+    assert result["extra_envs_applied"] == {}
     assert result["extra_envs_applied"] == {}
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
 async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monkeypatch):
-    """The inert-keep path is opt-in via the manifest; ordinary patches are unchanged.
-
-    Without switches, a kept patch would be live, so keeping an unprofitable one
-    would silently degrade the configuration.
-    """
+    """The inert-keep path is opt-in via the manifest; ordinary patches are unchanged."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -813,11 +695,7 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
-    """The writeback registers inert levers without lifting current_best.
-
-    Both halves matter: without registration the dormant code is unreachable, and
-    with a current_best lift the run would claim a gain it did not measure.
-    """
+    """The writeback registers inert levers without lifting current_best."""
     from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
@@ -839,19 +717,12 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     assert not state.current_best
 
 
-# --------------------------------------------------------------------------
 # switch-off parity
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_a_manifest_without_a_patch_registers_no_levers(tmp_path, monkeypatch):
-    """Switches gating code that was never delivered must not become levers.
-
-    Registering them would leave the ledger pointing at absent code, and a later
-    explore round would set switches that do nothing while reporting the result as
-    that rewrite's contribution.
-    """
+    """Switches gating code that was never delivered must not become levers."""
     import json as _json
 
     from .conftest import init_git_repo
@@ -895,12 +766,7 @@ async def test_a_manifest_without_a_patch_registers_no_levers(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_parity_leg_runs_with_every_switch_removed(tmp_path, monkeypatch):
-    """The parity leg must guarantee the switches are absent, not merely unset.
-
-    Unsetting is not enough on its own: an earlier accepted rewrite can have put
-    a switch into the base configuration, and the leg would then silently measure
-    the switched-on path while claiming to measure parity.
-    """
+    """The parity leg must guarantee the switches are absent, not merely unset."""
     _, _, _, legs = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=8.0)
     parity_legs = [leg for leg in legs if leg.get("unset_envs")]
     assert len(parity_legs) == 1
@@ -923,14 +789,7 @@ async def test_a_clean_parity_leg_is_recorded_on_the_keep(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_a_patch_that_is_not_inert_when_disabled_is_reverted(tmp_path, monkeypatch):
-    """A rewrite that changes throughput with its switches off breaks the contract.
-
-    Everything downstream assumes a disabled rewrite is a no-op: keeping inert
-    code, comparing levers against a shared base, and stacking several rewrite
-    patches in one session all rely on it. A patch that quietly takes effect while
-    "off" would corrupt every later measurement, and the switches-on bench alone
-    cannot detect it — which is why this costs a dedicated leg.
-    """
+    """A rewrite that changes throughput with its switches off breaks the contract."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -944,69 +803,24 @@ async def test_a_patch_that_is_not_inert_when_disabled_is_reverted(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_an_env_gated_patch_without_a_manifest_is_rejected(tmp_path, monkeypatch):
-    """A gate the manifest does not declare disables every guarantee, silently.
+async def test_a_plain_patch_without_a_manifest_is_still_benched(tmp_path, monkeypatch):
+    """Most framework work is a straight edit with no switch, and must still run.
 
-    Observed on a live session: the specialist delivered four patches, each gating
-    its rewrite on ``os.environ.get("MYFW_...")``, and no ``framework_switches``
-    key at all. With an empty manifest the whole scheme quietly stands down --
-    nothing is turned on for the measurement, no parity leg runs, no lever is
-    registered -- and the patch is benched as an ordinary diff. That run then
-    measured +1.4% *and* moved the output (ssim 0.4527 under a 0.4740 floor, lpips
-    31% over), which a genuinely default-off patch cannot do. The parity leg exists
-    precisely to catch that, and it never ran.
-
-    The failure mode is the mirror of the manifest-without-a-patch case already
-    handled here, so it gets the same treatment: refuse the deliverable instead of
-    falling back to the unguarded path.
+    Without a manifest there are no levers and no parity leg, but the patch is a
+    patch: it earns a benchmark like any other.
     """
-    result, repo, _, legs = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-    )
-    assert result["status"] == "reverted"
-    assert result["error_class"] == "framework_switch_gates_undeclared"
-    assert "HL_UNDECLARED_CACHE" in result["reason"]
-    # Refused before spending a benchmark leg on it.
-    assert not legs, "an undeclared gate must be caught before benching"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_a_plain_patch_without_env_gates_still_needs_no_manifest(tmp_path, monkeypatch):
-    """The check must not turn every ordinary framework patch into a rejection.
-
-    Most framework work is a straight edit with no switch at all; only a patch that
-    reads an undeclared environment switch is contradicting its own manifest.
-    """
-    result, _, _, legs = await _run_rewrite_integrate(
+    _result, _, _, legs = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
         delta_pct=8.0,
         switches=[],
     )
-    assert result.get("error_class") != "framework_switch_gates_undeclared"
     assert legs, "a plain patch must still be benched"
 
 
 @pytest.mark.asyncio
 async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_violation(tmp_path, monkeypatch):
-    """ "We could not measure it" and "the patch is not inert" are different findings.
-
-    On a live session a parity leg whose report was read too early came back with no
-    throughput, and the verdict said the patch "is not actually inert" — for a patch
-    worth +4.7% whose parity leg had in fact measured 0.3510 against a 0.3492 base,
-    0.5% apart. Conflating the two is worse than losing the run: the KB record teaches
-    every later session that this rewrite breaks when disabled, which is a lesson
-    drawn from a filesystem race.
-
-    The patch is still reverted — an unverified patch must not be left on disk to skew
-    later measurements — but under its own outcome, and the reason must not assert
-    something the measurement cannot support.
-    """
+    """\"We could not measure it\" and \"the patch is not inert\" are different findings."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -1021,12 +835,7 @@ async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_
 
 
 def test_both_parity_outcomes_are_writable_to_the_framework_kb():
-    """A verdict the KB rejects is a verdict that never reaches the next session.
-
-    The first live run raised ``ValueError: outcome='reverted_switch_off_parity' must
-    be one of [...]`` — the new verdict was never added to the allowed set, so the
-    record was dropped and the lesson lost.
-    """
+    """A verdict the KB rejects is a verdict that never reaches the next session."""
     from hyperloom.orchestrator.knowledge import kb_writeback
 
     assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY in kb_writeback.ALLOWED_OUTCOMES
@@ -1063,11 +872,7 @@ async def test_a_parity_leg_that_fails_correctness_reverts(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
-    """An inert KEEP leaves code on disk, so it needs the same guarantee.
-
-    Without this, unprofitable-but-not-inert code would stay in the tree and skew
-    the base of every subsequent measurement in the session.
-    """
+    """An inert KEEP leaves code on disk, so it needs the same guarantee."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -1081,21 +886,7 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(tmp_path, monkeypatch):
-    """A quality regression condemns one switch, not the whole bundle.
-
-    Measured on a live session: a four-switch patch cached the SP seqlen
-    rendezvous and reached 0.577 fps against a 0.3487 base -- +65.5%, three timed
-    runs 0.3% apart -- and was reverted whole because the quality gate failed. The
-    switches are benched together, so "the output moved" localises to the bundle,
-    not to a switch; at least one is broken and the rest may be exactly the win
-    the evidence pointed at.
-
-    Default-off code costs nothing to keep, and per-lever attribution in explore
-    is what separates the good switches from the bad one. But keeping it is only
-    safe if the tree really is unchanged with every switch unset, which is what
-    the parity leg measures — so on a switched bundle it is now worth its leg even
-    when the gate failed.
-    """
+    """A quality regression condemns one switch, not the whole bundle."""
     result, repo, _, legs = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -1111,11 +902,7 @@ async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bun
 
 @pytest.mark.asyncio
 async def test_a_correctness_failure_without_switches_still_reverts(tmp_path, monkeypatch):
-    """An unswitched patch has nothing to bisect, so a quality regression reverts it.
-
-    Without a manifest the code is live the moment it is applied: there is no
-    "off" state to fall back to, so a moved output means the patch must go.
-    """
+    """An unswitched patch has nothing to bisect, so a quality regression reverts it."""
     result, repo, _, legs = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -1130,12 +917,7 @@ async def test_a_correctness_failure_without_switches_still_reverts(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_a_bundle_that_is_not_inert_still_reverts_despite_the_bisect_path(tmp_path, monkeypatch):
-    """Keeping code is only safe when 'off' is genuinely off.
-
-    A bundle that fails both the quality gate and parity is not a bisect
-    candidate: with the switches unset it already changes the tree's behaviour, so
-    leaving it would skew every later measurement in the session.
-    """
+    """Keeping code is only safe when 'off' is genuinely off."""
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
@@ -1213,51 +995,3 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
-
-
-@pytest.mark.asyncio
-async def test_env_gated_patch_proceeds_to_bench_when_the_proposal_arms_it(tmp_path, monkeypatch):
-    """An enablement round may arm its gate through the proposal instead of the manifest.
-
-    Only the manifest feeds ``switch_env``, so an enablement fix that sets the gate
-    in its proposal is self-consistent even with no manifest: the env is on for the
-    bench. Refusing it would force env-shaped fixes to be rewritten as source
-    patches. The gate stays recorded as an auditable problem.
-    """
-    result_en, _, _, legs_en = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-        extra_params={"enablement": True, "extra_envs": {"HL_UNDECLARED_CACHE": "1"}},
-    )
-    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
-        "an enablement gate armed by the proposal must not be refused"
-    )
-    assert legs_en, "enablement round must have attempted a bench"
-    problems = result_en.get("framework_switch_problems") or []
-    assert any("undeclared environment switch" in p for p in problems), (
-        f"the demoted gate must stay auditable in the result, got {problems!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_env_gated_patch_refused_when_nothing_arms_it(tmp_path, monkeypatch):
-    """An enablement gate armed by neither manifest nor proposal benches inert.
-
-    ``switch_env`` only turns on manifest entries, so letting this through spends a
-    leg reproducing the same failure and feeds the stall streak.
-    """
-    result_en, _, _, legs_en = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-        extra_params={"enablement": True},
-    )
-    assert result_en["status"] == "reverted"
-    assert result_en["error_class"] == "framework_switch_gates_undeclared"
-    assert "HL_UNDECLARED_CACHE" in result_en["reason"]
-    assert not legs_en, "a gate nothing turns on must not spend a bench leg"

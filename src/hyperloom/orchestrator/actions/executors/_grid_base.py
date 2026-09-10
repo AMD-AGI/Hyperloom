@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared value types and helpers for the ``explore`` executor's grid runs.
-
-Holds :class:`GridVariant` / :class:`VariantResult`, the content-fingerprint
-delegate, ``extra_envs`` coercion, and the shared per-variant timeout default.
-The runner that actually invokes Magpie and parses ``benchmark_report.json``
-lives in :mod:`._grid_runner`.
-"""
+"""Shared value types and helpers for the ``explore`` executor's grid runs."""
 
 from __future__ import annotations
 
@@ -23,9 +17,7 @@ from ._canonical_fingerprint import canonical_fingerprint
 log = logging.getLogger(__name__)
 
 
-# Content-based variant fingerprint (cross-action dedup ledger key). Delegates
-# to :func:`canonical_fingerprint` (the single source of truth); both produce
-# the identical 16-char content hash.
+# Content-based variant fingerprint (cross-action dedup ledger key).
 def variant_fingerprint(
     extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
@@ -35,24 +27,7 @@ def variant_fingerprint(
     args_mode: str = "append",
     runtime_override: dict[str, Any] | None = None,
 ) -> str:
-    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
-
-    Name and note are NOT inputs — variants with identical content but
-    different names collapse to the same fingerprint. Delegates to
-    :func:`canonical_fingerprint` so the two never drift.
-
-    Args:
-        extra_server_args (str | None): Backend server args for the variant.
-        extra_envs (dict[str, Any] | None): Per-variant environment overrides.
-        remove_args: Base/server args to remove before appending this variant.
-        unset_envs: Inherited env names to unset before applying this variant.
-        args_mode: ``"append"`` or ``"replace"``.
-        runtime_override: Attempt runtime override; folded into the hash only
-            when non-empty so plain variants keep their historical fingerprint.
-
-    Returns:
-        str: The 16-char content fingerprint of the pair.
-    """
+    """Stable content fingerprint for a (extra_server_args, extra_envs) pair."""
     return canonical_fingerprint(
         extra_server_args,
         extra_envs,
@@ -63,47 +38,15 @@ def variant_fingerprint(
     )
 
 
-# Single home for the grid-level defaults every graded executor shares. They
-# were previously redefined per executor with identical values, which is how the
-# stack-rebench floors drifted apart.
-# Sized for the synthetic ISL/OSL shape: an AgentX round does not fit it, and is
-# not meant to -- see ``agentx_variant_timeout_sec`` in ``_grid_runner``, which
-# raises whatever cap reaches it rather than expecting this default to cover both
-# workloads.
+# Single home for the grid-level defaults every graded executor shares.
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
-# It is the only bar a variant clears. This default sits above grid noise, but
-# the Coordinator injects a per-cycle threshold that decays as a session runs
-# out of large wins, so a late-cycle KEEP is admitted on a thinner margin than
-# this. Override per task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 
 @dataclass
 class GridVariant:
-    """One row of the grid we're going to test.
-
-    A single server-config candidate: the flags/env overrides to apply on top
-    of the base Magpie config for one benchmark run.
-
-    Attributes:
-        name (str): Human-readable label for the variant.
-        extra_server_args (str): Backend server args appended via
-            ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
-        extra_envs (dict[str, str]): Per-variant environment overrides, minus
-            any name in ``BLOCKED_VARIANT_ENV_NAMES``. Defaults to an empty dict.
-        remove_args (list[str]): Base/server flags to remove before appending
-            this variant's args. Defaults to ``[]``.
-        unset_envs (list[str]): Inherited environment keys to remove before
-            applying ``extra_envs``. Defaults to ``[]``.
-        args_mode (str): ``"append"`` (default) or ``"replace"``.
-        note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
-            Defaults to ``""``.
-        runtime_override (dict[str, str]): Set on the instance only (not a
-            constructor argument); injected into the materialized YAML's
-            ``benchmark.envs`` by ``_build_variant_yaml`` and folded into
-            :attr:`fingerprint`.
-    """
+    """One row of the grid we're going to test."""
 
     name: str
     extra_server_args: str = ""
@@ -124,19 +67,7 @@ class GridVariant:
         unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
         args_mode: str = "append",
     ) -> None:
-        """Initialize a grid variant descriptor.
-
-        Args:
-            name: Variant name.
-            extra_server_args: Extra server CLI args for this variant.
-            extra_envs: Extra environment variables; unsafe names are dropped.
-            note: Optional reason/category note.
-            remove_args: Base/server args to remove before appending this
-                variant's args.
-            unset_envs: Inherited env names to remove before applying
-                ``extra_envs``.
-            args_mode: ``"append"`` or ``"replace"``.
-        """
+        """Initialize a grid variant descriptor."""
         self.name = name
         self.extra_server_args = extra_server_args
         self.extra_envs, dropped_envs = filter_untrusted_env_mapping(
@@ -150,18 +81,13 @@ class GridVariant:
         mode = str(args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
         self.note = note
-        # Optional runtime override; injected into materialized YAML benchmark.envs
-        # by _build_variant_yaml so the server subprocess resolves the attempt runtime.
+        # Optional runtime override; injected into materialized YAML benchmark.envs by _build_variant_yaml so the
+        # server subprocess resolves the attempt runtime.
         self.runtime_override: dict[str, str] = {}
 
     @property
     def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc.
-
-        Returns:
-            str: :func:`canonical_fingerprint` of this variant's
-            ``extra_server_args`` and ``extra_envs``.
-        """
+        """Content fingerprint used as dedup-ledger key. See module doc."""
         return variant_fingerprint(
             self.extra_server_args,
             self.extra_envs,
@@ -173,26 +99,12 @@ class GridVariant:
 
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
-    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
-
-    Accepts the three shapes the LLM emits — canonical dict, shell-style
-    ``"FOO=1 BAR=2"`` string, and ``["FOO=1", "BAR=2"]`` token list — so
-    downstream ``.items()`` callers never crash on a non-dict. Unknown shapes
-    coerce to an empty dict.
-
-    Args:
-        value (Any): The Orchestration-supplied ``extra_envs`` in any of the
-            accepted shapes (dict, shell-style string, or token list).
-
-    Returns:
-        dict[str, str]: The normalized env mapping; empty for unknown shapes.
-    """
+    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``."""
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items() if k is not None}
     if isinstance(value, str):
         out: dict[str, str] = {}
-        # Split on the first ``=`` only to preserve URL-style assignments
-        # like ``HF_ENDPOINT=https://...``.
+        # Split on the first ``=`` only to preserve URL-style assignments like ``HF_ENDPOINT=https://...``.
         tokens = re.split(r"[\s;]+", value.strip())
         for tok in tokens:
             if not tok:
@@ -228,56 +140,7 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
 
 @dataclass
 class VariantResult:
-    """One bench run's parsed result.
-
-    The parsed outcome of a single variant's Magpie run: identity, status,
-    headline throughput/latency metrics, artifact paths, and
-    failure-classification metadata.
-
-    Attributes:
-        name (str): Variant label (mirrors :attr:`GridVariant.name`).
-        extra_server_args (str): Server args used for this run.
-        extra_envs (dict[str, str]): Env overrides used for this run.
-        status (str): ``"succeeded"`` or ``"failed"``.
-        output_throughput (float | None): Output tokens/sec, if measured.
-        request_throughput (float | None): Requests/sec, if measured.
-        total_token_throughput (float | None): Total tokens/sec, if measured.
-        completed_requests (int | None): Number of completed requests.
-        duration_seconds (float | None): Benchmark duration in seconds.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms).
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms).
-        tpot_mean_ms (float | None): Mean time-per-output-token (ms).
-        input_throughput (float | None): Input tokens/sec (prefill), if measured.
-        tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
-        intvty_p90 (float | None): p90 E2E normalized interactivity
-            (tok/s/user), if measured.
-        workspace (str | None): Path to the located ``benchmark_*`` workspace.
-        report_path (str | None): Path to ``benchmark_report.json`` if present.
-        raw_result_path (str | None): Path to the raw result JSON, if salvaged.
-        reported_success (bool | None): Magpie's own success flag, if known.
-        returncode (int | None): Magpie subprocess return code.
-        nonfatal_warnings (list[str]): Non-fatal warning tags (e.g. harvested
-            leaked artifacts).
-        error (str | None): Error summary for failed/nonzero runs.
-        error_class (str): Short failure-classification tag (empty on success).
-        note (str): Optional reason/category tag carried from the variant.
-        runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
-        killed_overtime (bool): ``True`` iff reaped by the soft overtime
-            deadline rather than crashing/timing-out/succeeding.
-        estimated_output_throughput (float | None): Rough output tokens/sec
-            estimated from the engine's periodic ``server.log`` throughput
-            logs when the variant was killed before finishing. Informational
-            only — never a real measurement and never used for winner
-            selection; ``output_throughput`` stays ``None`` on the kill path.
-        server_log_path (str | None): Absolute path to the variant's
-            ``server.log`` when a server was launched; ``None`` for pre-launch
-            failures where no server ran.
-        launch_evidence (dict[str, Any]): Structured declared/observed launch
-            evidence persisted beside the variant. Empty when no config was
-            materialized before the failure.
-        launch_evidence_path (str | None): Path to the persisted
-            ``launch_evidence.json`` artifact.
-    """
+    """One bench run's parsed result."""
 
     name: str
     extra_server_args: str
@@ -308,8 +171,8 @@ class VariantResult:
     runtime_sec: float | None = None
     # True iff reaped by the overtime soft deadline.
     killed_overtime: bool = False
-    # Rough output tok/s salvaged from server.log on the killed_overtime path;
-    # informational only, never feeds winner selection.
+    # Rough output tok/s salvaged from server.log on the killed_overtime path; informational only, never feeds winner
+    # selection.
     estimated_output_throughput: float | None = None
     server_log_path: str | None = None
     launch_evidence: dict[str, Any] = field(default_factory=dict)
@@ -317,21 +180,11 @@ class VariantResult:
 
     @property
     def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`.
-
-        Returns:
-            str: :func:`canonical_fingerprint` of this result's
-            ``extra_server_args`` and ``extra_envs``.
-        """
+        """Same fingerprint scheme as :class:`GridVariant`."""
         return canonical_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize this result to a plain JSON-friendly dict.
-
-        Returns:
-            dict[str, Any]: All result fields plus the computed
-            ``fingerprint``, keyed by attribute name.
-        """
+        """Serialize this result to a plain JSON-friendly dict."""
         return {
             "name": self.name,
             "extra_server_args": self.extra_server_args,
@@ -346,6 +199,9 @@ class VariantResult:
             "ttft_mean_ms": self.ttft_mean_ms,
             "e2el_mean_ms": self.e2el_mean_ms,
             "tpot_mean_ms": self.tpot_mean_ms,
+            "input_throughput": self.input_throughput,
+            "tpot_p90_ms": self.tpot_p90_ms,
+            "e2e_norm_intvty_p90": self.intvty_p90,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

@@ -12,13 +12,13 @@ Two halves of the enablement flow that both build on a
   fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
   :func:`score_enablement_title`.
 * **Authoring** — turn a request + ranked candidates into the
-  :class:`EnablementMandate` (allowed source roots + task description + patch
+  :class:`EnablementMandate` (source roots + task description + patch
   invariants) handed to the patch-authoring specialist. See
   :func:`build_mandate`.
 
 Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
 the local filesystem (source-root probe + installed package version) unless
-``root_hints`` is passed explicitly.
+``source_root_hints`` is passed explicitly.
 """
 
 from __future__ import annotations
@@ -214,25 +214,19 @@ def _resolve_package_version(package: str) -> str:
 def _resolve_actual_root_hints(framework: str) -> list[str]:
     """Return concrete source-root strings for the mandate (never empty).
 
-    Calls probe_framework_source_roots_for_env() and falls back to the generic
-    prose hints when discovery yields nothing.  Also appends version info for the
-    target framework package.
+    Falls back to the generic prose hints when discovery yields nothing. Also
+    appends version info for the target framework package.
     """
     try:
         from hyperloom.orchestrator.framework.paths import (
-            probe_framework_source_roots_for_env,
+            resolve_kernel_search_roots,
             summarise_framework_root_discovery,
         )
 
-        roots_str = probe_framework_source_roots_for_env()
-        if roots_str:
-            hints: list[str] = []
-            summary = summarise_framework_root_discovery(roots_str)
-            for root in roots_str.split(":"):
-                root = root.strip()
-                if root:
-                    hints.append(root)
-            hints.append(f"(discovery summary: {summary})")
+        roots = resolve_kernel_search_roots()
+        if roots:
+            hints: list[str] = list(roots)
+            hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
             pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
             pkg_name = pkg_map.get(framework, framework)
             ver = _resolve_package_version(pkg_name)
@@ -259,9 +253,9 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "tree.  A serve-flag, env-var, or dependency-install fix requires no patch at "
     "all — set ``patches_written: []`` and record the change in ``proposal_set`` "
     "(for env/flag) or ``setup_commands`` (for installs).",
-    "Only *source edits* must stay under the allowed source roots listed below; "
-    "touching any other path with a code patch is a hard reject. (Environment "
-    "setup via ENVIRONMENT SETUP below is separate and allowed.)",
+    "Keep *source edits* under the source roots listed below; patching any other "
+    "path is outside this mandate. (Environment setup via ENVIRONMENT SETUP below "
+    "is separate and allowed.)",
     "Do NOT fabricate throughput/latency/accuracy numbers, and do NOT alter the "
     "eval dataset/task/metric/limit or the result parsing to inflate a score — the "
     "gate here is RUNNABILITY (server boots + minimal inference) or, for an "
@@ -297,27 +291,50 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
 # capability gap rarely becomes fully runnable inside a single budget window.
 # The integrate side REWARDS partial progress: a patch that only advances the
 # boot to a *new, deeper* failure is KEPT and stacked as a base for the next
-# round (see ``enablement.enablement_made_progress`` and ``integrate_patch``
+# round (see ``bringup.observe.round_advanced`` and ``integrate_patch``
 # ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
-# valid deliverable rather than grounds for returning ``empty=true``.
+# valid deliverable rather than grounds for returning an empty ``proposal_set``.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
     "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
     "have to reach full end-to-end runnability in this one budget window.",
     "If you cannot make the combo fully run, apply the SMALLEST CHANGE that "
     "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
-    "new, different failure then appears. The change is KEPT and stacked as a "
-    "base; the next round resumes from the deeper failure. One step forward is "
-    "strictly better than returning nothing. The change may be a source patch, "
+    "new, different failure then appears. The change is kept permanently in the "
+    "tree; the next round builds on it from the deeper failure. One step forward "
+    "is strictly better than returning nothing. The change may be a source patch, "
     "a serve flag, an env var, or a dependency install — whichever is simplest.",
     "Record the change: a source patch in ``patches_written``, serve-flag or "
     "env-var changes in ``proposal_set`` (each entry as ``extra_server_args`` "
-    "or ``extra_envs``), dependency installs in ``setup_commands``. Set "
-    "``empty=false`` and in ``summary`` state which failure you cleared and "
+    "or ``extra_envs``), dependency installs in ``setup_commands``. Emit a "
+    "non-empty ``proposal_set`` (or ``patches_written`` / ``artifacts_written``) "
+    "and in ``summary`` state which failure you cleared and "
     "what the next (deeper) failure now is.",
-    "Return ``empty=true`` ONLY when you cannot advance past the CURRENT failure "
+    "Return ``proposal_set=[]`` ONLY when you cannot advance past the CURRENT failure "
     "by even one step — NOT merely because full runnability is out of reach this "
     "round.",
+)
+
+
+# Loader-path and other blocked environment names: the benchmark env layer
+# drops them, and a round that needs one asks for that exact name/value pair.
+ENABLEMENT_ENV_GRANT_GUIDANCE: tuple[str, ...] = (
+    "A small set of environment names is BLOCKED from your ordinary `extra_envs` "
+    "layer because setting one redirects what the server process loads or makes "
+    "it execute a script before its own entrypoint. `PYTHONPATH` and "
+    "`LD_LIBRARY_PATH` are blocked but GRANTABLE; `LD_PRELOAD`, `LD_AUDIT`, "
+    "`PATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `BASH_ENV` and their kin are never "
+    "granted at all — find another fix.",
+    "To ask for one, add an `env_grant_requests` array to your final "
+    '`specialist_done`, each entry `{"name": ..., "value": ..., '
+    '"reason": ...}`. The grant covers that exact NAME AND VALUE pair for '
+    "THIS round only: a different value is not covered, and the next round starts "
+    "with no grant.",
+    "Ask for the narrowest value that works — for a loader search path, the ONE "
+    "directory that has to be searched, not a rebuilt whole path. It is "
+    "PREPENDED to what the launch config already carries, so the framework's own "
+    "search order survives; a value that tries to replace the path will still "
+    "only be prepended.",
 )
 
 
@@ -350,8 +367,8 @@ ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "A build request is COMPLEMENTARY to a source patch, not a replacement: you "
     "MAY both author the smallest patch that advances the boot one step AND "
     "request a build for the compiled/from-source piece the patch cannot cover. "
-    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT set "
-    "``empty=true`` when you emit one.",
+    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT "
+    "return an empty ``proposal_set`` when you emit one.",
 )
 
 
@@ -367,7 +384,7 @@ _LADDER_TWO_AXES: tuple[str, ...] = (
     "merely un-wired needs only the cheap top rungs (a flag / a small patch) — do "
     "NOT pull code or compile for it. A genuinely-new architecture climbs higher.",
     "After each cleared boot failure, RE-DIAGNOSE the new (deeper) failure and pick "
-    "a rung again — enablement is serial and progress is stacked.",
+    "a rung again — enablement is serial and each round's fix is cumulative.",
 )
 
 _LADDER_RUNGS: tuple[str, ...] = (
@@ -461,6 +478,10 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
+    lines.append("BLOCKED ENVIRONMENT NAMES (ask for a grant; a loader path is prepended, never replaced):")
+    for g in ENABLEMENT_ENV_GRANT_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
     for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
@@ -479,7 +500,7 @@ class EnablementMandate:
         framework: Target serving framework.
         model: Model id/path that must become runnable.
         signature: The classified failure driving the fix.
-        allowed_root_hints: Human-readable source-root families in scope.
+        source_root_hints: Human-readable source-root families to search.
         candidate_refs: Ranked bridging PR/ref hints (best first).
         task_description: The rendered specialist mandate (prompt body).
         invariants: The patch invariants (see :data:`ENABLEMENT_PATCH_INVARIANTS`).
@@ -488,7 +509,7 @@ class EnablementMandate:
     framework: str
     model: str
     signature: FailureSignature
-    allowed_root_hints: tuple[str, ...]
+    source_root_hints: tuple[str, ...]
     candidate_refs: tuple[str, ...] = ()
     task_description: str = ""
     invariants: tuple[str, ...] = field(default_factory=lambda: ENABLEMENT_PATCH_INVARIANTS)
@@ -498,7 +519,7 @@ def _render_task_description(
     req: EnablementRequest,
     sig: FailureSignature,
     candidate_refs: Sequence[str],
-    allowed_root_hints: Sequence[str],
+    source_root_hints: Sequence[str],
     source_context: str = "",
 ) -> str:
     """Render the specialist mandate text for an enablement failure.
@@ -507,7 +528,7 @@ def _render_task_description(
         req: The enablement request (framework/model/opt-in).
         sig: The classified failure signature.
         candidate_refs: Ranked bridging refs (best first).
-        allowed_root_hints: Source-root families in scope.
+        source_root_hints: Source-root families to search.
         source_context: Optional snippet of source lines near the offending
             site, injected verbatim to ground the authoring sub-agent. Empty
             omits the block.
@@ -542,8 +563,8 @@ def _render_task_description(
         for ref in candidate_refs:
             lines.append(f"  - {ref}")
         lines.append("")
-    lines.append("ALLOWED SOURCE ROOTS (code edits outside these are rejected):")
-    for hint in allowed_root_hints:
+    lines.append("SOURCE ROOTS TO SEARCH (advisory — where this session's code lives):")
+    for hint in source_root_hints:
         lines.append(f"  - {hint}")
     lines.append("")
     lines.append(build_enablement_ladder_book(sig))
@@ -560,7 +581,7 @@ def build_mandate(
     signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
-    root_hints: Sequence[str] | None = None,
+    source_root_hints: Sequence[str] | None = None,
 ) -> EnablementMandate:
     """Build an :class:`EnablementMandate` from a request + candidates.
 
@@ -570,18 +591,16 @@ def build_mandate(
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
-        root_hints: Explicit source-root hints; when ``None`` (default) they
-            are resolved via :func:`_resolve_actual_root_hints` (which calls
-            ``probe_framework_source_roots_for_env()`` and falls back to the
-            generic prose constants on failure).
+        source_root_hints: Explicit source-root hints; when ``None`` (default)
+            they are resolved via :func:`_resolve_actual_root_hints`.
 
     Returns:
         EnablementMandate: The authoring contract, ready to hand to the
         specialist runner.
     """
     sig = signature if signature is not None else req.signature
-    if root_hints is not None:
-        hints: list[str] = list(root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    if source_root_hints is not None:
+        hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
     else:
         hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
@@ -590,7 +609,7 @@ def build_mandate(
         framework=req.framework,
         model=req.model,
         signature=sig,
-        allowed_root_hints=tuple(hints),
+        source_root_hints=tuple(hints),
         candidate_refs=refs,
         task_description=task,
     )
@@ -598,6 +617,7 @@ def build_mandate(
 
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
+    "ENABLEMENT_ENV_GRANT_GUIDANCE",
     "ENABLEMENT_HEURISTICS",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",

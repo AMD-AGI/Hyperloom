@@ -19,19 +19,7 @@ async def check_registers(
     kernel_name: str | None = None,
     gpu_target: str = "gfx950",
 ) -> dict:
-    """Analyze register usage from a compiled kernel binary.
-
-    Uses llvm-objdump to disassemble and extract register metadata.
-
-    Args:
-        binary_path: Direct path to .so or .hsaco file.
-        build_dir: Directory to search for .so files.
-        kernel_name: If provided, filter output to this kernel.
-        gpu_target: GPU target for disassembly (default gfx950).
-
-    Returns:
-        Dict with: register_info, occupancy_analysis, message.
-    """
+    """Analyze register usage from a compiled kernel binary."""
     # Find binary
     if binary_path is None and build_dir is not None:
         so_files = glob.glob(str(Path(build_dir) / "*.so"))

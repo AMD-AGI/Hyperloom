@@ -76,7 +76,7 @@ class SubAgentResult:
             central registry:
 
             * ``"policy_{rule}"`` (e.g.
-              ``"policy_source_file_outside_trusted_scope"``): a
+              ``"policy_path_outside_session_dir"``): a
               ``PolicyDenied`` dispatch rejection, keyed on
               :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
               Falls through any exact-match bucket below by design — a
@@ -247,6 +247,7 @@ class SubAgentRunner:
                     self.policy.validate_dispatched_task(
                         task.kind,
                         dict(task.params or {}),
+                        task_id=task.task_id,
                     )
                 except PolicyDenied as denied:
                     await self._write_terminal(

@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the GEAK e2e breakdown collector and the
-sweep ``benchmark_report.json`` writer.
-
-These exercise the ``KERNEL_OPT_BACKEND_ORDER=geak`` paths in isolation:
-
-* :func:`collect_geak` — the not-engaged short-circuit, the
-  engaged-but-missing-result fallback, the full success mapping (including the
-  ``accepted_kernels`` shape guard and the path-relativization warning branch).
-* :func:`_write_benchmark_report` — the happy path plus the best-effort
-  ``OSError`` branch (a failed write must never raise).
-"""
+"""Unit coverage for the GEAK e2e breakdown collector and the sweep ``benchmark_report.json`` writer."""
 
 from __future__ import annotations
 
@@ -68,8 +58,8 @@ def test_collect_geak_engaged_without_result(tmp_path: Path) -> None:
 def test_collect_geak_reconstructs_from_disk_when_result_missing(
     tmp_path: Path,
 ) -> None:
-    # geak engaged with an on-disk tree but no ``geak_result`` in state: the
-    # collector reconstructs the run from disk instead of a bare miss.
+    # geak engaged with an on-disk tree but no ``geak_result`` in state: the collector reconstructs the run from disk
+    # instead of a bare miss.
     pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(
@@ -143,9 +133,8 @@ def test_collect_geak_reconstructs_from_disk_when_result_missing(
 def test_collect_geak_reconstruct_surfaces_opbench_logs_and_cause(
     tmp_path: Path,
 ) -> None:
-    # e2e ran the op-bench bake-off (no editable winner) then was killed before
-    # flushing a result/journey: reconstruction surfaces the op-bench verdicts,
-    # runner log tails, and a classified cause.
+    # e2e ran the op-bench bake-off (no editable winner) then was killed before flushing a result/journey:
+    # reconstruction surfaces the op-bench verdicts, runner log tails, and a classified cause.
     pf = tmp_path / "geak"
     exp = pf / "e2e_run"
     (exp / "baseline").mkdir(parents=True)
@@ -378,8 +367,8 @@ def _write_kernel_journey(eval_dir: Path) -> Path:
 
 
 def test_collect_geak_backfills_accepted_kernels_from_journey(tmp_path: Path) -> None:
-    # result.json shipped the aggregate win with empty accepted_kernels; the
-    # collector back-fills the integrated KEEP kernel from kernel_journey.json.
+    # result.json shipped the aggregate win with empty accepted_kernels; the collector back-fills the integrated KEEP
+    # kernel from kernel_journey.json.
     eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
@@ -576,8 +565,8 @@ def test_parse_isl_osl() -> None:
 
 
 def test_schema_has_optimizations_contract() -> None:
-    # V5 exposes adopted GEAK results through the canonical optimizations
-    # section and route diagnostics through the dedicated GEAK section.
+    # V5 exposes adopted GEAK results through the canonical optimizations section and route diagnostics through the
+    # dedicated GEAK section.
     from hyperloom.inference_optimizer.breakdown import schema
 
     assert hasattr(schema, "Optimizations")
@@ -600,10 +589,11 @@ async def test_sweep_via_geak_reuses_script_and_records_variants(
         """#!/usr/bin/env bash
 set -euo pipefail
 python3 - <<'PY'
-import json, os
+import json, os, sys
 from pathlib import Path
 out = Path(os.environ["OUT_DIR"])
 if os.environ["CONC"] == "2":
+    print("intentional conc=2 benchmark failure", file=sys.stderr)
     raise SystemExit(3)
 summary = {
     "output_throughput_tok_s_median": 321.0,
@@ -658,7 +648,7 @@ PY
     assert result["source"] == "geak"
     assert result["promotion_measurement"]["output_throughput"] == 321.0
     assert result["points"][1]["status"] == "failed"
-    assert result["points"][1]["error"] == "no throughput"
+    assert result["points"][1]["error"].rstrip().endswith("intentional conc=2 benchmark failure")
 
     ok_dir = tmp_path / "sweep" / "variant_0_conc1_isl8192_osl1024"
     env = json.loads((ok_dir / "env.json").read_text(encoding="utf-8"))
@@ -752,13 +742,7 @@ def _gemm_state_with_keep(*, attempt_tuned_file: str) -> dict:
 
 
 def test_collect_gemm_tuning_marks_a_kept_run_adopted() -> None:
-    """A forge run whose artifact reached the stack must read as adopted.
-
-    Across 419 real forge attempts this was never true: the attempt row carried
-    no ``tuned_file`` at all, so the stack lookup matched on the empty string
-    and every KEEP -- including ones measuring +49% -- was reported as not
-    adopted.
-    """
+    """A forge run whose artifact reached the stack must read as adopted."""
     from hyperloom.inference_optimizer.breakdown.collectors.kernels import collect_gemm_tuning
 
     out = collect_gemm_tuning(_gemm_state_with_keep(attempt_tuned_file="/ws/merged_tuned_fmoe.csv"))
@@ -778,26 +762,14 @@ def test_collect_gemm_tuning_leaves_an_unlifted_run_unadopted() -> None:
 
 
 class TestCandidateTunedFile:
-    """The artifact a KEEP adopted, named from the candidate's own env.
-
-    One KEEP is described by three different path strings -- the durable copy in
-    aiter's config dir, the tuner-workspace original, and the E2E merge product
-    -- so the attempt row cannot re-derive the one the stack holds. The way out
-    is not to read the stack back either: reading it back picks up whatever entry
-    is newest, and ``_lift_to_current_best`` skips the append when
-    ``(action, variant_name)`` already matches, which a second macro cycle
-    re-tuning the same tuner does. The attempt would then claim the previous
-    round's artifact and its gain. Both sides take the value from this one
-    function instead, so they are the same string by construction.
-    """
+    """The artifact a KEEP adopted, named from the candidate's own env."""
 
     def test_prefers_the_candidate_env_var(self) -> None:
-        """The candidate's own key wins over whatever the env happens to list
-        first -- a stacked env carries the earlier KEEPs' vars too."""
+        """The candidate's own key wins over whatever the env happens to list first -- a stacked env carries the earlier KEEPs' vars too."""
         from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
 
-        # Deliberately not first: falling back to insertion order would pick
-        # the wrong artifact and still look right if the target led the dict.
+        # Deliberately not first: falling back to insertion order would pick the wrong artifact and still look right
+        # if the target led the dict.
         env = {
             "AITER_CONFIG_GEMM_BF16": "/ws/earlier_keep.csv",
             "AITER_CONFIG_FMOE": "/ws/merged_tuned_fmoe.csv",
@@ -832,8 +804,8 @@ class TestCandidateTunedFile:
 
 
 def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
-    # A run stamped ``no_gain`` on the COLD basis can still hold a measured hot
-    # win and genuine KEEP rows in the journey. Attribution must not be dropped.
+    # A run stamped ``no_gain`` on the COLD basis can still hold a measured hot win and genuine KEEP rows in the
+    # journey.
     eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
@@ -854,8 +826,7 @@ def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
 
 
 def test_collect_geak_backfill_still_skipped_on_error(tmp_path: Path) -> None:
-    # ``error`` / ``timeout`` runs never produced a trustworthy workflow return;
-    # the gate must stay closed for them.
+    # ``error`` / ``timeout`` runs never produced a trustworthy workflow return; the gate must stay closed for them.
     eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     for bad in ("error", "timeout", "missing"):
@@ -873,9 +844,7 @@ def test_collect_geak_backfill_still_skipped_on_error(tmp_path: Path) -> None:
 
 
 def test_collect_geak_backfill_scans_earlier_cycles(tmp_path: Path) -> None:
-    # ``kernel_journey_path`` names the LAST e2e cycle. A run that keeps a kernel
-    # in cycle 0 and then opens a cycle 1 that keeps nothing must still attribute
-    # the cycle-0 kernel. Observed on two campaign runs.
+    # ``kernel_journey_path`` names the LAST e2e cycle.
     geak_dir = tmp_path / "geak"
     _write_kernel_journey(geak_dir / "e2e_cycle0")
     last = geak_dir / "e2e_cycle1"
@@ -910,8 +879,7 @@ def test_collect_geak_backfill_scans_earlier_cycles(tmp_path: Path) -> None:
 
 
 def test_collect_geak_backfill_dedupes_repeated_kernel_across_cycles(tmp_path: Path) -> None:
-    # The same kernel_id present in two cycles must be credited once, and the
-    # pointer (last) cycle wins.
+    # The same kernel_id present in two cycles must be credited once, and the pointer (last) cycle wins.
     geak_dir = tmp_path / "geak"
     _write_kernel_journey(geak_dir / "e2e_cycle0")
     _write_kernel_journey(geak_dir / "e2e_cycle1")
@@ -1025,14 +993,8 @@ def test_journey_backfill_keeps_distinct_op_kinds_at_same_gain(tmp_path: Path) -
 
 
 def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:
-    # The journey records one acceptance twice: the candidate id carries the
-    # measurement, the resolved profiler symbol carries gpu_pct=None. One kernel.
-    #
-    # Which row survives and which id names it are two separate questions. The
-    # measured row survives, because it is the only one holding ``gpu_pct``; it
-    # is then named by the *symbol*, because that is the id the acceptance
-    # ledger keeps for the same kernel. Naming it ``c0_triton`` here put one
-    # kernel under two names in two tables of the same report.
+    # The journey records one acceptance twice: the candidate id carries the measurement, the resolved profiler symbol
+    # carries gpu_pct=None.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=29.994, twin_gain=29.994)
     state = {
@@ -1063,15 +1025,8 @@ def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> N
 
 
 def test_collect_geak_backfill_excludes_declared_env_selection(tmp_path: Path) -> None:
-    # Real shape, Qwen3-14B-FP8/20260814T163051Z: the journey holds an alias
-    # twin whose resolved symbol is a CK library GEMM. ``accepted_kernels`` is
-    # empty and the win sits in ``accepted_heads`` declaring ``kind: env``.
-    #
-    # The collapse must run before the kind join, or the join has only the slot
-    # tag ``c1_ck`` to look up and finds nothing. Once the row is named by the
-    # symbol, ``result.json`` answers the question GEAK already answered: this
-    # is a library selection, not an authored kernel. It belongs to the config
-    # bucket, so ``kernels_optimized`` is 0 -- the run's e2e gain is unaffected.
+    # Real shape, Qwen3-14B-FP8/20260814T163051Z: the journey holds an alias twin whose resolved symbol is a CK
+    # library GEMM.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
     state = {
@@ -1096,11 +1051,8 @@ def test_collect_geak_backfill_excludes_declared_env_selection(tmp_path: Path) -
 
 
 def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> None:
-    # The converse, so the exclusion above can never be widened into a drop:
-    # the same twin declared ``authored`` survives, named by the symbol, and
-    # records where its kind came from. Only a *declared* env is excluded --
-    # a row no lane names stays admitted with ``kind_source: absent``, because
-    # guessing "env" would delete real kernels from dead runs.
+    # The converse, so the exclusion above can never be widened into a drop: the same twin declared ``authored``
+    # survives, named by the symbol, and records where its kind came from.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
     state = {
@@ -1123,13 +1075,8 @@ def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> 
 def test_collect_geak_backfill_reads_kind_from_the_stack_when_result_json_is_empty(
     tmp_path: Path,
 ) -> None:
-    # ``result.json`` is rewritten once per cycle and the last write wins, so a
-    # later cycle that accepts nothing blanks the lanes an earlier one declared.
-    # The ``geak_e2e`` optimization_stack entry is append-only and keeps them
-    # (KernelPhase copies both lanes into it verbatim). Reading only
-    # ``result.json`` here left every recovered row ``kind_source: absent`` and
-    # the ``env`` exclusion could not run at all -- the collector counted a CK
-    # library selection as an authored kernel.
+    # ``result.json`` is rewritten once per cycle and the last write wins, so a later cycle that accepts nothing
+    # blanks the lanes an earlier one declared.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
     state = {
@@ -1163,9 +1110,7 @@ def test_collect_geak_backfill_reads_kind_from_the_stack_when_result_json_is_emp
 def test_collect_geak_backfill_stack_kind_is_labelled_as_from_the_stack(
     tmp_path: Path,
 ) -> None:
-    # The converse, and the provenance. An authored declaration in the stack
-    # keeps the row, and ``kind_source`` says *which* artifact declared it, so a
-    # stack-sourced kind is never reported as something ``result.json`` said.
+    # The converse, and the provenance.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
     state = {
@@ -1196,8 +1141,6 @@ def test_geak_kind_index_prefers_the_run_s_own_result_json_over_the_stack(
     tmp_path: Path,
 ) -> None:
     # Adding a second source must not let it overwrite what the run published.
-    # A *declared* kind beats an undeclared one whichever artifact holds it;
-    # between two declarations ``result.json`` wins.
     result = {
         "accepted_kernels": [{"short_name": "a", "kind": "authored"}, {"short_name": "b"}],
     }
@@ -1219,8 +1162,8 @@ def test_geak_kind_index_prefers_the_run_s_own_result_json_over_the_stack(
 
 
 def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:
-    # Two genuinely distinct kernels that happen to share a gain must both stay:
-    # the collapse needs a measured row AND an unmeasured row to fire.
+    # Two genuinely distinct kernels that happen to share a gain must both stay: the collapse needs a measured row AND
+    # an unmeasured row to fire.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     eval_dir.mkdir(parents=True, exist_ok=True)
     (eval_dir / "kernel_journey.json").write_text(
@@ -1249,8 +1192,8 @@ def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path
 
 
 def test_collect_geak_backfill_keeps_unmeasured_kernels_of_distinct_gain(tmp_path: Path) -> None:
-    # Two unmeasured shape-split kernels are not aliases of the measured parent:
-    # their gains differ, so all three survive.
+    # Two unmeasured shape-split kernels are not aliases of the measured parent: their gains differ, so all three
+    # survive.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     eval_dir.mkdir(parents=True, exist_ok=True)
     (eval_dir / "kernel_journey.json").write_text(

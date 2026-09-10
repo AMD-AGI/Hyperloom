@@ -39,16 +39,7 @@ _bootstrap_kernel_agent_env()
 
 
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
-    """Put the executors in multi-node mode with a no-op per-round server restart.
-
-    Multi-node is what puts a discarded client-warmup pass in front of a measured
-    round, so it is the mode in which one round launches more than one benchmark
-    process -- and the restart between them is the part that needs a cluster.
-
-    Args:
-        monkeypatch: The requesting test's monkeypatch fixture.
-        nodes: How many nodes to claim, which is what the executors read.
-    """
+    """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
 
     async def _no_restart(*_args, **_kwargs) -> None:
@@ -59,19 +50,7 @@ def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
 
 
 def launches_by_round_slot(recorded: list[dict]) -> dict[str, dict]:
-    """Index recorded benchmark launches by the output slot each round ran in.
-
-    A round is identified by the slot it writes into rather than by its position
-    in the launch order, so a test can assert on one pass of a round without
-    encoding how many passes precede it.
-
-    Args:
-        recorded: Launch records, each carrying the ``round_slot`` name the
-            subprocess doubles stamp on every round they see.
-
-    Returns:
-        dict[str, dict]: The last launch recorded per slot name.
-    """
+    """Index recorded benchmark launches by the output slot each round ran in."""
     return {launch["round_slot"]: launch for launch in recorded}
 
 
@@ -104,26 +83,7 @@ def seed_kernel_keep(
     artifact: str = "",
     task_group_key: str = "",
 ) -> str:
-    """Put one attempt row and, for a KEEP, its queued patch into ``state``.
-
-    The lane that used to write both is gone -- source-level rewrite belongs to
-    the KernelForge controller now -- so tests covering the integrate queue seed
-    it through the same helper its surviving producer
-    (``enqueue_nominated_patch``) uses, rather than through a handler result
-    envelope nothing produces.
-
-    Args:
-        state: The SharedState to seed.
-        kernel_id: Kernel the attempt belongs to.
-        decision: The attempt's verdict; only ``KEEP`` reaches the queue.
-        micro: Micro-benchmark speedup, which orders the queue.
-        source_file: Source the patch touches; same-file KEEPs collapse.
-        artifact: Patch artifact path.
-        task_group_key: Group identity, when the kernel belongs to one.
-
-    Returns:
-        The stable task key the row was filed under.
-    """
+    """Put one attempt row and, for a KEEP, its queued patch into ``state``."""
     from hyperloom.orchestrator.kernel._kernel_decisions import (
         _queue_kernel_keep,
         _stable_kernel_task_key,
@@ -152,9 +112,7 @@ def seed_kernel_keep(
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the
-    ``no_target_gpu_configured`` target-analysis marker.
-    """
+    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the ``no_target_gpu_configured`` target-analysis marker."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     seed_target_analysis_marker(sd)
@@ -167,11 +125,7 @@ def init_git_repo(
     seed_file: str = "src.py",
     seed_text: str = "def f():\n    return 1\n",
 ) -> None:
-    """Initialise a minimal git repo with one commit under ``path``.
-
-    Seeds a single tracked file and commits it so ``git worktree add`` and
-    patch application have a base commit to branch from.
-    """
+    """Initialise a minimal git repo with one commit under ``path``."""
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
@@ -221,12 +175,7 @@ def git_commit_all(path: Path, message: str) -> None:
 
 
 class _BuildFakeCoordinator:
-    """Minimal coordinator surface for off-loop targeted-build tests.
-
-    Wires a real ``TaskRegistry`` + ``ResourceLockManager`` + ``SharedState``
-    against a temp SQLite DB so the build pump/reaper can run without a full
-    Coordinator.
-    """
+    """Minimal coordinator surface for off-loop targeted-build tests."""
 
     def __init__(self, session_dir: Path, db) -> None:
         from hyperloom.orchestrator.bus.resource_lock import (
@@ -263,74 +212,58 @@ def build_lifecycle(build_coord):
     return BuildLifecycleCollaborator(build_coord)
 
 
-def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:
-    """Register common tmp_path framework repos for integrate_patch allowlist tests."""
+def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
+    """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.framework import paths as fp
 
-    real = fp.resolve_source_file_allowlist
+    real = fp.resolve_kernel_search_roots
 
     def _merged() -> tuple[str, ...]:
-        extras: list[str] = []
+        # The tmp repos lead: a relative artifact target must land in the tree
+        # the test built, not in whatever framework happens to be installed on
+        # the host running the suite.
+        merged: list[str] = []
         for name in ("fw", "repo", "framework"):
             cand = tmp_path / name
             if cand.is_dir():
-                extras.append(str(cand.resolve()))
-        merged = list(real())
-        for extra in extras:
-            if extra not in merged:
-                merged.append(extra)
+                merged.append(str(cand.resolve()))
+        for root in real():
+            if root not in merged:
+                merged.append(root)
         return tuple(merged)
 
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", _merged)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
 
 
-# ---------------------------------------------------------------------------
 # Progress cadence: how long a long-running path may go unreported
-# ---------------------------------------------------------------------------
 
 
-# Production seconds per real test second. A heartbeat's honesty is a ratio —
-# notes per suppression window — so the whole timescale is compressed and the
-# assertions keep speaking in the numbers the window is actually configured
-# with (a 60s tick, a 300s window, a benchmark that blocks for ten minutes).
+# Production seconds per real test second.
 PROGRESS_TIME_SCALE: float = 600.0
 
 
 class ProgressCadence:
-    """Records when a path reported progress, on a simulated production clock.
+    """Records when a path reported progress, on a simulated production clock."""
 
-    A long-running path is not judged by whether it reports at all — every one
-    of them reports on entry — but by whether the gap between two consecutive
-    notes stays under the window a consumer waits before calling the owning
-    agent silent. That is the property a dropped liveness callback breaks and
-    an "it emitted a note" assertion cannot see.
-
-    The clock is simulated rather than read off the wall: it advances only when
-    the fake child does a chunk of the work it is standing in for
-    (:func:`chatty_child` calls :meth:`sleep`). Reading real elapsed time and
-    scaling it by :data:`PROGRESS_TIME_SCALE` instead would multiply every
-    scheduling delay in the test — a slow import, a loaded runner starving the
-    event loop — by 600 and charge it to the path under test, which turns a 4x
-    headroom into a coin flip on a 2-vCPU CI runner. What the simulated clock
-    gives up is the ability to see a long *non-child* block, which no compressed
-    wall-clock measurement could tell apart from load anyway.
-    """
-
-    def __init__(self, scale: float = PROGRESS_TIME_SCALE) -> None:
+    def __init__(self, scale: float = PROGRESS_TIME_SCALE, clock=None) -> None:
         """Start the clock at zero.
 
         Args:
             scale (float): Production seconds per real second.
+            clock: A ``VirtualClock`` to charge the simulated work to instead of
+                a private counter, for a test that also drives a scripted round
+                and needs both to agree about when things happened.
         """
         self.scale = scale
         self.notes: list[dict] = []
         self.reported_at: list[float] = []
+        self._clock = clock
         self._elapsed = 0.0
 
     def now(self) -> float:
         """Production seconds of simulated work done so far."""
-        return self._elapsed
+        return self._clock.elapsed if self._clock is not None else self._elapsed
 
     def sleep(self, simulated_s: float) -> None:
         """Charge ``simulated_s`` production seconds, blocking the real time they map to.
@@ -341,7 +274,10 @@ class ProgressCadence:
         Args:
             simulated_s (float): Production seconds the simulated child spent.
         """
-        self._elapsed += simulated_s
+        if self._clock is not None:
+            self._clock.advance(simulated_s)
+        else:
+            self._elapsed += simulated_s
         time.sleep(simulated_s / self.scale)
 
     def sink(self):
@@ -354,12 +290,7 @@ class ProgressCadence:
         return _sink
 
     def widest_silence(self) -> float:
-        """Longest unreported stretch, in production seconds.
-
-        Counts the run-up to the first note and the tail after the last one, so
-        a path that reports only on entry is measured over everything it then
-        stayed quiet for.
-        """
+        """Longest unreported stretch, in production seconds."""
         marks = [0.0, *self.reported_at, self.now()]
         return max(later - earlier for earlier, later in zip(marks, marks[1:]))
 
@@ -378,19 +309,7 @@ def progress_cadence(monkeypatch) -> "ProgressCadence":
 
 
 def chatty_child(cadence: ProgressCadence, inner, *, blocks_for_s: float, line_every_s: float):
-    """Wrap a fake ``run_with_session_kill`` so its child talks while it blocks.
-
-    Args:
-        cadence (ProgressCadence): Advanced by ``line_every_s`` per line, so it
-            is the simulated child's progress that moves the clock.
-        inner: The fake the path already uses; called for the return value once
-            the simulated child stops talking.
-        blocks_for_s (float): Production seconds the child runs for.
-        line_every_s (float): Production seconds between its output lines.
-
-    Returns:
-        A ``run_with_session_kill`` stand-in that drives ``on_output``.
-    """
+    """Wrap a fake ``run_with_session_kill`` so its child talks while it blocks."""
 
     def _run(cmd, *args, on_output=None, **kwargs):
         for _ in range(int(blocks_for_s / line_every_s)):
@@ -425,13 +344,7 @@ class _RayDoubleActorClass:
 
 
 class _RayDoubleActorHandle:
-    """An actor handle whose methods run in a pool sized like the real actor's.
-
-    ``max_concurrency`` is read from the options the production code passed, not
-    assumed: an actor left at Ray's single method slot gets a single-worker pool
-    here too, so a method that has to reach a call already running blocks behind
-    it exactly as it would on a real cluster.
-    """
+    """An actor handle whose methods run in a pool sized like the real actor's."""
 
     def __init__(self, obj, options: dict) -> None:
         from concurrent.futures import ThreadPoolExecutor
@@ -448,13 +361,7 @@ class _RayDoubleActorHandle:
 
 
 class RayDouble:
-    """A ``ray`` module stand-in that runs actor methods in real threads.
-
-    Ray is not a test dependency, and what these tests are about is what a lease
-    and its actor do to each other while work is in flight. So the transport is
-    the only thing faked: the actor is the real class, running real subprocesses,
-    and an ``ObjectRef`` is a :class:`~concurrent.futures.Future`.
-    """
+    """A ``ray`` module stand-in that runs actor methods in real threads."""
 
     class exceptions:  # noqa: N801 — mirrors the ray.exceptions namespace
         class RayActorError(Exception):
@@ -503,3 +410,57 @@ def serving_lease_on_a_ray_double(monkeypatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
     with rs.ServingLease(num_gpus=1) as lease:
         yield lease
+
+
+@pytest.fixture
+def virtual_clock():
+    """A :class:`VirtualClock` for tests whose subject is a deadline.
+
+    :class:`ProgressCadence` measures one path's reporting gaps and blocks for
+    real (scaled) time so a heartbeat driver gets to run; that is the right
+    instrument for cadence and the wrong one for a multi-tick round, where
+    nothing may block at all and the readings production takes have to be the
+    clock's. This one is that clock, and can be handed to ``ProgressCadence``
+    so a test using both keeps one timeline.
+    """
+    from hyperloom.orchestrator.rehearsal import VirtualClock
+
+    return VirtualClock()
+
+
+class NoLaunchBackendInstalled(BaseException):
+    """A test launched a subprocess before installing a launch backend.
+
+    A ``BaseException`` on purpose. Several production launch sites sit inside
+    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
+    interpreter cannot import Magpie" that way -- so an ordinary exception here
+    would be swallowed and the test would carry on against a wrong answer
+    instead of stopping.
+    """
+
+
+@pytest.fixture
+def launch_backend(monkeypatch):
+    """Install a scripted stand-in for ``run_with_session_kill``.
+
+    Call it with any object exposing that function's signature as ``run``. Both
+    the definition and the names the eager importers bound are patched, so a
+    launch made on a worker thread the test never sees is covered too.
+    """
+    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
+
+    installed: list = []
+
+    def _run(cmd, **kwargs):
+        if not installed:
+            raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
+        return installed[-1].run(cmd, **kwargs)
+
+    for module in (_subprocess_kill, _grid_runner, baseline):
+        monkeypatch.setattr(module, "run_with_session_kill", _run)
+
+    def _install(backend):
+        installed.append(backend)
+        return backend
+
+    return _install

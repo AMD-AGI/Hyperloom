@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from kernelforge.llm.workspace_policy import (
     tracked_editable_paths,
 )
 from kernelforge.llm.git import git
+from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )
@@ -40,27 +42,12 @@ from kernelforge.mcp_server.tools.bench import (
     calculate_measurement_case_speedups,
 )
 
-# How many best-ranked prior solutions to read for warm-start. More than one so
-# a champion that fails to apply -- a signature mismatch, a patch that no longer
-# lands -- still leaves something to fall back to, and so a record whose claim
-# does not survive measurement can lose to one that does.
-_WARMSTART_TOP_K = 3
-
-# How many candidates one warm start may fully evaluate. Each evaluation costs a
-# correctness run plus KEEP_MEASUREMENT_COUNT benchmark runs on the real driver,
-# so the search for the best measured start is bounded, not exhaustive.
-_WARMSTART_MAX_MEASURED_CANDIDATES = 3
-
-# How much of the speedup a candidate was ranked on its own measurement has to
-# reproduce for that ranking to count as honest. A confirmed top candidate is
-# adopted without paying for the rest; the regression this answers measured 32%
-# below the claim that had won the ranking.
+# How much of the speedup a candidate was ranked on its own measurement has to reproduce for that ranking to count as
+# honest. The regression this answers measured 32% below the claim that had won the ranking.
 _WARMSTART_CLAIM_CONFIRMED_RATIO = 0.9
 
-# Ceiling on the task's declared correctness suite when a warm start runs it,
-# used when no caller passes the loop's own ``validate_stage_timeout_sec``. A
-# candidate must not be judged under a looser clock for having arrived from the
-# KB, and clamping can only turn a pass into a failure.
+# Ceiling on the task's declared correctness suite when a warm start runs it, used when no caller passes the loop's
+# own ``validate_stage_timeout_sec``.
 _WARMSTART_CANONICAL_TIMEOUT_CAP_SEC = 1800
 
 _KB_REFERENCES_REL = Path("forge_experiments") / "kb_references"
@@ -70,18 +57,13 @@ class WarmStartRollbackError(RuntimeError):
     """A rejected warm-start could not restore the original workspace."""
 
 
-# The final warm-start implementation uses the more specific restore name while
-# the CLI recovery boundary keeps the established rollback exception contract.
+# The final warm-start implementation uses the more specific restore name while the CLI recovery boundary keeps the
+# established rollback exception contract.
 WarmStartRestoreError = WarmStartRollbackError
 
 
 def git_head(workspace_dir: str) -> str:
-    """Return the current HEAD sha of ``workspace_dir`` (empty on failure).
-
-    Every caller reads this as "the commit to anchor to, if there is one" and
-    supplies its own anchor otherwise, so an unborn HEAD or a directory that is
-    not a repository is an answer here rather than an error.
-    """
+    """Return the current HEAD sha of ``workspace_dir`` (empty on failure)."""
     try:
         return git("rev-parse", "HEAD", cwd=workspace_dir, check=False).stdout.strip()
     except OSError:
@@ -89,11 +71,7 @@ def git_head(workspace_dir: str) -> str:
 
 
 def git_checkout_branch(workspace_dir: str, branch: str) -> str:
-    """Create/switch to the loop branch before any warm-start edits.
-
-    Branch existence is probed with ``git rev-parse`` (locale-independent)
-    rather than matching git's localizable "already exists" message.
-    """
+    """Create/switch to the loop branch before any warm-start edits."""
     if not branch:
         return ""
     try:
@@ -121,14 +99,7 @@ def git_checkout_branch(workspace_dir: str, branch: str) -> str:
 
 
 def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
-    """Full diff from ``base_sha`` to HEAD (the run's net winning change).
-
-    Captured as bytes and decoded without newline translation. ``text=True``
-    would fold every ``\\r\\n`` in the diff to ``\\n``, and a patch is applied by
-    matching its context lines byte for byte: against a CRLF source the folded
-    patch no longer describes any file, so ``git apply`` rejects it and the
-    solution is unreusable while still looking perfectly well-formed.
-    """
+    """Full diff from ``base_sha`` to HEAD (the run's net winning change)."""
     if not base_sha:
         return ""
     try:
@@ -138,15 +109,7 @@ def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
     return "" if r.returncode != 0 else r.stdout.decode("utf-8", errors="replace")
 
 
-# Strip depths tried when applying a KB diff, in order. A KB patch is produced
-# by ``git diff`` in the PRODUCER's workspace, so its ``a/`` ``b/`` paths are
-# relative to that git root. The consumer's workspace root may sit at a different
-# depth (e.g. a nested package copy), so ``-p1`` alone can miss. Trying a few
-# strip depths absorbs a "consumer is deeper" layout difference without risky
-# path rewriting; each real apply is preceded by ``--check`` so a wrong depth
-# never half-applies. (A "consumer is shallower" layout can't be fixed by
-# stripping — the workspace-root constraint in the Hyperloom launcher handles
-# that; see the design doc §2.3/§3.3.)
+# Strip depths tried when applying a KB diff, in order.
 _GIT_APPLY_STRIP_DEPTHS = (1, 2, 3, 4, 5, 6)
 
 
@@ -178,8 +141,8 @@ def _editable_workspace_paths(
         workspace_dir,
         exact_protected_paths=protected,
     )
-    # Declarations are not an upper bound, but they may explicitly authorize a
-    # new implementation file that does not exist in the pristine tree yet.
+    # Declarations are not an upper bound, but they may explicitly authorize a new implementation file that does not
+    # exist in the pristine tree yet.
     for raw in [kernel, *(source_files or [])]:
         path = Path(raw)
         absolute = path.resolve() if path.is_absolute() else (workspace / path).resolve()
@@ -300,14 +263,7 @@ def _git_apply(
     canonical_source_paths: set[str] | None = None,
     consumer_source_map: dict[str, str] | None = None,
 ) -> bool:
-    """Apply (or --check) a unified diff from stdin, normalizing the strip depth.
-
-    Tries ``-p1`` first (the normal ``git diff`` layout), then deeper strips.
-    Returns True on the first depth that applies. When ``check_only`` is set,
-    only the dry-run ``--check`` is attempted (no mutation). The real apply path
-    always ``--check``s a depth before applying it, so the working tree is never
-    left half-patched by a wrong depth.
-    """
+    """Apply (or --check) a unified diff from stdin, normalizing the strip depth."""
 
     def _run(extra: list[str]) -> bool:
         # A depth that does not apply is the question being asked, not a failure.
@@ -476,17 +432,7 @@ def _git_discard_worktree(
 
 
 def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
-    """Run the driver's full benchmark suite once.
-
-    ``bench_repeat`` must match what the loop itself uses. This value can become
-    the loop's keep threshold, and comparing a single-shot probe against
-    repeat-and-median candidates injects a systematic offset (measured at 3.7% on
-    the TP4 all-reduce suite) that the KEEP gate reads as a free improvement.
-
-    The driver owns the source-to-artifact contract for its backend. A successful
-    result therefore means the currently patched source was built or JIT-compiled
-    as required before measurement.
-    """
+    """Run the driver's full benchmark suite once."""
     from kernelforge.mcp_server.tools.bench import bench_wallclock
 
     try:
@@ -501,14 +447,7 @@ def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
 
 
 def _correctness_once(driver: str, snr_threshold: float) -> bool:
-    """Run the driver's complete SNR parity probe once.
-
-    Mirrors the loop's pre-filter, so an obviously broken candidate is dropped
-    before it is benchmarked. It decides nothing: adoption is decided by the
-    task's own correctness suite in ``_adopt_measured_candidate``.
-    Returns True only when the driver reports a passing metric; any
-    failure/crash/timeout returns False so warm-start treats it as a reject.
-    """
+    """Run the driver's complete SNR parity probe once."""
     from kernelforge.mcp_server.tools.test import test_correctness
 
     try:
@@ -608,13 +547,7 @@ def _persist_kb_references(
     sols: list[dict],
     statuses: list[str],
 ) -> Path:
-    """Publish one complete immutable reference generation atomically.
-
-    The stable root index is the commit point. Before its replacement, the old
-    index continues to reference an intact old generation. After replacement,
-    the new index references a fully written and durably renamed new generation.
-    Superseded generations are removed only after that commit point.
-    """
+    """Publish one complete immutable reference generation atomically."""
     root = Path(workspace_dir).resolve() / _KB_REFERENCES_REL
     sets_root = root / "sets"
     sets_root.mkdir(parents=True, exist_ok=True)
@@ -719,12 +652,7 @@ def _apply_candidate_patch(
     allowed_paths,
     pre_untracked,
 ) -> str:
-    """Put one candidate's diff in the working tree, or say why it did not land.
-
-    Returns an empty string once the patch is applied. A patch that is refused
-    leaves the tree exactly as it was found, so the caller can move on to the
-    next candidate without a restore of its own.
-    """
+    """Put one candidate's diff in the working tree, or say why it did not land."""
     patch = sol.get("patch_content") or ""
     if not patch.strip():
         return "empty_patch"
@@ -776,18 +704,7 @@ def _adopt_measured_candidate(
     allowed_paths,
     canonical_timeout_cap_sec: int,
 ) -> tuple[str, str]:
-    """Re-apply one already-measured candidate and commit it as the start.
-
-    This is the moment a historical kernel becomes this run's incumbent, so it
-    is where the shared acceptance step runs: the candidate is judged by the
-    task's own correctness suite before the adopting commit exists, and a
-    failure returns the same rejection the caller already handles.
-
-    Returns the commit and an empty reason, or an empty commit and the reason
-    the candidate could not be adopted. Both outcomes leave the working tree
-    free of a partially adopted patch, so the caller can try the next best
-    measured candidate on a clean tree.
-    """
+    """Re-apply one already-measured candidate and commit it as the start."""
     pre_untracked = _untracked_files(workspace_dir)
     reject_reason = _apply_candidate_patch(
         sol,
@@ -863,11 +780,7 @@ def _ranked_speedup(sol: dict) -> float | None:
 
 
 def _measurement_confirms_rank(sol: dict, measured_mean_case_speedup: float) -> bool:
-    """Whether a measurement backs the speedup this candidate was ranked on.
-
-    An honest record is worth no more trials on its own account, but that alone
-    does not end the search: see :func:`_outranks_remaining`.
-    """
+    """Whether a measurement backs the speedup this candidate was ranked on."""
     ranked = _ranked_speedup(sol)
     if ranked is None:
         return False
@@ -878,16 +791,7 @@ def _outranks_remaining(
     measured_mean_case_speedup: float,
     remaining: list[dict],
 ) -> bool:
-    """Whether no candidate left in the field is ranked above this measurement.
-
-    Ranking puts every measured candidate ahead of every merely claimed one
-    however large the claim, and a record only earns a measurement by being
-    adopted, so a later rank routinely claims more than the leader. Stopping on
-    a confirmed leader alone would therefore pin warm start to the first record
-    that was ever measured and leave every better solution published since
-    unevaluated forever. A ranked value is the most a candidate can deliver if
-    it is honest, so matching the best of them is what ends the search.
-    """
+    """Whether no candidate left in the field is ranked above this measurement."""
     for sol in remaining:
         ranked = _ranked_speedup(sol)
         if ranked is not None and ranked > measured_mean_case_speedup:
@@ -902,19 +806,7 @@ def _record_measured_speedup(
     *,
     rank: int,
 ) -> dict:
-    """Write one measured speedup back onto the KB record it was read from.
-
-    Without this the KB keeps ranking an unverified claim forever, since nothing
-    else ever compares it against a measurement. A store that refuses the
-    amendment cannot fail the run, so the outcome is returned for the warm-start
-    result and printed; it is never dropped.
-
-    The amendment sanitizes what it raises itself, but opening the record's
-    address does not: ``create_rewrite_record_store`` builds the store client
-    from the KB Store URL and bearer token and lets anything that is not a
-    ``KBStoreError`` out. This reason is persisted, so the exception is redacted
-    and bounded here as well.
-    """
+    """Write one measured speedup back onto the KB record it was read from."""
     from kernelforge.knowledge.experience_reader import sanitize_read_error
     from kernelforge.rewrite_by_flydsl.agent_kb import (
         KernelRecipeKB,
@@ -956,15 +848,7 @@ def _record_measured_speedup(
 
 
 def _rejected_reference_status(reason: str, writeback: dict | None) -> str:
-    """The reference index status for a candidate this run did not adopt.
-
-    ``writeback`` is the outcome of amending the candidate's KB record, or None
-    when the candidate left no measurement to amend it with. An operator reading
-    the index has to be able to tell those apart from the entry itself: whether a
-    rejected candidate corrected the record it came from decides whether the same
-    claim is going to lead the ranking again tomorrow. A refusal names itself
-    here and carries its reason in ``measured_writeback_failures``.
-    """
+    """The reference index status for a candidate this run did not adopt."""
     if writeback is None:
         return f"rejected:{reason}"
     measured = float(writeback["measured_mean_case_speedup"])
@@ -974,19 +858,7 @@ def _rejected_reference_status(reason: str, writeback: dict | None) -> str:
 
 @dataclass(frozen=True)
 class _CandidateTrial:
-    """What trying one warm-start candidate established about it.
-
-    ``reject_reason`` is empty exactly when the candidate is adoptable, and the
-    three ``adoptable_`` values are set only then, so a rejected candidate cannot
-    be read as an adopted one. Together those four are the adoption verdict.
-
-    ``measured_mean_case_speedup`` is deliberately not one of them: it is the
-    value the KB record this candidate came from has to be amended with, and it
-    survives rejection. A candidate whose driver suite was benchmarked measured
-    something whether or not it then cleared the gate, and the records carrying
-    the most inflated claims are precisely the ones that lose. It is ``None``
-    when no benchmark completed, which is not evidence a later run can rank on.
-    """
+    """What trying one warm-start candidate established about it."""
 
     adoptable_ms: float | None
     adoptable_mean_case_speedup: float | None
@@ -1012,12 +884,7 @@ class _CandidateTrial:
         mean_case_speedup: float,
         bench: dict,
     ) -> "_CandidateTrial":
-        """A candidate that cleared every measured gate at ``mean_case_speedup``.
-
-        The task's own correctness suite has not judged it yet: that runs once,
-        on the candidate this field of measured candidates wins with, as it is
-        adopted.
-        """
+        """A candidate that cleared every measured gate at ``mean_case_speedup``."""
         return cls(applied_ms, mean_case_speedup, bench, "", mean_case_speedup)
 
 
@@ -1034,31 +901,7 @@ def _try_apply_candidate(
     pre_untracked,
     bench_repeat=1,
 ) -> _CandidateTrial:
-    """Measure one candidate solution as a possible starting point.
-
-    Applies the candidate's diff to the working tree, rebuilds JIT sources, and
-    validates it end to end on the consumer's complete driver suite. A KB lookup
-    already establishes the logical operator; implementation identity remains
-    diagnostic metadata and never suppresses a safe trial. The patch may touch
-    any tracked non-protected file, must pass the SNR pre-filter, and must beat
-    the pristine baseline on both measures the loop reports: the per-case mean
-    has to clear the KEEP threshold and the aggregate wall time has to be faster
-    than the pristine aggregate. ``pristine_bench`` must therefore carry both
-    halves of that measurement -- ``case_times`` and ``median_ms`` -- and a
-    candidate is refused rather than adopted unmeasured when either is missing.
-    On success, returns an adoptable
-    :class:`_CandidateTrial` carrying the raw mean, the mean case speedup and the
-    complete benchmark result. On rejection it cleanly restores the tree and
-    returns a rejected trial naming the reason, which tells an aggregate
-    regression apart from a threshold miss, plus the measurement the suite
-    produced before losing -- see :class:`_CandidateTrial`.
-
-    A historical solution is adopted only if it works and clears the same
-    full-suite performance gate used by the optimization loop: an adopted
-    candidate becomes this run's incumbent, so it is held to the bar every
-    later candidate is. The measured candidate is left in the working tree for
-    the caller to keep or discard.
-    """
+    """Measure one candidate solution as a possible starting point."""
     reject_reason = _apply_candidate_patch(
         sol,
         workspace_dir=workspace_dir,
@@ -1116,8 +959,7 @@ def _try_apply_candidate(
             measured_mean_case_speedup=None,
         )
 
-    # The suite ran, so this candidate measured something the KB record it came
-    # from can be amended with.
+    # The suite ran, so this candidate measured something the KB record it came from can be amended with.
     measured_mean_case_speedup = float(mean_case_speedup)
 
     if (
@@ -1137,16 +979,10 @@ def _try_apply_candidate(
             measured_mean_case_speedup=measured_mean_case_speedup,
         )
 
-    # The gate below is only as closed as the baseline it is given:
-    # aggregate_regression_detail reports no contradiction when either wall time
-    # is unknown -- correct for a run holding no best yet, wrong as an adoption
-    # verdict -- so a pristine aggregate that is absent, non-numeric or not
-    # positive would pass a candidate on a silent "" instead of on a comparison.
-    # The per-case half of the same measurement is already mandatory a few lines
-    # above, so the aggregate is required here rather than left to the caller's
-    # discipline. The reason is named apart from aggregate_regression: this
-    # candidate was never compared to a baseline at all, which is a broken
-    # baseline rather than a slow candidate.
+    # The gate below is only as closed as the baseline it is given: aggregate_regression_detail reports no
+    # contradiction when either wall time is unknown -- correct for a run holding no best yet, wrong as an adoption
+    # verdict -- so a pristine aggregate that is absent, non-numeric or not positive would pass a candidate on a
+    # silent "" instead of on a comparison.
     if not isinstance(pristine_ms, (int, float)) or float(pristine_ms) <= 0:
         _git_discard_worktree(
             workspace_dir,
@@ -1162,15 +998,9 @@ def _try_apply_candidate(
             measured_mean_case_speedup=measured_mean_case_speedup,
         )
 
-    # The keep gate above votes on the equal-weight mean of per-case speedups,
-    # which can clear the threshold while the candidate is slower in aggregate
-    # wall time: a few cheap cases improving outvote one expensive case
-    # collapsing, because that mean is unbounded above and bounded at 0 below.
-    # Adopting such a candidate would start the run from a baseline worse than
-    # pristine. This is the invariant the published manifest already refuses to
-    # badge, so the warm-start gate reuses its derivation instead of open-coding
-    # a comparison the two could drift apart on. The reason is named apart from
-    # performance_failed because this candidate did clear the threshold.
+    # The keep gate above votes on the equal-weight mean of per-case speedups, which can clear the threshold while the
+    # candidate is slower in aggregate wall time: a few cheap cases improving outvote one expensive case collapsing,
+    # because that mean is unbounded above and bounded at 0 below.
     aggregate_regression = aggregate_regression_detail(
         baseline_ms=pristine_ms,
         best_ms=applied_ms,
@@ -1215,35 +1045,8 @@ def kb_warmstart(
 ) -> dict:
     """Look up + apply the best prior solution as the loop's starting point.
 
-    ``target_functions`` and framework identity are forwarded so the read
-    resolves the same kernel slug the write side uses when the anchor is a
-    wrapper. Must stay in sync with ``write_experience_to_kb``.
-
-    Candidates arrive ranked on measured evidence ahead of bare claims. Up to
-    ``_WARMSTART_MAX_MEASURED_CANDIDATES`` of them are measured on this machine
-    and the best measured one is adopted, because the number a record claims is
-    not evidence that this consumer can reproduce it: adopting the first
-    candidate that merely applied is what let an inflated claim displace a
-    verified better start. The search stops early once a candidate reproduces
-    the value it was ranked on.
-
-    Every measurement is written back to its own KB record so the next run ranks
-    that record on evidence, including the measurement of a candidate this run
-    then rejected: a record only loses the gate by promising more than this
-    machine delivers, so those are the claims most in need of correcting. A
-    rejected candidate is never adoptable, whatever it measured.
-
-    Every solution returned for the logical operator may be attempted regardless
-    of implementation-signature or declared-source drift: the protected
-    measurement boundary constrains the patch, and the canonical driver owns
-    backend-specific build/JIT behavior and must prove correctness plus a strict
-    pristine-performance improvement before the patch is accepted. Every
-    candidate is persisted as reference material. ``snr_threshold`` is the cheap
-    parity pre-filter, not the gate: the candidate this run adopts is accepted by
-    the task's own correctness suite through the shared acceptance step, under
-    ``canonical_timeout_cap_sec``. ``source_files`` is forwarded to
-    ``force_jit_rebuild`` for frameworks that require explicit cache
-    invalidation.
+    Candidates are measured on this machine and the fastest is adopted, because the speedup a record claims is not
+    evidence this consumer can reproduce it. ``warmstart_policy`` bounds that search and is read at call time.
     """
     if resume:
         pointer = kb_reference_program_md(workspace_dir)
@@ -1276,7 +1079,7 @@ def kb_warmstart(
                 "kernel_backend": kernel_backend,
                 "target_functions": target_functions,
                 "framework": framework,
-                "top_k": _WARMSTART_TOP_K,
+                "top_k": warmstart_policy.top_k(),
                 "source_files": source_files,
                 "workspace": workspace_dir,
                 "operator_name": operator_name,
@@ -1290,6 +1093,17 @@ def kb_warmstart(
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
+        # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
+        # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
+        # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
+        admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
+        if len(admissible) != len(sols):
+            print(
+                f"  [kb] warm-start ignoring {len(sols) - len(admissible)} candidate(s) "
+                f"claiming under {warmstart_policy.min_claimed_speedup():.2f}x",
+                flush=True,
+            )
+        sols = admissible
         if not sols:
             _clear_kb_references(workspace_dir)
             return {
@@ -1362,10 +1176,21 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
+            # ``top_k()`` caps the field, but a count does not bound wall time: one candidate is a compile plus a
+            # correctness suite plus a benchmark, minutes on the heaviest kernels. On expiry the field closes and the
+            # best already measured is adopted below.
+            search_deadline = time.monotonic() + warmstart_policy.budget_sec()
             for idx, sol in enumerate(sols):
-                if len(measurements) >= _WARMSTART_MAX_MEASURED_CANDIDATES:
-                    statuses[idx] = "not_attempted_after_apply"
-                    continue
+                if time.monotonic() >= search_deadline:
+                    for later_index in range(idx, len(statuses)):
+                        statuses[later_index] = "not_attempted_search_budget"
+                    print(
+                        "  [kb] warm-start search budget spent after "
+                        f"{len(measurements)} measured candidate(s); "
+                        "adopting the best of them",
+                        flush=True,
+                    )
+                    break
                 pre_untracked = _untracked_files(workspace_dir)
                 trial = _try_apply_candidate(
                     sol,
@@ -1379,13 +1204,7 @@ def kb_warmstart(
                     pre_untracked=pre_untracked,
                     bench_repeat=bench_repeat,
                 )
-                # One write-back per measured candidate, adopted or not. A
-                # rejected candidate is the one whose record most likely carries
-                # an inflated claim -- an overstated number is what loses the
-                # gate -- so leaving it unamended is what lets the same claim win
-                # rank 1, be applied and benchmarked, and lose again on every
-                # later run. Both outcomes report through measured_writebacks, so
-                # a store that refuses either is equally visible.
+                # One write-back per measured candidate, adopted or not.
                 writeback = None
                 if trial.measured_mean_case_speedup is not None:
                     writeback = _record_measured_speedup(
@@ -1402,9 +1221,8 @@ def kb_warmstart(
                     )
                     reference_reason = trial.reject_reason
                     continue
-                # Every trial starts from the pristine tree, so a measured
-                # candidate is put back before the next one is tried; the
-                # candidate that wins the field is re-applied from its own patch.
+                # Every trial starts from the pristine tree, so a measured candidate is put back before the next one
+                # is tried; the candidate that wins the field is re-applied from its own patch.
                 _git_discard_worktree(
                     workspace_dir,
                     pre_untracked=pre_untracked,
@@ -1539,14 +1357,7 @@ def kb_warmstart(
 
 
 def _cheap_summary(archive: Any) -> dict:
-    """Build a non-LLM experience summary from the on-disk candidate archive.
-
-    Used by the incremental publish (invoked inside the running loop on every new
-    best): it must not spend ~150s on an LLM call or nest an event loop. Strategy
-    is taken from the best kept iteration's ``plan``. Free-form per-iteration
-    records are not compressed into a synthetic lesson field. The final graceful
-    write later overwrites the same page with the precise LLM summary.
-    """
+    """Build a non-LLM experience summary from the on-disk candidate archive."""
     strategy = ""
     if archive is not None:
         try:
@@ -1587,19 +1398,7 @@ def write_experience_to_kb(
     reused_speedup=None,
     usage=None,
 ) -> dict:
-    """Gather the run's outcome and mirror the best solution into the KB Store.
-
-    ``source_files`` and ``target_functions`` make the identity correct for
-    repository tasks (the operation is the real entry and dtypes are parsed from
-    the file that defines it). Must stay in sync with ``kb_warmstart`` so
-    read/write slugs match.
-
-    ``llm_summary`` controls the experience prose: True (final graceful write)
-    pays for the LLM summary; False (incremental publish on each new best) uses a
-    cheap archive-derived summary so it neither stalls the loop nor nests an
-    event loop. Both write to the same per-run solution page, so the final write
-    upgrades the interim one in place.
-    """
+    """Gather the run's outcome and mirror the best solution into the KB Store."""
     try:
         from kernelforge.knowledge.experience_sink import write_run_experience
 
@@ -1676,13 +1475,7 @@ def write_experience_to_kb(
 
 
 def kb_read_status(warm: dict) -> dict:
-    """Compact warm-start status safe to persist in result/experiment JSON.
-
-    A refused amendment leaves the KB ranking a claim no consumer reproduced,
-    which is the condition this run was supposed to correct, so it is summarized
-    here rather than living only in the console log. Bounded by the number of
-    candidates a warm start may measure.
-    """
+    """Compact warm-start status safe to persist in result/experiment JSON."""
     writebacks = warm.get("measured_writebacks") or []
     return {
         "measured_writebacks": len(writebacks),

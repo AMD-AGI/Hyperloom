@@ -12,9 +12,7 @@ from hyperloom.orchestrator.framework.stack_actions import (
 )
 
 
-# ---------------------------------------------------------------------------
 # EnablementStackAction round-trip
-# ---------------------------------------------------------------------------
 
 
 def test_stack_action_round_trip():
@@ -62,9 +60,7 @@ def test_stack_action_from_state_non_numeric_pr_number_coerced_to_zero():
     assert b.pr_number == 0
 
 
-# ---------------------------------------------------------------------------
 # FrameworkRuntime.to_runtime_override
-# ---------------------------------------------------------------------------
 
 
 def test_runtime_to_override_keys_match_apply_runtime_override():
@@ -109,9 +105,7 @@ def test_runtime_round_trip():
     assert FrameworkRuntime.from_state(rt.to_state()) == rt
 
 
-# ---------------------------------------------------------------------------
 # FrameworkRuntime — additive build fields
-# ---------------------------------------------------------------------------
 
 
 def test_runtime_extended_round_trip():
@@ -184,9 +178,7 @@ def test_runtime_python_exe_overrides_framework_python_in_envs():
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/venv/bin/python3.11"
 
 
-# ---------------------------------------------------------------------------
 # ProvisionResult
-# ---------------------------------------------------------------------------
 
 
 def test_provision_result_ok_false_propagation():

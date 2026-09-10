@@ -1,67 +1,13 @@
 """Measurement driver for the MoRI-EP dispatch/combine forge-loop task.
 
-forge-loop treats this as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout (see examples/README.md §2).
-It implements the three modes of that contract for MoRI-EP's distributed
-(EP8, all-8-GPU) dispatch/combine all-to-all:
-
-  * Correctness  ``python driver.py --mode <smoke|stability|determinism|full|bench>``
-    -> spawns 8 ranks, each does a dispatch -> identity-expert -> combine
-    round trip (the exact "isolated round-trip" recipe from
-    local_knowledge/framework/mori/operators/ep_dispatch_combine/: "dispatch ->
-    (identity expert) -> combine round-trip must reconstruct the input
-    within the dispatch dtype's tolerance"). ``smoke``/``stability``/
-    ``determinism``/``full`` run cheap bf16-dispatch/bf16-combine round
-    trips at <=256 tokens/rank; ``bench`` runs the SAME fp8-dispatch/
-    bf16-combine, ``_BENCH_TOKENS_PER_RANK``-token shape the benchmark below
-    times -- without it, a config could pass every other mode while being
-    wrong (or simply untested) at the shape that's actually scored. The
-    identity expert casts dispatch's output to the combine dtype (a no-op
-    when they already match) before feeding combine, mirroring what a real
-    expert would do between a quantized dispatch and a higher-precision
-    combine. Per-token routing weights are uniform (1/topk) so a correct
-    round trip reconstructs the original input exactly (modulo rounding),
-    but the actual pass/fail verdict comes from mori's own exact-equality
-    test-suite assertions (``check_dispatch_result`` / ``check_combine_
-    result`` in ``_correctness_worker``), not a computed SNR: an invalid
-    config raises inside the spawned worker (propagated by ``mp.spawn``)
-    before rank 0 ever writes its "ok" marker file. Prints only
-    ``allclose: <bool>`` -- the README's documented fallback for a driver
-    that gates on pass/fail rather than a dB score. There is no
-    ``SNR: <db> dB`` line; nothing here computes one.
-
-  * Benchmark    ``python driver.py --bench-mode --warmup <n> --iters <n>``
-    -> spawns 8 ranks running the REAL reference workload documented in
-    local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md: EP8,
-    4096 tokens/rank, hidden_dim=7168, top-8 routing, fp8 (e4m3fnuz)
-    dispatch + bf16 combine. Routing is fixed for the whole run (generated
-    once, reused every round) so the one host sync needed to learn dispatch's
-    data-dependent recv count happens ONCE before any timed round, never
-    inside one -- see ``_bench_worker``. Each round: every rank times its own
-    dispatch+combine with CUDA events, then ALL ranks join a MAX all_reduce
-    for that round (a synchronized collective's true per-round duration is
-    its slowest rank); the driver takes the median across rounds of that
-    per-round max and prints one ``wall_ms`` line per round plus one
-    ``case_ms`` line (the median) forge scores on.
-
-  * Profiling    ``python driver.py --profile-run [--profile-case <id>]``
-    -> runs a few dispatch+combine calls on all 8 ranks with no reference/
-    correctness/timing output, then exits 0.
-
-The tunable launch config (dispatch/combine block_num & warp_per_block,
-kernel_type, combine_zero_copy) lives in ``mori_ep_config.py`` — forge edits
-THAT file; this driver is protected and never edited by the agent. The fixed
-workload sizes above are NOT tunable — they anchor what block_num/
-warp_per_block choices are actually being optimized for.
-
-Requires ``HSA_NO_SCRATCH_RECLAIM=1`` (mori's own hard runtime requirement on
-this ROCm build) — set below before anything imports torch/HIP.
-
-The correctness gate also requires a **git checkout of ``mori`` itself**
-(not just ``pip install mori``) reachable on disk, because it reuses mori's
-own test-suite reference math (``tests/python/ops/
-dispatch_combine_test_utils.py``), which the installed package does not
-ship. Point ``MORI_REPO_ROOT`` at that checkout if it is not at ``/work/mori``.
+Read this for the operator, not for the launch. It predates ``dist_harness``
+and owns its own ranks -- ``mp.spawn``, a fixed master port, a hand-written
+``all_reduce(MAX)`` over per-round times -- which is exactly what a multi-rank
+driver may no longer do: preflight rejects a driver that did not measure inside
+the harness. Its correctness measurements were taken on real 8-GPU hardware in
+this shape, so it is kept as measured rather than ported blind; see
+``dist_harness`` and the distributed section of the driver contract for the
+shape a new driver must have.
 """
 
 from __future__ import annotations
@@ -83,28 +29,18 @@ from mori_ep_config import get_ep_launch_config
 _WORLD_SIZE = 8
 _MASTER_PORT = "29581"
 
-# Fixed reference workload (see module docstring) — matches the numbers cited
-# in local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md.
-# Overridable via env vars so the SAME driver contract can be pointed at a
-# different shape regime (decode-ish / large-prefill / narrower hidden) for a
-# generalization sweep, without hand-editing per-shape copies of this file.
+# Fixed EP8/top-8 reference workload matching the values in
+# local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md.
 _HIDDEN_DIM = int(os.environ.get("MORI_HIDDEN_DIM", "7168"))
 _NUM_EXPERTS_PER_RANK = 32  # E=256 total over world_size=8
 _NUM_EXPERTS_PER_TOKEN = int(os.environ.get("MORI_TOPK", "8"))  # top-8
 _BENCH_TOKENS_PER_RANK = int(os.environ.get("MORI_TOKENS_PER_RANK", "4096"))
 
-# Smaller token counts for correctness modes — same topk/hidden_dim (so the
-# same launch-config knobs are exercised) but cheap enough to run many times
-# per forge-loop iteration (smoke/shape-sweep/stability/determinism/full).
-# These four run bf16 dispatch + bf16 combine (dispatch dtype == combine
-# dtype, so the "identity expert" cast is a no-op) purely to keep them cheap.
+# Smaller token counts for correctness modes — same topk/hidden_dim (so the same launch-config knobs are exercised)
+# but cheap enough to run many times per forge-loop iteration (smoke/shape-sweep/stability/determinism/full).
 _CORRECTNESS_TOKENS = {"smoke": 8, "stability": 64, "determinism": 128, "full": 256}
-# "bench" is NOT a cheap smoke check -- it runs the EXACT dtype/token
-# combination _bench_worker times (fp8 dispatch + bf16 combine,
-# _BENCH_TOKENS_PER_RANK tokens/rank). Without this, a config could pass
-# every other mode at bf16/<=256 tokens while being wrong (or merely
-# untested) at the fp8/4096-token shape the benchmark and forge-loop's KEEP
-# decision actually score -- this mode exists to close exactly that hole.
+# "bench" is NOT a cheap smoke check -- it runs the EXACT dtype/token combination _bench_worker times (fp8 dispatch +
+# bf16 combine, _BENCH_TOKENS_PER_RANK tokens/rank).
 _CORRECTNESS_DTYPES = {
     "smoke": (torch.bfloat16, torch.bfloat16),
     "stability": (torch.bfloat16, torch.bfloat16),
@@ -132,25 +68,10 @@ def _dist_setup(rank: int, world_size: int) -> None:
 
 
 def _dist_teardown(op=None, *, healthy: bool = True) -> None:
-    """Best-effort, deadlock-safe teardown.
-
-    ``healthy`` must be False whenever this rank is unwinding through an
-    exception. dispatch()/combine() are themselves cross-rank collectives, so
-    if THIS rank failed mid-round, the other 7 ranks may currently be blocked
-    inside a collective this rank never issued -- calling another collective
-    here (``dist.barrier()``) would just add a second deadlock on top of the
-    first. Only a healthy rank (the common case: normal end-of-run cleanup)
-    barriers, and even then every step is best-effort (mirrors mori's own
-    "Complete Example" teardown order in docs/MORI-EP-GUIDE.md: ``del op`` ->
-    ``mori.shmem.shmem_finalize()`` -> ``dist.destroy_process_group()``) so one
-    failing step never blocks the next.
-    """
-    # shmem_finalize() on a rank that never actually initialized shmem (e.g.
-    # config validation or kernel_type validation raised before
-    # shmem_torch_process_group_init() ran) is not a clean Python exception
-    # -- it's a native SIGABRT. ``op is not None`` is a reliable proxy for
-    # "shmem was initialized": every call site initializes shmem immediately
-    # before constructing the op, never after.
+    """Best-effort, deadlock-safe teardown."""
+    # shmem_finalize() on a rank that never actually initialized shmem (e.g. config validation or kernel_type
+    # validation raised before shmem_torch_process_group_init() ran) is not a clean Python exception -- it's a native
+    # SIGABRT.
     had_op = op is not None
     if op is not None:
         try:
@@ -176,23 +97,17 @@ def _dist_teardown(op=None, *, healthy: bool = True) -> None:
             pass
 
 
-# Both are single-node kernel families (no RDMA fabric needed) so both are
-# legal on this 8-GPU box; IntraNodeLL ("low latency") shares the same
-# .hsaco module as IntraNode (mori/python/mori/ops/dispatch_combine.py
-# _KERNEL_TYPE_TO_HIP) and the same block_num/warp_per_block launch-config
-# surface -- it is a different kernel entry point selected at construction
-# time, not a per-call knob, so it is looked up here (not passed to
-# dispatch()/combine() like block_num/warp_per_block are).
+# Both are single-node kernel families (no RDMA fabric needed) so both are legal on this 8-GPU box; IntraNodeLL ("low
+# latency") shares the same .hsaco module as IntraNode (mori/python/mori/ops/dispatch_combine.py _KERNEL_TYPE_TO_HIP)
+# and the same block_num/warp_per_block launch-config surface -- it is a different kernel entry point selected at
+# construction time, not a per-call knob, so it is looked up here (not passed to dispatch()/combine() like
+# block_num/warp_per_block are).
 _KERNEL_TYPE_MAP = {
     "IntraNode": "IntraNode",
     "IntraNodeLL": "IntraNodeLL",
 }
 
-# All 6 keys are mandatory (program.md says so explicitly). Enforcing that
-# HERE, with a direct error message, matters because the alternative is an
-# uncaught KeyError from a bare `cfg["dispatch_block_num"]` deep inside a
-# spawned rank -- opaque, and it contradicts program.md's own contract
-# instead of failing loudly against it.
+# All 6 keys are mandatory (program.md says so explicitly).
 _REQUIRED_CFG_KEYS = (
     "dispatch_block_num", "dispatch_warp_per_block",
     "combine_block_num", "combine_warp_per_block",
@@ -216,12 +131,8 @@ def _make_config(rank: int, world_size: int, dtype, max_tokens: int, kernel_type
     import mori
 
     if kernel_type_name not in _KERNEL_TYPE_MAP:
-        # Fail loudly and fail here -- before any GPU/HIP work happens -- rather
-        # than silently substituting a different kernel type. An agent-supplied
-        # ``kernel_type`` that isn't legal on this single-node box (e.g. an
-        # InterNode* family, which needs an RDMA fabric this box doesn't have,
-        # or a typo) must fail the correctness gate loudly, not quietly
-        # benchmark IntraNode under a mislabeled config.
+        # Fail loudly and fail here -- before any GPU/HIP work happens -- rather than silently substituting a
+        # different kernel type.
         raise ValueError(
             f"invalid kernel_type {kernel_type_name!r} in mori_ep_config.py -- "
             f"must be one of {sorted(_KERNEL_TYPE_MAP)}. This single-node box "
@@ -244,9 +155,8 @@ def _make_config(rank: int, world_size: int, dtype, max_tokens: int, kernel_type
         max_total_recv_tokens=0,
         warp_num_per_block=8,
         block_num=80,
-        # Class-level default only -- actual mode is chosen per-call in
-        # _combine_with_config() via cfg["combine_zero_copy"], which is the
-        # tunable the agent controls (see mori_ep_config.py).
+        # Class-level default only -- actual mode is chosen per-call in _combine_with_config() via
+        # cfg["combine_zero_copy"], which is the tunable the agent controls (see mori_ep_config.py).
         use_external_inp_buf=True,
         gpu_per_node=world_size,
         quant_type="none",
@@ -269,34 +179,7 @@ def _combine_with_config(
     op, cfg: dict, expert_output: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor,
     call_reset: bool = False, prime_buffer: bool = True,
 ):
-    """Runs op.combine() honoring cfg["combine_zero_copy"] (default False).
-
-    True  -> mori's registered zero-copy buffer path (op.get_registered_
-             combine_input_buffer + use_external_inp_buf=0): the caller writes
-             the expert output directly into MORI's own peer-visible buffer,
-             skipping the internal copy the "external buffer" path performs.
-             docs/MORI-EP-GUIDE.md §2/§3; mori's own tuner
-             (tools/batch_intranode_tuning.sh) treats this as a first-class
-             tuning axis with its own optimal block_num/warp_per_block, not a
-             free win layered on top of the external-buffer optimum -- do not
-             assume the external-buffer best config transfers.
-    False -> the externally-managed buffer path (use_external_inp_buf=1),
-             which is what every prior campaign in this task used and is
-             mori's class-level default.
-    Both paths must be wired here (not just in the benchmark) so the
-    correctness gate validates the SAME combine call shape the benchmark
-    times -- gating on the wrong path would validate nothing.
-
-    ``prime_buffer`` (zero-copy path only): whether to copy ``expert_output``
-    into the registered buffer before calling combine(). Correctness callers
-    must leave this True (the buffer has to actually contain the real expert
-    output to check anything). The benchmark's timed loop passes False after
-    priming the buffer once, outside the timed region: in true zero-copy
-    usage the expert GEMM writes directly into the registered buffer, so a
-    ``copy_()`` inside the timed window would measure "external buffer +
-    an extra manual copy", not zero-copy -- see local_knowledge KB card for
-    the measured impact of getting this wrong.
-    """
+    """Runs op.combine() honoring cfg[\"combine_zero_copy\"] (default False)."""
     block_num = cfg["combine_block_num"]
     warp_per_block = cfg["combine_warp_per_block"]
     if cfg["combine_zero_copy"]:
@@ -324,8 +207,8 @@ def _make_routing(n_tokens: int, world_size: int, rank: int, device, scale: floa
     for i in range(n_tokens):
         perm = torch.randperm(total_experts, device=device)
         indices[i] = perm[: _NUM_EXPERTS_PER_TOKEN].to(torch.int32)
-    # Uniform weights summing to 1 per token: an identity-expert round trip
-    # then reconstructs the original token exactly (modulo bf16 rounding).
+    # Uniform weights summing to 1 per token: an identity-expert round trip then reconstructs the original token
+    # exactly (modulo bf16 rounding).
     weights = torch.full(
         (n_tokens, _NUM_EXPERTS_PER_TOKEN), 1.0 / _NUM_EXPERTS_PER_TOKEN,
         dtype=torch.float32, device=device,
@@ -343,14 +226,10 @@ def _correctness_worker(
         import mori
 
         # Reuse mori's own tested dispatch/combine reference-checking math
-        # (tests/python/ops/dispatch_combine_test_utils.py) instead of a
-        # hand-rolled identity-reconstruction check: combine's real contract
-        # is "unique-destination-PE dedup'd sum of the expert output,
-        # unweighted" (routing-weight multiply is the CALLER's job via the
-        # returned combine_output_weight), which is easy to get subtly wrong
-        # by hand. We still drive dispatch()/combine() with OUR OWN tunable
-        # block_num/warp_per_block overrides, so this exercises exactly the
-        # launch config the agent edits.
+        # (tests/python/ops/dispatch_combine_test_utils.py) instead of a hand-rolled identity-reconstruction check:
+        # combine's real contract is "unique-destination-PE dedup'd sum of the expert output, unweighted"
+        # (routing-weight multiply is the CALLER's job via the returned combine_output_weight), which is easy to get
+        # subtly wrong by hand.
         sys.path.insert(0, os.environ.get("MORI_REPO_ROOT", "/work/mori"))
         from tests.python.ops.dispatch_combine_test_utils import EpDispatchCombineTestCase
 
@@ -361,13 +240,11 @@ def _correctness_worker(
         test_data = test_case.gen_test_data(num_token_override=[n_tokens] * world_size)
         _, all_rank_indices, all_rank_input, all_rank_weights, all_rank_scales = test_data
         if scale != 1.0:
-            # Every rank deterministically regenerates the SAME all_rank_input
-            # (fixed seed) as everyone else's view of the whole world, so the
-            # scale must be applied uniformly across all ranks' entries here
-            # — scaling only this rank's own slice would desync it from what
-            # remote ranks (which independently recomputed the same list)
-            # still believe this rank sent, and check_dispatch_result's
-            # exact-equality assertion would then legitimately fail on them.
+            # Every rank deterministically regenerates the SAME all_rank_input (fixed seed) as everyone else's view of
+            # the whole world, so the scale must be applied uniformly across all ranks' entries here — scaling only
+            # this rank's own slice would desync it from what remote ranks (which independently recomputed the same
+            # list) still believe this rank sent, and check_dispatch_result's exact-equality assertion would then
+            # legitimately fail on them.
             all_rank_input = [t * scale for t in all_rank_input]
             test_data = (test_data[0], all_rank_indices, all_rank_input, all_rank_weights, all_rank_scales)
 
@@ -380,24 +257,20 @@ def _correctness_worker(
             dispatch_indices, dispatch_recv_num_token,
         )
 
-        # Identity expert: a real expert would still cast its dispatch-dtype
-        # input to whatever (typically higher-precision) dtype it computes
-        # in before writing an output combine() consumes; when dispatch and
-        # combine dtypes match (the bf16 modes) this cast is a no-op, but for
-        # the fp8-dispatch/bf16-combine shape (matching the benchmark) it is
-        # a REAL cast that must happen for combine to see the dtype it
-        # expects -- mirrors _bench_worker's separately-allocated bf16
-        # combine_input, just derived from dispatch_output instead of being
-        # random (identity expert has no other transformation to apply).
+        # Identity expert: a real expert would still cast its dispatch-dtype input to whatever (typically
+        # higher-precision) dtype it computes in before writing an output combine() consumes; when dispatch and
+        # combine dtypes match (the bf16 modes) this cast is a no-op, but for the fp8-dispatch/bf16-combine shape
+        # (matching the benchmark) it is a REAL cast that must happen for combine to see the dtype it expects --
+        # mirrors _bench_worker's separately-allocated bf16 combine_input, just derived from dispatch_output instead
+        # of being random (identity expert has no other transformation to apply).
         expert_output = dispatch_output.to(combine_dtype)
         combine_output, combine_output_weight = _combine_with_config(
             op, cfg, expert_output, dispatch_weights, all_rank_indices[rank], call_reset=True,
         )
-        # combine_data_type defaults to config.data_type (dispatch's dtype) --
-        # must be overridden explicitly here whenever combine_dtype differs
-        # (the fp8-dispatch/bf16-combine "bench" mode), or check_combine_
-        # result computes its reference at the WRONG precision and every
-        # token spuriously "mismatches" by exactly an fp8-rounding delta.
+        # combine_data_type defaults to config.data_type (dispatch's dtype) -- must be overridden explicitly here
+        # whenever combine_dtype differs (the fp8-dispatch/bf16-combine "bench" mode), or check_combine_ result
+        # computes its reference at the WRONG precision and every token spuriously "mismatches" by exactly an
+        # fp8-rounding delta.
         test_case.check_combine_result(
             op, test_data, combine_output, combine_output_weight, combine_data_type=combine_dtype,
         )
@@ -412,21 +285,7 @@ def _correctness_worker(
 
 
 def _capture_bench_graphs(op, cfg, x_fp8, weights, indices, combine_input, n_recv):
-    """Per-rank CUDA graph capture of one dispatch+combine round.
-
-    Mirrors mori's own reference benchmark (tests/python/ops/
-    bench_dispatch_combine.py:_capture_split_graphs) as closely as possible:
-    two SEPARATE graphs (so each half's replay can be timed independently if
-    ever needed), with combine's capture referencing the actual tensor
-    object dispatch's capture produced -- CUDA graphs bake in fixed memory
-    addresses, so combine must read from the SAME static buffer dispatch's
-    replay will refill, not a fresh tensor. Deliberately no ``call_reset``
-    here: mori's own reference graph-capture path doesn't reset between
-    replays either, so this follows their validated pattern rather than
-    guessing at graph-capture-specific reset semantics that aren't
-    documented. This is why graph-mode is opt-in (--graph-mode), not the
-    default this driver's every-iteration eager path uses.
-    """
+    """Per-rank CUDA graph capture of one dispatch+combine round."""
     dispatch_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(dispatch_graph):
         _do, dispatch_weights, _dsc, _di, _rn = op.dispatch(
@@ -454,31 +313,24 @@ def _bench_worker(
         op, cfg = _build_op(rank, world_size, torch.float8_e4m3fnuz, torch.bfloat16, _BENCH_TOKENS_PER_RANK)
         x_fp8, weights, indices = _make_routing(_BENCH_TOKENS_PER_RANK, world_size, rank, device, 1.0)
         x_fp8 = x_fp8.to(torch.float8_e4m3fnuz)
-        # Combine's expert-output input must be in combine dtype (bf16); its
-        # numeric content does not matter for a bandwidth/latency benchmark.
+        # Combine's expert-output input must be in combine dtype (bf16); its numeric content does not matter for a
+        # bandwidth/latency benchmark.
         combine_input = torch.randn(
             _BENCH_TOKENS_PER_RANK * _NUM_EXPERTS_PER_TOKEN, _HIDDEN_DIM,
             device=device, dtype=torch.bfloat16,
         )
 
-        # dispatch's actual recv count is data-dependent (depends on this
-        # iteration's random routing) and only known device-side until a
-        # host sync -- but x_fp8/weights/indices are fixed for the whole
-        # run (generated once above, not re-randomized per round), so
-        # recv_n is IDENTICAL on every round for a given rank. Do the one
-        # unavoidable host sync ONCE here, outside any timed region,
-        # instead of inside one_round() every iteration (that forced
-        # per-iteration sync was destroying any real dispatch/combine
-        # overlap and inflating every measured number -- see KB card).
+        # dispatch's actual recv count is data-dependent (depends on this iteration's random routing) and only known
+        # device-side until a host sync -- but x_fp8/weights/indices are fixed for the whole run (generated once
+        # above, not re-randomized per round), so recv_n is IDENTICAL on every round for a given rank.
         _ds0, dispatch_weights0, _dsc0, _di0, recv_n0 = op.dispatch(
             x_fp8, weights, None, indices,
             block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
         )
         n_recv = int(recv_n0.sum().item()) if hasattr(recv_n0, "sum") else int(recv_n0)
         n_recv = max(n_recv, 1)
-        # Prime the zero-copy registered buffer (a no-op read for the
-        # external-buffer path) with this fixed-content slice ONCE; the
-        # timed loop below never copies into it again.
+        # Prime the zero-copy registered buffer (a no-op read for the external-buffer path) with this fixed-content
+        # slice ONCE; the timed loop below never copies into it again.
         _combine_with_config(
             op, cfg, combine_input[:n_recv], dispatch_weights0, indices, call_reset=True, prime_buffer=True,
         )
@@ -510,11 +362,9 @@ def _bench_worker(
                     x_fp8, weights, None, indices,
                     block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
                 )
-                # call_reset=True: mori's own docs require reset() "between
-                # iterations" for repeated eager (non-graph) calls -- a real
-                # eager-mode production serving loop pays this same cost
-                # every round, so it belongs inside the timed region, not
-                # around it.
+                # call_reset=True: mori's own docs require reset() "between iterations" for repeated eager (non-graph)
+                # calls -- a real eager-mode production serving loop pays this same cost every round, so it belongs
+                # inside the timed region, not around it.
                 _combine_with_config(
                     op, cfg, combine_input[:n_recv], dispatch_weights, indices,
                     call_reset=True, prime_buffer=False,
@@ -524,11 +374,9 @@ def _bench_worker(
                 return start.elapsed_time(end)
 
         def one_round() -> float:
-            # Synchronized collective: the round's true duration is the
-            # SLOWEST rank, taken per-round (not each rank's own median
-            # across rounds, maxed afterward -- that mixes rounds together
-            # and isn't a real per-round statistic). Every rank must join
-            # this all_reduce every round since it is itself a collective.
+            # Synchronized collective: the round's true duration is the SLOWEST rank, taken per-round (not each rank's
+            # own median across rounds, maxed afterward -- that mixes rounds together and isn't a real per-round
+            # statistic).
             t = torch.tensor([one_round_local_ms()], device=device)
             dist.all_reduce(t, op=dist.ReduceOp.MAX)
             return t.item()
@@ -595,9 +443,8 @@ def _run_correctness(mode: str) -> int:
     ok = os.path.exists(result_path)
     if ok:
         os.remove(result_path)
-    # Reference-checked via mori's own dispatch/combine assertions (see
-    # _correctness_worker) rather than a hand-computed SNR — the README's
-    # documented fallback for drivers that gate on a pass/fail check.
+    # Reference-checked via mori's own dispatch/combine assertions (see _correctness_worker) rather than a
+    # hand-computed SNR — the README's documented fallback for drivers that gate on a pass/fail check.
     print(f"allclose: {ok}")
     return 0
 
@@ -623,11 +470,8 @@ def _run_bench(warmup: int, iters: int, graph_mode: bool = False) -> int:
     if not round_ms:
         print("error: bench worker produced no timing samples", file=sys.stderr)
         return 1
-    # Per examples/README.md §2: one `wall_ms:` line per timed iteration (each
-    # already the per-round max-across-ranks value -- see _bench_worker) plus
-    # one `case_ms:` line forge scores on. Printing the samples (not just the
-    # aggregate) lets forge take its own median and lets a human sanity-check
-    # round-to-round variance directly from stdout.
+    # Per examples/README.md §2: one `wall_ms:` line per timed iteration (each already the per-round max-across-ranks
+    # value -- see _bench_worker) plus one `case_ms:` line forge scores on.
     for v in round_ms:
         print(f"wall_ms: {v:.6f}")
     case_ms = sorted(round_ms)[len(round_ms) // 2]

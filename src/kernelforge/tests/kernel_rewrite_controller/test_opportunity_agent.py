@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,29 +27,12 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _system_prompt,
     run_opportunity_analysis,
 )
+from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "controller-test",
-    "GIT_AUTHOR_EMAIL": "controller-test@local",
-    "GIT_COMMITTER_NAME": "controller-test",
-    "GIT_COMMITTER_EMAIL": "controller-test@local",
-}
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env={**os.environ, **_GIT_IDENTITY},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:
@@ -89,7 +70,6 @@ def _write_staged_task(staging_root: Path, repo: Path) -> str:
     (task / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity,
                 "base_commit": "",
                 "repo_root": str(repo),
@@ -348,6 +328,40 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "before investigating secondary candidates" in prompt
 
 
+def test_the_prompt_does_not_talk_a_collective_out_of_being_published() -> None:
+    """Every rule that could read as "skip the comms operator" is answered.
+
+    A collective reaches the analyst looking exactly like the thing the
+    editable-source rule exists to reject: a mangled symbol inside a vendor
+    comms library, split across rows that each understate it, carrying no
+    shapes. Each of those is a true statement about the evidence and a wrong
+    reason to drop the operator, so the prompt has to answer all of them where
+    they are read -- a carve-out further down is read after the decision.
+    """
+    prompt = _system_prompt()
+
+    # The editable-source rule must carry its own exception rather than leave
+    # it to a later rule.
+    editable_rule = prompt.split("2. Publish only operators with editable")[1].split("\n3.")[0]
+    assert "that alone does not disqualify it" in editable_rule
+    assert "which algorithm is chosen" in editable_rule
+
+    # The layer around the kernel is a target in its own right.
+    assert "rewriting that layer is a real optimization, not a workaround" in prompt
+    assert "the dispatch\n   layer that selects and configures it is" in prompt
+
+    # Leading with the skip is what made the exception easy to miss.
+    assert "A communication operator is a first-class target" in prompt
+    assert "Skip a collective only after" in prompt
+
+    # Ranking one prorated row against a fused GEMM is not like-for-like.
+    assert "nccl_summary_total_ms" in prompt
+
+    # Missing shapes are how the evidence arrives, not a defect in it.
+    assert "arrive with no shapes" in prompt
+    assert "is not\n    a reason to skip the candidate" in prompt
+
+
 def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:
     repo, _base_commit = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
@@ -428,6 +442,52 @@ def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> Non
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def _refused_draft(staging_root: Path, name: str = "draft") -> Path:
+    draft = staging_root / name
+    draft.mkdir(parents=True)
+    (draft / REJECTION_FILENAME).write_text(
+        json.dumps({"draft": name, "reason": "identity.backend must be registered"}),
+        encoding="utf-8",
+    )
+    return draft
+
+
+def test_the_session_cannot_end_while_a_draft_stands_refused(tmp_path: Path) -> None:
+    """Validation is out of process, so stopping is the agent's last chance to hear."""
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging)
+
+    blocked = asyncio.run(protection._on_stop({}, "", None))
+
+    assert blocked["decision"] == "block"
+    assert "identity.backend must be registered" in blocked["reason"]
+    assert REJECTION_FILENAME in blocked["reason"]
+
+
+def test_a_session_with_nothing_refused_ends_normally(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+
+    assert asyncio.run(protection._on_stop({}, "", None)) == {}
+
+
+def test_stop_denials_are_capped_so_an_unfixable_draft_cannot_eat_the_budget(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging, max_stop_denials=2)
+
+    decisions = [asyncio.run(protection._on_stop({}, "", None)) for _ in range(3)]
+
+    assert [decision.get("decision") for decision in decisions] == ["block", "block", None]
+
+
+def test_the_prompt_names_the_file_refusals_are_written_to() -> None:
+    """The agent can only read the note if the contract tells it the name."""
+    assert REJECTION_FILENAME in _system_prompt()
+
+
 def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
     protection = _AnalysisToolGuard(tmp_path / "staging")
     matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
@@ -443,3 +503,47 @@ def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
     assert "Bash|Shell|Task.*|Agent" in matchers
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_the_analysis_records_what_it_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that publishes nothing still pays, and had been reporting zero."""
+
+    class _SpendingBackend(_Backend):
+        async def run(self, spec, usage=None):
+            self.spec = spec
+            self.callback(Path(spec.cwd))
+            if usage is not None:
+                usage.add_usage(
+                    {"input_tokens": 11, "output_tokens": 22},
+                    total_cost_usd=0.5,
+                )
+            return AgentRunResult(text="", end_reason="agent_stopped")
+
+    layout = ControllerLayout(tmp_path / "output")
+    handoff = _handoff(tmp_path)
+    agent = OpportunityAnalysisAgent(
+        backend=_SpendingBackend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=handoff, layout=layout))
+
+    assert outcome.llm_usage["calls"] == 1
+    assert outcome.llm_usage["input_tokens"] == 11
+    assert outcome.llm_usage["output_tokens"] == 22
+    assert outcome.agent_model == "fake"
+
+
+def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:
+    """``calls == 0`` is "not observed", which is not a claim of zero spend."""
+    layout = ControllerLayout(tmp_path / "output")
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert outcome.llm_usage == {}

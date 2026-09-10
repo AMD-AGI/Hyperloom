@@ -5,7 +5,337 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **The `learning/` tuning database, the tracker's scoring layer, and the
+  fusion reachability island are gone — KernelForge loses ~1.4k lines of
+  production code.**
+  Each had been superseded in place rather than deleted: `learning/` (4 files)
+  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
+  `False` since `knowledge/experience_sink.py` took over the same job, and its
+  output files had no reader — `IterationLoop`'s `evolver` parameter and
+  `resources.writable_knowledge_root()` go with it. The tracker's
+  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
+  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
+  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
+  carries its own `_is_gate_met` and `best_mean_case_speedup`.
+  `fusion/validate.py` held a closed seven-function island
+  (`unreached_fusion_symbols` and its six private helpers) whose only
+  references were each other's definitions; `fused_symbol_invocation_evidence`,
+  which `fusion/command.py` does call, is untouched.
+
+  The one observable difference is at the end of a `forge-loop` run: it no
+  longer writes lesson markdown under the writable knowledge base's `learned/`
+  directory, and no longer prints `Lessons learned: N`. Nothing read that
+  directory, and the `Transfer rules discovered: N` line beside it was already
+  unreachable because it derives from the tuning DB whose writes are disabled.
+  Everything else here has no reachable call site.
+
+  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
+  it unreachable — its gate fires only for tables the dispatcher has no entry
+  for, while the dispatcher admits exactly one table, so the two predicates
+  accept disjoint sets, and on the path where the gate does fire the runner
+  discards the model-authored tuner at the referee stage. That is a defect in a
+  tier that is supposed to run, not a dead subsystem, and it is being fixed
+  rather than removed.
+
+- **The deprecated `kernel-agents` console script is gone.** The rename to
+  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
+  nothing in this repository, the docs, or the example scripts invoked it, and
+  the orchestrator dispatches `python -m kernelforge.cli` directly. The
+  `kernel_agents.agent_providers` entry-point group stays: it is how
+  third-party provider plugins published before the rename are still
+  discovered, and it is not a CLI surface.
+
+## [v1.1.0] - 2026-09-09
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0)
+for the user-facing summary.
+
+### Removed
+
+- **`stop_ray_if_owned` and the ownership return value of `ensure_ray_cluster` are gone.**
+  `stop_ray_if_owned` was introduced alongside `parallel_e2e_runner.py` and was
+  called exclusively by `_stop_ray_via_helper` in that script. When
+  `parallel_e2e_runner.py` was retired in `c92784cbf`, the helper was deleted but
+  `stop_ray_if_owned` was left behind with zero production call sites, no test
+  references, and no `__all__` or documentation contract. `ensure_ray_cluster`
+  returned the ownership flag only for that pair; with the pair gone the return
+  value had no consumer. The function is deleted and the signature narrowed to
+  `-> None`. The standard deployment path starts a long-lived shared head via
+  `install.sh`; `ensure_ray_cluster` connects to it and returns immediately, so
+  nothing that previously ran after a `False` return changes behaviour.
+
+- **The `reference_envs` filter inside `materialize_config_with_envs` is gone.**
+  The only writer of that mapping is `cli/bootstrap.py` via
+  `reference_script.parse_reference_script`, which already filters every key
+  through `is_allowed_external_env_key` — strictly stronger than the
+  `valid_env_key` shape check applied here. The pass dropped nothing in
+  production and its warning log could never fire.
+
+- **BREAKING — the two tool-free LLM source tiers are gone**, along with
+  `HYPERLOOM_LLM_SOURCE_PROVIDER` and `HYPERLOOM_LLM_SOURCE_PREVIEW` and the
+  `llm_fallback_*` reason codes they produced. A per-kernel fallback picking a
+  path off a grep shortlist and a whole-table pass auditing the result were both
+  shown a prompt assembled in advance, so neither could see what a kernel
+  actually is — and the deterministic tiers' failure mode is not coming up empty
+  but coming up confidently wrong, which ranking paths by keyword cannot tell
+  apart. One tool-enabled review session on the agent analysis route replaces
+  both: it is handed locations rather than contents and opens what the evidence
+  leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
+  **Operators on `--analysis-route deterministic` should note that route now has
+  no model assistance of any kind** — it keeps its no-model guarantee by not
+  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
+  miss stays unresolved instead of being completed by a model.
+
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
+  `--max-iters` this repository put on every `forge-loop` and
+  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
+  are bounded by `--max-hours`, and the flag had already been documented there
+  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
+  therefore a no-op that logged a cap it never applied. `--max-hours` and the
+  hard-kill timeout remain the only budget controls, exactly as before.
+
+### Added
+
+- **Session breakdown exports now include the additive V6 startup contract.**
+  The existing V5 payload remains intact while `metadata`, `outcome`,
+  `timeline`, and `close` provide the V6 read model. Install and model-gate
+  source events use one ordered timeline ledger that preserves fresh and resume
+  attempts, and write failures are surfaced through `metadata.warnings`.
+
+- **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
+  Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
+  `85b49f2f` (upstream `main`, PR #53 included) into `src/kernelforge/`;
+  Hyperloom is the sole source from here on. The three former top-level
+  packages collapsed into one: `kernel_agents` -> `kernelforge`, `forge_llm` ->
+  `kernelforge.llm` / `kernelforge.agent_backends`, `forge_gemm_tune` ->
+  `kernelforge.gemm_tune`. forge keeps its own CLI (`kernelforge`, invoked as
+  `python -m kernelforge.cli`), and the orchestrator's kernel-agent dispatch
+  path is unchanged, including `KERNEL_OPT_BACKEND_ORDER`, which still selects
+  between the forge and geak backends exactly as before.
+
+  Its knowledge base, examples and serving patches moved inside the package as
+  `kernelforge/data/` and now ship in the wheel, so `resource_path()` resolves
+  them from an installed distribution rather than from a checkout. It raises
+  `FileNotFoundError` on a missing resource instead of returning a path that
+  does not exist, and runtime state that used to be written next to those
+  resources goes to a writable root instead of into `site-packages`.
+
+  Two things in the snapshot did not come across. The `intellikit` kernel
+  backend is removed: nothing in Hyperloom could reach it -- `infer_kernel_backend`
+  has no arm for it and the dispatch path only ever passes triton/flydsl/ck/aiter
+  -- and its author confirms it is no longer needed. Its `languages/asm/`
+  knowledge tree (117 files, a vendored copy of `ROCm/intellikit-asm-skills`
+  plus CDNA4 ISA extracts) went with it, being reachable from no other backend.
+  Eight kernel backends remain: CK, FlyDSL, Triton, Gluon, AITER, HIP,
+  hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
+  it targets the retired repository.
+
+- **`scripts/partition_mode_sweep.py` measures which compute-partition mode a
+  workload wants.** Sets each mode on one card in turn, runs the same benchmark
+  on every partition that mode creates, sums the throughput, and restores the
+  card's entry mode on the way out — including after a failure or a Ctrl-C.
+  Modes whose partitions provably cannot hold the configured streams are skipped
+  with the arithmetic shown rather than run into an out-of-memory failure.<br/>
+  The fan-out is the substance of it. A benchmark that loads one partition and
+  ignores the rest measures a fraction of the card, which reports `CPX` as eight
+  times worse than it is; every figure here is the sum over a mode's partitions
+  with all of them loaded together, and a mode is reported only when every one of
+  its partitions returned a measurement. Partitions are selected by matching CU
+  count within the swept card's PCI bus, never by device index: `amd-smi` orders
+  by PCI address while HSA/HIP enumerates whole cards first, so on an 8-card
+  MI355X node with card 0 in `CPX` the two tools disagree about which devices the
+  partitions are — 0-7 against 7-14.<br/>
+  This is where the privileged `amd-smi set` lives, and the only place it does.
+  A card-wide mutation that evicts every GPU context is reasonable between
+  benchmarks in a script an operator ran on purpose, and unreasonable inside an
+  optimization loop that also runs agent-authored code, so `optimize` continues
+  to only read the mode. Together the two halves are a boundary: the sweep
+  chooses the shape, the session asserts it.<br/>
+  Because that set evicts work, the check standing in front of it fails closed:
+  an `amd-smi` process listing in a shape the parser does not model is a refusal,
+  not an empty one, since the only wrong answer that destroys anything is reading
+  a busy node as free. It is scoped to the card being swept, so a neighbour's
+  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
+  of the guard on the target card. Every exit from a started sweep runs the
+  restore and the report, including on an error the script does not model — which
+  exits `4`, keeps the modes already measured, and still yields `3` if the card
+  could not be put back.
+- **The card's compute-partition shape is now recorded, checked, and published.**
+  An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
+  `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
+  throughput. Until now nothing in a session recorded which shape a
+  number came from, so two runs of the same configuration on the same card in
+  `SPX` and in `CPX` were indistinguishable in the history — different
+  experiments filed under one name.<br/>
+  The observed mode now goes into the platform fingerprint alongside NPS, the
+  session report names it on partitioned runs, and the shape is published to
+  the environment for the benchmark entrypoint to fan work out across
+  partitions. That entrypoint lives outside this repository, so until it reads
+  them a session on a split card measures one partition rather than the total;
+  the recorded shape is still what stops a `CPX` number being filed as though
+  it were `SPX`. The published variables are set only for the scriptable
+  frameworks whose benchmarks can fan out; a serving session records the shape
+  but is handed no fan-out contract, and its report says the figure cannot be
+  read as an aggregate.<br/>
+  Two optional flags configure it. `--compute-partition-mode` **asserts** the
+  mode the card is already in and refuses the session if it is in another one,
+  or if the card cannot be read — the flag exists to catch an external set that
+  did not take, so an unverifiable assertion is treated as a failed one.
+  `--streams-per-partition` (default `2`) is how many concurrent streams go on
+  each partition; a value below `1` is refused rather than quietly replaced by
+  the default, since `0` is far more likely to be a mistake than a request.<br/>
+  **The optimizer does not change the mode.** Setting it is privileged and
+  disrupts every process holding a GPU context, which is not something an
+  optimization loop should do between benchmark rounds. The card must be in its
+  mode before `optimize` starts: the shape is checked and recorded at launch, so
+  a mode applied later — by the benchmark entrypoint, for instance — is too late
+  to be either. Nothing added here needs privilege: every probe is an
+  unprivileged read, and a host without `amd-smi` behaves exactly as before.<br/>
+  **Operator note**: launch now refuses a session whose streams provably will
+  not fit one partition, sized from the checkpoint's weight bytes as a lower
+  bound. The arithmetic costs milliseconds and the failure it replaces is an
+  out-of-memory crash hours in. When the checkpoint cannot be sized the session
+  runs and says so. The refusal applies where streams will actually share a
+  partition — a scriptable framework, or an operator who named the flags — and
+  not to a serving session that merely happens to start on a card someone else
+  left split. Multi-node sessions record no shape, since the readable card is
+  not the benchmark's.
+
 ### Changed
+
+- **One reasoning-effort vocabulary, and it is the one both surfaces accept.**
+  Three tables disagreed: Hyperloom took `minimal | low | medium | high`, Forge
+  ranked `none | low | medium | high | xhigh | max`, and the Codex backend
+  accepted a third list while folding `max` onto `xhigh`. The disagreement was
+  not cosmetic -- `HYPERLOOM_REASONING_EFFORT=minimal` passed Hyperloom's own
+  filter and then raised inside the Codex backend, so a box configured once
+  crashed the component doing most of the spending.
+  `hyperloom.common.reasoning_effort` now holds the single ladder
+  `low | medium | high | xhigh | max`, measured against both surfaces:
+  `claude --effort` takes `low..xhigh` plus `max`, the OpenAI-compatible
+  gateway takes `none`/`minimal`/`low..xhigh` and returns 400 on `max`.
+  `low`–`xhigh` are levels as written. `max` is a real Claude level, so it is
+  one here too, and `gateway_reasoning_effort` projects it onto `xhigh` -- the
+  gateway's deepest -- for the Codex backend *and* for Hyperloom's own
+  chat.completions: the fold used to live inside the Codex backend only, so the
+  identical value reaching Hyperloom's own calls was a 400. `minimal` and
+  `none` go the other way -- the gateway takes them, the Claude CLI does not
+  know them, and there is no Claude level below `low` to project them onto --
+  so neither is a level.<br/>
+  **A bad value is refused at startup, by name.** `resolve_agent_reasoning_effort`
+  and `Config.__post_init__` raise on an unrecognized effort and say which
+  variable carried it, rather than passing it through for the provider to
+  reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
+  keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
+  non-reasoning models and gateways that reject the field.<br/>
+  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
+  reaches the gateway.** Hyperloom's own chat.completions used to forward
+  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
+  drops it and the call runs at the gateway's default -- deeper and more
+  expensive, with no error to notice. Forge's side of the same variable is loud
+  (it refuses to start), but Hyperloom's cannot be without breaking
+  non-reasoning models, so **a deployment sitting on `minimal` has to move to
+  `low` by hand.**
+
+- **Forge reads Hyperloom's environment contract instead of its own.** Forge
+  does not ship next to Hyperloom any more, it ships inside it, and an operator
+  configuring one box was being asked to learn two vocabularies for the same
+  decision. `Config.from_env` now walks the ladder
+  `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
+  written out separately because they answer different questions -- Hyperloom's
+  picks the model for its own calls into a campaign, Forge's picks the model an
+  agent session runs -- and the part worth sharing is the variable names, which
+  this change makes identical. Reasoning effort falls back to
+  the project-wide `HYPERLOOM_REASONING_EFFORT` when
+  `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
+  is not silently contradicted by the component doing most of the spending.<br/>
+  **Three surfaces were reading a different ladder than the one they
+  documented.** `forge-fusion`'s `_resolve_agent_choice` and Hyperloom's own
+  `_run_vendor_playbook_loop_via_cli` each read one model variable directly
+  rather than the shared resolver, so a request-level `llm_model` and the
+  environment were ranked differently depending on which surface launched the
+  run. Both now go through the resolver. And
+  `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
+  a subscription token was told it had no Anthropic credentials while the Claude
+  CLI on it would have authenticated fine -- Hyperloom's own credential
+  preflight has always counted that token as a complete Anthropic side.<br/>
+  **BREAKING -- removed, with no deprecation window: `FORGE_CLAUDE_MODEL`,
+  `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL`, and `KERNEL_AGENTS_MODEL`. Forge no
+  longer has a model variable of its own; set `CLAUDE_MODEL` / `CODEX_MODEL`.**
+  The per-provider pair dated from when Forge was a separate project that had
+  to name its own settings; inside Hyperloom it was one component's second
+  spelling of a platform setting, and a deployment that set one and not the
+  other silently ran Forge on a different model than everything else.
+  `FORGE_AGENT_MODEL` was the provider-neutral rung above them, and it has the
+  same problem for the same reason: the Hyperloom-side resolver
+  (`resolve_forge_llm_model`) never read it, so as long as it existed the two
+  ladders agreed only by coincidence. Deleting it is what makes them one
+  ladder. `KERNEL_AGENTS_MODEL` was never set by anything in either repository
+  -- only read -- so it was a rung to explain with nothing to configure. All
+  four are dropped from the resolver on both sides, from the Ray and Slurm
+  environment allowlists, and from both env templates. A box that had been
+  relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
+  through to the provider default rather than failing, so **check your
+  deployment's env rather than waiting for an error.**
+
+- **`auto` resolves the model after the provider, not before.** The model
+  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
+  backend of `auto` answered before the question was settled: `auto` prefers
+  the Claude CLI but falls to codex when it is not installed, and the runtime
+  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
+  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
+  and `Config.agent_runtime` reads the pair once the provider is known. Two
+  further sites built their own runtime and so read neither switch:
+  `fusion/command.py` pinned every fusion session to the default depth
+  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
+  took the provider default model and the default effort. Both now read the
+  same pair and the same effort ladder as `forge-loop`, and a new test asserts
+  the set of modules that build a runtime is closed -- a fresh bypass fails the
+  suite rather than going unnoticed, which is how these two did.<br/>
+  The two provider-*switch* branches had the same defect on their far side.
+  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
+  provider other than the implementer's -- which is the ordinary case, since
+  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
+  all, so the supervisor ran the registry default however `CODEX_MODEL` was
+  set. `make_agent_fn` did the opposite, carrying the already-resolved
+  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
+  defect again one level up. Both now read the pair for the provider they are
+  about to build, and a second test asserts every construction site does.
+
+- **An agent session's reasoning effort is now the operator's decision, not the
+  call site's.** `AgentRunSpec.resolved()` used to let a spec's own
+  `reasoning_effort` outrank the runtime's, and two thirds of the sessions in
+  this repository wrote one -- so an operator who set
+  `FORGE_AGENT_REASONING_EFFORT` watched most of the campaign ignore it and
+  then read the result as evidence about a setting it never ran under. The
+  ranking is inverted and every call-site literal is deleted rather than left
+  in place looking live; the spec's value survives only for a runtime that
+  names no effort, which no provider here builds. Nine sessions that hardcoded
+  `max` now run at the campaign effort (`high` by default), which is also the
+  cheaper direction.<br/>
+  **Context window: not ported.** Upstream appends `[1m]` to every Claude
+  model id. Measured against the gateway Hyperloom points Forge at
+  (`.../api/v1/llm-proxy`), `claude-opus-5` answers 200 while
+  `claude-opus-5[1m]` -- and every other bracketed form, `[200k]` included --
+  answers `400 Invalid model name`; `/v1/models` publishes 23 ids of which none
+  is windowed. So the suffix would fail every Hyperloom-launched session at the
+  startup probe rather than shrink it. Nor is the window something Forge needs
+  for its own sake: it runs no compaction and no token budget, so the suffix
+  was the only thing a window could have driven, and Hyperloom's own
+  `MODEL_CONTEXT_WINDOWS` answers a different question (when to compact the
+  orchestrator's conversation) and never reaches the wire. The whole mechanism
+  is therefore absent -- no `model_context.py`, no `context_window` on the
+  runtime, no environment variable. A test pins that, so a future re-port of
+  upstream fails the suite instead of every session.<br/>
+  **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
+  so it answered "some configuration works" rather than "this one does"; it now
+  asks under the configuration the campaign will run. `[` terminates the model
+  family regex, so an operator who hand-writes `claude-opus-5[1m]` into
+  `CLAUDE_MODEL` is still recognised as running `claude-opus-5`.
 
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
@@ -194,7 +524,233 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on. `host_origin` is the one sanitizer-exempt subtree allowed to carry
   absolute paths (secret-named keys are still dropped there).
 
+
+- **BREAKING: `forge-loop` and `forge-rewrite-by-flydsl` now reject an undeclared
+  option instead of dropping it.** These two were the only tolerant entry points
+  in the forge CLI: an option they did not declare was discarded, named on
+  stderr, and recorded as `ignored_cli_options` on the result document, and the
+  run proceeded on the defaults. The exemption existed because a consumer in a
+  *separate repository* drove them and could ship ahead of the installed
+  producer; vendoring put producer and consumer in one tree and one wheel, so
+  that skew can no longer occur. What the tolerance still absorbed was typos and
+  renames — silently. Seven shipped examples kept passing a `--fellow` flag after
+  the `fellow` -> `kernel_backend` rename and ran an inferred backend instead of
+  the intended one, exiting 0 the whole time; contrast the fusion wrapper's
+  `--llm-model` -> `--model` rename, which `forge-fuse` rejected outright and
+  which was therefore found and fixed. Both commands now behave like every other
+  forge subcommand — click's own error, exit 2, before any GPU work starts, with
+  a "Did you mean" suggestion. `kernelforge/cli_forward_compat.py` and the
+  `ignored_cli_options` result field are removed; nothing in Hyperloom read that
+  field. The retired `--max-iters`, previously accepted and ignored, is now
+  rejected too.
+
+- **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
+  installs forge, so there is no checkout to point at and nothing to clone:
+  `local_setup.sh` no longer clones the private KernelForge repo (and the
+  quick-start Dockerfile no longer needs an SSH mount for it), and `install.sh`
+  no longer pip-installs forge as a separate distribution from a checkout — it
+  verifies that `kernelforge.cli` and `kernelforge.fusion` import instead.
+  Vendor-playbook resolution, the serving-patch root and the gemm-tune root now
+  read the packaged copy, where they previously failed or skipped.<br/>
+  **No code reads `$FORGE_PATH` any more.** An earlier draft of this entry said
+  it still worked as a deliberate override; that was true of an intermediate
+  revision and is not true of what shipped. Every value it could hold pointed at
+  the pre-inlining repository layout, so honouring it would have shadowed the
+  packaged tree with an archived one. Because `FORGE_` remains on env_safety's
+  dotenv prefix allowlist, a stale setting is still forwarded into the run and
+  then ignored — silently, which is why it is called out here. The dev override
+  that replaces it is **`$KERNELFORGE_PROJECT_ROOT`**: a writable root holding
+  `knowledge_base/`, `serving_patches/` and the other resource trees, taking
+  precedence over the packaged copy when the tree it names exists. It defaults
+  to `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge`.
+
+- **BREAKING: `forge-gemm-tune` is gone as a console script and as a
+  distribution.** The tuner is now the `kernelforge.gemm_tune` subpackage of the
+  Hyperloom wheel, invoked as `kernelforge gemm-tune` (or
+  `python -m kernelforge.cli gemm-tune run`). There is no subtree left to
+  `pip install` on its own, and `FORGE_GEMM_TUNE_ROOT` no longer resolves one.
+  `install.sh` now treats a missing `gemm-tune` subcommand as a fatal incomplete
+  install rather than a warning, because it ships in the same wheel as
+  everything else the script just verified.
+
+- **BREAKING: the `fellow` vocabulary is retired.** "Kernel backend" in prose,
+  `kernel_backend` in code. Concretely: the CLI flag is `--kernel-backend`
+  taking a bare name (`triton`, not `triton-fellow`); the campaign-config key is
+  `kernel_backend`, and a config carrying the retired key **fails loudly at
+  load** rather than migrating silently; the environment variable is
+  `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
+  The CLI flag was the one place where the failure was *not* loud on its own:
+  `forge-loop` still tolerated unknown options at the time, so `--fellow
+  triton-fellow` was dropped with a warning and the campaign proceeded on an
+  inferred backend. That tolerance is removed in this same release (see above),
+  so the flag now fails like the config key does. The seven
+  shipped `run_example.sh` that still passed it are fixed, and the rename guard
+  that should have caught them — its exemption globbed `data/*` rather than
+  `data/*.md`, so it was exempting runnable scripts along with the prose it
+  meant to protect — is narrowed.<br/>
+  `FORGE_DISABLE_COMPILED_FELLOWS` has the same forwarded-then-ignored hazard as
+  `$FORGE_PATH`, and a worse consequence: an operator who had switched compiled
+  kernel backends off would silently get them back. It is not honoured, but it
+  is now detected and warned about once per run.
+
+- **BREAKING: the post-KEEP confirmation round is removed.** An `explore`
+  variant and an `integrate_patch` candidate were each re-benched once more
+  after they had already been graded, and the second measurement overwrote the
+  first as the reported number. Both now report the round that graded them.
+  - `explore` measured that round as a third run on the server its warmup and
+    decision rounds had already warmed, so it carried more cache than the round
+    it overwrote — and the inflated value became the anchor the next in-batch
+    variant was graded against. Removing it takes the bias out of the reported
+    gain and saves a full benchmark per KEEP.
+  - `integrate_patch` measured it on a server of its own, so removing it costs
+    two things and they are worth stating: a patch that only cleared the bar on
+    one measurement is no longer asked to clear it again before being committed
+    to the framework tree, and `delta_pct` is now read off the same measurement
+    that selected the patch, which reads higher than an independent re-measure
+    would.
+  - GEAK's same-harness revalidation dispatched an `explore` that inherited the
+    confirmation round. It now measures like every other explore, so its
+    throughput is graded colder against the engagement and current-best gates:
+    expect more `fallback` (2a harness replay) and `no_promote` verdicts.
+  - **Removed from the session record:** the `KEEP_UNSTABLE` outcome, the
+    `keep_unstable_in_stack` result key, and the `stack_rebench_tput` /
+    `stack_rebench_workspace` / `stack_rebench_warnings` fields. Readers of
+    `keep_unstable_count` stay so a session recorded before this change still
+    renders. `cumulative_gain_validated` now records `e2e_decision_round` as
+    its measurement basis for explore promotions.
+  - `enable_stack_rebench` and `rebench_stable_threshold_pct` are no longer
+    read from task params.
+
+- **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
+  now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
+  search and source/upstream landing are two arms of one phase, worked in
+  parallel; the phase advances only when both are dry. One arm plateauing
+  raises `switch_bottleneck` for the next macro-cycle instead of ending the
+  phase while the other lever still pays.
+  - **`--no-explore` is removed** rather than aliased. The two arms cannot be
+    disabled separately, so the flag's new meaning would be strictly wider
+    than the one an operator script asked for; an unrecognised argument says
+    so where a silent widening would not. Use `--no-framework-agent`.
+  - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
+    the framework budget option. The merged phase's default share is `0.40`,
+    against `0.50` for KERNEL_AGENT.
+  - Exit reasons `explore_*` and `framework_agent_*` are replaced by
+    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted` and
+    `optimize_budget_cap`.
+  - **A session recorded at `EXPLORE` cannot be resumed by this build.** Its
+    phase names a machine that no longer exists, and starting over would
+    re-run PRELUDE on top of its baseline and KEPT stack, so the Coordinator
+    refuses at startup. Archived sessions still *read* — the attribution and
+    recorder paths understand the old labels — they just cannot be continued.
+
+- **BREAKING: the `framework_agent` action is retired.** Upstream PRs land
+  through `integrate_patch` with `patch_source='upstream_pr'`, the same action
+  and the same apply / vet / bench / KEEP-REVERT pipeline every other patch
+  source uses. `runs/framework_agent/<task_id>/` is no longer produced; PR
+  candidate workspaces are under `runs/integrate_patch/<task_id>/`.
+
+- **BREAKING: `pr_intel_specialist` is replaced by
+  `candidate_discovery_specialist`,** which owns finding, ranking and judging
+  upstream candidates rather than being an occasional PR top-up.
+
+- **Gain is attributed by lever, not by phase.** Both arms run inside one
+  phase, so the phase that was live when a KEEP landed no longer says which
+  lever moved it. `lever_kind` is the attribution key, read from what a
+  specialist delivered rather than from what its mandate asked for, and
+  `attribution.lever_breakdown` splits validated gain by it. The values are:
+  - `config` — server args / envs; nothing on disk is touched.
+  - `source_patch` — a diff a specialist wrote for this session.
+  - `upstream_pr` — a diff fetched from an upstream pull request.
+  - `enablement` — graded on runnability and the accuracy floor, not throughput.
+  - `kernel` — a tuned or authored kernel, graded on the end-to-end bench.
+
+  Gain that carried no stamp lands under `unattributed`; a non-zero figure
+  there is a tagging gap, not a category.
+
+
+- **`canonical_fingerprint` now uses pair-aware arg normalization.**
+  The previous implementation sorted all arg tokens as a flat list, which
+  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
+  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
+  and were incorrectly treated as duplicates by the `explore_search` dedup
+  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
+  last-wins semantics for repeated flags, matching the semantics of
+  `_shell_safe_dedupe`.<br/>
+  **Operator note**: this changes the hash for any variant whose `extra_args`
+  contains at least one flag with a value.  All fingerprint keys already
+  persisted in `explore_search.tested`, `accepted`, `rejected`, and
+  `name_index` inside `state.json` are invalidated.  On the next resume the
+  session will re-bench its full explored history.
+
+- **`force_restart_local_cluster` now routes its `ray stop` through `_stop_ray_force`.**
+  The function previously inlined its own `subprocess.run(["ray", "stop", "--force"], ...)`
+  without a timeout or `OSError` guard, meaning a hung `ray stop` on the
+  version-mismatch recovery path would block indefinitely. `_stop_ray_force`
+  already enforces `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
+  `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) and swallows both `TimeoutExpired` and
+  `OSError`, so the timeout constant now covers all three stop sites instead of
+  only one. Log output is unchanged: `_stop_ray_force` appends the stop command
+  and any timeout note to `log_path` in the same order as before.
+
+- **Multi-node SSH forwarding now uses the shared env-safety definitions.**
+  `multi_node/_internal/env_safety` declared its own nine-name `_DENY_KEYS` set
+  and its own copy of the POSIX key-shape regex. The denylist was missing
+  `CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
+  `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`, all of which a
+  shell-launched remote pod is exposed to. Both local definitions are deleted in
+  favour of `BLOCKED_UNTRUSTED_ENV_NAMES` and `valid_env_key`. Forwarding is
+  unaffected: `_collect_forward_env` builds its mapping from a prefix allowlist
+  plus four hardcoded names, none of which are in the blocked set.
+
+- **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
+  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
+  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling, so
+  those three blocked nothing real. Every remaining name corresponds to a process
+  this repository actually spawns: bash benchmark wrappers, Python subprocesses,
+  the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
+  stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
+  timestamped logging shim pipes through.
+
+- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
+  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
+  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
+  so the old name described a dependency that does not exist and read as a no-op
+  on a run that never tunes GEMM. The old spelling still works and still opts
+  out, with a `DeprecationWarning`; the current flag wins when both are passed.
+  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
+  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
+  The switch covers that dispatch only: orchestration can still request
+  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
+
+- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
+  decode trace with a flat kernel distribution nothing but a graph-launch
+  wrapper reaches double digits, so the 10% floor admitted no real kernel and
+  left the batch dispatcher idle while the orchestrator picked candidates one at
+  a time. Expect more candidates dispatched per run, and correspondingly more
+  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
+
+- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
+  KernelForge renamed the option to match the spelling the rest of its CLI
+  already used, and `forge-fuse` rejects an unknown option outright rather than
+  ignoring it, so every fusion run was exiting 2 before it started and
+  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
+  wrapper's own input JSON is unchanged.
+
 ### Fixed
+
+- **The Codex default named a deployment the gateway does not serve.**
+  `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
+  points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
+  found!` on both ChatCompletions and Responses, while `gpt-5.6-sol` answers
+  200 on both. Both appear in `/v1/models`, so the catalog alone does not
+  separate them -- only a request does. Hyperloom's own install guide already
+  names `gpt-5.6-sol` and states that it is a deployment name rather than a
+  suffixed variant of a bare `gpt-5.6`, so this default disagreed with the
+  documentation shipped beside it: a box that named no model started every
+  Codex session on a rejected id and survived only by falling back to
+  `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
+  a context-window suffix -- bracketed ids remain rejected by this gateway,
+  which is why no window suffix is applied at all.
 
 - **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
   The serving-process checks now accept `atom.entrypoints`. Recovery records
@@ -353,258 +909,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   program body, making its value executable; the three measurement knobs are now
   validated as numbers and the comparison passes them through `awk -v`.
 
-### Added
-
-- **Session breakdown exports now include the additive V6 startup contract.**
-  The existing V5 payload remains intact while `metadata`, `outcome`,
-  `timeline`, and `close` provide the V6 read model. Install and model-gate
-  source events use one ordered timeline ledger that preserves fresh and resume
-  attempts, and write failures are surfaced through `metadata.warnings`.
-
-- **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
-  Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
-  `85b49f2f` (upstream `main`, PR #53 included) into `src/kernelforge/`;
-  Hyperloom is the sole source from here on. The three former top-level
-  packages collapsed into one: `kernel_agents` -> `kernelforge`, `forge_llm` ->
-  `kernelforge.llm` / `kernelforge.agent_backends`, `forge_gemm_tune` ->
-  `kernelforge.gemm_tune`. forge keeps its own CLI (`kernelforge`, invoked as
-  `python -m kernelforge.cli`), and the orchestrator's kernel-agent dispatch
-  path is unchanged, including `KERNEL_OPT_BACKEND_ORDER`, which still selects
-  between the forge and geak backends exactly as before.
-
-  Its knowledge base, examples and serving patches moved inside the package as
-  `kernelforge/data/` and now ship in the wheel, so `resource_path()` resolves
-  them from an installed distribution rather than from a checkout. It raises
-  `FileNotFoundError` on a missing resource instead of returning a path that
-  does not exist, and runtime state that used to be written next to those
-  resources goes to a writable root instead of into `site-packages`.
-
-  Two things in the snapshot did not come across. The `intellikit` kernel
-  backend is removed: nothing in Hyperloom could reach it -- `infer_kernel_backend`
-  has no arm for it and the dispatch path only ever passes triton/flydsl/ck/aiter
-  -- and its author confirms it is no longer needed. Its `languages/asm/`
-  knowledge tree (117 files, a vendored copy of `ROCm/intellikit-asm-skills`
-  plus CDNA4 ISA extracts) went with it, being reachable from no other backend.
-  Eight kernel backends remain: CK, FlyDSL, Triton, Gluon, AITER, HIP,
-  hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
-  it targets the retired repository.
-
-- **`scripts/partition_mode_sweep.py` measures which compute-partition mode a
-  workload wants.** Sets each mode on one card in turn, runs the same benchmark
-  on every partition that mode creates, sums the throughput, and restores the
-  card's entry mode on the way out — including after a failure or a Ctrl-C.
-  Modes whose partitions provably cannot hold the configured streams are skipped
-  with the arithmetic shown rather than run into an out-of-memory failure.<br/>
-  The fan-out is the substance of it. A benchmark that loads one partition and
-  ignores the rest measures a fraction of the card, which reports `CPX` as eight
-  times worse than it is; every figure here is the sum over a mode's partitions
-  with all of them loaded together, and a mode is reported only when every one of
-  its partitions returned a measurement. Partitions are selected by matching CU
-  count within the swept card's PCI bus, never by device index: `amd-smi` orders
-  by PCI address while HSA/HIP enumerates whole cards first, so on an 8-card
-  MI355X node with card 0 in `CPX` the two tools disagree about which devices the
-  partitions are — 0-7 against 7-14.<br/>
-  This is where the privileged `amd-smi set` lives, and the only place it does.
-  A card-wide mutation that evicts every GPU context is reasonable between
-  benchmarks in a script an operator ran on purpose, and unreasonable inside an
-  optimization loop that also runs agent-authored code, so `optimize` continues
-  to only read the mode. Together the two halves are a boundary: the sweep
-  chooses the shape, the session asserts it.<br/>
-  Because that set evicts work, the check standing in front of it fails closed:
-  an `amd-smi` process listing in a shape the parser does not model is a refusal,
-  not an empty one, since the only wrong answer that destroys anything is reading
-  a busy node as free. It is scoped to the card being swept, so a neighbour's
-  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
-  of the guard on the target card. Every exit from a started sweep runs the
-  restore and the report, including on an error the script does not model — which
-  exits `4`, keeps the modes already measured, and still yields `3` if the card
-  could not be put back.
-- **The card's compute-partition shape is now recorded, checked, and published.**
-  An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
-  `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
-  throughput. Until now nothing in a session recorded which shape a
-  number came from, so two runs of the same configuration on the same card in
-  `SPX` and in `CPX` were indistinguishable in the history — different
-  experiments filed under one name.<br/>
-  The observed mode now goes into the platform fingerprint alongside NPS, the
-  session report names it on partitioned runs, and the shape is published to
-  the environment for the benchmark entrypoint to fan work out across
-  partitions. That entrypoint lives outside this repository, so until it reads
-  them a session on a split card measures one partition rather than the total;
-  the recorded shape is still what stops a `CPX` number being filed as though
-  it were `SPX`. The published variables are set only for the scriptable
-  frameworks whose benchmarks can fan out; a serving session records the shape
-  but is handed no fan-out contract, and its report says the figure cannot be
-  read as an aggregate.<br/>
-  Two optional flags configure it. `--compute-partition-mode` **asserts** the
-  mode the card is already in and refuses the session if it is in another one,
-  or if the card cannot be read — the flag exists to catch an external set that
-  did not take, so an unverifiable assertion is treated as a failed one.
-  `--streams-per-partition` (default `2`) is how many concurrent streams go on
-  each partition; a value below `1` is refused rather than quietly replaced by
-  the default, since `0` is far more likely to be a mistake than a request.<br/>
-  **The optimizer does not change the mode.** Setting it is privileged and
-  disrupts every process holding a GPU context, which is not something an
-  optimization loop should do between benchmark rounds. The card must be in its
-  mode before `optimize` starts: the shape is checked and recorded at launch, so
-  a mode applied later — by the benchmark entrypoint, for instance — is too late
-  to be either. Nothing added here needs privilege: every probe is an
-  unprivileged read, and a host without `amd-smi` behaves exactly as before.<br/>
-  **Operator note**: launch now refuses a session whose streams provably will
-  not fit one partition, sized from the checkpoint's weight bytes as a lower
-  bound. The arithmetic costs milliseconds and the failure it replaces is an
-  out-of-memory crash hours in. When the checkpoint cannot be sized the session
-  runs and says so. The refusal applies where streams will actually share a
-  partition — a scriptable framework, or an operator who named the flags — and
-  not to a serving session that merely happens to start on a card someone else
-  left split. Multi-node sessions record no shape, since the readable card is
-  not the benchmark's.
-
-### Changed
-
-- **BREAKING: `forge-loop` and `forge-rewrite-by-flydsl` now reject an undeclared
-  option instead of dropping it.** These two were the only tolerant entry points
-  in the forge CLI: an option they did not declare was discarded, named on
-  stderr, and recorded as `ignored_cli_options` on the result document, and the
-  run proceeded on the defaults. The exemption existed because a consumer in a
-  *separate repository* drove them and could ship ahead of the installed
-  producer; vendoring put producer and consumer in one tree and one wheel, so
-  that skew can no longer occur. What the tolerance still absorbed was typos and
-  renames — silently. Seven shipped examples kept passing a `--fellow` flag after
-  the `fellow` -> `kernel_backend` rename and ran an inferred backend instead of
-  the intended one, exiting 0 the whole time; contrast the fusion wrapper's
-  `--llm-model` -> `--model` rename, which `forge-fuse` rejected outright and
-  which was therefore found and fixed. Both commands now behave like every other
-  forge subcommand — click's own error, exit 2, before any GPU work starts, with
-  a "Did you mean" suggestion. `kernelforge/cli_forward_compat.py` and the
-  `ignored_cli_options` result field are removed; nothing in Hyperloom read that
-  field. The retired `--max-iters`, previously accepted and ignored, is now
-  rejected too.
-
-- **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
-  installs forge, so there is no checkout to point at and nothing to clone:
-  `local_setup.sh` no longer clones the private KernelForge repo (and the
-  quick-start Dockerfile no longer needs an SSH mount for it), and `install.sh`
-  no longer pip-installs forge as a separate distribution from a checkout — it
-  verifies that `kernelforge.cli` and `kernelforge.fusion` import instead.
-  Vendor-playbook resolution, the serving-patch root and the gemm-tune root now
-  read the packaged copy, where they previously failed or skipped.<br/>
-  **No code reads `$FORGE_PATH` any more.** An earlier draft of this entry said
-  it still worked as a deliberate override; that was true of an intermediate
-  revision and is not true of what shipped. Every value it could hold pointed at
-  the pre-inlining repository layout, so honouring it would have shadowed the
-  packaged tree with an archived one. Because `FORGE_` remains on env_safety's
-  dotenv prefix allowlist, a stale setting is still forwarded into the run and
-  then ignored — silently, which is why it is called out here. The dev override
-  that replaces it is **`$KERNELFORGE_PROJECT_ROOT`**: a writable root holding
-  `knowledge_base/`, `serving_patches/` and the other resource trees, taking
-  precedence over the packaged copy when the tree it names exists. It defaults
-  to `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge`.
-
-- **BREAKING: `forge-gemm-tune` is gone as a console script and as a
-  distribution.** The tuner is now the `kernelforge.gemm_tune` subpackage of the
-  Hyperloom wheel, invoked as `kernelforge gemm-tune` (or
-  `python -m kernelforge.cli gemm-tune run`). There is no subtree left to
-  `pip install` on its own, and `FORGE_GEMM_TUNE_ROOT` no longer resolves one.
-  `install.sh` now treats a missing `gemm-tune` subcommand as a fatal incomplete
-  install rather than a warning, because it ships in the same wheel as
-  everything else the script just verified.
-
-- **BREAKING: the `fellow` vocabulary is retired.** "Kernel backend" in prose,
-  `kernel_backend` in code. Concretely: the CLI flag is `--kernel-backend`
-  taking a bare name (`triton`, not `triton-fellow`); the campaign-config key is
-  `kernel_backend`, and a config carrying the retired key **fails loudly at
-  load** rather than migrating silently; the environment variable is
-  `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
-  The CLI flag was the one place where the failure was *not* loud on its own:
-  `forge-loop` still tolerated unknown options at the time, so `--fellow
-  triton-fellow` was dropped with a warning and the campaign proceeded on an
-  inferred backend. That tolerance is removed in this same release (see above),
-  so the flag now fails like the config key does. The seven
-  shipped `run_example.sh` that still passed it are fixed, and the rename guard
-  that should have caught them — its exemption globbed `data/*` rather than
-  `data/*.md`, so it was exempting runnable scripts along with the prose it
-  meant to protect — is narrowed.<br/>
-  `FORGE_DISABLE_COMPILED_FELLOWS` has the same forwarded-then-ignored hazard as
-  `$FORGE_PATH`, and a worse consequence: an operator who had switched compiled
-  kernel backends off would silently get them back. It is not honoured, but it
-  is now detected and warned about once per run.
-
-- **BREAKING: the post-KEEP confirmation round is removed.** An `explore`
-  variant and an `integrate_patch` candidate were each re-benched once more
-  after they had already been graded, and the second measurement overwrote the
-  first as the reported number. Both now report the round that graded them.
-  - `explore` measured that round as a third run on the server its warmup and
-    decision rounds had already warmed, so it carried more cache than the round
-    it overwrote — and the inflated value became the anchor the next in-batch
-    variant was graded against. Removing it takes the bias out of the reported
-    gain and saves a full benchmark per KEEP.
-  - `integrate_patch` measured it on a server of its own, so removing it costs
-    two things and they are worth stating: a patch that only cleared the bar on
-    one measurement is no longer asked to clear it again before being committed
-    to the framework tree, and `delta_pct` is now read off the same measurement
-    that selected the patch, which reads higher than an independent re-measure
-    would.
-  - GEAK's same-harness revalidation dispatched an `explore` that inherited the
-    confirmation round. It now measures like every other explore, so its
-    throughput is graded colder against the engagement and current-best gates:
-    expect more `fallback` (2a harness replay) and `no_promote` verdicts.
-  - **Removed from the session record:** the `KEEP_UNSTABLE` outcome, the
-    `keep_unstable_in_stack` result key, and the `stack_rebench_tput` /
-    `stack_rebench_workspace` / `stack_rebench_warnings` fields. Readers of
-    `keep_unstable_count` stay so a session recorded before this change still
-    renders. `cumulative_gain_validated` now records `e2e_decision_round` as
-    its measurement basis for explore promotions.
-  - `enable_stack_rebench` and `rebench_stable_threshold_pct` are no longer
-    read from task params.
-
-- **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
-  now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
-  search and source/upstream landing are two arms of one phase, worked in
-  parallel; the phase advances only when both are dry. One arm plateauing
-  raises `switch_bottleneck` for the next macro-cycle instead of ending the
-  phase while the other lever still pays.
-  - **`--no-explore` is removed** rather than aliased. The two arms cannot be
-    disabled separately, so the flag's new meaning would be strictly wider
-    than the one an operator script asked for; an unrecognised argument says
-    so where a silent widening would not. Use `--no-framework-agent`.
-  - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
-    the framework budget option. The merged phase's default share is `0.40`,
-    against `0.50` for KERNEL_AGENT.
-  - Exit reasons `explore_*` and `framework_agent_*` are replaced by
-    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted` and
-    `optimize_budget_cap`.
-  - **A session recorded at `EXPLORE` cannot be resumed by this build.** Its
-    phase names a machine that no longer exists, and starting over would
-    re-run PRELUDE on top of its baseline and KEPT stack, so the Coordinator
-    refuses at startup. Archived sessions still *read* — the attribution and
-    recorder paths understand the old labels — they just cannot be continued.
-
-- **BREAKING: the `framework_agent` action is retired.** Upstream PRs land
-  through `integrate_patch` with `patch_source='upstream_pr'`, the same action
-  and the same apply / vet / bench / KEEP-REVERT pipeline every other patch
-  source uses. `runs/framework_agent/<task_id>/` is no longer produced; PR
-  candidate workspaces are under `runs/integrate_patch/<task_id>/`.
-
-- **BREAKING: `pr_intel_specialist` is replaced by
-  `candidate_discovery_specialist`,** which owns finding, ranking and judging
-  upstream candidates rather than being an occasional PR top-up.
-
-- **Gain is attributed by lever, not by phase.** Both arms run inside one
-  phase, so the phase that was live when a KEEP landed no longer says which
-  lever moved it. `lever_kind` is the attribution key, read from what a
-  specialist delivered rather than from what its mandate asked for, and
-  `attribution.lever_breakdown` splits validated gain by it. The values are:
-  - `config` — server args / envs; nothing on disk is touched.
-  - `source_patch` — a diff a specialist wrote for this session.
-  - `upstream_pr` — a diff fetched from an upstream pull request.
-  - `enablement` — graded on runnability and the accuracy floor, not throughput.
-  - `kernel` — a tuned or authored kernel, graded on the end-to-end bench.
-
-  Gain that carried no stamp lands under `unattributed`; a non-zero figure
-  there is a tagging gap, not a category.
-
-### Fixed
 
 - **A baseline round no longer OOMs against a server a prior sweep/explore
   round's timeout left orphaned.** `BaselineExecutor`'s pre-start cleanup
@@ -700,136 +1004,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **A session's `--no-eval` was silently overridden** on the framework patch
   lane.
 
-- **`canonical_fingerprint` now uses pair-aware arg normalization.**
-  The previous implementation sorted all arg tokens as a flat list, which
-  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
-  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
-  and were incorrectly treated as duplicates by the `explore_search` dedup
-  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
-  last-wins semantics for repeated flags, matching the semantics of
-  `_shell_safe_dedupe`.<br/>
-  **Operator note**: this changes the hash for any variant whose `extra_args`
-  contains at least one flag with a value.  All fingerprint keys already
-  persisted in `explore_search.tested`, `accepted`, `rejected`, and
-  `name_index` inside `state.json` are invalidated.  On the next resume the
-  session will re-bench its full explored history.
-
-### Removed
-
-- **`stop_ray_if_owned` and the ownership return value of `ensure_ray_cluster` are gone.**
-  `stop_ray_if_owned` was introduced alongside `parallel_e2e_runner.py` and was
-  called exclusively by `_stop_ray_via_helper` in that script. When
-  `parallel_e2e_runner.py` was retired in `c92784cbf`, the helper was deleted but
-  `stop_ray_if_owned` was left behind with zero production call sites, no test
-  references, and no `__all__` or documentation contract. `ensure_ray_cluster`
-  returned the ownership flag only for that pair; with the pair gone the return
-  value had no consumer. The function is deleted and the signature narrowed to
-  `-> None`. The standard deployment path starts a long-lived shared head via
-  `install.sh`; `ensure_ray_cluster` connects to it and returns immediately, so
-  nothing that previously ran after a `False` return changes behaviour.
-
-- **The `reference_envs` filter inside `materialize_config_with_envs` is gone.**
-  The only writer of that mapping is `cli/bootstrap.py` via
-  `reference_script.parse_reference_script`, which already filters every key
-  through `is_allowed_external_env_key` — strictly stronger than the
-  `valid_env_key` shape check applied here. The pass dropped nothing in
-  production and its warning log could never fire.
-
-- **BREAKING — the two tool-free LLM source tiers are gone**, along with
-  `HYPERLOOM_LLM_SOURCE_PROVIDER` and `HYPERLOOM_LLM_SOURCE_PREVIEW` and the
-  `llm_fallback_*` reason codes they produced. A per-kernel fallback picking a
-  path off a grep shortlist and a whole-table pass auditing the result were both
-  shown a prompt assembled in advance, so neither could see what a kernel
-  actually is — and the deterministic tiers' failure mode is not coming up empty
-  but coming up confidently wrong, which ranking paths by keyword cannot tell
-  apart. One tool-enabled review session on the agent analysis route replaces
-  both: it is handed locations rather than contents and opens what the evidence
-  leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
-  **Operators on `--analysis-route deterministic` should note that route now has
-  no model assistance of any kind** — it keeps its no-model guarantee by not
-  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
-  miss stays unresolved instead of being completed by a model.
-
-- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
-  `--max-iters` this repository put on every `forge-loop` and
-  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
-  are bounded by `--max-hours`, and the flag had already been documented there
-  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
-  therefore a no-op that logged a cap it never applied. `--max-hours` and the
-  hard-kill timeout remain the only budget controls, exactly as before.
-
-### Changed
-
-- **`canonical_fingerprint` now uses pair-aware arg normalization.**
-  The previous implementation sorted all arg tokens as a flat list, which
-  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
-  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
-  and were incorrectly treated as duplicates by the `explore_search` dedup
-  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
-  last-wins semantics for repeated flags, matching the semantics of
-  `_shell_safe_dedupe`.<br/>
-  **Operator note**: this changes the hash for any variant whose `extra_args`
-  contains at least one flag with a value.  All fingerprint keys already
-  persisted in `explore_search.tested`, `accepted`, `rejected`, and
-  `name_index` inside `state.json` are invalidated.  On the next resume the
-  session will re-bench its full explored history.
-
-- **`force_restart_local_cluster` now routes its `ray stop` through `_stop_ray_force`.**
-  The function previously inlined its own `subprocess.run(["ray", "stop", "--force"], ...)`
-  without a timeout or `OSError` guard, meaning a hung `ray stop` on the
-  version-mismatch recovery path would block indefinitely. `_stop_ray_force`
-  already enforces `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
-  `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) and swallows both `TimeoutExpired` and
-  `OSError`, so the timeout constant now covers all three stop sites instead of
-  only one. Log output is unchanged: `_stop_ray_force` appends the stop command
-  and any timeout note to `log_path` in the same order as before.
-
-- **Multi-node SSH forwarding now uses the shared env-safety definitions.**
-  `multi_node/_internal/env_safety` declared its own nine-name `_DENY_KEYS` set
-  and its own copy of the POSIX key-shape regex. The denylist was missing
-  `CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
-  `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`, all of which a
-  shell-launched remote pod is exposed to. Both local definitions are deleted in
-  favour of `BLOCKED_UNTRUSTED_ENV_NAMES` and `valid_env_key`. Forwarding is
-  unaffected: `_collect_forward_env` builds its mapping from a prefix allowlist
-  plus four hardcoded names, none of which are in the blocked set.
-
-- **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
-  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
-  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling, so
-  those three blocked nothing real. Every remaining name corresponds to a process
-  this repository actually spawns: bash benchmark wrappers, Python subprocesses,
-  the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
-  stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
-  timestamped logging shim pipes through.
-
-- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
-  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
-  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
-  so the old name described a dependency that does not exist and read as a no-op
-  on a run that never tunes GEMM. The old spelling still works and still opts
-  out, with a `DeprecationWarning`; the current flag wins when both are passed.
-  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
-  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
-  The switch covers that dispatch only: orchestration can still request
-  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
-
-- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
-  decode trace with a flat kernel distribution nothing but a graph-launch
-  wrapper reaches double digits, so the 10% floor admitted no real kernel and
-  left the batch dispatcher idle while the orchestrator picked candidates one at
-  a time. Expect more candidates dispatched per run, and correspondingly more
-  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
-
-- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
-  KernelForge renamed the option to match the spelling the rest of its CLI
-  already used, and `forge-fuse` rejects an unknown option outright rather than
-  ignoring it, so every fusion run was exiting 2 before it started and
-  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
-  wrapper's own input JSON is unchanged.
-
-### Fixed
-
 - **The recorded framework version now comes from the interpreter preflight
   resolved, not from whatever the orchestrator's own process happens to have.**
   `--framework-env isolated` is the default for vLLM, whose ROCm wheel pins its
@@ -907,8 +1081,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the same wrong version.
 
 ## [v1.0.0] - 2026-08-26
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
 for the user-facing summary.
 
@@ -1321,7 +1494,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.0...HEAD
+[v1.1.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0
 [v1.0.0b2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2
 [v1.0.0b1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1

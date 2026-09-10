@@ -1,25 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical optimization projection for ``session_breakdown.json``.
-
-Every field here traces to something a producer recorded when it happened.
-There is no reconstruction from business state: a session whose recorder
-streams are empty is reported as such rather than re-derived from
-``state.json``, because a projection assembled after the fact cannot tell a
-run that adopted nothing from a run whose records never landed.
-"""
+"""Canonical optimization projection for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, GRADED_TOTAL
+
 from ..agent_ownership import UNATTRIBUTED, patch_author
 
 
-#: ``5`` means the recorder-first shape: ``attempts``, ``summary_by_agent``,
-#: and the reconciliation fields under ``validation``. This tracked the
+#: This section's own wire shape, independent of the envelope's version:
+#: ``5`` means the recorder-first shape -- ``attempts``, ``summary_by_agent``,
+#: and the reconciliation fields under ``validation``. It tracked the
 #: envelope's major version until the envelope went to v6.0 for the recorded
 #: timeline, which reshaped nothing here -- so the two numbers now differ, and
 #: a consumer has to read this one for this section rather than infer it.
@@ -34,12 +30,9 @@ _SOURCES = (
 )
 
 # Operation kinds that represent one attempt at making the workload faster.
-# Everything else the recorder captures (discovery, review, routing, baseline
-# measurement) is context, not an attempt.
 _ATTEMPT_KINDS = frozenset(
     {
         "kernel_optimization",
-        "kernel_collective",
         "gemm_tuning",
         "integrate_patch",
         "framework_agent",
@@ -51,9 +44,8 @@ _ATTEMPT_KINDS = frozenset(
 _KEEP_DECISIONS = frozenset({"KEEP", "KEPT", "KEPT_INERT", "ADOPT", "ADOPTED", "PROMOTED"})
 _REVERT_DECISIONS = frozenset({"REVERT", "REVERTED", "REJECTED", "FAILED", "ACCURACY_UNAVAILABLE_REJECT"})
 
-# Measurement names, not the result fields they came from: the recorder maps
-# ``output_throughput`` and ``delta_pct`` onto ``throughput`` and ``gain``
-# before writing, so matching on the field names would match nothing.
+# Measurement names, not the result fields they came from: the recorder maps ``output_throughput`` and ``delta_pct``
+# onto ``throughput`` and ``gain`` before writing, so matching on the field names would match nothing.
 _THROUGHPUT_AFTER_NAMES = frozenset({"final_throughput", "throughput"})
 _THROUGHPUT_BEFORE_NAMES = frozenset({"baseline_throughput"})
 _GAIN_NAMES = frozenset({"e2e_gain_pct", "gain"})
@@ -162,11 +154,7 @@ def _empty_kind_summary() -> dict[str, Any]:
 
 
 def _work_kind(operation: dict[str, Any]) -> str:
-    """Return the operation's real work kind.
-
-    ``composite`` is a container label the recorder uses for multi-step actions;
-    the action name underneath it is what identifies the work.
-    """
+    """Return the operation's real work kind."""
     kind = str(operation.get("kind") or "").strip().lower()
     if kind in {"", "composite"}:
         return str(operation.get("name") or "").strip().lower()
@@ -175,7 +163,6 @@ def _work_kind(operation: dict[str, Any]) -> str:
 
 _AGENT_BY_RECORDED_KIND = {
     "kernel_optimization": "kernel_agent",
-    "kernel_collective": "kernel_agent",
     "gemm_tuning": "kernel_agent",
     "framework_agent": "framework_agent",
     "explore": "explore",
@@ -184,12 +171,7 @@ _AGENT_BY_RECORDED_KIND = {
 
 
 def _attempt_agent(operation: dict[str, Any], adoption: dict[str, Any]) -> str:
-    """Return the owning agent, preferring what the producer actually recorded.
-
-    Sessions recorded before producers stamped ``agent`` still need a bucket, so
-    fall back to the work kind and, for patch application, the authoring markers
-    the executor left in its own result.
-    """
+    """Return the owning agent, preferring what the producer actually recorded."""
     recorded = str(operation.get("agent") or adoption.get("agent") or "").strip()
     if recorded:
         return recorded
@@ -211,17 +193,7 @@ def _last_decision(operation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _threshold_from_operation(operation: dict[str, Any]) -> tuple[float | None, str]:
-    """Pull the keep threshold out of whichever gate or decision recorded it.
-
-    Which of the four places it came from is part of the answer. A threshold on
-    the gate is the bar that gate actually ruled against; one on the operation's
-    outputs is whatever the executor was configured with, which is not
-    necessarily what ruled. Reporting only the number lets a rejection be
-    explained by a bar that never applied to it.
-
-    Returns:
-        The threshold and the place it was recorded, or ``(None, "")``.
-    """
+    """Pull the keep threshold out of whichever gate or decision recorded it."""
     for gate in operation.get("gates") or []:
         if not isinstance(gate, dict):
             continue
@@ -290,21 +262,7 @@ def _sub_attempt_rows(operation: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _first_recorded(*candidates: tuple[str, Any]) -> tuple[Any, str]:
-    """Return the first candidate a producer actually recorded, and its origin.
-
-    These chains exist because several producers record the same fact in
-    different places. Which place a value came from is what says whether it is
-    the verdict an executor stated or a status inferred from the operation
-    around it, and losing that distinction is how a fallback becomes
-    indistinguishable from the real thing.
-
-    Args:
-        candidates: ``(origin, value)`` pairs, most authoritative first.
-
-    Returns:
-        The first non-empty value with the origin it came from; ``(None, "")``
-        when nothing was recorded.
-    """
+    """Return the first candidate a producer actually recorded, and its origin."""
     for origin, value in candidates:
         if value is not None and value != "":
             return value, origin
@@ -327,9 +285,7 @@ def _recorded_attempt_row(
     recorded_ids = [str(mid) for mid in operation.get("measurement_refs") or []]
     pinned_ids = [str(mid) for mid in adoption.get("measurement_ids") or []]
     if pinned_ids:
-        # The adoption named the measurements it was decided on. Re-measuring
-        # the same subject now records new ones beside these instead of over
-        # them, so these still say what they said when the call was made.
+        # The adoption named the measurements it was decided on.
         measurement_ids = pinned_ids
         measurement_source = "adoption_pinned"
     else:
@@ -339,19 +295,11 @@ def _recorded_attempt_row(
     measured_before = None
     measured_after = None
     measured_gain = None
-    # Which measurement name each of the three came off. Every one of them
-    # accepts more than one name because producers stamp them differently, and
-    # the names are not synonyms in every context: a reading taken as
-    # ``final_throughput`` and one taken as ``throughput`` were taken by
-    # different producers under their own conventions. When the chain below
-    # multiplies these together, an alias that meant something slightly
-    # different propagates into the cumulative figure rather than staying on
-    # its own row, so the name is kept beside the value.
+    # Which measurement name each of the three came off.
     measured_before_name = ""
     measured_after_name = ""
     measured_gain_name = ""
-    # Readings that matched the same role under a different name. Only the
-    # first is used; a second one that disagrees means the role is ambiguous.
+    # Readings that matched the same role under a different name.
     alias_conflicts: list[str] = []
     measurements: list[dict[str, Any]] = []
     for measurement_id in measurement_ids:
@@ -365,9 +313,9 @@ def _recorded_attempt_row(
                 "name": name,
                 "value": measurement.get("value"),
                 "unit": str(measurement.get("unit") or ""),
-                # Which reading of this name it is, oldest first, so a reader
-                # can tell a re-measure from the one that was decided on
-                # without having to compare ids.
+                "metric_basis": str(measurement.get("metric_basis") or ""),
+                # Which reading of this name it is, oldest first, so a reader can tell a re-measure from the one that
+                # was decided on without having to compare ids.
                 "occurrence": occurrence_index.get(str(measurement_id), 0),
                 "occurrences_of_name": sum(
                     1
@@ -394,8 +342,8 @@ def _recorded_attempt_row(
             elif name != measured_gain_name and _disagrees((measured_gain, value)):
                 alias_conflicts.append(f"local_gain:{measured_gain_name}/{name}")
 
-    # Values frozen on the adoption outrank the referenced measurements, which
-    # archives recorded before per-occurrence ids may have since overwritten.
+    # Values frozen on the adoption outrank the referenced measurements, which archives recorded before per-occurrence
+    # ids may have since overwritten.
     frozen_before = _to_float(adoption.get("throughput_before"))
     frozen_after = _to_float(adoption.get("throughput_after"))
     throughput_before = frozen_before if frozen_before is not None else measured_before
@@ -404,9 +352,8 @@ def _recorded_attempt_row(
         (frozen_before, measured_before),
         (frozen_after, measured_after),
     ):
-        # The adoption pinned these readings, yet they no longer say what it
-        # was decided on: they were written over before ids carried an
-        # occurrence. The frozen values still stand; the citation does not.
+        # The adoption pinned these readings, yet they no longer say what it was decided on: they were written over
+        # before ids carried an occurrence.
         measurement_source = "adoption_pinned_stale"
 
     artifact_ids = list(operation.get("artifact_refs") or [])
@@ -435,10 +382,8 @@ def _recorded_attempt_row(
         and str(adoption.get("decision") or "").upper() in _KEEP_DECISIONS
     )
     evidence = decision_row.get("evidence") if isinstance(decision_row.get("evidence"), dict) else {}
-    # Deliberately never named ``gain_pct``: this is what the executor measured
-    # against its own starting point, which is not the session baseline once
-    # anything has been adopted. Summing these across attempts is wrong, and a
-    # shared field name is all it takes for someone to try.
+    # Deliberately never named ``gain_pct``: this is what the executor measured against its own starting point, which
+    # is not the session baseline once anything has been adopted.
     local_gain_pct, local_gain_source = _first_recorded(
         ("adoption.gain_pct", _to_float(adoption.get("gain_pct"))),
         ("decision.evidence.gain_pct", _to_float(evidence.get("gain_pct"))),
@@ -474,32 +419,26 @@ def _recorded_attempt_row(
         ),
         "status": str(operation.get("status") or ""),
         "decision": decision,
-        # Where each of these came from. A verdict an executor stated and a
-        # status inferred from the operation around it are different claims,
-        # and the value alone cannot tell them apart.
+        # Where each of these came from.
         "decision_source": decision_source,
         "decision_reason": str(adoption.get("reason") or decision_row.get("reason") or outputs.get("reason") or ""),
         "keep_threshold_pct": keep_threshold_pct,
-        # A bar recorded on the gate is the one that gate ruled against; one
-        # recorded on the outputs is the executor's configuration, which need
-        # not be what applied.
+        # A bar recorded on the gate is the one that gate ruled against; one recorded on the outputs is the executor's
+        # configuration, which need not be what applied.
         "keep_threshold_source": keep_threshold_source,
         "adopted": adopted,
-        # What the operation says happened to the workload, as distinct from
-        # what the adoption stream credits. The two are written by one call and
-        # dropped independently, so they can disagree.
+        # What the operation says happened to the workload, as distinct from what the adoption stream credits.
         "integrated": (bool(outputs.get("integrated")) if outputs.get("integrated") is not None else None),
-        # What stood behind the verdict: an accuracy gate that ruled, an
-        # end-to-end re-measurement, or a KEEP nothing checked the accuracy of.
+        # What stood behind the verdict: an accuracy gate that ruled, an end-to-end re-measurement, or a KEEP nothing
+        # checked the accuracy of.
         "validation_basis": str(adoption.get("validation_basis") or ""),
         "attribution_eligible": (bool(adoption.get("attribution_eligible", True)) if adoption else None),
         "local_gain_pct": round(local_gain_pct, 6) if local_gain_pct is not None else None,
         "local_gain_source": local_gain_source,
         "throughput_before": throughput_before,
         "throughput_after": throughput_after,
-        # ``adoption`` means the number was frozen when the call was made;
-        # ``measurement.<name>`` means it was read back afterwards, off a
-        # reading recorded under that name, and could since have moved.
+        # ``adoption`` means the number was frozen when the call was made; ``measurement.<name>`` means it was read
+        # back afterwards, off a reading recorded under that name, and could since have moved.
         "throughput_before_source": (
             "adoption"
             if frozen_before is not None
@@ -514,17 +453,14 @@ def _recorded_attempt_row(
             if measured_after is not None
             else ""
         ),
-        # Roles that more than one recorded name laid claim to, with readings
-        # that do not agree. The first name won; this says the choice was not
-        # free.
+        # Roles that more than one recorded name laid claim to, with readings that do not agree.
         "alias_conflicts": alias_conflicts,
         "adoption_id": str(adoption.get("adoption_id") or "") or None,
         "gates": _gate_rows(operation),
         "backend_attempts": _sub_attempt_rows(operation),
         "measurements": measurements,
-        # Which reading of a repeatedly measured subject these numbers came
-        # from, and how many readings the operation has in total. Without this
-        # a re-measured kernel looks the same as one measured once.
+        # Which reading of a repeatedly measured subject these numbers came from, and how many readings the operation
+        # has in total.
         "measurement_source": measurement_source,
         "measurement_occurrences": sum(1 for mid in recorded_ids if mid in measurement_by_id),
         "artifacts": artifacts,
@@ -532,11 +468,7 @@ def _recorded_attempt_row(
 
 
 def _disagrees(*pairs: tuple[float | None, float | None]) -> bool:
-    """Report whether a frozen value and its cited measurement have parted ways.
-
-    Compared in relative terms so a re-serialized float never counts, while a
-    genuine re-measurement always does.
-    """
+    """Report whether a frozen value and its cited measurement have parted ways."""
     for frozen, measured in pairs:
         if frozen is None or measured is None or not frozen:
             continue
@@ -549,13 +481,7 @@ def _occurrence_index(
     measurement_ids: list[str],
     measurement_by_id: dict[str, dict[str, Any]],
 ) -> dict[str, int]:
-    """Number an operation's readings of each metric, oldest first.
-
-    Recorded ids have to be derived from what is being recorded rather than
-    from a counter, since several producers replay their records after a
-    resume. That makes them stable but unreadable, so the plain ordinal a
-    reader wants is assigned here, where the whole set is in hand at once.
-    """
+    """Number an operation's readings of each metric, oldest first."""
     ordered: dict[str, list[tuple[float, str]]] = {}
     for measurement_id in measurement_ids:
         measurement = measurement_by_id.get(str(measurement_id))
@@ -566,8 +492,8 @@ def _occurrence_index(
         ordered.setdefault(name, []).append((taken_at if taken_at is not None else float("inf"), str(measurement_id)))
     index: dict[str, int] = {}
     for rows in ordered.values():
-        # Ties fall back to the id so the numbering is at least deterministic
-        # for readings whose timestamps are identical or missing.
+        # Ties fall back to the id so the numbering is at least deterministic for readings whose timestamps are
+        # identical or missing.
         for position, (_, measurement_id) in enumerate(sorted(rows)):
             index[measurement_id] = position
     return index
@@ -577,13 +503,7 @@ def _latest_measurement_per_name(
     measurement_ids: list[str],
     measurement_by_id: dict[str, dict[str, Any]],
 ) -> list[str]:
-    """Keep one measurement per name: the most recent time it was taken.
-
-    An operation accumulates a reference for every occurrence of every metric
-    it measured, because retrying a subject no longer overwrites the earlier
-    numbers. With no adoption naming which occurrence a decision used, the
-    newest one is the operation's current state.
-    """
+    """Keep one measurement per name: the most recent time it was taken."""
     newest: dict[str, tuple[float, str]] = {}
     for measurement_id in measurement_ids:
         measurement = measurement_by_id.get(str(measurement_id))
@@ -598,17 +518,34 @@ def _latest_measurement_per_name(
     return [measurement_id for measurement_id in measurement_ids if measurement_id in chosen]
 
 
+# Short basis labels for the graded axes. ``intvty`` is the AgentX objective and ``total`` is now its guard axis;
+# both are session-wide aggregates, unlike the per-request ``output`` reading.
+_METRIC_BASES = frozenset({"output", "total", "intvty"})
+_SESSION_WIDE_BASES = frozenset({"total", "intvty"})
+
+
+def _metric_basis(value: Any) -> str:
+    return {GRADED_OUTPUT: "output", GRADED_TOTAL: "total", GRADED_INTVTY: "intvty"}.get(
+        str(value or ""), str(value or "")
+    )
+
+
+def _attempt_gain_basis(attempt: dict[str, Any], operation: dict[str, Any]) -> str:
+    for measurement in attempt.get("measurements") or []:
+        if measurement["name"] in _GAIN_NAMES and _to_float(measurement.get("value")) is not None:
+            basis = _metric_basis(measurement.get("metric_basis"))
+            if basis in _METRIC_BASES:
+                return basis
+    outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+    return _metric_basis(outputs.get("graded_objective")) or "output"
+
+
 def _recorded_baseline_throughput(
     operations: list[dict[str, Any]],
     measurement_by_id: dict[str, dict[str, Any]],
+    metric_basis: str = "output",
 ) -> float | None:
-    """Return the session baseline throughput the recorder measured.
-
-    The baseline is where the session started, so when it has been measured
-    more than once the earliest reading is the one every gain in the report is
-    stated against. Taking the newest would quietly move the denominator under
-    figures that were already published.
-    """
+    """Return the session baseline throughput the recorder measured."""
     earliest: tuple[float, float] | None = None
     for operation in operations:
         if not isinstance(operation, dict) or _work_kind(operation) != "baseline":
@@ -617,12 +554,14 @@ def _recorded_baseline_throughput(
             measurement = measurement_by_id.get(str(measurement_id))
             if not measurement:
                 continue
-            # Producers differ on which of the two names they stamp on a
-            # baseline run; on a baseline operation both mean the same thing.
+            # Producers differ on which of the two names they stamp on a baseline run; on a baseline operation both
+            # mean the same thing.
             if str(measurement.get("name") or "").strip().lower() not in {
                 "throughput",
                 "baseline_throughput",
             }:
+                continue
+            if (_metric_basis(measurement.get("metric_basis")) or "output") != metric_basis:
                 continue
             value = _to_float(measurement.get("value"))
             if not value:
@@ -636,19 +575,7 @@ def _recorded_baseline_throughput(
 def _recorded_session_validation(
     operations: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Return the last gain the run itself promoted as validated.
-
-    This is the only figure in the section that does not come from the ledger,
-    which is exactly why it is worth having: a total computed by summing the
-    ledger can never be found to disagree with it. Sessions recorded before
-    producers wrote this have none, and the caller falls back to the sum.
-
-    Args:
-        operations: The recorded operation stream.
-
-    Returns:
-        The newest session-validation record's outputs, or ``None``.
-    """
+    """Return the operation carrying the last gain the run itself promoted as validated."""
     latest: tuple[int, float, dict[str, Any]] | None = None
     for operation in operations:
         if not isinstance(operation, dict) or _work_kind(operation) != "session_validation":
@@ -656,27 +583,49 @@ def _recorded_session_validation(
         outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
         if _to_float(outputs.get("validated_gain_pct")) is None:
             continue
-        # Stack length first: it is the run's own ordering of these
-        # checkpoints, and it survives clocks that do not move monotonically.
+        # Stack length first: it is the run's own ordering of these checkpoints, and it survives clocks that do not
+        # move monotonically.
         stack_len = int(_to_float(outputs.get("validated_at_stack_len")) or 0)
         at = _parse_ts(operation.get("ended_at") or operation.get("started_at")) or 0.0
         if latest is None or (stack_len, at) >= (latest[0], latest[1]):
-            latest = (stack_len, at, outputs)
+            latest = (stack_len, at, operation)
     return latest[2] if latest else None
+
+
+def _checkpoint_gain_before_attempt(
+    operations: list[dict[str, Any]],
+    *,
+    stack_len: int,
+    metric_basis: str,
+    previous_at: float | None,
+    attempt_at: float | None,
+) -> float | None:
+    """Find an explicit baseline checkpoint covering exactly the preceding KEEP window."""
+    if previous_at is None or attempt_at is None:
+        return None
+    latest: tuple[float, float] | None = None
+    for operation in operations:
+        if not isinstance(operation, dict) or _work_kind(operation) != "session_validation":
+            continue
+        outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+        if _to_float(outputs.get("validated_at_stack_len")) != stack_len:
+            continue
+        if _metric_basis(outputs.get("graded_objective")) != metric_basis:
+            continue
+        gain = _to_float(outputs.get("validated_gain_pct"))
+        at = _parse_ts(operation.get("ended_at") or operation.get("started_at"))
+        if gain is None or at is None or not previous_at <= at < attempt_at:
+            continue
+        if latest is None or at > latest[0]:
+            latest = (at, gain)
+    return latest[1] if latest else None
 
 
 def _summarize_by_agent(
     attempts: list[dict[str, Any]],
     gain_by_attempt: dict[str, float],
 ) -> dict[str, Any]:
-    """Aggregate attempts into the per-agent view (first layer of the report).
-
-    ``gain_by_attempt`` holds each adopted attempt's baseline-relative
-    contribution, so per-agent totals add up to
-    ``validation.attributed_total_gain_pct``. They fall short of the session's
-    end-to-end gain by whatever no attempt accounts for, which is reported
-    separately as ``validation.unattributed_gain_pct``.
-    """
+    """Aggregate attempts into the per-agent view (first layer of the report)."""
     summary: dict[str, Any] = {}
     for attempt in attempts:
         agent = str(attempt.get("agent") or "unattributed")
@@ -793,12 +742,7 @@ def collect_recorded_optimizations(
     forge_invocations: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Build the optimization read model straight from author-time records.
-
-    Every field here traces to something a producer recorded when it happened,
-    so ownership, verdicts, and the thresholds behind them survive export
-    instead of being re-inferred from business state after the fact.
-    """
+    """Build the optimization read model straight from author-time records."""
 
     measurement_by_id = {
         str(row.get("measurement_id") or ""): row
@@ -822,10 +766,8 @@ def collect_recorded_optimizations(
         ):
             adoption_by_operation[operation_id] = row
 
-    # The ledger walks operations, so an adoption whose operation is not among
-    # them contributes nothing and says nothing. Both streams are written by
-    # separate calls that can fail separately, which is exactly how one lands
-    # without the other.
+    # The ledger walks operations, so an adoption whose operation is not among them contributes nothing and says
+    # nothing.
     kind_by_operation = {
         str(operation.get("operation_id") or ""): _work_kind(operation)
         for operation in operations
@@ -874,8 +816,7 @@ def collect_recorded_optimizations(
             f"{sorted(set(orphan_adoptions))[:5]}"
         )
     if off_ledger_adoptions:
-        # A kind missing from ``_ATTEMPT_KINDS`` is how a newly added optimizer
-        # silently stays out of the accounting.
+        # A kind missing from ``_ATTEMPT_KINDS`` is how a newly added optimizer silently stays out of the accounting.
         warnings.append(
             "optimizations: adoptions belong to operation kinds the ledger "
             "does not count as attempts: "
@@ -883,14 +824,6 @@ def collect_recorded_optimizations(
         )
 
     # The mirror image of an orphan adoption, and the more damaging of the two.
-    # An operation saying the change was integrated is the workload having
-    # moved; with no adoption to credit it, the gain walk below skips the step
-    # entirely, yet the next adopted step still starts from the higher figure.
-    # The difference lands in ``unattributed_gain_pct``, where it is
-    # indistinguishable from drift nobody caused -- a plausible number in place
-    # of a missing record. Both rows come from one call through a writer that
-    # swallows its own failures, so losing one and keeping the other is
-    # reachable rather than theoretical.
     unclaimed_integrations = [
         str(attempt["attempt_id"])
         for attempt in attempts
@@ -906,79 +839,145 @@ def collect_recorded_optimizations(
 
     alias_conflicts = sorted({conflict for attempt in attempts for conflict in attempt.get("alias_conflicts") or []})
     if alias_conflicts:
-        # Two names for one role, disagreeing. Whichever was read first won,
-        # and the chain arithmetic carries that choice into every later step.
+        # Two names for one role, disagreeing.
         warnings.append(
             "optimizations: measurements recorded under different names for "
             f"the same role disagree, and the first read won: {alias_conflicts[:5]}"
         )
 
-    # Reported gain is measured against the session baseline, so each adopted
-    # step contributes the percentage points it added to the cumulative figure.
-    # An executor's own local gain is relative to whatever it started from,
-    # which is not the baseline once anything has already been adopted.
-    #
-    # ``entries`` is the gain ledger over ``attempts``: one row per adopted and
-    # attributable attempt, carrying only what the chain arithmetic needs.
-    # Everything descriptive stays on the attempt and is reachable through
-    # ``adopted_attempt_id``.
-    baseline_tput = _recorded_baseline_throughput(operations, measurement_by_id)
+    # Reported gain is measured against the session baseline, so each adopted step contributes the percentage points
+    # it added to the cumulative figure.
+    operation_by_id = {
+        str(operation.get("operation_id") or ""): operation for operation in operations if isinstance(operation, dict)
+    }
+    basis_by_attempt = {
+        attempt["attempt_id"]: _attempt_gain_basis(attempt, operation_by_id[attempt["attempt_id"]])
+        for attempt in attempts
+    }
+    validation_operation = _recorded_session_validation(operations)
+    session_validation = validation_operation["outputs"] if validation_operation else None
+    ledger_basis = _metric_basis((session_validation or {}).get("graded_objective")) or next(
+        (
+            basis_by_attempt[attempt["attempt_id"]]
+            for attempt in attempts
+            if attempt.get("adopted") and attempt.get("attribution_eligible") is not False
+        ),
+        "output",
+    )
+    baseline_tput = _recorded_baseline_throughput(operations, measurement_by_id, ledger_basis)
     entries: list[dict[str, Any]] = []
+    incompatible_basis: list[str] = []
     cumulative = 0.0
-    # Throughput the next adopted step is expected to start from: the baseline
-    # for the first one, then wherever the previous one left off. A step that
-    # starts somewhere else means something moved the workload without being
-    # adopted, and that movement belongs to nobody. Crediting it to the next
-    # step is how a kernel's reported gain silently absorbs an earlier patch.
+    # Throughput the next adopted step is expected to start from: the baseline for the first one, then wherever the
+    # previous one left off.
     expected_before = baseline_tput
     unattributed = 0.0
     attributed = 0.0
+    seen_gain_bases: set[str] = set()
+    baseline_gain_anchor: float | None = 0.0
+    adopted_count = 0
+    previous_adopted_at: float | None = None
     for attempt in attempts:
-        if not attempt.get("adopted") or attempt.get("attribution_eligible") is False:
+        if not attempt.get("adopted"):
+            continue
+        attempt_at = _parse_ts(attempt.get("ended_at") or attempt.get("started_at"))
+        if baseline_gain_anchor is None:
+            checkpoint_gain = _checkpoint_gain_before_attempt(
+                operations,
+                stack_len=adopted_count,
+                metric_basis=ledger_basis,
+                previous_at=previous_adopted_at,
+                attempt_at=attempt_at,
+            )
+            if checkpoint_gain is not None:
+                # A checkpoint can locate the workload again, but cannot award
+                # the previously unmeasured movement to the next optimizer.
+                unattributed += checkpoint_gain - cumulative
+                cumulative = checkpoint_gain
+                baseline_gain_anchor = checkpoint_gain
+                expected_before = baseline_tput * (1.0 + checkpoint_gain / 100.0) if baseline_tput else None
+        adopted_count += 1
+        previous_adopted_at = attempt_at
+        if attempt.get("attribution_eligible") is False:
             continue
         local_gain = _to_float(attempt.get("local_gain_pct"))
         throughput_before = _to_float(attempt.get("throughput_before"))
         throughput_after = _to_float(attempt.get("throughput_after"))
+        gain_basis = basis_by_attempt[attempt["attempt_id"]]
+        throughput_bases = {
+            _metric_basis(measurement.get("metric_basis")) or "output"
+            for measurement in attempt["measurements"]
+            if measurement["name"] in _THROUGHPUT_BEFORE_NAMES | _THROUGHPUT_AFTER_NAMES
+        } or {"output"}
+        matching_throughput = throughput_bases == {ledger_basis}
+        operation = operation_by_id[attempt["attempt_id"]]
+        extensions = operation.get("extensions") if isinstance(operation.get("extensions"), dict) else {}
+        gemm = extensions.get("gemm") if isinstance(extensions.get("gemm"), dict) else {}
+        session_baseline_gain = attempt["kind"] == "gemm_tuning" and gemm.get("e2e_validated") is True
         drift = 0.0
         chain_continuous = True
-        if baseline_tput and throughput_after:
+        if gain_basis != ledger_basis:
+            incompatible_basis.append(str(attempt["attempt_id"]))
+            gain = None
+            gain_method = "missing"
+            expected_before = None
+            chain_continuous = False
+        elif session_baseline_gain:
+            # The GEMM validator records a session-baseline watermark, not an
+            # increment from the previous KEEP. Generic gemm-kind operations
+            # without this producer's extension keep their local-gain semantics.
+            if baseline_gain_anchor is None:
+                gain = None
+                gain_method = "missing"
+                expected_before = None
+                chain_continuous = False
+            elif baseline_tput and throughput_after and matching_throughput:
+                gain = (throughput_after - baseline_tput) / baseline_tput * 100.0 - baseline_gain_anchor
+                gain_method = "baseline_chain"
+                expected_before = throughput_after
+            else:
+                gain = local_gain - baseline_gain_anchor if local_gain is not None else None
+                gain_method = "recorded_adoption" if gain is not None else "missing"
+                expected_before = None
+                chain_continuous = False
+        elif baseline_tput and throughput_after and matching_throughput:
             started_from = throughput_before or expected_before or baseline_tput
             drift = (started_from - expected_before) / baseline_tput * 100.0 if expected_before else 0.0
-            # Percentage points of the baseline this step added. Stated this
-            # way the rows sum exactly, with no chaining subtleties to get
-            # wrong, and any drift stays outside the sum.
+            # Percentage points of the baseline this step added.
             gain = (throughput_after - started_from) / baseline_tput * 100.0
             gain_method = "baseline_chain"
             expected_before = throughput_after
-        elif baseline_tput and expected_before and local_gain is not None:
-            # The step ran and moved the workload; only its finishing
-            # throughput went unrecorded. A local gain is by definition
-            # measured against where the step started, which is where the
-            # previous one left off, so the missing reading can be put back
-            # and the chain carried on.
-            #
-            # Adding the local figure to the running total directly would be
-            # a unit error as well as a broken chain: it is a percentage of
-            # this step's own starting point, not percentage points of the
-            # baseline.
+        elif baseline_tput and expected_before and local_gain is not None and matching_throughput:
+            # The step ran and moved the workload; only its finishing throughput went unrecorded.
             projected_after = expected_before * (1.0 + local_gain / 100.0)
             gain = (projected_after - expected_before) / baseline_tput * 100.0
             gain_method = "local_gain_projected"
             expected_before = projected_after
-            # If the local figure was measured against something else, the
-            # next step's drift is what says so.
+            # If the local figure was measured against something else, the next step's drift is what says so.
             chain_continuous = False
         else:
-            gain = local_gain
-            gain_method = "recorded_adoption" if local_gain is not None else "missing"
-            # Nothing left to chain from: crediting the next step's head start
-            # to whoever follows is the error this guards against.
+            # Kernel gain is local to its integrate anchor. Output-only readings cannot prove continuity for a
+            # second KEEP graded on a session-wide axis, whichever of the two that session was graded on.
+            gain = (
+                None
+                if attempt["kind"] == "kernel_optimization"
+                and gain_basis in _SESSION_WIDE_BASES
+                and gain_basis in seen_gain_bases
+                else local_gain
+            )
+            gain_method = "recorded_adoption" if gain is not None else "missing"
+            # Nothing left to chain from: crediting the next step's head start to whoever follows is the error this
+            # guards against.
             expected_before = None
             chain_continuous = False
+        seen_gain_bases.add(gain_basis)
         unattributed += drift
         cumulative += drift + (gain or 0.0)
-        # Summed unrounded, so the reported gap equals the drift exactly rather
-        # than trailing it by a rounding step.
+        if gain is None:
+            baseline_gain_anchor = None
+        elif baseline_gain_anchor is not None:
+            baseline_gain_anchor = cumulative
+        # Summed unrounded, so the reported gap equals the drift exactly rather than trailing it by a rounding step.
         attributed += gain or 0.0
         stack_index = len(entries)
         entries.append(
@@ -992,15 +991,15 @@ def collect_recorded_optimizations(
                 "optimization_kind": attempt["kind"],
                 "name": attempt["name"],
                 "backend": attempt.get("backend") or None,
-                # Gain against the session baseline: the only figure that may
-                # be summed, and the one ``cumulative_gain_pct`` is built from.
+                # Gain against the session baseline: the only figure that may be summed, and the one
+                # ``cumulative_gain_pct`` is built from.
                 "gain_pct": round(gain, 6) if gain is not None else None,
                 "gain_method": gain_method,
-                # False when this step's finishing throughput was never
-                # recorded, so the drift across it could not be measured.
+                # False when this step's finishing throughput was never recorded, so the drift across it could not be
+                # measured.
                 "chain_continuous": chain_continuous,
-                # The executor's own figure, carried so the two are visibly
-                # different numbers rather than one ambiguous field.
+                # The executor's own figure, carried so the two are visibly different numbers rather than one
+                # ambiguous field.
                 "local_gain_pct": (round(local_gain, 6) if local_gain is not None else None),
                 "cumulative_gain_pct": round(cumulative, 6),
                 "throughput_after": throughput_after,
@@ -1009,8 +1008,14 @@ def collect_recorded_optimizations(
             }
         )
 
-    # Below this the drift is float noise from re-serialized throughputs, well
-    # under any measurement's own repeatability.
+    if incompatible_basis:
+        warnings.append(
+            f"optimizations: {len(incompatible_basis)} adopted step(s) have a different gain basis "
+            f"from the {ledger_basis} ledger, so only their local gain is retained: {sorted(incompatible_basis)[:5]}"
+        )
+
+    # Below this the drift is float noise from re-serialized throughputs, well under any measurement's own
+    # repeatability.
     if abs(unattributed) > 0.01:
         warnings.append(
             "optimizations: "
@@ -1023,7 +1028,7 @@ def collect_recorded_optimizations(
     if discontinuous:
         warnings.append(
             f"optimizations: {len(discontinuous)} adopted step(s) recorded no "
-            "finishing throughput, so the drift across them could not be "
+            f"finishing throughput on the {ledger_basis} gain basis, so the drift across them could not be "
             f"measured: {sorted(discontinuous)[:5]}"
         )
 
@@ -1074,19 +1079,16 @@ def collect_recorded_optimizations(
     ]
     if non_attributable:
         withheld = sorted(str(attempt.get("attempt_id") or "<unknown>") for attempt in non_attributable)
-        # Name the cut explicitly: a bare 5-element list reads as the complete
-        # set, so someone chasing the sixth withheld adoption never learns it
-        # exists.
+        # Name the cut explicitly: a bare 5-element list reads as the complete set, so someone chasing the sixth
+        # withheld adoption never learns it exists.
         shown = f"{withheld[:5]}" + (f" (first 5 of {len(withheld)})" if len(withheld) > 5 else "")
         warnings.append(
             "optimizations: "
             f"{len(non_attributable)} kept adoption(s) have no attributable "
             f"throughput pair, so their gain was withheld: {shown}"
         )
-    # `entries` is the GAIN ledger and deliberately holds only attributable keeps, so a backend whose
-    # keeps are all non-attributable reads as zero keeps — indistinguishable from an optimizer that
-    # produced nothing. That is the same conflation the canonical-stream fix set out to remove, one
-    # layer further in. Count the keep from the attempts, keep the gain coming from the entries.
+    # `entries` is the GAIN ledger and deliberately holds only attributable keeps, so a backend whose keeps are all
+    # non-attributable reads as zero keeps — indistinguishable from an optimizer that produced nothing.
     for attempt in non_attributable:
         if str(attempt.get("agent") or "") != "kernel_agent":
             continue
@@ -1101,14 +1103,12 @@ def collect_recorded_optimizations(
         )
         backend_bucket["keeps"] += 1
         backend_bucket["non_attributable_keeps"] = int(backend_bucket.get("non_attributable_keeps", 0)) + 1
-    # An adopted step that contributes nothing to the total is a hole in the
-    # accounting, not a zero. Counting it keeps the sum honest about what it
-    # could not see.
+    # An adopted step that contributes nothing to the total is a hole in the accounting, not a zero.
     unmeasured = [str(entry["adopted_attempt_id"]) for entry in entries if entry.get("gain_method") == "missing"]
     if unmeasured:
         warnings.append(
-            f"optimizations: {len(unmeasured)} adopted step(s) recorded neither "
-            "a throughput nor a gain, so they contribute nothing to the "
+            f"optimizations: {len(unmeasured)} adopted step(s) have neither "
+            f"a usable throughput nor a gain on the {ledger_basis} basis, so they contribute nothing to the "
             f"session total: {sorted(unmeasured)[:5]}"
         )
     stale_evidence = [
@@ -1117,8 +1117,7 @@ def collect_recorded_optimizations(
         if attempt.get("measurement_source") == "adoption_pinned_stale"
     ]
     if stale_evidence:
-        # The frozen numbers still stand; what no longer stands is the trail
-        # back to the readings they came from.
+        # The frozen numbers still stand; what no longer stands is the trail back to the readings they came from.
         warnings.append(
             f"optimizations: {len(stale_evidence)} adoption(s) cite measurements "
             "that were later written over, so their evidence cannot be "
@@ -1131,12 +1130,34 @@ def collect_recorded_optimizations(
         if attempt.get("adopted") and attempt.get("validation_basis") == "keep_verdict_unscored"
     )
 
-    session_validation = _recorded_session_validation(operations)
     recorded_total = _to_float(session_validation.get("validated_gain_pct")) if session_validation else None
-    if recorded_total is not None and abs(recorded_total - cumulative) > 0.01:
-        # The one disagreement this section could never previously surface:
-        # the ledger and the figure the run promoted are now two independent
-        # numbers, so they can be seen to part company.
+    validated_stack_len = (
+        int(_to_float(session_validation.get("validated_at_stack_len")) or 0) if session_validation else len(entries)
+    )
+    checkpoint_at = (
+        _parse_ts(validation_operation.get("ended_at") or validation_operation.get("started_at"))
+        if validation_operation
+        else None
+    )
+    checkpoint_stale = session_validation is not None and (
+        validated_stack_len < adopted_count
+        or (
+            checkpoint_at is not None
+            and any(
+                attempt.get("adopted")
+                and (_parse_ts(attempt.get("ended_at") or attempt.get("started_at")) or 0.0) > checkpoint_at
+                for attempt in attempts
+            )
+        )
+    )
+    if checkpoint_stale:
+        warnings.append(
+            f"optimizations: the validation checkpoint at stack length {validated_stack_len} is stale "
+            f"after {adopted_count} adopted steps; its historical gain is not reconciled against the current ledger"
+        )
+    if recorded_total is not None and not checkpoint_stale and abs(recorded_total - cumulative) > 0.01:
+        # The one disagreement this section could never previously surface: the ledger and the figure the run promoted
+        # are now two independent numbers, so they can be seen to part company.
         warnings.append(
             "optimizations: the ledger totals "
             f"{cumulative:+.6f}pp but the run promoted {recorded_total:+.6f}pp as "
@@ -1146,10 +1167,7 @@ def collect_recorded_optimizations(
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
         "source_of_truth": "recorder",
-        # Stated on both paths. Telling a session that recorded nothing apart
-        # from one that optimized nothing is the point of this section, and a
-        # consumer cannot make that call against a key that is only present
-        # when the answer is no.
+        # Stated on both paths.
         "available": True,
         "attempts": attempts,
         "entries": entries,
@@ -1159,51 +1177,41 @@ def collect_recorded_optimizations(
         "summary_by_kind": summary_by_kind,
         "validation": {
             "method": ("recorded_session_validation" if recorded_total is not None else "ledger_sum"),
-            "validated_at_stack_len": (
-                int(_to_float(session_validation.get("validated_at_stack_len")) or 0)
-                if session_validation
-                else len(entries)
-            ),
-            # What the session moved end to end, and how much of that any
-            # attempt is willing to claim. The difference is the part no
-            # adopted step accounts for, and it is stated rather than absorbed.
+            "validated_at_stack_len": validated_stack_len,
+            # What the session moved end to end, and how much of that any attempt is willing to claim.
             "validated_total_gain_pct": round(
                 recorded_total if recorded_total is not None else cumulative,
                 6,
             ),
-            # The same figure the ledger arrives at on its own. Kept beside the
-            # measured one so the two can be seen to differ; when the measured
-            # one is absent they are the same number by construction, and
-            # nothing here can be checked.
+            # The same figure the ledger arrives at on its own.
             "ledger_total_gain_pct": round(cumulative, 6),
             "validation_basis": (
                 str(session_validation.get("measurement_basis") or "") if session_validation else "ledger_sum"
             ),
             "validation_source": (str(session_validation.get("source") or "") if session_validation else ""),
-            "reconciliation_gap_pct": (round(recorded_total - cumulative, 6) if recorded_total is not None else None),
+            "reconciliation_gap_pct": (
+                round(recorded_total - cumulative, 6) if recorded_total is not None and not checkpoint_stale else None
+            ),
             "attributed_total_gain_pct": round(attributed, 6),
             "unattributed_gain_pct": round(unattributed, 6),
-            "attribution_gap_pct": round(
-                (recorded_total if recorded_total is not None else cumulative) - attributed,
-                6,
+            "attribution_gap_pct": (
+                None
+                if checkpoint_stale
+                else round((recorded_total if recorded_total is not None else cumulative) - attributed, 6)
             ),
             "attempt_count": len(attempts),
             "keep_count": len(entries),
             "non_attributable_keep_count": len(non_attributable),
             # Adopted, counted, but with nothing measured behind them.
             "unmeasured_keep_count": len(unmeasured),
-            # Adopted steps whose finishing throughput was reconstructed from
-            # the executor's own percentage rather than read from a
-            # measurement.
+            # Adopted steps whose finishing throughput was reconstructed from the executor's own percentage rather
+            # than read from a measurement.
             "projected_keep_count": sum(1 for entry in entries if entry.get("gain_method") == "local_gain_projected"),
             # Adopted steps whose evidence trail no longer resolves.
             "stale_evidence_count": len(stale_evidence),
-            # Changes the ledger says landed with nothing crediting them. Any
-            # number here means the unattributed figure is overstated by
-            # whatever these steps earned.
+            # Changes the ledger says landed with nothing crediting them.
             "unclaimed_integration_count": len(unclaimed_integrations),
-            # Adopted on the strength of a KEEP verdict alone, with no
-            # accuracy gate having ruled on them.
+            # Adopted on the strength of a KEEP verdict alone, with no accuracy gate having ruled on them.
             "unscored_keep_count": unscored_keeps,
             "notes": ["Projected from author-time recorder streams (operations/adoptions/measurements/artifacts)."],
         },

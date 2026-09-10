@@ -172,8 +172,8 @@ def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list[str], extra: list[s
     from kernelforge.gemm_tune.router import TunerSpec
 
     monkeypatch.setattr(cli_mod, "_create_tuner", lambda name, ctx: _Tuner(name))
-    # The CLI imports select_tuners inside the command body, so the patch has to
-    # land on the router module it reads from.
+    # The CLI imports select_tuners inside the command body, so the patch has to land on the router module it reads
+    # from.
     monkeypatch.setattr(
         router_mod,
         "select_tuners",
@@ -204,11 +204,7 @@ def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list[str], extra: list[s
 
 
 def test_the_tuner_ceiling_keeps_the_highest_priority_ones(tmp_path, monkeypatch):
-    """A share paying for two of three tuners must not start the third.
-
-    Only a single ``--tuner`` name could be forced before, so any ceiling above
-    one capped nothing and the extra tuners ran bounded only by the wall clock.
-    """
+    """A share paying for two of three tuners must not start the third."""
     executed = _run_with_ceiling(
         tmp_path,
         monkeypatch,

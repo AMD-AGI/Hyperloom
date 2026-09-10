@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The base layer every SBD V6 timeline event type records through.
-
-These cover the invariants the layer exists to enforce rather than the shape of
-any one event type: that ids are recomputable after a resume, that a row cannot
-be written without both halves of its event attribution, that assembly order
-does not depend on write order, and that a killed session leaves a state
-finalize can tell apart from a finished one.
-"""
+"""The base layer every SBD V6 timeline event type records through."""
 
 from __future__ import annotations
 
@@ -51,9 +44,8 @@ def test_an_event_id_is_three_readable_segments_with_the_phase_case_normalized()
 
 
 def test_recomputing_an_event_id_from_the_same_state_gives_the_same_value():
-    # The resume guarantee: nothing in the id comes from a clock, a random
-    # source or a process counter, so a new process continuing the same phase
-    # run writes into the same fragments instead of a second set.
+    # The resume guarantee: nothing in the id comes from a clock, a random source or a process counter, so a new
+    # process continuing the same phase run writes into the same fragments instead of a second set.
     assert rec.event_id("kernel_agent", 3, "kernel") == rec.event_id("kernel_agent", 3, "kernel")
 
 
@@ -88,19 +80,14 @@ def test_the_event_level_fragment_is_keyed_by_the_bare_event_id():
 
 
 def test_a_fragment_key_refuses_an_empty_natural_id():
-    # Tolerating it would give two distinct rows one key, and the second would
-    # merge into the first rather than land beside it.
+    # Tolerating it would give two distinct rows one key, and the second would merge into the first rather than land
+    # beside it.
     with pytest.raises(ValueError):
         rec.fragment_key(_EID, "lane", "")
 
 
 def test_a_fragment_key_refuses_the_separator_inside_a_value():
-    """The segments are joined on it, so a value carrying one is ambiguous.
-
-    ``("geak:rebench", "3")`` and ``("geak", "rebench:3")`` join to the same
-    string, and the fragment filename cannot separate them either: its digest
-    is taken over the joined key. The rows would deep-merge in place.
-    """
+    """The segments are joined on it, so a value carrying one is ambiguous."""
     with pytest.raises(ValueError):
         rec.fragment_key(_EID, "round", "geak:rebench", "3")
     assert rec.fragment_key(_EID, "round", "geak", "rebench-3") == f"{_EID}:round:geak:rebench-3"
@@ -110,8 +97,8 @@ def test_a_fragment_key_refuses_the_separator_inside_a_value():
 
 
 def test_a_sink_writes_the_event_id_into_both_the_key_and_the_payload(tmp_path):
-    # Both halves are load-bearing and protect against different failures, so
-    # the sink supplies them together rather than trusting the caller.
+    # Both halves are load-bearing and protect against different failures, so the sink supplies them together rather
+    # than trusting the caller.
     with session_scope(tmp_path):
         sink = rec.make_sink(_EID, producer="orchestrator")
         path = sink.record("kernel_lane_run", {"attempt_id": "att-7"}, row_type="lane", natural_ids="att-7")
@@ -123,8 +110,8 @@ def test_a_sink_writes_the_event_id_into_both_the_key_and_the_payload(tmp_path):
 
 
 def test_a_sink_drops_a_payload_that_claims_a_different_event_and_says_so_loudly(tmp_path, caplog):
-    # The core is meant to be ignorant of its event id, so a payload that names
-    # one is a leak rather than a value to be trusted or silently overridden.
+    # The core is meant to be ignorant of its event id, so a payload that names one is a leak rather than a value to
+    # be trusted or silently overridden.
     with session_scope(tmp_path), caplog.at_level(logging.WARNING):
         sink = rec.make_sink(_EID, producer="orchestrator")
         written = sink.record(
@@ -140,9 +127,7 @@ def test_a_sink_drops_a_payload_that_claims_a_different_event_and_says_so_loudly
 
 
 def test_a_failing_row_is_dropped_loudly_rather_than_breaking_the_phase(tmp_path, caplog):
-    # An empty natural id is data-dependent, not just an author slip: a task id
-    # can come back empty on some paths. Recording must not take the run down
-    # with it, but the missing fact cannot be quiet either.
+    # An empty natural id is data-dependent, not just an author slip: a task id can come back empty on some paths.
     with session_scope(tmp_path), caplog.at_level(logging.WARNING):
         sink = rec.make_sink(_EID, producer="orchestrator")
         written = sink.record("kernel_lane_run", {"attempt_id": ""}, row_type="lane", natural_ids="")
@@ -153,23 +138,22 @@ def test_a_failing_row_is_dropped_loudly_rather_than_breaking_the_phase(tmp_path
 
 
 def test_two_sinks_over_one_section_keep_their_rows_in_separate_files(tmp_path):
-    # This is why the key carries the prefix: the spool is per session, so two
-    # events holding a row with the same natural id would otherwise upsert into
-    # one file and the first event's row would be gone.
+    # This is why the key carries the prefix: the spool is per session, so two events holding a row with the same
+    # natural id would otherwise upsert into one file and the first event's row would be gone.
     with session_scope(tmp_path):
         rec.make_sink(_EID, producer="orchestrator").record(
             "kernel_lane_run", {"attempt_id": "att-7", "lane": "kernel_rewrites"}, row_type="lane", natural_ids="att-7"
         )
         rec.make_sink("prelude:0:roofline", producer="orchestrator").record(
-            "kernel_lane_run", {"attempt_id": "att-7", "lane": "collective_runs"}, row_type="lane", natural_ids="att-7"
+            "kernel_lane_run", {"attempt_id": "att-7", "lane": "fusion_runs"}, row_type="lane", natural_ids="att-7"
         )
 
     assert len(_fragments(tmp_path)) == 2
 
 
 def test_a_second_write_on_one_key_merges_instead_of_replacing(tmp_path):
-    # Three writers touch one lane row at three different moments, none of them
-    # knowing the other two's fields; whole-object write-back would erase them.
+    # Three writers touch one lane row at three different moments, none of them knowing the other two's fields;
+    # whole-object write-back would erase them.
     with session_scope(tmp_path):
         sink = rec.make_sink(_EID, producer="orchestrator")
         sink.record("kernel_lane_run", {"attempt_id": "att-7", "run_id": "r-1"}, row_type="lane", natural_ids="att-7")
@@ -206,8 +190,8 @@ def test_rows_sort_by_their_own_fields_regardless_of_the_order_they_were_read_in
 
 
 def test_a_row_with_no_primary_key_sorts_last_rather_than_first():
-    # Sorting it first would read as "this happened before everything else",
-    # which is a claim the missing field cannot support.
+    # Sorting it first would read as "this happened before everything else", which is a claim the missing field cannot
+    # support.
     rows = [
         {"attempt_id": "no-ts"},
         {"attempt_id": "has-ts", "started_at": "10:00:00"},
@@ -216,8 +200,8 @@ def test_a_row_with_no_primary_key_sorts_last_rather_than_first():
 
 
 def test_rows_that_agree_on_every_declared_key_still_sort_deterministically():
-    # Assembling the same fragments twice has to produce the same array, even
-    # when the caller's declared keys do not separate two rows.
+    # Assembling the same fragments twice has to produce the same array, even when the caller's declared keys do not
+    # separate two rows.
     a = {"attempt_id": "a", "started_at": "10:00:00"}
     b = {"attempt_id": "b", "started_at": "10:00:00"}
     assert rec.sort_rows([a, b], keys=("started_at",)) == rec.sort_rows([b, a], keys=("started_at",))
@@ -263,8 +247,8 @@ def test_opening_an_event_makes_it_visible_as_running_before_it_finishes(tmp_pat
 
 
 def test_the_sequence_of_an_opened_event_lands_on_its_event_level_fragment(tmp_path):
-    # The fragment is the event's only durable identity, so the sequence has to
-    # be there or the closing write cannot find the entry to update.
+    # The fragment is the event's only durable identity, so the sequence has to be there or the closing write cannot
+    # find the entry to update.
     with session_scope(tmp_path):
         sequence = rec.open_event(
             event_type="kernel",
@@ -328,7 +312,6 @@ def test_an_event_killed_after_it_opened_is_residual_with_its_sequence_recoverab
 
 def test_fragments_with_no_event_behind_them_are_residual_with_no_sequence(tmp_path):
     # The shell write failed, or rows were recorded before the event opened.
-    # Finalize has to allocate a sequence for these rather than reuse one.
     with session_scope(tmp_path):
         rec.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
         residual = rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel")
@@ -355,8 +338,8 @@ def test_an_event_that_reached_a_terminal_status_is_not_residual(tmp_path):
 
 
 def test_a_recovered_event_is_marked_interrupted_rather_than_guessed_complete(tmp_path):
-    # Nothing judged the run: the closing status is derived at assembly, and an
-    # event whose closing write never ran has no verdict to report.
+    # Nothing judged the run: the closing status is derived at assembly, and an event whose closing write never ran
+    # has no verdict to report.
     with session_scope(tmp_path):
         sequence = rec.open_event(
             event_type="kernel",
@@ -408,8 +391,8 @@ def test_finalize_closes_an_event_whose_phase_was_killed_before_it_could(tmp_pat
 
 
 def test_finalize_keeps_the_rows_the_killed_phase_had_already_recorded(tmp_path):
-    # An interrupted event reports no verdict, but everything recorded before
-    # the kill is on the timeline -- that is what the fragments are for.
+    # An interrupted event reports no verdict, but everything recorded before the kill is on the timeline -- that is
+    # what the fragments are for.
     _killed_kernel_entry(tmp_path)
 
     rec.finalize_events(tmp_path)
@@ -453,8 +436,8 @@ def test_finalize_binds_the_session_itself_so_a_re_export_can_run_it(tmp_path):
 
 
 def test_recording_without_a_bound_session_fails_instead_of_guessing_a_path():
-    # This is also the backstop for a subprocess: the ContextVar is unset
-    # inside a Ray actor, and two processes upserting one fragment lose writes.
+    # This is also the backstop for a subprocess: the ContextVar is unset inside a Ray actor, and two processes
+    # upserting one fragment lose writes.
     assert not session_is_bound()
     with pytest.raises(SessionNotBoundError):
         rec.get_recorder(producer="orchestrator")
@@ -469,9 +452,8 @@ def test_a_session_scope_does_not_outlive_its_block(tmp_path):
 
 
 def test_two_spellings_of_one_session_directory_bind_to_one_recorder(tmp_path):
-    # The recorder cache is keyed by the derived spool path, so two spellings
-    # must not produce two recorders, each holding its own lock over the same
-    # fragments.
+    # The recorder cache is keyed by the derived spool path, so two spellings must not produce two recorders, each
+    # holding its own lock over the same fragments.
     with session_scope(tmp_path):
         first = rec.get_recorder(producer="orchestrator")
     with session_scope(str(tmp_path) + "/./"):

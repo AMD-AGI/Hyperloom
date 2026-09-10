@@ -1,28 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-column facades over this run's KB draft and its warm-start record.
-
-A published Recipe carries three columns, and each one has exactly one facade:
-
-``config``
-    The cross-session server-args / env layer.
-``patch``
-    Source overlays in replay order (``patches``), plus one provenance row per
-    overlay saying how it was captured (``provenance``). Nothing else: a report
-    or a changed-file listing is not replay material.
-``kernel``
-    The ``gemm`` / ``fusion`` / ``rewrite`` sub-columns.
-
-A facade both reads the prior record's column and stages this run's, so a
-column's on-the-wire shape has exactly one owner. Staging is atomic per call:
-either every member lands and the section document names it, or nothing is
-written and the draft is left as it was.
-
-Overlay refs are ``patch/overlays/<stack_index>/<member>-<name>.patch`` with
-both indices zero-padded, so the lexicographic order of ``patch.patches`` *is*
-the replay order and there is no separate timeline to keep in step.
-"""
+"""Per-column facades over this run's KB draft and its warm-start record."""
 
 from __future__ import annotations
 
@@ -95,14 +74,7 @@ def _prior_member(
 
 
 class DraftArtifactSink:
-    """Collect local files into one column's staged member set.
-
-    Mirrors the ref layout the CLOSE-time upload sink produces
-    (``<category>/<kind>/<basename>``) so a value builder does not care whether
-    it is writing into a draft or straight into the upload tree. Bytes are held
-    in memory until the owning facade commits them, which is what keeps a
-    staging call atomic.
-    """
+    """Collect local files into one column's staged member set."""
 
     def __init__(self) -> None:
         self._members: dict[str, bytes] = {}
@@ -114,13 +86,7 @@ class DraftArtifactSink:
         return list(self._members.items())
 
     def add(self, source: Any, *, category: str, kind: str, name: str = "") -> str:
-        """Return the ref ``source`` will occupy, or ``""`` when unusable.
-
-        A missing file yields ``""`` so an optional artifact does not fail the
-        whole column; a symlink or an oversized file raises, because those are
-        contract violations rather than absences. Raises the same error type the
-        CLOSE-time upload sink does, so a value builder has one failure mode.
-        """
+        """Return the ref ``source`` will occupy, or ``\"\"`` when unusable."""
         from .remote_recipe.models import MAX_FILE_BYTES, RemoteRecipeValidationError
 
         raw = str(source or "").strip()
@@ -154,14 +120,7 @@ class DraftArtifactSink:
         return rel
 
     def discard(self, ref: str) -> None:
-        """Undo a just-added ref so a skipped item leaves no staged orphan.
-
-        A kernel KEEP whose checkout cannot be named is dropped from the Recipe
-        rather than aborting the whole publish, but its patch was already staged
-        to reserve the ref. Without removing it the column's members would carry
-        a file the published value no longer references, which the section
-        mismatch guard rejects.
-        """
+        """Undo a just-added ref so a skipped item leaves no staged orphan."""
         self._members.pop(ref, None)
         self._sources = {key: value for key, value in self._sources.items() if value != ref}
 
@@ -224,12 +183,7 @@ class _ColumnKB:
         *,
         members: Sequence[tuple[str, bytes]] = (),
     ) -> bool:
-        """Commit ``document`` and any new members as one section update.
-
-        A ref that is already staged with different bytes fails the whole call,
-        so a ref never silently changes meaning. Files written before the
-        failure are removed, leaving the draft as it was.
-        """
+        """Commit ``document`` and any new members as one section update."""
         if self._sections is None:
             return False
         created: list[Path] = []
@@ -283,11 +237,7 @@ class ConfigKB(_ColumnKB):
         }
 
     def stage(self, config: Mapping[str, Any]) -> bool:
-        """Stage the final config layer, replacing whatever was staged before.
-
-        The authority is the session's accepted stack, so this is published once
-        from the settled value rather than accumulated per KEEP.
-        """
+        """Stage the final config layer, replacing whatever was staged before."""
         envs = config.get("extra_envs")
         return self._publish(
             {
@@ -312,13 +262,7 @@ class PatchKB(_ColumnKB):
         return [str(ref) for ref in patches if isinstance(ref, str) and str(ref).strip()]
 
     def read_provenance(self) -> list[dict[str, Any]]:
-        """Return each overlay's capture provenance, ordered by stack index.
-
-        Metadata only: it says how trustworthy the overlay beside it is, not
-        what the overlay contains. ``complete`` is the one a consumer must
-        honour -- a capture that could not account for every path its patch
-        claimed to touch may have produced an incomplete overlay.
-        """
+        """Return each overlay's capture provenance, ordered by stack index."""
         rows = self.prior().get("provenance")
         if not isinstance(rows, list):
             return []
@@ -334,11 +278,7 @@ class PatchKB(_ColumnKB):
         *,
         stack_index: int,
     ) -> list[str]:
-        """Stage one KEEP's overlay members in caller order.
-
-        Repeating the same call returns the same refs and leaves one physical
-        copy. The complete set is rejected when any member cannot be staged.
-        """
+        """Stage one KEEP's overlay members in caller order."""
         if self._sections is None:
             return []
         index = _stack_index(stack_index)
@@ -391,32 +331,7 @@ class PatchKB(_ColumnKB):
         realized: bool = True,
         host_origin: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Record how the overlay at ``stack_index`` was captured.
-
-        Metadata only, no files. Restaging the same index replaces its row, so a
-        retried handoff cannot accumulate duplicates.
-
-        Args:
-            stack_index: The KEEP whose overlay this describes.
-            base_sha: The framework sha the capture ran against. Provenance for
-                a reader diagnosing a failed apply; it is not a gate, because a
-                session commits every KEEP and so each capture's base is the
-                previous KEEP's session-local commit.
-            complete: False when the capture could not account for every path
-                its patch claimed to touch, which means the overlay may be
-                incomplete too.
-            artifacts_outside_root: How many applied artifacts landed outside the
-                framework root and are therefore in no overlay at all. A nonzero
-                count means this KEEP's gain is not fully reproducible from the
-                record.
-            realized: True when the overlay is the diff the KEEP actually landed;
-                False when it fell back to the patch as delivered.
-            host_origin: Absolute paths on the producing host. ``apply_roots``
-                maps each overlay ref to the checkout it was applied into, which
-                is what a later session replays against; the rest records where
-                the patch, snapshot and manifest were written, for reading a
-                record back that would not replay.
-        """
+        """Record how the overlay at ``stack_index`` was captured."""
         if self._sections is None:
             return False
         index = _stack_index(stack_index)
@@ -496,12 +411,7 @@ class KernelAgentKB(_ColumnKB):
     # -- write ---------------------------------------------------------------
 
     def stage_from_state(self, state: Any, *, kernel_optimizer: str) -> bool:
-        """Stage all three sub-columns from the session's accepted stack.
-
-        A ``geak`` run publishes the columns empty: its kernels live in the
-        GEAK-owned record, and duplicating them here would let two records
-        disagree about the same kernel.
-        """
+        """Stage all three sub-columns from the session's accepted stack."""
         from .remote_recipe.values import (
             build_kernel_fusion_value,
             build_kernel_gemm_value,
@@ -518,12 +428,7 @@ class KernelAgentKB(_ColumnKB):
                     "rewrite": {"items": []},
                 }
             )
-        # A builder that cannot materialize an accepted kernel still raises, and
-        # that must reach CLOSE. A KEEP whose checkout cannot be named is the one
-        # exception: the builder drops just that item and publishes the rest, so
-        # one unrooted kernel no longer takes config, patch, and the other kernels
-        # down with it -- publishing it rootless would instead poison the whole
-        # combined replay.
+        # A builder that cannot materialize an accepted kernel still raises, and that must reach CLOSE.
         sink = DraftArtifactSink()
         document = {
             "gemm": build_kernel_gemm_value(state, sink),
@@ -534,17 +439,7 @@ class KernelAgentKB(_ColumnKB):
 
 
 def _host_origin(raw: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Keep only the absolute paths of a host-origin record.
-
-    ``apply_roots`` maps each overlay ref to the checkout it was applied into, so
-    a Recipe whose overlays came from more than one tree stays replayable: the
-    ref carries its own answer and nothing has to reconcile them.
-
-    A relative value is dropped. Anywhere but ``apply_roots`` that would be a
-    session-local artifact ref, which the column's own ``patches`` list already
-    carries, and recording it twice would invite a reader to treat this subtree
-    as replay material rather than as provenance.
-    """
+    """Keep only the absolute paths of a host-origin record."""
     if not isinstance(raw, Mapping):
         return {}
     origin: dict[str, Any] = {}

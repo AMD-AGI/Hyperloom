@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Value-level payload validation in ``validate_envelope``.
-
-Required-key presence alone let bad values reach consumers that assume them:
-``intent_router`` maps ALERT ``severity`` onto an interrupt priority and casts
-EXTEND_LEASE ``extra_sec`` with a bare ``int()``, and an unrecognised
-REVIEW_VERDICT ``verdict`` matched neither the approve nor the deny branch.
-"""
+"""Value-level payload validation in ``validate_envelope``."""
 
 from __future__ import annotations
 

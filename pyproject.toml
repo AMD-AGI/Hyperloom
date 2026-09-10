@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0"
+version = "1.1.0"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -91,6 +91,8 @@ test = [
     "hyperloom-inference_optimizer[runtime]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    # Property-based tests over the bring-up ladder.
+    "hypothesis>=6.0",
     "respx>=0.21",
     "requests>=2.28",
     # psutil-based live-compiler probe in _aiter_jit.
@@ -140,11 +142,8 @@ fa = "hyperloom.agents.framework.runtime.cli:main"
 robustness-agent = "hyperloom.agents.robustness.main:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
-# ``python -m kernelforge.cli`` directly; these are for interactive use.
+# ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
-# Deprecated alias kept for one release: the standalone ``kernel-agents``
-# distribution is gone, and operator scripts still reference this name.
-kernel-agents = "kernelforge.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -187,6 +186,12 @@ exclude = [
     # importable top-level modules. They ship as package-data instead.
     "kernelforge.data",
     "kernelforge.data.*",
+    # Scripted launch/specialist backends and a virtual clock: scaffolding a
+    # test drives, not a runtime component. Nothing in the shipped tree imports
+    # it, and the production launch boundary it substitutes
+    # (``actions/executors/launch_backend.py``) ships as normal.
+    "hyperloom.orchestrator.rehearsal",
+    "hyperloom.orchestrator.rehearsal.*",
 ]
 
 [tool.setuptools.data-files]
@@ -208,6 +213,9 @@ exclude = [
 ".agents/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
@@ -269,7 +277,7 @@ hyperloom = [
     "scripts/*.sh",
 ]
 # Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
-# read at runtime by classify_patchability()/forge_submit.py, so it must ship.
+# read at runtime by classify_patchability(), so it must ship.
 "hyperloom.agents.kernel.tools" = [
     "vendor_operator_playbooks.json",
 ]
@@ -364,7 +372,6 @@ omit = [
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
-    "src/hyperloom/agents/kernel/tools/_collective_names.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent

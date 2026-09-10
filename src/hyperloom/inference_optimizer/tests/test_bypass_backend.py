@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the bypass benchmark backend + Python engine.
-
-No real GPU/server: server launch, client subprocess, and HTTP readiness are
-all injected/monkeypatched. Verifies backend selection, argv construction, the
-Magpie-compatible report contract, and end-to-end orchestration.
-"""
+"""Tests for the bypass benchmark backend + Python engine."""
 
 from __future__ import annotations
 
@@ -111,11 +106,7 @@ def test_read_log_present_and_missing(tmp_path):
 
 
 def test_run_benchmark_launches_server_with_current_interpreter(tmp_path, monkeypatch):
-    """The sglang server subprocess must use the runner's own interpreter.
-
-    Regression: a PATH ``python3`` in a different venv cannot import sglang, so
-    the runner must pass sys.executable to build_server_command.
-    """
+    """The sglang server subprocess must use the runner's own interpreter."""
     import sys
 
     inferencex = tmp_path / "InferenceX"
@@ -321,6 +312,7 @@ def test_wait_for_server_ready_polls_until_200():
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=100.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=probe,
         sleep=lambda _s: None,
@@ -329,12 +321,34 @@ def test_wait_for_server_ready_polls_until_200():
     assert calls["n"] == 3
 
 
+def test_wait_for_server_ready_stops_when_the_server_has_exited():
+    """A server that is gone will never answer, so the wait ends with it."""
+    probes = {"n": 0}
+
+    def probe(_url):
+        probes["n"] += 1
+        return 503
+
+    ok = bypass_engine.wait_for_server_ready(
+        "http://127.0.0.1:8888",
+        timeout_s=3600.0,
+        server_exited=lambda: True,
+        poll_s=0.0,
+        probe=probe,
+        sleep=lambda _s: None,
+    )
+    assert ok is False
+    # Once, not for the hour the timeout would otherwise have run.
+    assert probes["n"] == 1
+
+
 def test_wait_for_server_ready_times_out():
     ticks = iter([0.0, 1.0, 2.0, 3.0, 100.0])
 
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=5.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=lambda _u: 503,
         sleep=lambda _s: None,
@@ -591,11 +605,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
 
 
 def test_vllm_server_command_enables_torch_profiler():
-    """vLLM needs --profiler-config flags to enable the torch profiler.
-
-    Regression: setting only VLLM_TORCH_PROFILER_DIR env is ignored by vLLM
-    (Unknown env var), so /start_profile returns 404 and no trace lands.
-    """
+    """vLLM needs --profiler-config flags to enable the torch profiler."""
     cmd = bypass_engine.build_server_command(
         framework="vllm",
         model="/m",
@@ -893,12 +903,7 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch, framework):
 
 
 def test_lifecycle_server_ready_timeout_honored(tmp_path, monkeypatch):
-    """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client.
-
-    wait_for_server_ready must receive the lifecycle server_ready_timeout_s
-    (not benchmark.timeout_seconds), while the client benchmark keeps using
-    timeout_seconds.
-    """
+    """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client."""
     import yaml
 
     inferencex = tmp_path / "InferenceX"
@@ -1133,12 +1138,7 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
 
 
 def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
-    """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1.
-
-    The serving path injects PROFILE/profiler-dir env, but the scriptable
-    (xDiT) path previously dropped it, so profiler never engaged. The fake
-    script records the PROFILE env + profiler dir it received.
-    """
+    """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1."""
     import yaml
 
     inferencex = tmp_path / "InferenceX"
@@ -1346,16 +1346,11 @@ def test_server_env_pins_profiler_dirs_when_profiling(tmp_path):
 
 
 def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
-    """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
-
-    The client is identified by --result-dir plus benchmark_serving.py (writes
-    inferencex_result.json); the lm_eval dep probe/install is a no-op
-    passthrough; anything else is treated as the eval subprocess.
-    """
+    """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc."""
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        # _ensure_eval_deps probes/install lm_eval before the eval subprocess;
-        # treat it as already-present so this fake stays focused on client/eval.
+        # _ensure_eval_deps probes/install lm_eval before the eval subprocess; treat it as already-present so this
+        # fake stays focused on client/eval.
         if "import lm_eval" in cmd or ("pip" in cmd and "install" in cmd):
 
             class _Ok:
@@ -1392,12 +1387,7 @@ def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
 
 
 def test_eval_failure_propagates_as_run_failure(tmp_path, monkeypatch):
-    """client succeeds but lm-eval fails: the whole run must fail (no silent 0).
-
-    Magpie's ``run_eval ... || exit $?`` aborts the benchmark on eval failure;
-    bypass must mirror that so baseline's eval-rooted RUN_EVAL=false fallback can
-    detect it. The report must be success=false and carry the eval marker.
-    """
+    """client succeeds but lm-eval fails: the whole run must fail (no silent 0)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1448,11 +1438,7 @@ def test_eval_success_keeps_run_success(tmp_path, monkeypatch):
 
 
 def test_lifecycle_reuse_without_metadata_fails(tmp_path, monkeypatch):
-    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie
-    server occupies the port. bypass must NOT silently reuse or re-boot over it;
-    it fails explicitly so the reuse-key mismatch surfaces instead of being
-    papered over.
-    """
+    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie server occupies the port. bypass must NOT silently reuse or re-boot over it; it fails explicitly so the reuse-key mismatch surfaces instead of being papered over."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1756,8 +1742,7 @@ def test_tokenize_extra_args_falls_back_on_bad_quoting():
 
 
 def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatch):
-    """phase=server: a server that never becomes ready is torn down, no pid/meta
-    is persisted, and the run fails (rc=1)."""
+    """phase=server: a server that never becomes ready is torn down, no pid/meta is persisted, and the run fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1785,8 +1770,7 @@ def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatc
 
 
 def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
-    """phase=server: build_server_command raising ValueError emits a failing
-    report and returns rc=2 before any server launch."""
+    """phase=server: build_server_command raising ValueError emits a failing report and returns rc=2 before any server launch."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1804,8 +1788,7 @@ def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
 
 
 def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
-    """phase=server: when os.getpgid fails, the pgid falls back to the pid and
-    the server still persists successfully (rc=0)."""
+    """phase=server: when os.getpgid fails, the pgid falls back to the pid and the server still persists successfully (rc=0)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1833,8 +1816,7 @@ def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
-    """YAML lifecycle boot round: a server that never becomes ready is torn down
-    and the round fails (rc=1)."""
+    """YAML lifecycle boot round: a server that never becomes ready is torn down and the round fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1862,8 +1844,7 @@ def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
 
 
 def test_scriptable_nonzero_rc_without_error_reports_failure(tmp_path, monkeypatch):
-    """scriptable: run_scriptable returns rc!=0 with no error string and no result
-    file -> the report records both failures and the rc propagates."""
+    """scriptable: run_scriptable returns rc!=0 with no error string and no result file -> the report records both failures and the rc propagates."""
     inferencex = tmp_path / "InferenceX"
     inferencex.mkdir()
     cfg = {
@@ -1909,8 +1890,7 @@ def test_lifecycle_all_build_command_value_error_fails(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
-    """YAML lifecycle boot round with cleanup=True: after the client runs the
-    server is terminated AND the lifecycle files are torn down."""
+    """YAML lifecycle boot round with cleanup=True: after the client runs the server is terminated AND the lifecycle files are torn down."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1964,11 +1944,7 @@ def test_ensure_eval_deps_present_skips_install(monkeypatch):
 
 
 def test_ensure_eval_deps_installs_when_missing(monkeypatch):
-    """lm_eval not importable -> pip install runs with the SAME interpreter.
-
-    Mirrors InferenceX benchmark_lib.sh's runtime shim so bypass-only accuracy
-    runs (Magpie install skipped) do not die on a missing lm_eval.
-    """
+    """lm_eval not importable -> pip install runs with the SAME interpreter."""
     calls = []
     rcs = [1, 0]  # probe fails, pip succeeds
 

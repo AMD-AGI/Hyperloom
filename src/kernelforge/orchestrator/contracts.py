@@ -138,13 +138,7 @@ class OrchestrationContext:
     program_context: str
     source_map_path: str
     cases: tuple[CaseEvidence, ...]
-    # Every file the campaign declared as its own source set, in campaign order
-    # (entry 0 is the primary kernel path). This is the declared FLOOR of the
-    # edit surface, never its ceiling -- the hard boundary is the protected
-    # measurement surface. A planner that is never told it may edit the tuned
-    # CSV or the sibling module that holds the dispatch constant will reason as
-    # though only the anchor file exists and price whole directions out on that
-    # mistake. Data and config files belong here exactly as much as .py sources.
+    # Every file the campaign declared as its own source set, in campaign order (entry 0 is the primary kernel path).
     editable_sources: tuple[str, ...] = ()
     knowledge_index: str = ""
     supervisor_guidance: str = ""
@@ -154,8 +148,6 @@ class OrchestrationContext:
     search_mode_residence_remaining: int = 0
     evidence_refs: tuple[EvidenceRef, ...] = ()
     # ``analysis_commit`` remains the canonical commit for compatibility.
-    # These fields separate the code being planned from the commit that
-    # produced the active Analysis/profiling evidence.
     canonical_commit: str = ""
     evidence_commit: str = ""
     evidence_stale: bool = False
@@ -164,10 +156,7 @@ class OrchestrationContext:
     current_mean_case_speedup: float | None = None
     cumulative_diff_path: str = ""
     cumulative_diff_error: str = ""
-    # The previous iteration's Plan Critic ruling. Carried because a critic can
-    # only rule on a plan that already exists, so a verdict that the route
-    # itself is dominated cannot change the round it was passed on -- it can
-    # only change the next one.
+    # The previous iteration's Plan Critic ruling.
     last_critic_verdict: str = ""
     last_critic_review: str = ""
 
@@ -439,15 +428,7 @@ class SpecialistOutcome:
 
 @dataclass(frozen=True)
 class LaneDrop:
-    """One lane the review judged not worth its Implementer session.
-
-    The reason is required and travels with the lane_id, because a lane is
-    dropped for something the review found -- a ground the evidence does not
-    support, another lane's change in different words -- and a round that
-    published fewer lanes than it planned without saying why cannot be audited
-    afterwards. Whether the drop is obeyed is not decided here: the round's
-    width belongs to whoever holds the lanes.
-    """
+    """One lane the review judged not worth its Implementer session."""
 
     lane_id: int
     reason: str
@@ -465,15 +446,7 @@ class LaneDrop:
 
 @dataclass(frozen=True)
 class PlanCriticOutcome:
-    """One free-form plan review, its routing verdict, and its width ruling.
-
-    The verdict routes the round's one implementation route; ``lane_drops``
-    rules on how much of the round is worth running. They are separate because
-    a round is one route divided into several lanes: "this route needs
-    correcting" and "this lane is not worth a session" are different findings,
-    and a vocabulary that only carries the first leaves the second with no
-    outlet.
-    """
+    """One free-form plan review, its routing verdict, and its width ruling."""
 
     verdict: str
     review: str = ""
@@ -481,19 +454,10 @@ class PlanCriticOutcome:
     duration_sec: float = 0.0
     verdict_source: str = "explicit"
     lane_drops: tuple[LaneDrop, ...] = ()
-    # What reading the review's width block found: a block that was not there,
-    # an entry that named no lane. Named rather than dropped, so "the review
-    # wanted every lane" and "the review wanted something nobody could read"
-    # never reach the round as one answer. Each note stays an observation and
-    # leaves the outcome to ``narrowing_status`` and ``lane_drops``, because a
-    # note that concluded anything would be concluding it before the repair
-    # pass and the round have had their say.
+    # What reading the review's width block found: a block that was not there, an entry that named no lane.
     narrowing_notes: tuple[str, ...] = ()
-    # How the width ruling above was arrived at, which no count of drops can
-    # say: an empty ``lane_drops`` is the answer to "run every lane", to "the
-    # review never answered", and to "the block was there and unusable" alike.
-    # ``not_asked`` covers a one-plan round, which is never held to a block, and
-    # a review that never ran.
+    # How the width ruling above was arrived at, which no count of drops can say: an empty ``lane_drops`` is the
+    # answer to "run every lane", to "the review never answered", and to "the block was there and unusable" alike.
     narrowing_status: str = "not_asked"
 
     def __post_init__(self) -> None:
@@ -552,29 +516,7 @@ class PlanCriticOutcome:
 
 @dataclass(frozen=True)
 class LaneGround:
-    """The ground one lane of a round owns, in the terms an edit lands in.
-
-    A round is partitioned so two lanes never spend two Implementer sessions on
-    the same change. What decides that is the code each lane will edit, not the
-    specialist role its evidence came from: the roles are three readings of one
-    kernel, so dividing by role divides nothing. ``ground`` therefore names
-    files, functions and mechanisms.
-
-    Only what a lane owns is recorded. What it must stay off is every other
-    lane's ``ground``, derived at the point of use, so the two can never be
-    written down as disagreeing descriptions of one boundary.
-
-    ``joint`` marks the one shape that buys a wider ground than a region:
-    a change and the launch configuration it invalidates, or a move that spans
-    what no single region contains. It widens one lane and does not repeal the
-    rule above: a launch site two bodies share is named in exactly one lane's
-    ``ground``, and every other lane derives it as ground it does not own. Such
-    a lane returns a gain that cannot
-    be decomposed, so it pays for the width with ``fallback`` -- the smaller
-    change inside the same ground that its Implementer lands if the joint step
-    does not converge, so a lane that risks more cannot also risk measuring
-    nothing.
-    """
+    """The ground one lane of a round owns, in the terms an edit lands in."""
 
     lane_id: int
     ground: str
@@ -605,19 +547,7 @@ class LaneGround:
 
 @dataclass(frozen=True)
 class SynthesizedPlan:
-    """One generated plan, the ground it was planned on, and its session.
-
-    ``ground`` is empty for a single-lane round, which is planned over the whole
-    kernel and has no sibling to be bounded away from.
-
-    ``joint`` and ``fallback`` are the lane's from :class:`LaneGround`, carried
-    here because the steps that rule on a drafted lane -- the review's width
-    ruling above all -- hold drafts and not grounds. Without them the review
-    decided whether a lane was worth a session while blind to the fact that the
-    lane was deliberately widened and to the smaller change it falls back to,
-    and the round could not name, afterwards, which widened ground it had
-    published nowhere.
-    """
+    """One generated plan, the ground it was planned on, and its session."""
 
     text: str
     session_id: str = ""
@@ -644,8 +574,7 @@ class OrchestrationRunResult:
 
     dispatch_plan: DispatchPlan
     specialist_outcomes: tuple[SpecialistOutcome, ...] = ()
-    # Every lane's plan for this round, in lane order. A single-lane round
-    # carries exactly one, which is the ordinary path.
+    # Every lane's plan for this round, in lane order.
     optimization_plans: tuple[str, ...] = ()
     structured_output_diagnostics: dict[str, Any] | None = None
     optimization_plan_executable: bool = True
@@ -668,10 +597,5 @@ class OrchestrationRunResult:
 
     @property
     def optimization_plan(self) -> str:
-        """Lane 1's plan, which is the whole round on the single-lane path.
-
-        Derived rather than stored: it was a second field holding a copy of
-        ``optimization_plans[0]``, and the only thing two fields for one value
-        can add is the chance of disagreeing.
-        """
+        """Lane 1's plan, which is the whole round on the single-lane path."""
         return self.optimization_plans[0]

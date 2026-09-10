@@ -1,28 +1,4 @@
-"""Standalone CLI for the quantization-agent.
-
-Lets you drive the Quark PTQ skill chain from a natural-language prompt
-without going through ``inference_optimizer``. The prompt is fed to the
-Claude Agent SDK, which loads ``hyperloom/agents/quantization/SKILL.md`` as the
-runtime contract and invokes the Quark skills end-to-end.
-
-Example (or use the ``quantization-agent`` console script)::
-
-    python -m hyperloom.agents.quantization.cli \\
-        --prompt "Quantize Qwen/Qwen3-0.5B to fp8 (kv_cache also fp8, exclude lm_head)" \\
-        --workspace /scratch/qwen3-0.5b-ws \\
-        --quark-root /scratch/kewang/workspace/Quark \\
-        --interactive off \\
-        --acceptable-eval-gap 0.03 \\
-        --max-requantize-attempts 1
-
-Exit codes:
-    0   success or partial (model usable; partial means audit/eval gap)
-    1   failed (model unusable or MUST-validate violation)
-    2   argparse / input validation error
-
-An operator-rejected checkpoint has no dedicated code: it lands as ``partial``
-(0) or ``failed`` (1) with the reason in ``assessment.notes``.
-"""
+"""Standalone CLI for the quantization-agent."""
 
 from __future__ import annotations
 
@@ -37,18 +13,7 @@ from .driver.runner import DEFAULT_MODEL
 
 
 def _interactive_value(raw: str) -> bool | None:
-    """Parse the ``--interactive`` flag into a tri-state value.
-
-    Args:
-        raw: Raw flag value supplied on the command line.
-
-    Returns:
-        ``None`` for ``auto`` (tty auto-detection), ``True`` for the on-style
-        values, and ``False`` for the off-style values.
-
-    Raises:
-        argparse.ArgumentTypeError: If ``raw`` is not a recognized value.
-    """
+    """Parse the ``--interactive`` flag into a tri-state value."""
     raw = raw.strip().lower()
     if raw in ("auto", "", "default"):
         return None
@@ -60,14 +25,7 @@ def _interactive_value(raw: str) -> bool | None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Build the argument parser and parse the CLI arguments.
-
-    Args:
-        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
-
-    Returns:
-        The populated :class:`argparse.Namespace`.
-    """
+    """Build the argument parser and parse the CLI arguments."""
     p = argparse.ArgumentParser(
         prog="quantization_agent",
         description="Drive the AMD Quark PTQ skill chain from a natural-language prompt.",
@@ -123,22 +81,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    """Run one quantization request and print a JSON summary.
-
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Process exit code: ``0`` on success or partial success, ``1`` when the
-        resulting model is unusable.
-    """
+    """Run one quantization request and print a JSON summary."""
 
     def log(line: str) -> None:
-        """Write a line to stderr when verbose output is enabled.
-
-        Args:
-            line: Text to emit.
-        """
+        """Write a line to stderr when verbose output is enabled."""
         if args.verbose:
             print(line, file=sys.stderr, flush=True)
 
@@ -166,14 +112,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point for the quantization agent.
-
-    Args:
-        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
-
-    Returns:
-        The process exit code produced by :func:`_run`.
-    """
+    """CLI entry point for the quantization agent."""
     args = _parse_args(argv)
     return asyncio.run(_run(args))
 

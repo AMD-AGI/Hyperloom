@@ -1,35 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Re-time a generated tuner's candidates with our own clock.
-
-This is the mechanism that makes a generated tuner safe to run at all: it may
-propose configurations, and nothing it reports about their speed is used. A
-script that mistimes its benchmark, or times an empty kernel, therefore costs
-machine time and nothing else.
-
-The protocol is the one the measurement work on this fleet arrived at, and each
-part of it replaced something that gave a wrong answer first:
-
-* **Clocks are warmed before anything is compared.** The GPU idles at 94MHz;
-  whatever is measured first otherwise pays the ramp and looks slow for reasons
-  that have nothing to do with it.
-* **Baseline and candidate are measured next to each other, not in blocks.**
-  Timing all of A and then all of B put one default at 1269us against 517us
-  measured the day before -- a 2.5x swing owed to a neighbour's workload.
-* **The minimum across repeats is the estimate, not the median.** On a shared
-  box interference only ever adds time, so the smallest window is the cleanest
-  reading of what the kernel costs; a median tracks how busy the neighbours
-  were. Median-based runs rejected 9 of 16 measurements as unstable on spreads
-  of 40-170% and left the comparison full of holes.
-* **A result whose two readings disagree is refused, not reported.** If the
-  best case and the typical case disagree about which side is faster, the two
-  sides were not measured under one machine state and no number here means
-  anything.
-
-Dispatch is the caller's business. A candidate is only meaningful against the
-backend it names, so this takes callables and never tries to interpret a config.
-"""
+"""Re-time a generated tuner's candidates with our own clock."""
 
 from __future__ import annotations
 
@@ -155,24 +127,7 @@ def judge_candidates(
     is_correct: Callable[[Callable[[], Any]], bool] | None = None,
     sync: Callable[[], Any] | None = None,
 ) -> Judgement:
-    """Re-time one shape's candidates and pick the best that stands up.
-
-    Args:
-        shape: Label for the result.
-        candidates: Proposed configurations, best-first per the generator.
-        baseline: The unmodified path this shape is compared against.
-        dispatch: Turns a candidate into a callable, or None when it cannot be
-            dispatched at all -- which is itself a result worth recording.
-        is_correct: Numerical check. Must already be the repeated,
-            fresh-input kind: an intermittently wrong kernel passes a single
-            check roughly at random, and four such kernels were selected as
-            winners on this hardware before that was understood.
-        sync: Device synchronisation, if the backend needs it.
-
-    Returns:
-        A judgement carrying every candidate that was timed, so the call can be
-        audited rather than trusted.
-    """
+    """Re-time one shape's candidates and pick the best that stands up."""
     result = Judgement(shape=shape)
     for cand in candidates:
         call = dispatch(cand)

@@ -1,30 +1,4 @@
-"""Measurement driver for the Gemma RMSNorm task (FlyDSL).
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the two
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public name ``gemma_rmsnorm`` from ``rmsnorm_kernel.py``.
-
-Stream routing lives HERE, not in the kernel: this driver always passes the handle
-of the CURRENTLY ACTIVE stream, queried at call time. Under the CUDA-graph harness
-that stream is the private capture stream, so a FlyDSL kernel that honors the
-handle gets recorded into the graph. Keeping the decision in the protected driver
-means the agent cannot break graph capture by editing the kernel.
-"""
+"""Measurement driver for the Gemma RMSNorm task (FlyDSL)."""
 
 from __future__ import annotations
 
@@ -58,18 +32,13 @@ def _make_inputs(
     x = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
     weight = torch.randn(hidden, device=device, dtype=torch.bfloat16)
     if mode == "stability":
-        # Large magnitudes overflow a kernel that squares in bf16 instead of
-        # accumulating the mean-of-squares in fp32.
+        # Large magnitudes overflow a kernel that squares in bf16 instead of accumulating the mean-of-squares in fp32.
         x = x * 240.0
     return x, weight
 
 
 def _launch(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> None:
-    """Run the kernel on whatever stream is currently active.
-
-    The handle is queried at call time on purpose: under ``torch.cuda.graph`` the
-    active stream is the private capture stream, so the launch gets recorded.
-    """
+    """Run the kernel on whatever stream is currently active."""
     gemma_rmsnorm(x, weight, out, stream_handle=torch.cuda.current_stream().cuda_stream)
 
 
@@ -108,8 +77,8 @@ def _run_correctness(rows: int, hidden: int, mode: str, device: str) -> int:
 
 
 def _run_bench(rows: int, hidden: int, warmup: int, iters: int, device: str) -> int:
-    # Static tensors allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead.
+    # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
+    # not host launch overhead.
     x, weight = _make_inputs(rows, hidden, "full", device)
     out = torch.empty_like(x)
     ref = _reference(x, weight)
@@ -117,8 +86,8 @@ def _run_bench(rows: int, hidden: int, warmup: int, iters: int, device: str) -> 
     def step() -> None:
         _launch(x, weight, out)
 
-    # dirty + verify prove the graph actually captured the kernel (an uncaptured
-    # launch would leave `out` at its dirtied value and fail verify -> eager).
+    # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave `out` at its
+    # dirtied value and fail verify -> eager).
     result = cuda_graph_bench(
         step,
         warmup=warmup,

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Assemble the final forge-rewrite result.
-
-The cross-language speedup (FlyDSL vs the original source kernel) is computed
-HERE from the source baseline (preflight stage) and the FlyDSL best (optimize
-stage) — forge-loop itself only minimizes the FlyDSL wall time against its own
-anchor, so this is where the "did the rewrite help?" number is produced.
-"""
+"""Assemble the final forge-rewrite result."""
 
 from __future__ import annotations
 
@@ -18,20 +12,18 @@ from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.durable_io import atomic_write_text
 
-# The nested forge-loop sentinel is suppressed while its stdout is streamed by
-# rewrite_by_flydsl.optimize, so this is the only one a caller sees.
+# The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
+# the only one a caller sees.
 SENTINEL = protocol.RESULT_SENTINEL
 
 
 @dataclass
 class RewriteResult:
     logical_op_name: str
-    # Reported so a consumer can name the produced factory without reproducing
-    # KernelForge's normalization rule.
+    # Reported so a consumer can name the produced factory without reproducing KernelForge's normalization rule.
     operator_slug: str
     builder_symbol: str
-    # Always "flydsl" — this layer only rewrites into FlyDSL. Kept in the result
-    # so downstream consumers can label the output.
+    # Always "flydsl" — this layer only rewrites into FlyDSL.
     target_language: str
     port_ok: bool
     compiled: bool
@@ -97,8 +89,8 @@ def build_result(
     applyback = applyback_result or {}
     applyback_ok = bool(applyback.get("ok")) if applyback_result is not None else False
     flydsl_best_commit = str((optimize_result.get("best_commit") if optimize_result else "") or "")
-    # With apply-back required this key means the apply-back commit and nothing
-    # else; the standalone best is reported only as flydsl_best_commit.
+    # With apply-back required this key means the apply-back commit and nothing else; the standalone best is reported
+    # only as flydsl_best_commit.
     best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
 
     speedup = None
@@ -110,9 +102,8 @@ def build_result(
         operator_slug=protocol.operator_slug(op_name),
         builder_symbol=protocol.builder_symbol(op_name),
         target_language="flydsl",
-        # MVP mapping: a successful port yields a building, correct FlyDSL kernel
-        # (forge-loop only keeps correctness-passing versions), so compiled and
-        # correct track port_ok.
+        # MVP mapping: a successful port yields a building, correct FlyDSL kernel (forge-loop only keeps
+        # correctness-passing versions), so compiled and correct track port_ok.
         port_ok=port_ok,
         compiled=port_ok,
         correct=port_ok,
@@ -134,8 +125,7 @@ def build_result(
         applyback_commit_ref=str(applyback.get("commit_ref") or ""),
         patch_path=str(applyback.get("patch_path") or ""),
         artifacts=list(applyback.get("artifacts") or []),
-        # Only a published apply-back bundle carries an artifact kind; an interim
-        # or failed run must not name one.
+        # Only a published apply-back bundle carries an artifact kind; an interim or failed run must not name one.
         artifact_kind=(protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK if applyback_ok else ""),
         artifact_schema_version=(protocol.ARTIFACT_SCHEMA_VERSION if applyback_ok else 0),
         canonical_manifest=str(applyback.get("manifest_path") or ""),

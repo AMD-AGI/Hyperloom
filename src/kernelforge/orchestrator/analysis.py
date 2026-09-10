@@ -914,8 +914,6 @@ class AnalysisAgentService:
             expected_parent = incremental.parent_bundle.resolve()
             if parent_root is None or parent_root != expected_parent or not parent_root.is_dir():
                 # The current canonical can still be analyzed from scratch.
-                # A missing or superseded parent must not permanently block
-                # this commit's two durable Analysis session attempts.
                 incremental = None
                 parent_reuse_commit = ""
         if incremental is not None:
@@ -1358,13 +1356,7 @@ class AnalysisAgentService:
         *,
         evidence_commit: str,
     ) -> OrchestrationContext:
-        """Restore one published bundle as stale-safe planning evidence.
-
-        Validation cross-checks the bundle's immutable request and manifest
-        digests rather than comparing stale evidence with the current canonical
-        source digest. Current case latencies remain authoritative while
-        bottlenecks and per-case profile paths come from the evidence commit.
-        """
+        """Restore one published bundle as stale-safe planning evidence."""
         commit = str(evidence_commit or "").strip()
         if not commit:
             return context
@@ -1533,7 +1525,6 @@ class AnalysisAgentService:
                         cwd=str(work_root),
                         writable=True,
                         timeout_sec=timeout_sec,
-                        reasoning_effort="high",
                         additional_directories=[
                             context.workspace,
                             str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),

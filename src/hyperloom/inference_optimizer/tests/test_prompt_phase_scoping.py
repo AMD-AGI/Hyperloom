@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase scoping of the orchestration system prompt and the Critic judge bundle.
-
-Locks both halves of the contract: a phase receives only the modules whose
-behaviour it can reach, and the cross-phase planning facts a ``skip_to_*``
-decision needs survive every phase.
-"""
+"""Phase scoping of the orchestration system prompt and the Critic judge bundle."""
 
 from __future__ import annotations
 
@@ -51,8 +46,8 @@ ROOFLINE_PHASES = {
     _ps.PHASE_KERNEL_AGENT,
 }
 
-# Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT
-# specialists come from the Coordinator's authoring pump but stay steerable.
+# Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT specialists come from the Coordinator's
+# authoring pump but stay steerable.
 SPECIALIST_DISPATCH_OPS = (SPECIALIST_DIALS, SPECIALIST_DOMAIN, WEB_SEARCH)
 ALL_SPECIALIST_OPS = (*SPECIALIST_DISPATCH_OPS, SPECIALIST_WATCH)
 
@@ -66,7 +61,7 @@ ALWAYS_ON = (
     "## 7. RULES & OUTPUT PROTOCOL",
     "### Phase awareness",
     "### Hard rules",
-    "### Pulling context on a delta turn",
+    "### Pulling what the projection does not carry",
     "### SESSION_DIR contract",
     "### Output protocol",
     "RULE F3",
@@ -94,9 +89,7 @@ def _build(registry: dict, phase: str) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
 # Phase-scoped modules render only where the behaviour exists
-# ---------------------------------------------------------------------------
 def test_kernel_request_reference_only_in_kernel_phase(registry):
     """Kernel REQUEST payload templates are legal only in KERNEL_AGENT."""
     for phase in _ps.PHASE_NAMES:
@@ -214,9 +207,7 @@ def test_generic_recovery_survives_outside_prelude(registry):
     assert "last_action_failures" in text
 
 
-# ---------------------------------------------------------------------------
 # Back-compat: an unscoped build is a superset
-# ---------------------------------------------------------------------------
 def test_unscoped_build_renders_every_module(registry):
     """A caller that does not track phases keeps the pre-scoping prompt."""
     text = _build(registry, "")
@@ -248,9 +239,7 @@ def test_maintainer_header_never_reaches_the_model(registry):
         assert "rules fragment** consumed by" not in _build(registry, phase)
 
 
-# ---------------------------------------------------------------------------
 # Rules-fragment tag filtering
-# ---------------------------------------------------------------------------
 FRAGMENT = """\
 > maintainer note, stripped
 
@@ -299,15 +288,9 @@ def test_phase_argument_is_case_insensitive(registry):
     assert _build(registry, "kernel_agent") == _build(registry, _ps.PHASE_KERNEL_AGENT)
 
 
-# ---------------------------------------------------------------------------
 # Coordinator re-scopes the override at the phase seam
-# ---------------------------------------------------------------------------
 def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
-    """Build a MachinePhase over a minimal coordinator stub.
-
-    Returns ``(phase_handler, coord, rebuild_calls)`` where ``rebuild_calls``
-    records the kwargs handed to the stubbed prompt rebuilder.
-    """
+    """Build a MachinePhase over a minimal coordinator stub."""
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.phases.machine import MachinePhase
@@ -401,9 +384,7 @@ def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
     assert "phase_machine" in Coordinator._COLLAB_MODULES
 
 
-# ---------------------------------------------------------------------------
 # Snapshot paths: one artefact per scope the model ran under
-# ---------------------------------------------------------------------------
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
 
@@ -443,9 +424,7 @@ def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     assert list(orch.glob("system_prompt.*.snapshot.md")) == []
 
 
-# ---------------------------------------------------------------------------
 # Critic: phase is structurally deliverable and injected one phase at a time
-# ---------------------------------------------------------------------------
 def test_judge_bundle_to_dict_carries_phase():
     """The on-disk bundle records the phase, so audits are not misled."""
     from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
@@ -533,15 +512,7 @@ def test_reloop_infeasible_when_the_target_phase_is_disabled():
 
 
 def test_the_payload_contract_lists_only_required_keys():
-    """Required keys and value constraints are different claims.
-
-    The notes were appended to the generated required-field list, under a label
-    that says "Required keys". That printed `alert:{severity,summary,severity ∈
-    low|medium|high}` -- severity twice -- and presented `prune_branch.scope`
-    and `extend_lease.reason` as required when validate_envelope requires none
-    of them. The same string is the description of Claude's emit_intent tool,
-    so the drift this contract exists to prevent was introduced into it.
-    """
+    """Required keys and value constraints are different claims."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         _PAYLOAD_REQUIRED,
@@ -587,15 +558,7 @@ def test_both_provider_descriptions_carry_the_constraints():
 
 
 def test_an_unknown_transport_is_refused_not_rendered_empty(registry):
-    """A transport nobody declares must not quietly delete the output protocol.
-
-    Every `<!-- transport: ... -->` block is dropped when the requested
-    transport is not among the ones it names, and both Output protocol blocks
-    are scoped that way. A misspelled or renamed transport therefore produced a
-    prompt telling the model nothing about how to answer -- the exact shape of
-    silent degradation this contract is built to prevent, and TRANSPORTS was
-    imported here without ever being consulted.
-    """
+    """A transport nobody declares must not quietly delete the output protocol."""
     from hyperloom.orchestrator.prompts.transport import TRANSPORTS
 
     with pytest.raises(ValueError, match="carrier-pigeon"):
@@ -635,15 +598,7 @@ def test_every_declared_transport_still_renders(registry, transport):
 
 
 def test_a_role_with_no_constraints_gets_no_constraints_line():
-    """Say nothing rather than an empty clause.
-
-    ``payload_constraints`` returns an empty string for an intent set where no
-    type carries a note, and both callers embedded it unconditionally -- so such
-    a role was told "Constraints: ." The orchestration role always has notes and
-    Claude's tool takes every intent type, so production does not reach it today;
-    these are public functions taking any role's intent set, and assuming the
-    current configuration is the habit this whole contract exists to break.
-    """
+    """Say nothing rather than an empty clause."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema

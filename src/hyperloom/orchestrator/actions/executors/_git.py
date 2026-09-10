@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared low-level git subprocess primitives for framework / integrate_patch.
-
-``_run_git`` → ``(ok, stdout, stderr)``; ``_run_git_cp`` → the raw
-CompletedProcess (or None on spawn/timeout) for callers that must inspect
-returncode. Both carry a ``safe.directory`` exception for the target checkout.
-"""
+"""Shared low-level git subprocess primitives for framework / integrate_patch."""
 
 from __future__ import annotations
 
@@ -42,11 +37,7 @@ def _run_git_cp(
     cwd: str | Path | None = None,
     input: str | None = None,  # noqa: A002 - mirrors subprocess.run's keyword
 ) -> subprocess.CompletedProcess | None:
-    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout.
-
-    ``cwd`` locates the checkout for callers that do not pass ``-C``; ``input``
-    feeds a patch on stdin.
-    """
+    """Run ``git <args>`` returning the raw CompletedProcess, or None on spawn/timeout."""
     try:
         return subprocess.run(
             ["git", *safe_directory_args(args, cwd=cwd)],

@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared rocm-smi VRAM reader.
-
-stdlib-only and free of hyperloom imports, so it is loadable from any layer.
-"""
+"""Shared rocm-smi VRAM reader."""
 
 from __future__ import annotations
 
@@ -24,16 +21,7 @@ class GpuVram(NamedTuple):
 
 
 def gpu_vram_usage() -> list[GpuVram] | None:
-    """Return per-GPU VRAM usage via rocm-smi, or None when it cannot be read.
-
-    Uses ``rocm-smi --showmeminfo vram --json``, which reports byte counts and
-    needs no HIP device visibility. Every unreadable case yields ``None`` --
-    binary absent, non-zero exit, unparseable JSON, or a card missing either
-    figure -- so callers can tell "unknown" apart from "idle".
-
-    Returns:
-        One :class:`GpuVram` per card in rocm-smi key order, or ``None``.
-    """
+    """Return per-GPU VRAM usage via rocm-smi, or None when it cannot be read."""
     if not shutil.which("rocm-smi"):
         return None
     try:

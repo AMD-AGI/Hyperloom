@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers
-it shares with the native concurrency sweep.
-
-These cover the ``_geak_sweep.sweep_via_geak`` branches not exercised by
-``test_geak_breakdown_unit`` -- the ``validated_regimes`` protocol fallback (used
-when ``result`` carries no explicit ``bench_protocol``), the ``pin_num_prompts``
-single-point replay, and the per-variant subprocess-error path -- plus the pure
-row/flatten helpers the GEAK sweep result feeds into downstream.
-"""
+"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers it shares with the native concurrency sweep."""
 
 from __future__ import annotations
 
@@ -20,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
@@ -29,7 +22,14 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _budget_limited_without_valid_pair,
     _point_from_variant,
 )
-from hyperloom.orchestrator.loop.coordinator_helpers import _parse_server_arg_value
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator_helpers import (
+    _parse_server_arg_value,
+    _resolve_gpu_pin,
+    _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+)
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _bench_script(tmp_path: Path) -> Path:
@@ -65,8 +65,9 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry;
-    ``pin_num_prompts`` forwards that regime's NUM_PROMPTS onto the point."""
+    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry; ``pin_num_prompts`` forwards that
+    regime's NUM_PROMPTS onto the point.
+    """
     bench = _bench_script(tmp_path)
     monkeypatch.setenv("MODEL_PATH", "/models/x")
     monkeypatch.setenv("FRAMEWORK", "sglang")
@@ -195,6 +196,135 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     assert "cannot spawn bench process" in entry["error"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity_source", ["handoff", "baseline_recipe"])
+@pytest.mark.parametrize("pin_var", ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"])
+async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_source: str,
+    pin_var: str,
+) -> None:
+    """Replay keeps the run's devices and serving identity after ambient drift."""
+    for name in VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("MODEL_PATH", "/models/stale-shell-model")
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+
+    recipe = tmp_path / "baseline.yaml"
+    recipe_env = {"TP": 2, pin_var: "4,5"}
+    recipe.write_text(
+        json.dumps({"benchmark": {"framework": "vllm", "model": "/models/validated", "envs": recipe_env}}),
+        encoding="utf-8",
+    )
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        benchmark_mode="synthetic",
+        framework="vllm",
+        model_path="/models/validated",
+        tp=2,
+        baseline_config_path=str(recipe),
+        baseline_tput=100.0,
+        current_best={"action": "explore", "tput": 150.0},
+        isl=16,
+        osl=16,
+        conc=1,
+    )
+    pin = _resolve_gpu_pin(recipe_envs=recipe_env, environ={})
+    gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2)
+    gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=pin)
+    assert gpu_ids == ("0,1" if pin_var == "ROCR_VISIBLE_DEVICES" else "4,5")
+    assert gpu_ids_space == ("logical" if pin_var == "ROCR_VISIBLE_DEVICES" else "absolute")
+    geak_dir = tmp_path / "geak"
+    bench = _bench_script(geak_dir)
+    if identity_source == "handoff":
+        handoff = {
+            "schema_version": 3,
+            "model_path": "/models/validated",
+            "framework": "vllm",
+            "tp": 2,
+            "gpu_pin": pin,
+            "gpu_ids": gpu_ids,
+            "gpu_ids_space": gpu_ids_space,
+            "launch_recipe": str(recipe),
+            "baseline_env_spec": coord.build_env_spec(),
+            "bench_client": "native",
+            "workload": {"isl": 16, "osl": 16, "conc": 1},
+        }
+        (geak_dir / "handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "bench_script": str(bench),
+        "output_dir": str(geak_dir),
+        "throughput_speedup": 2.0,
+        "bench_client": "native",
+        "accepted_config": {"flags": "--max-num-batched-tokens 4096", "env": ""},
+        "validated_regimes": [{"isl": 16, "osl": 16, "conc": 1}],
+    }
+    captured: dict[str, str] = {}
+
+    def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        captured.update(kwargs["env"])
+        out = Path(kwargs["env"]["OUT_DIR"])
+        (out / "bench_summary.json").write_text(json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
+    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+
+    assert captured["GPU"] == gpu_ids
+    if gpu_ids_space == "logical":
+        assert captured["ROCR_VISIBLE_DEVICES"] == "4,5"
+    else:
+        assert "ROCR_VISIBLE_DEVICES" not in captured
+    assert (captured["MODEL"], captured["BACKEND"], captured["TP"]) == ("/models/validated", "vllm", "2")
+    assert outcome["validated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_geak_replay_uses_existing_client_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bench_client: str,
+) -> None:
+    bench = _bench_script(tmp_path)
+    captured: dict[str, str] = {}
+
+    def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        captured.update(kwargs["env"])
+        out = Path(captured["OUT_DIR"])
+        (out / "bench_summary.json").write_text(json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
+    outcome = await sweep_via_geak(
+        result={"status": "ok", "bench_script": str(bench), "bench_client": bench_client, "accepted_config": {}},
+        handoff={
+            "model_path": "/models/validated",
+            "framework": "sglang",
+            "tp": 1,
+            "gpu_ids": "4",
+            "gpu_ids_space": "absolute",
+            "bench_client": bench_client,
+        },
+        conc_values=[4],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+        repeats=3,
+    )
+
+    assert captured["BENCH_CLIENT"] == bench_client
+    assert captured["REPEATS"] == "3"
+    assert outcome["status"] == "succeeded"
+    assert outcome["promotion_measurement"]["output_throughput"] == 200.0
+
+
 def test_point_from_variant_defaults_conc_zero_on_bad_env() -> None:
     """A non-numeric CONC env coerces the row's ``conc`` to 0 rather than raising."""
     v = VariantResult(
@@ -271,18 +401,16 @@ def test_backend_results_dir_keyed_and_single_subdir(tmp_path: Path) -> None:
 
 
 def test_coerce_extra_envs_skips_malformed_tokens() -> None:
-    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the
-    shell-string and token-list shapes rather than emitting junk keys."""
+    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the shell-string and token-list shapes rather than emitting junk keys."""
     # Shell-string shape: leading separator -> empty token; ``=v`` -> empty key.
     assert coerce_extra_envs("; =v FOO=1") == {"FOO": "1"}
-    # Token-list shape: dict item with a None key, a token without ``=``, a
-    # non-string item, and an empty-key ``=v`` are all skipped.
+    # Token-list shape: dict item with a None key, a token without ``=``, a non-string item, and an empty-key ``=v``
+    # are all skipped.
     assert coerce_extra_envs([{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]) == {"A": "1", "B": "2"}
 
 
 def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:
-    """The GEAK handoff recovers a flag value even when the server-args string is
-    not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
+    """The GEAK handoff recovers a flag value even when the server-args string is not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
     got = _parse_server_arg_value('--max-model-len 4096 "unbalanced', "--max-model-len")
     assert got == "4096"
     # ``--flag=value`` form is also handled.

@@ -859,8 +859,7 @@ def test_invalid_probe_payload_reports_a_contract_error():
 
 
 def test_untracked_fork_recovers_and_still_injects(tmp_path):
-    """End to end: an untracked fork remote must not lose the feature when the
-    source path can prove which upstream it belongs to."""
+    """End to end: an untracked fork remote must not lose the feature when the source path can prove which upstream it belongs to."""
     (tmp_path / "csrc").mkdir()
     (tmp_path / "csrc" / "k.cu").write_text("// kernel")
     client = _PathIndexClient(
@@ -924,8 +923,7 @@ def test_probe_contract_error_is_reported_without_starting_discovery(tmp_path):
 
 
 def test_probe_requests_are_counted_as_http_calls(tmp_path):
-    """Probing is real traffic. Omitting it understates the cost of the
-    untracked-fork path by one request per tracked repo."""
+    """Probing is real traffic."""
     client = _PathIndexClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
     result = collect_references(client=client, **_fork_workspace(tmp_path))
@@ -958,14 +956,7 @@ class _BudgetRecordingClient(_PathIndexClient):
 
 
 def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_path):
-    """Preflight and repository listing spend the caller's seconds too.
-
-    The finding is which stages a budget admits, and the observable for that
-    is the requests that were issued -- not how long the call took. Reading it
-    off the wall clock made this a race the test lost on a loaded runner: real
-    sleeps overshoot, so a pass depended on the scheduler rather than on the
-    deadline being honoured. The clock is driven instead, one stage at a time.
-    """
+    """Preflight and repository listing spend the caller's seconds too."""
 
     class _Body:
         def __init__(self, payload):
@@ -997,9 +988,8 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
             return _Body([{"repo_name": "ROCm/aiter", "is_active": True}])
         return _Body([])
 
-    # Both modules read the deadline off their own ``time`` import: refs sets
-    # it, search subtracts from it, and a clock patched in one of them only
-    # would leave the other reading the real one.
+    # Both modules read the deadline off their own ``time`` import: refs sets it, search subtracts from it, and a
+    # clock patched in one of them only would leave the other reading the real one.
     for module in ("pr_monitor_refs", "pr_monitor_search"):
         monkeypatch.setattr(f"kernelforge.knowledge.{module}.time.monotonic", _now)
     monkeypatch.setattr("kernelforge.knowledge.pr_monitor_client.urllib.request.urlopen", slow)
@@ -1012,9 +1002,8 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
         budget_sec=1.0,
     )
 
-    # Preflight and the repository listing spend the whole budget between them,
-    # so nothing is left to probe a path with. A lookup that charged the caller
-    # only for the path probes would have issued a third request here.
+    # Preflight and the repository listing spend the whole budget between them, so nothing is left to probe a path
+    # with.
     assert requested == ["healthz", "repos"]
 
 

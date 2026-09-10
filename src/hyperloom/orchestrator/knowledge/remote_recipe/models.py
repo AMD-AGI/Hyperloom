@@ -68,14 +68,7 @@ def _scope_int(value: Any) -> int | None:
 
 @dataclass(frozen=True)
 class RecipeScope:
-    """The partition a Recipe belongs to in the KB Store.
-
-    A recipe replays a kernel stack produced by one optimizer at one workload
-    shape, so champions are ranked per scope: a Forge result at TP8 must not
-    warm-start a GEAK run at TP4. Every scoped read and write carries these
-    five fields, and a View that comes back describing a different scope is
-    rejected rather than replayed.
-    """
+    """The partition a Recipe belongs to in the KB Store."""
 
     kernel_optimizer: str
     tp: int
@@ -85,21 +78,10 @@ class RecipeScope:
 
     @classmethod
     def from_state(cls, state: Any) -> "RecipeScope":
-        """Build the scope this session writes to and reads from.
-
-        Args:
-            state: SharedState carrying the optimizer and workload shape.
-
-        Returns:
-            The validated scope.
-
-        Raises:
-            RemoteRecipeValidationError: The optimizer is unknown or the
-                workload shape is incomplete.
-        """
+        """Build the scope this session writes to and reads from."""
         optimizer = str(getattr(state, "kernel_optimizer", "") or "").strip().lower()
-        # CLI bootstrap records an explicitly enabled Forge backend as
-        # "native"; KB Store uses the public backend name "forge".
+        # CLI bootstrap records an explicitly enabled Forge backend as "native"; KB Store uses the public backend name
+        # "forge".
         backend = "forge" if optimizer in {"native", "forge", "kernel_agent_forge"} else optimizer
         scope = cls(
             kernel_optimizer=backend,
@@ -112,12 +94,7 @@ class RecipeScope:
         return scope
 
     def validate(self) -> None:
-        """Reject a scope the KB Store cannot partition on.
-
-        Raises:
-            RemoteRecipeValidationError: The optimizer is not one the Store
-                indexes, or a workload dimension is missing.
-        """
+        """Reject a scope the KB Store cannot partition on."""
         if self.kernel_optimizer not in {"forge", "geak"}:
             raise RemoteRecipeValidationError(f"unsupported kernel_optimizer: {self.kernel_optimizer!r}")
         if min(self.tp, self.conc, self.isl, self.osl) <= 0:
