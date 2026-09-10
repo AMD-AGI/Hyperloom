@@ -1285,6 +1285,10 @@ class KernelEventRecorder:
     def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
         """Replay what GEAK tried, from the journey it emits."""
         parsed = _as_dict(journey)
+        prior = {
+            row.get("kernel_id"): _as_dict(row.get("e2e"))
+            for row in event_parts((SECTION_GEAK_ATTEMPT,), event=self._event_id).get(SECTION_GEAK_ATTEMPT) or []
+        }
         for ordinal, run in enumerate(_as_list(parsed.get("discovery_runs"))):
             row = _as_dict(run)
             if not row:
@@ -1310,6 +1314,9 @@ class KernelEventRecorder:
             dispatch = _as_dict(row.get("dispatch"))
             backend = _as_dict(row.get("backend_result"))
             e2e = _as_dict(row.get("e2e"))
+            # Re-reading the producer's file cannot undo the coordinator's verdict.
+            if prior.get(kernel_id, {}).get("rejection_reason") and not e2e.get("rejection_reason"):
+                e2e = prior[kernel_id]
             verification = _as_dict(backend.get("verification"))
             self._geak_sink.record(
                 SECTION_GEAK_ATTEMPT,
@@ -1352,6 +1359,11 @@ class KernelEventRecorder:
                         "e2e_gain_pct": _float_or_none(e2e.get("e2e_gain_pct")),
                         "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
                         "decision": _text(e2e.get("decision")),
+                        "self_reported_e2e_gain_pct": _float_or_none(e2e.get("self_reported_e2e_gain_pct")),
+                        "rejection_reason": _text(e2e.get("rejection_reason")),
+                        "revalidation_measured_tput": _float_or_none(e2e.get("revalidation_measured_tput")),
+                        "revalidation_current_best_tput": _float_or_none(e2e.get("revalidation_current_best_tput")),
+                        "revalidation_provenance": _text(e2e.get("revalidation_provenance")),
                         "patch_path": _text(e2e.get("patch_path")),
                         "target_file": _text(e2e.get("target_file")),
                     }
@@ -1361,6 +1373,47 @@ class KernelEventRecorder:
                 row_type=ROW_GEAK_ATTEMPT,
                 natural_ids=kernel_id,
             )
+        _republish_closed_event(self._event_id)
+
+    def reject_geak_attempts(
+        self,
+        *,
+        measured_tput: float,
+        current_best_tput: float,
+        provenance: str,
+        rejection_reason: str,
+    ) -> None:
+        """Revoke this event's imported KEEPs even if the producer file is gone."""
+        rows = event_parts((SECTION_GEAK_ATTEMPT,), event=self._event_id).get(SECTION_GEAK_ATTEMPT) or []
+        for row in rows:
+            e2e = _as_dict(row.get("e2e"))
+            if not (
+                str(e2e.get("decision") or "").upper() in {"KEEP", "ADOPTED"}
+                or e2e.get("integrated")
+                or e2e.get("validated")
+            ):
+                continue
+            self._geak_sink.record(
+                SECTION_GEAK_ATTEMPT,
+                {
+                    **row,
+                    "e2e": {
+                        **e2e,
+                        "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
+                        "revalidation_measured_tput": measured_tput,
+                        "revalidation_current_best_tput": current_best_tput,
+                        "revalidation_provenance": provenance,
+                        "rejection_reason": rejection_reason,
+                        "decision": "REVERT",
+                        "integrated": False,
+                        "validated": False,
+                        "e2e_gain_pct": None,
+                    },
+                },
+                row_type=ROW_GEAK_ATTEMPT,
+                natural_ids=str(row["kernel_id"]),
+            )
+        _republish_closed_event(self._event_id)
 
     def record_geak_claim(self, pending: dict[str, Any] | None, *, specs: Any = None) -> None:
         """Record what GEAK reported about itself, before any re-measurement."""
@@ -1487,6 +1540,7 @@ class KernelEventRecorder:
                 }
             },
         )
+        _republish_closed_event(self._event_id)
 
     # ---- conclusion ------------------------------------------------------
 

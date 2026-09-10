@@ -3615,7 +3615,8 @@ class WritebackCollaborator:
         if anchor_accepted:
             from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
-            self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
+            if not is_revalidation or "benchmark_script" in task_params:
+                self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
             self.shared_state.baseline_perf = perf_snapshot_from_mapping(result) or {}
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
@@ -4235,19 +4236,28 @@ class WritebackCollaborator:
                     decision = "no_promote"
                 native_rejection = next(
                     (
-                        entry["reason"]
+                        str(entry.get("reason") or "native_gate_rejected")
                         for entry in result.get("per_variant_outcomes") or []
                         if isinstance(entry, Mapping)
                         and entry.get("outcome") == "REVERT"
-                        and entry.get("reason")
-                        in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
+                        and (
+                            any(
+                                isinstance(gate, Mapping)
+                                and gate.get("gate") in {"graded_axes", "accuracy"}
+                                and gate.get("passed") is False
+                                for gate in entry.get("gates") or []
+                            )
+                            or (
+                                "gates" not in entry
+                                and entry.get("reason")
+                                in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
+                            )
+                        )
                         and (not expected_hash or entry.get("fingerprint") == expected_hash)
                     ),
                     "",
                 )
-                if native_rejection:
-                    decision = native_rejection
-                elif (
+                if (
                     measured > 0
                     and got_hash == expected_hash
                     and (not baseline_grade.comparable or not current_grade.comparable)
@@ -4276,6 +4286,8 @@ class WritebackCollaborator:
                             got_digest,
                         )
                         decision = "fallback"
+                if native_rejection:
+                    decision = "no_promote"
                 ps = (
                     self.shared_state.geak_result
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -4304,13 +4316,21 @@ class WritebackCollaborator:
                     if not has_prior_geak_e2e:
                         if not ps:
                             decision = "no_material"
-                        elif not _geak_result_has_material(
-                            ps,
-                            prev_best_flags=str(cb_now.get("extra_server_args") or ""),
-                            prev_best_envs=cb_now.get("extra_envs") or {},
-                            prev_best_controls=cb_now,
-                        ):
-                            decision = "no_material"
+                        else:
+                            try:
+                                _accepted_config_as_variant(ps.get("accepted_config"))
+                                has_material = _geak_result_has_material(
+                                    ps,
+                                    prev_best_flags=str(cb_now.get("extra_server_args") or ""),
+                                    prev_best_envs=cb_now.get("extra_envs") or {},
+                                    prev_best_controls={**cb_now, **self._current_best_launch_config()},
+                                )
+                            except ValueError as exc:
+                                decision = "no_promote"
+                                native_rejection = f"invalid_accepted_config: {exc}"
+                            else:
+                                if not has_material:
+                                    decision = "no_material"
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
                 pending_tid = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
                 from ..phases.geak_rebench import geak_harness_replays_workload, geak_rebench_should_apply_result
@@ -5954,17 +5974,21 @@ class WritebackCollaborator:
         # deltas. Both retain the current stack's environment removal controls.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
-        ps_controls = _accepted_config_controls(ps_cfg)
-        if ps_controls.get("args_mode") == "replace" and "remove_args" not in ps_cfg:
-            inherited_removals = self._current_best_launch_config()["remove_args"]
-            if inherited_removals:
-                ps_controls["remove_args"] = inherited_removals
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
         # a result carrying an accepted, positive-delta kernel is revalidated
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
-        ps_has_material = ps_admissible and _geak_result_has_material(ps)
+        try:
+            ps_controls = _accepted_config_controls(
+                ps_cfg, inherited_remove_args=self._current_best_launch_config()["remove_args"]
+            )
+            ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
+            ps_has_material = ps_admissible and _geak_result_has_material(ps)
+        except ValueError as exc:
+            self._reject_geak_promotion(ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.shared_state.save(self.session_dir)
+            return {"skipped": True, "reason": "geak_invalid_config"}
         if ps_admissible and (
             ps_cfg.get("flags")
             or ps_cfg.get("env")
@@ -5975,12 +5999,6 @@ class WritebackCollaborator:
         ):
             from ..actions.executors._proposal_identity import effective_fingerprint
 
-            try:
-                ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
-            except ValueError as exc:
-                self._reject_geak_promotion(ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
-                self.shared_state.save(self.session_dir)
-                return {"skipped": True, "reason": "geak_invalid_config"}
             # An overlay that cannot load installs nothing: the server launches
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries

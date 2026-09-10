@@ -679,6 +679,77 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["both_axes_regressed (intvty 100.0->50.0 tput 1000.0->900.0)", "new gate wording"])
+async def test_structured_native_rejection_prevents_fresh_fallback(tmp_path, reason):
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.geak_result = _ok_result(final=150.0)
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+
+    async def must_not_replay(**_kwargs):
+        pytest.fail("a conclusive native graded-axis rejection must not invoke fallback")
+
+    coord._validate_geak_via_geak_harness = must_not_replay
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "status": "succeeded",
+            "output_throughput": None,
+            "winners": [],
+            "per_variant_outcomes": [
+                {
+                    "outcome": "REVERT",
+                    "reason": reason,
+                    "fingerprint": "abc",
+                    "gates": [{"gate": "graded_axes", "passed": False, "reason": reason}],
+                }
+            ],
+        },
+        task=_revalidate_task(expected_hash="abc"),
+    )
+    assert coord.shared_state.current_best["tput"] == 110.0
+    assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert coord.shared_state.geak_result["revalidation_error"] == reason
+
+
+@pytest.mark.asyncio
+async def test_complete_return_with_inherited_removals_cannot_credit_measurement_noise(tmp_path):
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    state = coord.shared_state
+    state.current_best.update(
+        {
+            "extra_server_args": "--mem-fraction-static 0.95",
+            "args_mode": "replace",
+            "remove_args": ["--disable-radix-cache"],
+        }
+    )
+    state.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--mem-fraction-static 0.95",
+            "env_map": {},
+            "args_mode": "replace",
+        },
+    }
+    state.resume_pending_revalidation = True
+    state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "status": "succeeded",
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=_revalidate_task(expected_hash="abc"),
+    )
+    assert state.current_best["tput"] == 110.0
+    assert state.geak_result["revalidation_status"] == "no_material"
+    assert state.cumulative_gain_validated == 0.0
+    assert not state.optimization_stack
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome,reason,fingerprint",
     [("FAILED", "no_measurement", "abc"), ("REVERT", "accuracy_drop", "different")],

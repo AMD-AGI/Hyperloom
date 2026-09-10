@@ -34,6 +34,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.perf_metric import (
+    agentx_enabled as agentx_enabled,
     intvty_grading_enabled,
     is_agentx_mode,
     parse_intvty_noise_pct,
@@ -54,7 +55,7 @@ from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
-from ._grid_runner import (
+from ._grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -116,7 +117,6 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # was attempted and did not apply. Distinct from "never attempted": patching can
 # be disabled for an image that already ships the patch.
 _TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
-_AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
@@ -141,12 +141,6 @@ def _first_env(names: tuple[str, ...]) -> str:
         if value:
             return value
     return ""
-
-
-def agentx_enabled(env: dict[str, str] | None = None) -> bool:
-    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    raw = (env or os.environ).get("HYPERLOOM_AGENTX", "")
-    return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
 
 
 def agentx_active(shared_state: Any = None) -> bool:
@@ -403,7 +397,7 @@ def apply_agentx_switch(
     # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
     # layers stay consistent. AgentX-only: this function returned early above when AgentX
     # is off, so the default (synthetic) cap is untouched. The import is function-local
-    # to avoid a circular dependency (``baseline`` imports this module at load time).
+    # so standalone workload materialization uses the same timeout derivation.
     #
     # max(), never assignment: this is the ONLY place in the AgentX path that
     # writes an existing cap, and a bare assignment LOWERS every config that
@@ -414,7 +408,7 @@ def apply_agentx_switch(
     # module exists to prevent, introduced by the fix for it. A declared cap is a
     # measured statement about that config; the derivation is a floor under it,
     # not a replacement for it.
-    from hyperloom.orchestrator.actions.executors.baseline import (
+    from ._agentx_timeouts import (
         agentx_baseline_timeout_sec,
         agentx_warmup_grace_sec,
     )

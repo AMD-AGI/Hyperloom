@@ -458,7 +458,7 @@ def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
 
 def test_the_derivation_does_not_narrate_once_per_call_site(monkeypatch, caplog):
     """A ladder resolves this for every rung at several sites; one line each."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.actions.executors import _agentx_timeouts as bl
 
     _on(monkeypatch)
     monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)

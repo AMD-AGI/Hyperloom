@@ -440,6 +440,20 @@ def test_save_no_current_setting_when_no_best(tmp_path):
     assert not (sd / "current_setting.sh").exists()
 
 
+@pytest.mark.parametrize("invalid", [{"final_overlay": "/missing-overlay"}, {"unset_envs": ["PYTHONPATH"]}])
+def test_failed_current_setting_export_removes_stale_launcher_but_preserves_state(tmp_path, caplog, invalid):
+    state = SharedState(session_id="invalid-export", framework="sglang")
+    state.current_best = {"tput": 100.0, "extra_server_args": "--tp 8", "extra_envs": {"SGLANG_USE_AITER": "1"}}
+    state.save(tmp_path)
+    launcher = tmp_path / "current_setting.sh"
+    assert launcher.is_file()
+    state.current_best.update(invalid)
+    state.save(tmp_path)
+    assert not launcher.exists()
+    assert SharedState.load_or_init(tmp_path).current_best == state.current_best
+    assert "current_setting.sh render failed" in caplog.text
+
+
 def test_save_current_setting_includes_workload_identity(tmp_path, monkeypatch):
     """current_setting.sh emits TP, MAX_MODEL_LEN, GPU_TYPE when set."""
     monkeypatch.setenv("FRAMEWORK", "vllm")

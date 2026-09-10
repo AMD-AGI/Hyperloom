@@ -17,8 +17,6 @@ from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
 
 def test_split_env_and_flags_mixed_tokens() -> None:
-    # Only ``-``-prefixed tokens land in ``flags``; a bare value token following a space-form flag is dropped
-    # (equals-form is the only way a value survives).
     envs, flags = ch._split_env_and_flags("FOO=1 BAR=baz --chunked-prefill-size=2048 --disable-radix-cache")
     assert envs == {"FOO": "1", "BAR": "baz"}
     assert flags == "--chunked-prefill-size=2048 --disable-radix-cache"
@@ -69,8 +67,48 @@ def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
 
 def test_empty_accepted_env_map_does_not_restore_raw_assignments() -> None:
     config = {"env": "RUN_EVAL=false SGLANG_USE_AITER=1 --disable-cuda-graph", "env_map": {}}
-    assert ch._accepted_config_as_variant(config) == ("", {})
-    assert not ch._geak_result_has_material({"accepted_config": config}, prev_best_envs={"RUN_EVAL": "true"})
+    assert ch._accepted_config_as_variant(config) == ("--disable-cuda-graph", {})
+    assert ch._geak_result_has_material({"accepted_config": config}, prev_best_envs={"RUN_EVAL": "true"})
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("unparsed", [False, True])
+def test_legacy_flags_and_discarded_text_are_reported(caplog, mapped, unparsed):
+    config = {"env": "SGLANG_USE_AITER=1 --disable-cuda-graph"}
+    if mapped:
+        config["env_map"] = {}
+    if unparsed:
+        config["env_unparsed"] = ["discarded prose"]
+    assert ch._accepted_config_as_variant(config) == (
+        "--disable-cuda-graph",
+        {} if mapped else {"SGLANG_USE_AITER": "1"},
+    )
+    assert "retaining them alongside accepted_config.flags" in caplog.text
+    assert ("reports discarded source text" in caplog.text) == unparsed
+    assert "using only validated env_map" not in caplog.text
+
+
+@pytest.mark.parametrize("artifact", ["accepted_kernels", "accepted_heads", "final_overlay", "final_patch"])
+def test_invalid_config_does_not_hide_artifact_materiality(artifact):
+    assert ch._geak_result_has_material({artifact: ["product"], "accepted_config": {"env_map": None}})
+
+
+def test_invalid_config_is_not_reported_as_no_material():
+    with pytest.raises(ValueError, match="env_map"):
+        ch._geak_result_has_material({"accepted_config": {"env_map": None}})
+
+
+@pytest.mark.parametrize("removals", [None, [], ["--disable-radix-cache"]])
+def test_complete_config_materiality_inherits_omitted_removals(removals):
+    config = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": "replace"}
+    prior = {"args_mode": "replace", "remove_args": ["--disable-radix-cache"]}
+    if removals is not None:
+        config["remove_args"] = removals
+    assert ch._geak_result_has_material(
+        {"accepted_config": config},
+        prev_best_flags=config["flags"],
+        prev_best_controls=prior,
+    ) == (removals == [])
 
 
 def test_accepted_env_map_preserves_values_and_filters_loader_keys() -> None:
@@ -89,6 +127,19 @@ def test_legacy_accepted_config_still_parses_env_and_flags() -> None:
     assert ch._accepted_config_as_variant(
         {"flags": "--mem-fraction-static 0.95", "env": "SGLANG_USE_AITER=1 --disable-radix-cache"}
     ) == ("--mem-fraction-static 0.95 --disable-radix-cache", {"SGLANG_USE_AITER": "1"})
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_legacy_flags_keep_values_and_literal_json(mapped):
+    import shlex
+
+    value = '{"path": "a b", "pattern": "x=y"}'
+    config = {"env": shlex.join(["SGLANG_USE_AITER=1", "--limit", "64", "--config", value])}
+    if mapped:
+        config["env_map"] = {}
+    flags, envs = ch._accepted_config_as_variant(config)
+    assert shlex.split(flags) == ["--limit", "64", "--config", value]
+    assert envs == ({} if mapped else {"SGLANG_USE_AITER": "1"})
 
 
 # ── _geak_sweep_measured_tput ─────────────────────────────────────────────

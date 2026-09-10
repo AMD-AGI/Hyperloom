@@ -153,14 +153,23 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a source that cannot be read or shell-parsed."""
+    """Lift static launch settings from an untrusted local or remote recipe.
+
+    Executable overlay imports require resuming the owning session or explicitly
+    running its exported launcher; a recipe comment cannot authorize Python code.
+    """
     text = _read_source(source)
-    controls = {}
+    controls: dict[str, Any] = {}
     for raw in text.splitlines():
         if raw.startswith(_CONTROLS_PREFIX):
             if controls:
                 raise ValueError("duplicate reference launch controls")
             controls = _validate_launch_controls(json.loads(raw[len(_CONTROLS_PREFIX) :]))
+            if controls.get("overlay_pythonpath"):
+                raise ValueError(
+                    "reference overlay_pythonpath imports executable code; resume the owning session "
+                    "or review and run the exported launcher directly"
+                )
     envs = _extract_envs(text)
     line = _find_entrypoint_line(text, framework)
     if not line:

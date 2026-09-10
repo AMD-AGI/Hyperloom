@@ -481,8 +481,6 @@ def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("invalid", ["missing", "empty_manifest", "bad_manifest", "path_list"])
 def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
-    import json
-
     overlay = tmp_path / "overlay"
     overlay.mkdir()
     if invalid != "missing":
@@ -497,3 +495,29 @@ def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
     source = _write(tmp_path, "# hyperloom-launch-controls: " + json.dumps({"overlay_pythonpath": value}))
     with pytest.raises(ValueError, match="overlay_pythonpath"):
         parse_reference_script(source, framework="sglang")
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_untrusted_reference_cannot_enable_loadable_overlay(tmp_path, monkeypatch, remote):
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("raise RuntimeError('must not be imported')")
+    text = render_reference_script(framework="sglang", server_args="--tp 8", overlay_pythonpath=str(overlay))
+    if remote:
+        source = "https://example.invalid/recipe.sh"
+        monkeypatch.setattr(
+            "hyperloom.inference_optimizer.baseline_comparison.inferencex_client._fetch_raw",
+            lambda _source: text.encode(),
+        )
+    else:
+        source = _write(tmp_path, text)
+    with pytest.raises(ValueError, match="imports executable code"):
+        parse_reference_script(source, framework="sglang")
+
+
+def test_nonexecutable_launch_controls_roundtrip(tmp_path):
+    controls = {"unset_envs": ["SGLANG_USE_AITER"], "remove_args": ["--disable-cuda-graph"], "args_mode": "replace"}
+    text = render_reference_script(framework="sglang", server_args="--tp 8", **controls)
+    recipe = parse_reference_script(_write(tmp_path, text), framework="sglang")
+    assert recipe.launch_controls == controls
+    assert recipe.server_args == "--tp 8"

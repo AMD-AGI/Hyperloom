@@ -1253,7 +1253,8 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_exported_reference_controls_survive_reimport_and_child_launch(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_overlay", [False, True])
+async def test_exported_reference_controls_reimport_requires_static_settings(tmp_path, monkeypatch, with_overlay):
     from types import SimpleNamespace
 
     from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
@@ -1273,15 +1274,21 @@ async def test_exported_reference_controls_survive_reimport_and_child_launch(tmp
         "unset_envs": ["SGLANG_REMOVE_ME", "SGLANG_REASSIGN"],
         "remove_args": ["--disable-radix-cache"],
         "args_mode": "replace",
-        "final_overlay": str(overlay),
     }
+    if with_overlay:
+        state.current_best["final_overlay"] = str(overlay)
     state.save(session)
     monkeypatch.setenv("FRAMEWORK", "sglang")
+    if with_overlay:
+        with pytest.raises(SystemExit) as exc:
+            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
+        assert exc.value.code == 2
+        return
     args, envs, model, source, controls = _resolve_reference_recipe(
         SimpleNamespace(reference_script=str(session / "current_setting.sh"))
     )
     assert "PYTHONPATH" not in envs
-    assert controls["overlay_pythonpath"] == str(overlay)
+    assert "overlay_pythonpath" not in controls
     imported = SharedState(
         framework="sglang",
         reference_server_args=args,
@@ -1341,7 +1348,7 @@ async def test_exported_reference_controls_survive_reimport_and_child_launch(tmp
         assert "--mem-fraction-static 0.7" not in child["EXTRA_SGLANG_ARGS"]
         assert child["SGLANG_REMOVE_ME"] is None
         assert child["SGLANG_REASSIGN"] == "accepted"
-        assert child["OVERLAY_OBSERVED"] == "loaded"
+        assert child["OVERLAY_OBSERVED"] is None
 
 
 @pytest.fixture(autouse=False)

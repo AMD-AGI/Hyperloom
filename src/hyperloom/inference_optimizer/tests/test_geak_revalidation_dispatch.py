@@ -2140,7 +2140,10 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["geak", "resume"])
-async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp_path, monkeypatch, source) -> None:
+@pytest.mark.parametrize("enablement_revalidation", [False, True])
+async def test_internal_stack_rebench_preserves_baseline_script(
+    coordinator, tmp_path, monkeypatch, source, enablement_revalidation
+) -> None:
     import yaml
 
     from hyperloom.orchestrator.actions.executors import ExploreExecutor
@@ -2162,6 +2165,13 @@ async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp
         )
     assert state.baseline_tput == 100.0
     assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
+    if enablement_revalidation:
+        task = await coordinator.tasks.create(
+            kind="baseline", params={"reason": "enablement_eval_revalidation"}, idempotency_key="revalidate-baseline"
+        )
+        await coordinator._promote_to_shared_state(
+            "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task
+        )
     state.save(coordinator.session_dir)
     coordinator.shared_state = state = type(state).load_or_init(coordinator.session_dir)
     assert state.baseline_benchmark_script == "sglang_custom.sh"
@@ -2204,7 +2214,12 @@ async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp
 
 
 @pytest.mark.asyncio
-async def test_invalid_handoff_configuration_never_launches_geak(coordinator, monkeypatch):
+@pytest.mark.parametrize("mode", ["synthetic", "agentx"])
+@pytest.mark.parametrize("settled", [False, True])
+async def test_invalid_handoff_configuration_never_launches_geak(coordinator, monkeypatch, mode, settled):
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
     def invalid_spec():
         raise ValueError("unserializable launch configuration")
 
@@ -2213,6 +2228,35 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
 
     monkeypatch.setattr(coordinator, "build_env_spec", invalid_spec)
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    coordinator.shared_state.benchmark_mode = mode
+    previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
+    if settled:
+        coordinator.shared_state.geak_result = dict(previous)
+    recorder = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK)
+    assert recorder is not None
+    recorder.begin()
+    coordinator._kernel_timeline_recorder = recorder
     await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
-    assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
+    if settled:
+        assert coordinator.shared_state.geak_result == previous
+    else:
+        assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
+    event = next(row for row in read_timeline_events(coordinator.session_dir) if row["type"] == "kernel")
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["error_class"] == "invalid_env_spec"
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", [{"env_map": None}, {"unset_envs": ["PYTHONPATH"]}])
+async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coordinator, config):
+    coordinator.shared_state.geak_result = {
+        "status": "ok",
+        "accepted_config": config,
+        "accepted_kernels": ["real_kernel"],
+    }
+    result = await coordinator._enqueue_internal_stack_rebench(reason="invalid_config")
+    assert result == {"skipped": True, "reason": "geak_invalid_config"}
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert "accepted_config" in coordinator.shared_state.geak_result["revalidation_error"]
     assert not await coordinator.tasks.queued()

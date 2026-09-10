@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_external_env_key,
+    is_allowed_variant_env_key,
+)
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     effective_mask_tokens,
@@ -650,26 +654,41 @@ def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
     """Split a bench-style config string into (env dict, flags string)."""
     envs: dict[str, str] = {}
     flag_tokens: list[str] = []
+    quoted = True
     try:
         tokens = shlex.split(str(env_str or ""))
     except ValueError:
         tokens = str(env_str or "").split()
+        quoted = False
+    expects_value = False
     for tok in tokens:
         if tok.startswith("-"):
             flag_tokens.append(tok)
-        elif "=" in tok:
+            expects_value = "=" not in tok
+        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             k, v = tok.split("=", 1)
-            if k:
-                envs[k] = v
-    return envs, " ".join(flag_tokens).strip()
+            envs[k] = v
+            expects_value = False
+        elif expects_value:
+            flag_tokens.append(tok)
+            expects_value = False
+    return envs, shlex.join(flag_tokens) if quoted else " ".join(flag_tokens)
 
 
 def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     """Normalize a GEAK ``accepted_config`` into the ``(args, envs)`` a variant runs."""
     cfg = cfg if isinstance(cfg, dict) else {}
-    if cfg.get("env_unparsed"):
-        log.warning("GEAK accepted_config.env_unparsed reports discarded source text; using only validated env_map")
+    _accepted_config_controls(cfg)
     flags = str(cfg.get("flags") or "").strip()
+    legacy_envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
+    if cfg.get("env_unparsed"):
+        log.warning("GEAK accepted_config.env_unparsed reports discarded source text")
+        from ..actions.executors._grid_server_args import remove_server_args
+
+        extra_flags = remove_server_args(extra_flags, cfg["env_unparsed"])
+    if extra_flags:
+        log.warning("GEAK accepted_config.env contains server flags; retaining them alongside accepted_config.flags")
+        flags = (flags + " " + extra_flags).strip()
     if "env_map" in cfg:
         envs = cfg["env_map"]
         if not isinstance(envs, dict) or any(
@@ -681,24 +700,32 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
         ):
             raise ValueError("GEAK accepted_config.env_map must map strings to strings")
     else:
-        envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
-        if extra_flags:
-            flags = (flags + " " + extra_flags).strip()
+        envs = legacy_envs
     envs, _dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
     return flags, envs
 
 
-def _accepted_config_controls(cfg: Any) -> dict[str, Any]:
+def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) -> dict[str, Any]:
     """Normalize explicit GEAK launch controls; unmarked flags remain a delta.
 
     ``args_mode=replace`` attests that ``flags`` is complete. Neither a result
     schema version nor an empty environment mapping carries that meaning.
     Environment removals precede current assignments; an assignment re-enables
     the name even when inherited controls still list it in ``unset_envs``.
+    Legacy flag deltas similarly re-enable removed arguments. Complete flags
+    are snapshots subject to the final removals; GEAK clears superseded removal
+    specs before returning that snapshot. An omitted removal list inherits the
+    prior stack's controls, while an explicit empty list clears them.
     """
     from ..actions.executors._proposal_identity import controls_of, normalize_proposal
 
-    return controls_of(normalize_proposal(cfg if isinstance(cfg, dict) else {}))
+    cfg = cfg if isinstance(cfg, dict) else {}
+    controls = controls_of(normalize_proposal(cfg))
+    if any(not is_allowed_external_env_key(name) for name in controls.get("unset_envs", [])):
+        raise ValueError("GEAK accepted_config.unset_envs contains a forbidden environment name")
+    if controls.get("args_mode") == "replace" and "remove_args" not in cfg and inherited_remove_args:
+        controls["remove_args"] = list(inherited_remove_args)
+    return controls
 
 
 def _geak_revalidation_decision(
@@ -744,11 +771,6 @@ def _geak_result_has_material(
 
     if not isinstance(result, dict) or not result:
         return True
-    try:
-        accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
-    except ValueError as exc:
-        log.warning("GEAK result has invalid accepted_config: %s", exc)
-        return False
     if _has_nonempty(result.get("accepted_kernels")):
         return True
     if _has_nonempty(result.get("accepted_heads")):
@@ -757,7 +779,11 @@ def _geak_result_has_material(
         return True
     if str(result.get("final_patch") or "").strip():
         return True
-    controls = _accepted_config_controls(result.get("accepted_config"))
+    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+    prior_controls = _accepted_config_controls(prev_best_controls)
+    controls = _accepted_config_controls(
+        result.get("accepted_config"), inherited_remove_args=prior_controls.get("remove_args")
+    )
     # A missing / all-empty accepted_config carries no config optimization; a
     # bare fingerprint mismatch against a non-empty current_best is NOT material
     # (promoting it would wipe the existing config to empty).

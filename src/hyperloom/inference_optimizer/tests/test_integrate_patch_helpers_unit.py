@@ -75,6 +75,30 @@ def test_resolve_framework_root_explicit_dir(tmp_path):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
+def test_recorded_roots_with_external_localization_require_full_resolution(tmp_path):
+    workspace = tmp_path / "specialist"
+    workspace.mkdir()
+    authored = workspace / "authored.patch"
+    authored.touch()
+    localization = tmp_path / "localization.patch"
+    localization.touch()
+    payload = {"patch_roots": {str(authored): "/aiter", str(localization): "/aiter"}}
+    assert ip._sole_patch_root(payload, [authored, localization], specialist_workspace=workspace) is None
+
+
+def test_recorded_root_with_nul_declines_fast_path(tmp_path):
+    patch = tmp_path / "a.patch"
+    patch.touch()
+    assert (
+        ip._sole_patch_root(
+            {"patch_roots": {"a.patch": "/bad\0root"}},
+            [patch],
+            specialist_workspace=tmp_path,
+        )
+        is None
+    )
+
+
 def test_recorded_roots_compare_directory_identity(tmp_path):
     root = tmp_path / "aiter"
     root.mkdir()
@@ -88,7 +112,7 @@ def test_recorded_roots_compare_directory_identity(tmp_path):
 
 
 @pytest.mark.parametrize("failing_path", ["a.patch", "aiter"])
-@pytest.mark.parametrize("error", [OSError, RuntimeError])
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
 def test_recorded_roots_decline_unresolvable_paths(tmp_path, monkeypatch, failing_path, error):
     patch = tmp_path / "a.patch"
     patch.touch()

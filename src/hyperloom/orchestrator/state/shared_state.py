@@ -1325,6 +1325,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     encoding="utf-8",
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
+            # Never leave a stale launcher or export a subset of the retained
+            # configuration. The complete settings remain in durable state.
             try:
                 (Path(session_dir) / "current_setting.sh").unlink(missing_ok=True)
             except OSError:

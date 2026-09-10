@@ -505,6 +505,8 @@ def _sole_patch_root(
 
     Only metadata covering the selected patch set can replace target
     resolution. Unselected patches cannot supply or contradict its root.
+    Localization patches outside the specialist workspace deliberately use
+    full-set content resolution: the specialist cannot attest their paths.
 
     Args:
         done_payload: The originating specialist's done payload, if any.
@@ -519,7 +521,7 @@ def _sole_patch_root(
         return None
     try:
         selected = {patch.resolve() for patch in patch_paths}
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
     covered: set[Path] = set()
     roots: set[str] = set()
@@ -532,7 +534,7 @@ def _sole_patch_root(
                 explicit_patches=[recorded_patch],
                 done_payload=None,
             )
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return None
         for patch in resolved:
             if patch not in selected:
@@ -545,7 +547,7 @@ def _sole_patch_root(
                 if not root_path.is_absolute():
                     root_path = specialist_workspace / root_path
                 roots.add(str(root_path.resolve()))
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, ValueError):
                 return None
     return roots.pop() if covered == selected and len(roots) == 1 else None
 

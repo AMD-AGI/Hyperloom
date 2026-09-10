@@ -385,7 +385,7 @@ async def test_geak_replay_uses_existing_client_contract(
             {"AITER_CONFIG": '{"path": "/tmp/a (b); c"}'},
             "",
         ),
-        ({"env_map": {}, "env": "AITER_CONFIG=wrong --trust-remote-code"}, {}, ""),
+        ({"env_map": {}, "env": "AITER_CONFIG=wrong --trust-remote-code"}, {}, "--trust-remote-code"),
         (
             {"env_map": {"AITER_CONFIG": "", "LD_PRELOAD": "/untrusted.so", "PYTHONPATH": "/untrusted"}},
             {"AITER_CONFIG": ""},

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -243,14 +245,37 @@ def test_geak_promotion_retains_fresh_launch_controls(promotion, effective_flags
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("through_recheck", [False, True])
-async def test_terminal_rejection_cannot_attribute_geak_claims(promotion, monkeypatch, through_recheck):
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("journey_missing", [False, True])
+async def test_terminal_rejection_cannot_attribute_geak_claims(
+    promotion, monkeypatch, through_recheck, closed, journey_missing
+):
+    from hyperloom.inference_optimizer.tests.test_geak_gain_alignment import _journey_with_validated_keeps
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+        EVENT_SECTIONS,
+        SECTION_GEAK_ATTEMPT,
+        event_parts,
+    )
+
     coord, result, recorder = promotion
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
     result["final_throughput_tok_s"] = 150.0
+    result["kernel_journey_path"] = _journey_with_validated_keeps(coord.session_dir, [1.5])
+    journey = json.loads(Path(result["kernel_journey_path"]).read_text())
     state.geak_result = deepcopy(result)
+    coord._record_geak_kernel_journey(result)
     coord._record_geak_candidate(result)
     assert state.geak_pending["self_reported_gain_pct"] == 50.0
+    before = event_parts(EVENT_SECTIONS)[SECTION_GEAK_ATTEMPT][0]["e2e"]
+    assert before["decision"] == "KEEP"
+    assert before["validated"] is True
+    assert before["integrated"] is True
+    assert before["e2e_gain_pct"] == 50.0
+    if journey_missing:
+        Path(result["kernel_journey_path"]).unlink()
+    if closed:
+        recorder.finish(verdict="pending_rebench", tput_after=110.0)
 
     async def fresh_replay(**_kwargs):
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
@@ -273,6 +298,18 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(promotion, monkey
     assert event["ext"]["outcome"]["adopted"] == []
     assert event["ext"]["geak"]["rebench"]["final_status"] == "no_promote"
     assert any(row["decision"] == "no_promote" for row in event["ext"]["geak"]["rebench"]["attempts"])
+    attempt = event["ext"]["geak"]["attempts"]["kernels"][0]
+    assert attempt["e2e"]["decision"] == "REVERT"
+    assert attempt["e2e"]["validated"] is False
+    assert attempt["e2e"]["integrated"] is False
+    assert attempt["e2e"]["e2e_gain_pct"] is None
+    assert event["ext"]["geak"]["attempts"]["counts"]["integrated"] == 0
+    restored = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK, resumed=True)
+    assert restored is not None
+    restored.record_geak_attempts(journey)
+    refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
+    assert refreshed["ext"]["geak"]["attempts"]["counts"]["integrated"] == 0
+    assert refreshed["ext"]["geak"]["attempts"]["kernels"][0]["e2e"]["decision"] == "REVERT"
 
 
 def test_geak_complete_config_survives_direct_promotion(promotion):
@@ -340,7 +377,9 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
     removed = returned_removals != []
-    assert ("--disable-radix-cache" not in best["extra_server_args"]) is removed
+    assert best["extra_server_args"] == (
+        "--mem-fraction-static 0.95" if removed else "--mem-fraction-static 0.95 --disable-radix-cache"
+    )
     assert best.get("remove_args", []) == (["--disable-radix-cache"] if removed else [])
 
 

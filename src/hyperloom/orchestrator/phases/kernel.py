@@ -990,7 +990,7 @@ class KernelPhase(PhaseHandler):
         ) -> None:
             """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
 
-            A settled AgentX verdict is left standing: a later failure records
+            A settled verdict is left standing: a later failure records
             itself without retiring the candidate that already adjudicated.
             """
             if record_delegation:
@@ -1003,7 +1003,7 @@ class KernelPhase(PhaseHandler):
                     kill_timeout_sec=kill_timeout_s,
                 )
             prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-            if not (agentx and _geak_rebench.geak_verdict_is_terminal(prev)):
+            if not _geak_rebench.geak_verdict_is_terminal(prev):
                 state.geak_result = result
             self._record_phase_entry_evidence(
                 geak={
@@ -1021,6 +1021,9 @@ class KernelPhase(PhaseHandler):
             env_spec = self.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
+            recorder = self._kernel_timeline()
+            if recorder is not None:
+                recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
             _finish_skip(
                 {"status": "error", "error_class": "invalid_env_spec", "error": str(exc)}, record_delegation=False
             )
@@ -1944,6 +1947,14 @@ class KernelPhase(PhaseHandler):
         }
         self.shared_state.geak_result = rejected_result
         self.shared_state.geak_pending = {}
+        KernelPhase._reject_geak_kernel_journey(
+            self,
+            rejected_result,
+            measured_tput=measured_tput,
+            current_best_tput=current_best_tput,
+            provenance="geak_promote_rejected",
+            rejection_reason=reason,
+        )
         recorder = KernelPhase._kernel_timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
@@ -2361,28 +2372,14 @@ class KernelPhase(PhaseHandler):
         provenance: str,
         rejection_reason: str = "rebench_did_not_beat_current_best",
     ) -> None:
-        """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
-
-        # Named on the class, not through ``self``: Coordinator does not
-        # delegate this method, so callers bind it with a Coordinator as
-        # ``self`` and an attribute lookup there would not find the helper.
-        for kernel in KernelPhase._geak_journey_kernels(result):
-            kernel_id = str(kernel.get("kernel_id") or "")
-            e2e = kernel.get("e2e")
-            if not kernel_id or not isinstance(e2e, dict):
-                continue
-            decision = str(e2e.get("decision") or "").upper()
-            if decision not in {"KEEP", "ADOPTED"}:
-                continue
-            evidence = dict(e2e)
-            evidence.update(
-                {
-                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
-                    "revalidation_measured_tput": measured_tput,
-                    "revalidation_current_best_tput": current_best_tput,
-                    "revalidation_provenance": provenance,
-                    "rejection_reason": rejection_reason,
-                }
+        """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
+        recorder = KernelPhase._kernel_timeline(self)
+        if recorder is not None:
+            recorder.reject_geak_attempts(
+                measured_tput=measured_tput,
+                current_best_tput=current_best_tput,
+                provenance=provenance,
+                rejection_reason=rejection_reason,
             )
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:

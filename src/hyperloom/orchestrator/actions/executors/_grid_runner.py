@@ -37,6 +37,7 @@ from ..stop_attribution import (
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
 )
+from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -110,7 +111,6 @@ from ._grid_server_args import (
     _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
-    apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
@@ -1025,13 +1025,11 @@ def variant_conc(variant: Any) -> int | None:
 
 def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
     """Raise a variant's hard cap to what an AgentX round actually needs."""
-    # Local import: baseline imports from this module, and the rest of the file already resolves _workload_envs this
-    # way.
     from ._workload_envs import agentx_active, agentx_env_for_conc
 
     if not agentx_active(shared_state):
         return cap
-    from .baseline import agentx_baseline_timeout_sec
+    from ._agentx_timeouts import agentx_baseline_timeout_sec
 
     return max(cap, agentx_baseline_timeout_sec(agentx_env_for_conc(conc)))
 
