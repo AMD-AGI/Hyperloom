@@ -61,6 +61,11 @@ from hyperloom.inference_optimizer.tools._report_html import (
     sparkline,
 )
 from hyperloom.inference_optimizer.tools.dump_llm_call_report import Node, build_tree, call_identity, load_ledgers
+from hyperloom.inference_optimizer.tools import _report_agents as agents_mod
+from hyperloom.inference_optimizer.tools._report_agents import UNLABELLED
+from hyperloom.inference_optimizer.tools.render_geak_html_report import CALLS_FILENAME as GEAK_LEDGER
+from hyperloom.inference_optimizer.tools.render_geak_html_report import derive_role as derive_geak_role
+from hyperloom.inference_optimizer.tools.render_geak_html_report import load_calls as load_geak_ledger
 
 BREAKDOWN_FILENAME = "session_breakdown.json"
 DEFAULT_OUTPUT = "hyperloom_report.html"
@@ -78,6 +83,14 @@ ATTRIBUTION_PHASES: dict[str, tuple[str, ...]] = {
 
 #: Decisions in ``phase_timeline`` that mean the change was kept.
 KEEP_DECISIONS = {"KEEP", "PROMOTE", "promoted"}
+
+#: The ledger component whose rows the GEAK harvester writes into ``ext/``. When
+#: GEAK's own ledger is grafted in, these are dropped so the spend is not counted
+#: twice -- the harvested rows and the grafted ones describe the same API calls.
+GEAK_COMPONENT = "geak"
+
+#: The phase a grafted GEAK run is nested under. GEAK is invoked as this phase.
+GEAK_PHASE = "KERNEL_AGENT"
 
 
 def load_breakdown(path: Path) -> dict[str, Any] | None:
@@ -323,6 +336,213 @@ def session_identity(session_dir: Path, breakdown: dict[str, Any] | None) -> dic
 # --------------------------------------------------------------------------- #
 
 
+
+def agent_identity(row: dict[str, Any]) -> tuple[str, str]:
+    """The conversation a row belongs to, and the readable name for it.
+
+    Hyperloom's ledger has no agent column. What it has is ``task_path``, which
+    for a specialist reads ``specialist/<instance id>/turn-N`` -- so the instance
+    is the conversation and ``turn-N`` is a position inside it -- and for
+    everything else is either a bare name (``critic``) or absent. ``role`` is the
+    readable name, but it is written by some producers and not others: on the
+    runs seen so far it is present on orchestration and critic rows and empty on
+    every specialist row. So identity comes from the task path, which is
+    populated, and the name from ``role`` when the producer recorded one.
+
+    Args:
+        row: A ledger row.
+
+    Returns:
+        ``(agent id, role)``. The role is :data:`UNLABELLED` when nothing
+        recorded one -- never inferred from the id.
+    """
+    path = str(row.get("task_path") or "").strip("/")
+    component = str(row.get("component") or "").strip()
+    segments = [seg for seg in path.split("/") if seg]
+    if len(segments) >= 2:
+        agent = "/".join(segments[:2])
+    elif segments:
+        agent = segments[0]
+    else:
+        agent = component or "unattributed"
+    role = str(row.get("role") or "").strip()
+    if not role:
+        role = component if component and component != agent else UNLABELLED
+    return agent, role
+
+
+def normalise(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reshape ledger rows into the record the shared deep dive works on.
+
+    Ordering within a conversation is ``(turn, api_call_index, ts)`` and the
+    position is then renumbered from zero, so the position curve measures where
+    a call sat in its own conversation rather than in the session.
+
+    Args:
+        rows: Billable rows from :func:`call_rows`.
+
+    Returns:
+        Normalised rows, ordered by agent then position.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[agent_identity(row)[0]].append(row)
+
+    out: list[dict[str, Any]] = []
+    for agent, calls in grouped.items():
+        calls.sort(key=lambda r: (num(r.get("turn")), num(r.get("api_call_index")), str(r.get("ts") or "")))
+        for index, row in enumerate(calls):
+            isl = num(row.get("isl")) or (
+                num(row.get("input_tokens"))
+                + num(row.get("cache_read_input_tokens"))
+                + num(row.get("cache_creation_input_tokens"))
+            )
+            thinking = num(row.get("reasoning_output_tokens"))
+            # Hyperloom's ledger puts thinking beside output, not inside it.
+            osl = num(row.get("osl")) or (num(row.get("output_tokens")) + thinking)
+            tools = [
+                str(t.get("tool"))
+                for t in (row.get("tool_calls") or [])
+                if isinstance(t, dict) and t.get("tool")
+            ]
+            out.append(
+                {
+                    "phase": str(row.get("phase") or "unattributed"),
+                    "agent": agent,
+                    "role": agent_identity(row)[1],
+                    "call_index": index,
+                    "ts": row.get("ts"),
+                    "isl": isl,
+                    "osl": osl,
+                    "thinking": thinking,
+                    "usd": num(row.get("cost_usd")),
+                    "dt_s": num(row.get("latency_ms")) / 1000.0,
+                    "tools": tools,
+                    "model": row.get("model"),
+                    "component": row.get("component"),
+                    # Hyperloom records no prompt text; the drill-down column stays blank
+                    # rather than being filled with something the ledger did not say.
+                    "prompt": "",
+                }
+            )
+    return out
+
+
+def hyperloom_role_of(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Name an agent from what its rows recorded, in that order of preference.
+
+    A recorded ``role`` wins wherever the producer wrote one. Grafted GEAK rows
+    carry prompt text instead, so they fall back to the role sentence every GEAK
+    prompt opens with -- the same derivation GEAK's own report uses, so an agent
+    is named identically on both pages. Nothing else is inferred.
+
+    Args:
+        calls: One agent's calls, in order.
+
+    Returns:
+        The identity mapping :func:`agents_mod.agent_records` merges in.
+    """
+    for call in calls:
+        role = str(call.get("role") or "").strip()
+        if role and role != UNLABELLED:
+            return {"role": role, "specialty": None, "round": None, "derived": False}
+    prompt = str(calls[0].get("prompt") or "") if calls else ""
+    if prompt:
+        return derive_geak_role(prompt)
+    return {"role": UNLABELLED, "specialty": None, "round": None, "derived": False}
+
+
+def geak_eval_dir(session_dir: Path) -> Path | None:
+    """Where the session's GEAK cycle wrote its own artifacts, as the run recorded it.
+
+    Read from the handoff records rather than guessed from the directory layout,
+    because a resumed session can carry more than one cycle and only the record
+    says which one ran.
+
+    Args:
+        session_dir: Session root.
+
+    Returns:
+        The eval directory, or ``None`` when no record names one.
+    """
+    for name in ("geak/result.json", "geak/handoff.json", "state.json"):
+        try:
+            data = json.loads((session_dir / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        candidate = data.get("eval_dir") or (data.get("geak") or {}).get("eval_dir")
+        if isinstance(candidate, str) and candidate:
+            path = Path(candidate)
+            if path.is_dir():
+                return path
+    return None
+
+
+def graft_geak(session_dir: Path, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Replace the harvested GEAK summary rows with GEAK's own per-call ledger.
+
+    GEAK is invoked as the ``KERNEL_AGENT`` phase and has historically been the
+    majority of a session's bill, but the session ledger sees it from outside:
+    the harvester writes a handful of turn rows into an ``ext`` shard, so the
+    phase that cost the most is the phase with the least to show. GEAK writes a
+    full per-call ledger of its own, and when the run left one behind this
+    grafts it in so ``KERNEL_AGENT`` drills down to GEAK's own agents.
+
+    The harvested rows are dropped in the same step. They describe the same API
+    calls as the grafted ones, so keeping both would count GEAK's spend twice.
+
+    Args:
+        session_dir: Session root.
+        rows: Normalised session rows.
+
+    Returns:
+        ``(rows, status)`` -- the status says what was grafted, or why not, and
+        is rendered in the coverage banner rather than left implicit.
+    """
+    eval_dir = geak_eval_dir(session_dir)
+    status: dict[str, Any] = {
+        "eval_dir": str(eval_dir) if eval_dir else "",
+        "grafted": False,
+        "calls": 0,
+        "usd": 0.0,
+        "dropped_harvested": 0,
+        "reason": "",
+    }
+    harvested = [r for r in rows if str(r.get("component") or "") == GEAK_COMPONENT]
+    if eval_dir is None:
+        status["reason"] = "no GEAK eval directory is named in this session's records"
+        return rows, status
+
+    ledger = eval_dir / "reports" / GEAK_LEDGER
+    geak_rows = load_geak_ledger(ledger)
+    if not geak_rows:
+        status["reason"] = (
+            f"GEAK left no <code>{esc(GEAK_LEDGER)}</code> under <code>{esc(eval_dir / 'reports')}</code>. "
+            "A GEAK build without the trace mirror writes its call ledger only into the Claude config "
+            "home, which does not survive the container; run <code>dump_geak_call_report</code> against "
+            "a surviving home to rebuild it."
+        )
+        return rows, status
+
+    kept = [r for r in rows if str(r.get("component") or "") != GEAK_COMPONENT]
+    grafted = [
+        {**row, "phase": f"{GEAK_PHASE} / {row.get('phase') or 'unattributed'}", "component": GEAK_COMPONENT}
+        for row in geak_rows
+    ]
+    status.update(
+        {
+            "grafted": True,
+            "calls": len(grafted),
+            "usd": sum(num(r.get("usd")) for r in grafted),
+            "dropped_harvested": len(harvested),
+            "dropped_usd": sum(num(r.get("usd")) for r in harvested),
+        }
+    )
+    return kept + grafted, status
+
+
 def _share(part: float, whole: float) -> str:
     """A share of a total, rendered as a bar plus its percentage."""
     fraction = (part / whole) if whole else 0.0
@@ -348,9 +568,32 @@ def _headline_cards(ident: dict[str, str], totals: Any, ladder: dict[str, Any]) 
     )
 
 
-def _coverage_section(cov: dict[str, Any], breakdown_seen: bool) -> str:
+def _coverage_section(
+    cov: dict[str, Any],
+    breakdown_seen: bool,
+    agents: list[dict[str, Any]],
+    geak: dict[str, Any],
+) -> str:
     """The banner that says what these numbers are and are not. Always rendered."""
     caveats: list[str] = []
+    unlabelled = agents_mod.unlabelled_count(agents)
+    if unlabelled:
+        caveats.append(
+            f"{fmt_int(unlabelled)} of {fmt_int(len(agents))} agents carry no <code>role</code>: that "
+            "field is written by some producers and not others, so those agents are identified by their "
+            "task path and shown as <i>unlabelled</i> rather than given an inferred name."
+        )
+    if geak.get("grafted"):
+        caveats.append(
+            f"GEAK's own per-call ledger is grafted in beneath <code>{esc(GEAK_PHASE)}</code>: "
+            f"{fmt_int(geak['calls'])} calls worth {fmt_usd(geak['usd'])}, replacing the "
+            f"{fmt_int(geak['dropped_harvested'])} harvested summary rows "
+            f"({fmt_usd(geak.get('dropped_usd', 0.0))}) that describe the same calls. The headline "
+            "cards above are the session ledger's own totals and still carry the harvested figure, so "
+            "the two differ by whatever the harvest missed."
+        )
+    elif geak.get("reason"):
+        caveats.append(f"No GEAK detail beneath <code>{esc(GEAK_PHASE)}</code>: {geak['reason']}")
     if cov.get("turns_without_detail"):
         caveats.append(
             f"{fmt_int(cov['turns_without_detail'])} of {fmt_int(cov['turns_total'])} turns wrote no per-call "
@@ -513,26 +756,52 @@ def _tree_rows(node: Node, depth: int, parent_usd: float, out: list[str], limit:
         _tree_rows(kid, depth + 1, totals.usd_total or parent_usd, out, limit)
 
 
-def _deepdive_section(joined: list[dict[str, Any]], depth_limit: int) -> str:
-    """Inside each phase: the task path that carries the spend."""
-    blocks = []
-    for record in joined:
-        totals = record["totals"]
-        rows: list[str] = []
-        _tree_rows(record["node"], 0, totals.usd_total, rows, depth_limit)
-        if not rows:
-            rows = ['<tr><td colspan="7" class="mut">no task path recorded beneath this phase</td></tr>']
-        blocks.append(
-            f'<details class="phase"><summary><span>{esc(record["phase"])}</span>'
-            f"<span>{fmt_usd(totals.usd_total)} | {fmt_int(totals.calls)} calls</span></summary>"
-            '<table class="grid"><thead><tr><th>Task path</th><th>USD</th><th>Share of parent</th>'
-            "<th>Calls</th><th>ISL</th><th>OSL</th><th>Agent time</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></details>"
-        )
+def _task_tree(record: dict[str, Any], depth_limit: int) -> str:
+    """The task-path tree beneath one phase, heaviest branch first."""
+    totals = record["totals"]
+    rows: list[str] = []
+    _tree_rows(record["node"], 0, totals.usd_total, rows, depth_limit)
+    if not rows:
+        return ""
     return (
-        '<h2 id="deep">Inside each phase</h2>'
-        '<p class="lede">The same tree <code>dump_llm_call_report</code> prints, folded so the expensive '
-        "branch is the one you open. Share is against the parent, not the session.</p>" + "".join(blocks)
+        "<h3>The task path beneath this phase</h3>"
+        '<p class="lede">The same tree <code>dump_llm_call_report</code> prints. Share is against the '
+        "parent, not the session.</p>"
+        '<div class="scroll"><table><thead><tr><th>Task path</th><th>USD</th><th>Share of parent</th>'
+        "<th>Calls</th><th>ISL</th><th>OSL</th><th>Agent time</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def _deepdive_section(
+    phases: list[dict[str, Any]],
+    total_usd: float,
+    trees: dict[str, str],
+) -> str:
+    """Inside each phase: the shared anatomy and roster, plus this page's task tree.
+
+    The anatomy and roster are rendered by the module both reports share, so a
+    column means the same thing here as on a GEAK run's own page. The task tree
+    is Hyperloom's alone and is appended beneath them.
+
+    Args:
+        phases: Phase records from the shared module, most expensive first.
+        total_usd: The bill shares are taken against.
+        trees: Rendered task-path tree per phase name, "" where there is none.
+
+    Returns:
+        The section HTML.
+    """
+    return agents_mod.deepdive_html(
+        phases,
+        total_usd,
+        lede=(
+            "Expand a phase to see where its money went: how cost moves as a conversation grows, how "
+            "few agents carry the total, what tools the work actually consisted of, and the full agent "
+            "roster. Any agent row opens into its own API calls. A phase named "
+            "<code>KERNEL_AGENT / ...</code> is a GEAK phase grafted in from GEAK's own ledger."
+        ),
+        extra_of=lambda phase: trees.get(phase["phase"], ""),
     )
 
 
@@ -600,6 +869,14 @@ def render(session_dir: Path, title: str | None = None, depth_limit: int = 3) ->
     rows = call_rows(turns, details)
     ident = session_identity(session_dir, breakdown)
 
+    # The deep dive runs on the normalised rows, with GEAK's own ledger grafted in
+    # place of the handful of summary rows the harvester wrote for it.
+    normalised, geak_status = graft_geak(session_dir, normalise(rows))
+    agents = agents_mod.agent_records(normalised, hyperloom_role_of)
+    deep_phases = agents_mod.phase_records(normalised, agents)
+    deep_usd = sum(p["usd"] for p in deep_phases)
+    trees = {record["phase"]: _task_tree(record, depth_limit) for record in joined}
+
     heading = title or f"Hyperloom session - where the time and the money went ({ident['model']})"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     read = ["llm_calls.jsonl", "llm_calls_detail.jsonl"] + ([BREAKDOWN_FILENAME] if breakdown else [])
@@ -616,20 +893,24 @@ def render(session_dir: Path, title: str | None = None, depth_limit: int = 3) ->
 {f"| {esc(ident['elapsed_min'])} min elapsed" if ident["elapsed_min"] else ""}
 | generated {generated} from {sources}</p>
 <nav><a href="#bought">What it bought</a><a href="#phases">Spend by phase</a>
-<a href="#deep">Inside each phase</a><a href="#growth">Conversation growth</a>
+<a href="#deep">Inside each phase</a><a href="#delegate">Delegation signals</a>
+<a href="#growth">Conversation growth</a>
 <a href="#models">Models</a><a href="#coverage">Coverage</a></nav>
 {_headline_cards(ident, root.total, ladder)}
-{_coverage_section(cov, breakdown is not None)}
+{_coverage_section(cov, breakdown is not None, agents, geak_status)}
 {_outcome_section(ladder)}
 {_phase_table(joined, root.total.usd_total)}
-{_deepdive_section(joined, depth_limit)}
+{_deepdive_section(deep_phases, deep_usd, trees)}
+{agents_mod.delegation_html(agents_mod.delegation_signals(agents))}
 {_growth_section(growth_curve(rows))}
 {_models_section(model_mix(rows), root.total.usd_total)}
 <h2>How to reproduce this</h2>
 <p class="lede">Everything above is computed from the files this session wrote. Regenerate with:</p>
 <pre class="mono">python3 -m hyperloom.inference_optimizer.tools.render_hyperloom_html_report \\
     --session-dir {esc(session_dir)} -o {esc(session_dir / "reports" / DEFAULT_OUTPUT)}</pre>
-</div></body></html>
+</div>
+<script>const AGENTS={agents_mod.agent_payload(agents)};{agents_mod.drill_js("llm_calls_detail.jsonl")}</script>
+</body></html>
 """
 
 

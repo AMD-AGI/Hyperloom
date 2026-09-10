@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.tools import _report_agents as A
+from hyperloom.inference_optimizer.tools._report_html import sparkline
 from hyperloom.inference_optimizer.tools import render_geak_html_report as R
 
 
@@ -166,8 +168,8 @@ def test_pct_says_not_measured_for_none():
 
 
 def test_sparkline_of_no_data_says_so():
-    assert "no data" in R._sparkline([])
-    assert "<svg" in R._sparkline([1.0, 2.0, 3.0])
+    assert "no data" in sparkline([])
+    assert "<svg" in sparkline([1.0, 2.0, 3.0])
 
 
 def test_render_produces_a_self_contained_document(reports: Path):
@@ -212,7 +214,8 @@ def test_agent_key_is_dom_safe(reports: Path):
 
 
 def test_call_payload_is_capped_and_reports_the_remainder(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(R, "MAX_CALLS_EMBEDDED", 2)
+    # The cap lives in the shared deep-dive module both reports render through.
+    monkeypatch.setattr(A, "MAX_CALLS_EMBEDDED", 2)
     rows = [_call(call_index=i) for i in range(5)]
     agents = R.agent_records(rows)
     assert len(agents[0]["rows"]) == 2

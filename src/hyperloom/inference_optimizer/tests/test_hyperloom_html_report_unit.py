@@ -232,3 +232,113 @@ def test_unrelated_rows_without_call_ids_still_count_separately() -> None:
     root, _ = build_tree([a, b], [])
     assert root.roll_up().calls == 2
     assert root.roll_up().isl == 107
+
+
+def test_agent_identity_uses_the_task_path_and_the_recorded_role():
+    """A specialist's conversation is its instance, not its turn."""
+    agent, role = H.agent_identity(_call(task_path="specialist/abc123/turn-7", component="specialist"))
+    assert agent == "specialist/abc123"
+    assert role == "specialist"
+
+    agent, role = H.agent_identity(_call(task_path="critic", component="critic", role="critic"))
+    assert (agent, role) == ("critic", "critic")
+
+
+def test_agent_identity_never_invents_a_role_from_the_id():
+    """An id is an id. With nothing recorded and nothing to fall back on, say so."""
+    _, role = H.agent_identity(_call(task_path="specialist/abc123/turn-1", component="specialist", role=None))
+    assert role == "specialist"
+    _, role = H.agent_identity({"task_path": "lone", "component": "lone"})
+    assert role == H.UNLABELLED
+
+
+def test_normalise_renumbers_position_within_each_conversation():
+    """The position curve must measure position in a conversation, not in the session."""
+    rows = [
+        _call(task_path="specialist/a/turn-3", turn=3, api_call_index=1),
+        _call(task_path="specialist/a/turn-1", turn=1, api_call_index=1),
+        _call(task_path="specialist/b/turn-9", turn=9, api_call_index=1),
+    ]
+    out = H.normalise(rows)
+    by_agent = {}
+    for row in out:
+        by_agent.setdefault(row["agent"], []).append(row["call_index"])
+    assert by_agent["specialist/a"] == [0, 1]
+    assert by_agent["specialist/b"] == [0]
+
+
+def test_normalise_puts_thinking_beside_output_not_inside_it():
+    """Hyperloom's ledger convention, the inverse of GEAK's. Getting it wrong double-counts."""
+    (row,) = H.normalise([_call(osl=0, output_tokens=100, reasoning_output_tokens=40)])
+    assert row["thinking"] == 40
+    assert row["osl"] == 140
+
+
+def test_role_falls_back_to_the_geak_prompt_only_when_nothing_recorded_one():
+    """Grafted GEAK rows carry a prompt and no role; the derivation matches GEAK's own page."""
+    assert H.hyperloom_role_of([{"role": "critic", "prompt": "You are the director."}])["role"] == "critic"
+    assert H.hyperloom_role_of([{"prompt": "You are the director. PHASE=setup."}])["role"] == "director"
+    assert H.hyperloom_role_of([{"prompt": ""}])["role"] == H.UNLABELLED
+
+
+def test_geak_eval_dir_reads_the_record_and_requires_the_directory(tmp_path: Path):
+    """A path the run recorded but that is not there is not an eval dir."""
+    sd = tmp_path / "sess"
+    (sd / "geak").mkdir(parents=True)
+    (sd / "geak" / "result.json").write_text(json.dumps({"eval_dir": str(sd / "geak" / "gone")}), encoding="utf-8")
+    assert H.geak_eval_dir(sd) is None
+
+    (sd / "geak" / "e2e_cycle0").mkdir()
+    (sd / "geak" / "result.json").write_text(
+        json.dumps({"eval_dir": str(sd / "geak" / "e2e_cycle0")}), encoding="utf-8"
+    )
+    assert H.geak_eval_dir(sd) == sd / "geak" / "e2e_cycle0"
+
+
+def test_graft_replaces_the_harvested_rows_rather_than_adding_to_them(tmp_path: Path):
+    """The harvested rows and GEAK's own describe the same calls; keeping both bills twice."""
+    sd = tmp_path / "sess"
+    reports = sd / "geak" / "e2e_cycle0" / "reports"
+    reports.mkdir(parents=True)
+    (sd / "geak" / "result.json").write_text(
+        json.dumps({"eval_dir": str(sd / "geak" / "e2e_cycle0")}), encoding="utf-8"
+    )
+    _write(
+        reports / H.GEAK_LEDGER,
+        [{"phase": "P8 HeadKernel h0", "agent": "a1", "call_index": 0, "usd": 4.0, "isl": 10, "osl": 1}],
+    )
+    rows = [
+        {"phase": "KERNEL_AGENT", "agent": "geak/runner", "component": "geak", "usd": 9.0},
+        {"phase": "PRELUDE", "agent": "baseline", "component": "orchestration", "usd": 1.0},
+    ]
+    out, status = H.graft_geak(sd, rows)
+
+    assert status["grafted"] is True
+    assert status["dropped_harvested"] == 1
+    assert [r["phase"] for r in out if r["component"] == "geak"] == ["KERNEL_AGENT / P8 HeadKernel h0"]
+    assert sum(r["usd"] for r in out) == 5.0
+
+
+def test_graft_that_finds_no_ledger_changes_nothing_and_says_why(tmp_path: Path):
+    """A run whose GEAK ledger did not survive keeps its harvested rows and an explanation."""
+    sd = tmp_path / "sess"
+    (sd / "geak" / "e2e_cycle0" / "reports").mkdir(parents=True)
+    (sd / "geak" / "result.json").write_text(
+        json.dumps({"eval_dir": str(sd / "geak" / "e2e_cycle0")}), encoding="utf-8"
+    )
+    rows = [{"phase": "KERNEL_AGENT", "agent": "geak/runner", "component": "geak", "usd": 9.0}]
+    out, status = H.graft_geak(sd, rows)
+
+    assert out == rows
+    assert status["grafted"] is False
+    assert H.GEAK_LEDGER in status["reason"]
+
+
+def test_the_page_carries_the_deep_dive_and_the_delegation_signals(session: Path):
+    """Both pages answer the same questions inside a phase, so both must render them."""
+    html = H.render(session)
+    for heading in ("Cost by position in the conversation", "Agents, most expensive first"):
+        assert heading in html
+    assert 'id="delegate"' in html
+    assert "const AGENTS=" in html
+    assert "no GEAK eval directory is named" in html

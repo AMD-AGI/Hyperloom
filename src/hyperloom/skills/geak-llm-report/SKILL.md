@@ -114,6 +114,14 @@ ledger and none needs to.
    a flat per-call cost say a phase is a mechanical loop; they do not say a
    smaller model would get the same answer. Nothing in the ledger can say that.
 
+   **A Hyperloom-driven run's session page may already carry all of this.**
+   `render_hyperloom_html_report` grafts `geak_calls.jsonl` in beneath its
+   `KERNEL_AGENT` phase and renders it through the same deep-dive code, so one
+   page covers both hierarchies and a column means the same thing on either.
+   That graft reads the ledger off disk; a GEAK build without the trace mirror
+   wrote it only into the Claude config home, and then this report against a
+   surviving home is the way to get the detail back.
+
 4. **For the cross-hierarchy view**, add `--join-hyperloom <SESSION_DIR>`. The
    GEAK tree is nested under the session's `KERNEL_AGENT` phase, so one document
    carries Hyperloom phases on top and GEAK phases inside. Rows the GEAK

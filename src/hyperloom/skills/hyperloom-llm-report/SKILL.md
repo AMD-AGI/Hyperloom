@@ -83,7 +83,28 @@ Everything comes from `<session_dir>/reports/trace/`:
      bill — is missing, and the session total is badly understated. Check that
      `reports/trace/ext/geak-*.jsonl` exists and that the harvester ran.
 
-5. **Answer the question that was asked.** The markdown tree is the artifact;
+5. **Inside a phase, read the deep dive.** The page renders the same four panels
+   a GEAK run's own report does, from the same shared code, so a column means
+   the same thing on either: cost by position in the conversation, how few
+   agents carry the phase, what tools the work consisted of, and the agent
+   roster with every agent drillable to its own API calls. Two things about
+   identity there are worth knowing before quoting it:
+
+   - **An agent is a conversation, identified by its task path.** A specialist's
+     rows read `specialist/<instance>/turn-N`, so the instance is the agent and
+     `turn-N` is a position inside it. The readable name comes from the `role`
+     field where a producer wrote one -- on the runs seen so far that is
+     orchestration and critic rows, not specialists -- and an agent with none is
+     shown `unlabelled` rather than named from its id.
+   - **`KERNEL_AGENT / ...` phases are GEAK's own.** When the run left a
+     `geak_calls.jsonl` behind, GEAK's per-call ledger is grafted in beneath
+     `KERNEL_AGENT` and the harvested `ext/geak-*` rows are dropped in the same
+     step, because both describe the same API calls. The coverage banner says
+     which happened. A build without GEAK's trace mirror leaves no ledger to
+     graft, and then `KERNEL_AGENT` shows only what the harvester saw -- often a
+     single lumped agent for the phase that cost the most.
+
+6. **Answer the question that was asked.** The markdown tree is the artifact;
    the JSON (`tree` → `totals` per node) is what to compute from when comparing
    two runs. When comparing models, compare `usd_total` and `ms_total` per
    phase, not session totals alone — a cheaper session that spent it all in one
