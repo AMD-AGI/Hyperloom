@@ -26,6 +26,11 @@ GRADED_INTVTY = "e2e_norm_intvty_p90"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
 
+# The axes ``graded_axes_of`` can carry, for a consumer that must publish all four including the ones a measurement
+# did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader unable to tell
+# an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it was zero".
+GRADED_AXIS_KEYS = (GRADED_INTVTY, GRADED_TOTAL, "input_throughput", "tpot_p90_ms")
+
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
@@ -237,6 +242,7 @@ class GradedComparison:
 __all__ = [
     "AGENTX_KEEP_THRESHOLD_FLOOR_PCT",
     "GradedComparison",
+    "GRADED_AXIS_KEYS",
     "GRADED_INTVTY",
     "GRADED_OUTPUT",
     "GRADED_TOTAL",
