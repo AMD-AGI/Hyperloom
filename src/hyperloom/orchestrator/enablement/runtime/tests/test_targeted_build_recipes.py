@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
-from hyperloom.orchestrator.framework.targeted_build import (
+from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     _driver_main,
     run_aiter_build,
     run_sgl_kernel_build,
@@ -32,7 +32,7 @@ def _completed(stdout="", stderr="", returncode=0):
 @pytest.fixture(autouse=True)
 def _host_independent_toolchain(monkeypatch):
     """Keep these tests independent of the host's ROCm install."""
-    from hyperloom.orchestrator.framework import build_utils
+    from hyperloom.orchestrator.enablement.runtime import build_utils
 
     monkeypatch.setattr(
         build_utils,
@@ -440,8 +440,8 @@ def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
 
 def test_result_json_round_trip_through_classify_build_exit(tmp_path):
     """Driver writes result.json; the classifier reads it as a rich BuildResult."""
-    from hyperloom.orchestrator.framework.build_actions import BuildResult, FrameworkRuntime
-    from hyperloom.orchestrator.framework.targeted_build import BuildHandle, classify_build_exit
+    from hyperloom.orchestrator.enablement.runtime.build_actions import BuildResult, FrameworkRuntime
+    from hyperloom.orchestrator.enablement.runtime.targeted_build import BuildHandle, classify_build_exit
 
     root = tmp_path / "attempt"
     root.mkdir()
@@ -485,10 +485,10 @@ def test_driver_main_writes_result_json(monkeypatch, tmp_path):
     action = _aiter_action(ref="v0.1.0")
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    from hyperloom.orchestrator.framework import targeted_build as tb
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
 
     def _fake_recipe(action, attempt_root, **kw):
-        from hyperloom.orchestrator.framework.build_actions import BuildResult
+        from hyperloom.orchestrator.enablement.runtime.build_actions import BuildResult
 
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
@@ -911,10 +911,10 @@ def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
     action = _sgl_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    from hyperloom.orchestrator.framework import targeted_build as tb
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
 
     def _fake_sgl(action, attempt_root, **kw):
-        from hyperloom.orchestrator.framework.build_actions import BuildResult
+        from hyperloom.orchestrator.enablement.runtime.build_actions import BuildResult
 
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
@@ -932,10 +932,10 @@ def test_driver_main_routes_vllm_source(monkeypatch, tmp_path):
     action = _vllm_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    from hyperloom.orchestrator.framework import targeted_build as tb
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
 
     def _fake_vllm(action, attempt_root, **kw):
-        from hyperloom.orchestrator.framework.build_actions import BuildResult
+        from hyperloom.orchestrator.enablement.runtime.build_actions import BuildResult
 
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
@@ -952,7 +952,7 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
     action = _vllm_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    from hyperloom.orchestrator.framework import targeted_build as tb
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
 
     def _patched_driver(argv=None):
         import argparse
@@ -998,7 +998,7 @@ def test_aiter_build_e2e_real_rocm(tmp_path):
     except ImportError:
         pytest.skip("torch not importable — skipping real AITER compile")
 
-    from hyperloom.orchestrator.framework.targeted_build import run_aiter_build
+    from hyperloom.orchestrator.enablement.runtime.targeted_build import run_aiter_build
 
     action = TargetedBuildAction(
         gap_id="e2e",

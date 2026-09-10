@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.framework.build_actions import (
+from hyperloom.orchestrator.enablement.runtime.build_actions import (
     FAILURE_CLASSES,
     BuildResult,
     FrameworkRuntime,
@@ -146,7 +146,7 @@ def test_novelty_key_novel_repo_and_capability_differ():
 
 # resolve_build_ref
 
-from hyperloom.orchestrator.framework.build_actions import resolve_build_ref
+from hyperloom.orchestrator.enablement.runtime.build_actions import resolve_build_ref
 
 
 def test_resolve_github_pr_url():

@@ -10,7 +10,7 @@ import types
 import pytest
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.framework.stack_actions import EnablementStackAction
+from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 
 
 def _ctx(task_id: str = "t-1"):

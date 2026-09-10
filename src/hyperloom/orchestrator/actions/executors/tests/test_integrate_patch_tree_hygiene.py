@@ -13,7 +13,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _git_stash_if_dirty,
 )
 
-from .conftest import git_commit_all, init_git_repo
+from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo
 
 _SEED = "def f():\n    return 1\n"
 

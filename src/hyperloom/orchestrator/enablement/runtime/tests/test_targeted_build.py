@@ -12,8 +12,8 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
-from hyperloom.orchestrator.framework.targeted_build import (
+from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     classify_build_exit,
     ensure_build_dead,
     kill_build_pgroup,

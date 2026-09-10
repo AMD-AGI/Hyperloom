@@ -17,7 +17,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     _build_variant_yaml,
     apply_runtime_override,
 )
-from hyperloom.orchestrator.framework.stack_actions import (
+from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
     FrameworkRuntime,
     ProvisionResult,
@@ -106,7 +106,7 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
         called["n"] += 1
         return _FakeAdapter(_ok_result("/x"))
 
-    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", _get_adapter)
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", _get_adapter)
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None
@@ -119,7 +119,7 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
 async def test_provision_ok_sets_ctx(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv))
-    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None
@@ -131,7 +131,7 @@ async def test_provision_ok_sets_ctx(_executor, monkeypatch):
 
 async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
     adapter = _FakeAdapter(ProvisionResult(ok=False, error="pip failed"))
-    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
     assert out is not None
@@ -146,7 +146,7 @@ async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
 async def test_probe_fail_returns_reverted(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
     adapter = _FakeAdapter(_ok_result(venv), probe_ok=False)
-    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
     assert out is not None
@@ -163,7 +163,7 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
     monkeypatch.setattr(iso, "disk_preflight", _boom)
     called = {"n": 0}
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.adapters.get_adapter",
+        "hyperloom.orchestrator.enablement.runtime.adapters.get_adapter",
         lambda _fw: called.__setitem__("n", called["n"] + 1),
     )
     ctx = _ctx()

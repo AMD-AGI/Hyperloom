@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import init_git_repo, patch_integrate_patch_roots
+from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
