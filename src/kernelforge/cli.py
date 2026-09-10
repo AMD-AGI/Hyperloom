@@ -545,10 +545,7 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     for name, detail in _LANE_PROVIDER_ADVISORIES:
         if getattr(capabilities, name, False):
             continue
-        print(
-            f"  [lanes] WARNING: agent provider {provider!r} does not declare "
-            f"{name}; it cannot {detail}"
-        )
+        print(f"  [lanes] WARNING: agent provider {provider!r} does not declare {name}; it cannot {detail}")
     missing = [
         f"{name} (it must {detail})"
         for name, detail in _LANE_PROVIDER_REQUIREMENTS
