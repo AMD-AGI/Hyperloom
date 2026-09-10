@@ -352,7 +352,6 @@ async def _run_agent(
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,
-        reasoning_effort="max",
         additional_directories=[str(reference_path.parent)],
         allow_untracked=True,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),

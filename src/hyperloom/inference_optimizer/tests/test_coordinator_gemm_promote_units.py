@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -1518,6 +1519,626 @@ class TestHandleGemmTuningResult:
 
         assert coord.shared_state.optimization_stack == []
         assert not coord.shared_state.current_best
+
+
+class TestKernelE2EMeasurementPromotion:
+    @pytest.fixture
+    def coord(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
+        monkeypatch.delenv("HYPERLOOM_GEMM_PAIRED_PAIRS", raising=False)
+        coord = _coord(
+            tmp_path,
+            framework="sglang",
+            benchmark_mode="agentx",
+            baseline_tput=100.0,
+            baseline_perf={"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0},
+            current_best={
+                "tput": 100.0,
+                "total_throughput": 1000.0,
+                "e2e_norm_intvty_p90": 100.0,
+                "extra_envs": {"BASE_ENV": "1"},
+            },
+        )
+        coord.shared_state.save(tmp_path)
+        return coord
+
+    @staticmethod
+    def _bench(output=90.0, total=1200.0, *, name="first", intvty=120.0):
+        return {
+            "status": "succeeded",
+            "output_throughput": output,
+            "total_token_throughput": total,
+            "input_throughput": total - output,
+            "e2e_norm_intvty_p90": intvty,
+            "intvty_p90": 100.0,
+            "tpot_p90_ms": 10.0,
+            "ttft_mean_ms": 12.0,
+            "e2el_mean_ms": 23.0,
+            "tpot_mean_ms": 4.0,
+            "workspace": f"/e2e/{name}",
+            "raw_result_path": f"/e2e/{name}/raw.json",
+            "report_path": f"/e2e/{name}/report.json",
+            "materialized_config": f"/e2e/{name}/config.yaml",
+            "launch_evidence": {
+                "framework": "sglang",
+                "observed_server_identity": {"model_path": "/models/e2e", "tp_size": 2},
+                "observed_server_launch_flags": "--model-path /models/e2e --tp-size 2",
+            },
+            "launch_evidence_path": f"/e2e/{name}/launch_evidence.json",
+            "server_log_path": f"/e2e/{name}/server.log",
+            "extra_envs": {"MEASURED_ENV_NOT_CANDIDATE": "1"},
+            "extra_server_args": "--stale-measured-args",
+            "source_snapshot": "/stale/measured-snapshot",
+        }
+
+    @classmethod
+    def _result(cls):
+        return {
+            **cls._bench(9999.0, 99999.0, name="micro", intvty=9999.0),
+            "backend": "forge",
+            "requires_e2e_validation": True,
+            "recommended_env": {"GEMM_CONFIG": "/candidate.csv"},
+            "extra_envs": {"GEMM_CONFIG": "/candidate.csv"},
+            "candidates": [{"tuner": "dense", "env": {"GEMM_CONFIG": "/candidate.csv"}}],
+        }
+
+    @staticmethod
+    def _assert_measurement(coord, bench):
+        cb = coord.shared_state.current_best
+        assert cb["tput"] == bench["output_throughput"]
+        for key in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms", "workspace", "e2e_norm_intvty_p90"):
+            assert cb[key] == bench[key]
+        measurement = coord.shared_state.current_best_measurement
+        assert measurement["benchmark_workspace"] == bench["workspace"]
+        for key in ("launch_evidence", "launch_evidence_path", "server_log_path"):
+            assert measurement[key] == bench[key]
+        assert measurement["identity_verification_status"] == "verified_observed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outer_output", [90.0, 9000.0])
+    async def test_gemm_nested_intvty_keep_can_lower_output(self, coord, monkeypatch, outer_output):
+        bench = self._bench(total=1080.0)
+        fake = _make_integrate(
+            [{"decision": "KEEP", "new_tput": outer_output, "gain_pct": 20.0, "bench_result": bench}]
+        )
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        result = self._result()
+        phase = KernelPhase(coord)
+        lifted_variants = []
+        real_lift = phase._lift_to_current_best
+
+        def capture_lift(action, tput, variant, **kwargs):
+            lifted_variants.append(variant)
+            return real_lift(action, tput, variant, **kwargs)
+
+        monkeypatch.setattr(phase, "_lift_to_current_best", capture_lift)
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "KEEP"
+        assert result["e2e_gain_pct"] == pytest.approx(20.0)
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(20.0)
+        assert coord.shared_state.cumulative_gain_validated_stack_len == 1
+        assert coord.shared_state.current_best["total_throughput"] == 1080.0
+        assert coord.shared_state.current_best["input_throughput"] == 990.0
+        assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == 120.0
+        assert coord.shared_state.current_best["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
+        assert coord.shared_state.current_best["extra_server_args"] == ""
+        assert result["tuned_file"] == "/candidate.csv"
+        assert result["e2e_results"]["kept"][0]["tput"] == 90.0
+        assert coord.shared_state.optimization_stack[0]["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv"}
+        assert "source_snapshot" not in coord.shared_state.optimization_stack[0]
+        self._assert_measurement(coord, bench)
+        [variant] = lifted_variants
+        for key in ("raw_result_path", "report_path", "materialized_config", "tpot_p90_ms"):
+            assert variant[key] == bench[key]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("explicit_output", [False, True], ids=["intvty", "explicit_output"])
+    async def test_promotion_recorder_keeps_gain_objective_separate_from_output(
+        self, coord, monkeypatch, explicit_output
+    ):
+        from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+
+        if explicit_output:
+            monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        bench = self._bench(150.0, 1080.0)
+        gain = 50.0 if explicit_output else 20.0
+        integrate = {
+            "status": "ok",
+            "decision": "KEEP",
+            "new_tput": 150.0,
+            "gain_pct": gain,
+            "bench_result": bench,
+            "apply_result": {"status": "ok", "manifest_path": "/candidate/manifest.json"},
+        }
+        phase = KernelPhase(coord)
+        monkeypatch.setattr(krh_mod, "integrate_handler", _make_integrate([integrate]))
+        result = {
+            "status": "ok",
+            "backend": "forge",
+            "baseline_tput": 100.0,
+            "new_tput": 150.0,
+            "candidates": [{"tuner": "dense", "env": {"GEMM_CONFIG": "/candidate.csv"}}],
+        }
+        await phase._handle_gemm_tuning_result(result)
+        kind = "gemm_tuning"
+
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
+        parts = assemble_parts(coord.session_dir)
+        operation = next(row for row in parts["operations"] if row["kind"] == kind)
+        measurements = {
+            row["name"]: row for row in parts["measurements"] if row["measurement_id"] in operation["measurement_refs"]
+        }
+        assert measurements["baseline_throughput"]["value"] == 100.0
+        assert measurements["baseline_throughput"]["metric_basis"] == "output"
+        assert measurements["final_throughput"]["value"] == 150.0
+        assert measurements["final_throughput"]["metric_basis"] == "output"
+        assert measurements["e2e_gain_pct"]["value"] == pytest.approx(gain)
+        assert measurements["e2e_gain_pct"]["metric_basis"] == ("output" if explicit_output else "intvty")
+
+    @pytest.mark.asyncio
+    async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):
+        state = coord.shared_state
+        state.baseline_perf = {}
+        state.cumulative_gain_validated = 37.0
+        state.cumulative_gain_validated_ts = "2026-01-01T00:00:00+00:00"
+        bench = self._bench()
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 90.0, "gain_pct": 20.0, "bench_result": bench}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        result = self._result()
+
+        await KernelPhase(coord)._validate_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "KEEP"
+        assert result["e2e_gain_pct"] is None
+        assert result["e2e_results"]["kept"][0]["gain_pct"] == 20.0
+        assert result["tuned_file"] == "/candidate.csv"
+        assert state.current_best["total_throughput"] == 1200.0
+        assert len(state.optimization_stack) == 1
+        assert state.cumulative_gain_validated == 37.0
+        assert state.cumulative_gain_validated_ts == "2026-01-01T00:00:00+00:00"
+        assert state.cumulative_gain_validated_stack_len == 0
+        self._assert_measurement(coord, bench)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("last_has_axes", [True, False])
+    async def test_gemm_sequential_keeps_persist_live_anchor_and_last_measurement(
+        self, coord, monkeypatch, last_has_axes
+    ):
+        from hyperloom.orchestrator.state.shared_state import resolve_graded_comparison
+
+        first = self._bench(110.0, 1080.0)
+        last = self._bench(115.0, 1120.0, name="last", intvty=132.0)
+        if not last_has_axes:
+            for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
+                last.pop(key)
+        fake = _make_integrate(
+            [
+                {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 20.0, "bench_result": first},
+                {"decision": "KEEP", "new_tput": 115.0, "gain_pct": 10.0, "bench_result": last},
+            ]
+        )
+        anchors = []
+
+        async def integrate(payload, *, session_dir):
+            persisted = SharedState.load_or_init(session_dir)
+            response = await fake(payload, session_dir=session_dir)
+            graded = resolve_graded_comparison(persisted, response["bench_result"])
+            anchors.append((persisted.current_best, persisted.current_best_measurement, graded.reference))
+            return response
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", integrate)
+        result = self._result()
+        result["candidates"].append({"tuner": "second", "env": {"SECOND_CONFIG": "/second.csv"}})
+        await KernelPhase(coord)._validate_gemm_tuning_e2e(result)
+
+        assert len(fake.calls) == 2
+        assert fake.calls[1]["base_tput"] == 110.0
+        assert fake.calls[1]["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv", "SECOND_CONFIG": "/second.csv"}
+        anchor, identity, reference = anchors[1]
+        assert anchor["tput"] == 110.0
+        assert anchor["total_throughput"] == 1080.0
+        assert anchor["e2e_norm_intvty_p90"] == 120.0
+        assert anchor["extra_envs"] == {"BASE_ENV": "1", "GEMM_CONFIG": "/candidate.csv"}
+        assert identity["benchmark_workspace"] == first["workspace"]
+        assert len(coord.shared_state.optimization_stack) == (2 if last_has_axes else 1)
+        assert reference == (120.0 if last_has_axes else 110.0)
+        assert [row["tput"] for row in result["e2e_results"]["kept"]] == ([110.0, 115.0] if last_has_axes else [110.0])
+        assert result["tuned_file"] == ("/second.csv" if last_has_axes else "/candidate.csv")
+        gain = 32.0 if last_has_axes else 20.0
+        assert result["e2e_gain_pct"] == pytest.approx(gain)
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
+        assert coord.shared_state.cumulative_gain_validated_stack_len == (2 if last_has_axes else 1)
+        expected = last if last_has_axes else first
+        assert coord.shared_state.current_best["total_throughput"] == expected["total_token_throughput"]
+        assert coord.shared_state.current_best["e2e_norm_intvty_p90"] == expected["e2e_norm_intvty_p90"]
+        if last_has_axes:
+            assert result["e2e_results"]["reverted"] == []
+        else:
+            assert [row["tuner"] for row in result["e2e_results"]["reverted"]] == ["second"]
+            assert result["recommended_env"] == result["extra_envs"] == {"GEMM_CONFIG": "/candidate.csv"}
+            assert "SECOND_CONFIG" not in coord.shared_state.current_best["extra_envs"]
+        self._assert_measurement(coord, expected)
+
+    @pytest.fixture
+    def paired_handler(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _multi_node_env, benchmark_backend
+
+        def unexpected(*args, **kwargs):
+            raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
+
+        monkeypatch.setenv("FRAMEWORK", "sglang")
+        monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
+        monkeypatch.setattr(krh_mod, "_load_apply_tool", unexpected)
+        monkeypatch.setattr(krh_mod, "_grade_integrate_accuracy", unexpected)
+        monkeypatch.setattr(krh_mod, "_maybe_finalize_kernel_patch", unexpected)
+        monkeypatch.setattr(krh_mod, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
+        monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
+        monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+        return krh_mod.integrate_handler
+
+    @pytest.fixture
+    def paired_empty_recipe(self, coord):
+        state = coord.shared_state
+        state.current_best.update(extra_server_args="--page-size 32", extra_envs={"TUNED_ENV": "1"})
+        state.baseline_config_path = "/live/base.yaml"
+        state.last_kernel_opt = {
+            "kernel_id": "unrelated",
+            "patch_path": "/unrelated.patch",
+            "target_file": "/unrelated.py",
+        }
+        state.save(coord.session_dir)
+        return {
+            "source": "forge_gemm_paired",
+            "mode": "env_only",
+            "kernel_id": "gemm_paired_A0",
+            "paired_reference": {"tput": 110.0, "extra_envs": {}},
+            "config_path": "/entry/base.yaml",
+            "extra_server_args": "",
+            "extra_envs": {},
+            "keep_threshold_pct": 0.0,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_keep", [False, True], ids=["keep-revert", "keep-keep"])
+    async def test_gemm_paired_defaults_keep_entry_reference(self, coord, monkeypatch, paired_handler, second_keep):
+        from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "2")
+        state = coord.shared_state
+        entry_envs = {"BASE_ENV": "1", "PYTHONPATH": "/prior/source"}
+        state.current_best.update(
+            tput=110.0,
+            total_throughput=1100.0,
+            e2e_norm_intvty_p90=110.0,
+            extra_server_args="--page-size 16",
+            extra_envs=dict(entry_envs),
+            final_overlay="/prior/overlay",
+        )
+        state.baseline_config_path = "/entry/base.yaml"
+        coord.writeback._stamp_current_best_measurement(self._bench(110.0, 1100.0, name="entry", intvty=110.0))
+        entry_reference = deepcopy(state.current_best)
+        state.save(coord.session_dir)
+        candidate = coord.session_dir / "candidate-fmoe.csv"
+        candidate.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        first = self._bench(120.0, 1150.0, intvty=132.0)
+        last = (
+            self._bench(130.0, 1200.0, name="last", intvty=145.2)
+            if second_keep
+            else self._bench(110.0, 1050.0, intvty=110.0)
+        )
+        candidate_integrate = _make_integrate(
+            [
+                {"decision": "KEEP", "new_tput": 120.0, "gain_pct": 20.0, "bench_result": first},
+                {
+                    "decision": "KEEP" if second_keep else "REVERT",
+                    "new_tput": last["output_throughput"],
+                    "gain_pct": 10.0 if second_keep else -16.6667,
+                    "bench_result": last,
+                },
+            ]
+        )
+        calls = []
+        paired_payloads = []
+        paired_params = []
+        disk_during_pairs = []
+        live_during_pairs = []
+        paired_state_changes = []
+
+        async def integrate(payload, *, session_dir):
+            calls.append(payload["kernel_id"])
+            if payload["source"] != "forge_gemm_paired":
+                resolved = krh_mod._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+                response = await candidate_integrate(resolved, session_dir=session_dir)
+                state.baseline_config_path = "/live/base.yaml"
+                return response
+            paired_payloads.append(deepcopy(payload))
+            before = SharedState.state_path(session_dir).read_bytes()
+            live_before = deepcopy((state.current_best, state.optimization_stack, state.baseline_config_path))
+            live_during_pairs.append(live_before[0])
+            response = await paired_handler(payload, session_dir=session_dir)
+            paired_state_changes.append(
+                (
+                    SharedState.state_path(session_dir).read_bytes() != before,
+                    (state.current_best, state.optimization_stack, state.baseline_config_path) != live_before,
+                )
+            )
+            return response
+
+        async def measure(executor, ctx):
+            params = deepcopy(ctx.task.params)
+            paired_params.append(params)
+            disk_during_pairs.append(deepcopy(executor.shared_state.current_best))
+            tuned = "AITER_CONFIG_FMOE" in params["extra_envs"]
+            output = (130.0 if second_keep else 120.0) if tuned else 110.0
+            intvty = (145.2 if second_keep else 132.0) if tuned else 110.0
+            return {**self._bench(output, output * 10, name="paired", intvty=intvty), "completed_requests": 2}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", integrate)
+        monkeypatch.setattr(BaselineExecutor, "__call__", measure)
+        phase = KernelPhase(coord)
+        monkeypatch.setattr(phase, "_merge_gemm_candidate_with_runtime", lambda _var, value: value)
+        result = self._result()
+        result["candidates"] = [
+            {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(candidate)}},
+            {"tuner": "second", "env": {"SECOND_CONFIG": "/second.csv"}},
+        ]
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert calls == [
+            "gemm_tune_fmoe_ck",
+            "gemm_tune_second",
+            "gemm_paired_A0",
+            "gemm_paired_B1",
+            "gemm_paired_A2",
+            "gemm_paired_B3",
+        ]
+        assert len(paired_params) == 4
+        assert paired_state_changes == [(False, False)] * 4
+        expected_tuned_envs = {**entry_envs, "AITER_CONFIG_FMOE": str(candidate)}
+        if second_keep:
+            expected_tuned_envs["SECOND_CONFIG"] = "/second.csv"
+        for index, params in enumerate(paired_params):
+            recipe_envs = entry_envs if index % 2 == 0 else expected_tuned_envs
+            assert params["extra_envs"] == {**recipe_envs, "PYTHONPATH": "/prior/overlay:/prior/source"}
+            assert params["extra_server_args"] == (
+                "--page-size 16" if index % 2 == 0 else "--page-size 16 --moe-runner-backend aiter"
+            )
+            assert params["config_path"] == "/entry/base.yaml"
+            assert paired_payloads[index]["base_tput"] == 110.0
+            reference = paired_payloads[index]["paired_reference"]
+            assert reference == entry_reference
+            assert reference["tput"] == 110.0
+            assert reference["total_throughput"] == 1100.0
+            assert reference["e2e_norm_intvty_p90"] == 110.0
+            assert reference["measurement"]["benchmark_workspace"] == "/e2e/entry"
+            assert live_during_pairs[index] == state.current_best
+            # Disk still holds the first KEEP; B must explicitly carry the last KEEP.
+            assert disk_during_pairs[index]["tput"] == 120.0
+            assert disk_during_pairs[index]["extra_envs"] == {**entry_envs, "AITER_CONFIG_FMOE": str(candidate)}
+        accepted = last if second_keep else first
+        expected_gain = 45.2 if second_keep else 32.0
+        assert result["decision"] == "KEEP"
+        assert result["e2e_gain_pct"] == pytest.approx(expected_gain)
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(expected_gain)
+        assert coord.shared_state.cumulative_gain_validated_stack_len == (2 if second_keep else 1)
+        assert len(state.optimization_stack) == (2 if second_keep else 1)
+        assert len(result["e2e_results"]["reverted"]) == (0 if second_keep else 1)
+        assert state.current_best["extra_envs"] == expected_tuned_envs
+        assert state.current_best["extra_server_args"] == "--page-size 16 --moe-runner-backend aiter"
+        assert state.current_best["final_overlay"] == "/prior/overlay"
+        assert state.current_best["total_throughput"] == accepted["total_token_throughput"]
+        assert state.baseline_config_path == "/live/base.yaml"
+        self._assert_measurement(coord, accepted)
+
+    @pytest.mark.asyncio
+    async def test_gemm_paired_native_handler_measures_explicit_empty_recipe(
+        self, coord, monkeypatch, paired_handler, paired_empty_recipe
+    ):
+        from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+        before = SharedState.state_path(coord.session_dir).read_bytes()
+        measured = []
+        bench = {**self._bench(300.0, 3000.0), "completed_requests": 2}
+
+        async def measure(executor, ctx):
+            measured.append((deepcopy(ctx.task.params), deepcopy(executor.shared_state.current_best)))
+            return bench
+
+        monkeypatch.setattr(BaselineExecutor, "__call__", measure)
+        result = await paired_handler(paired_empty_recipe, session_dir=coord.session_dir)
+
+        [(params, anchor)] = measured
+        assert params["config_path"] == "/entry/base.yaml"
+        assert params["extra_server_args"] == ""
+        assert params["extra_envs"] == {}
+        assert "disable_run_eval" not in params
+        assert params["defer_accuracy_until_after_measure"] is True
+        assert params["quality_ref_exempt"] is True
+        assert anchor == coord.shared_state.current_best
+        assert result["status"] == "ok"
+        assert result["decision"] == "NEEDS_REVIEW"
+        assert result["base_tput"] == 110.0
+        assert result["new_tput"] == 300.0
+        assert result["bench_result"] == bench
+        assert SharedState.state_path(coord.session_dir).read_bytes() == before
+        for missing in ("paired_reference", "config_path", "extra_server_args", "extra_envs"):
+            incomplete = {key: value for key, value in paired_empty_recipe.items() if key != missing}
+            with pytest.raises(ValueError, match="explicit entry reference"):
+                await paired_handler(incomplete, session_dir=coord.session_dir)
+        with pytest.raises(AssertionError, match="must not resolve"):
+            await paired_handler(
+                {
+                    **paired_empty_recipe,
+                    "source": "arbitrary_source",
+                    "mode": "patch",
+                    "patch_path": "/unrelated.patch",
+                },
+                session_dir=coord.session_dir,
+            )
+        assert len(measured) == 1
+        assert SharedState.state_path(coord.session_dir).read_bytes() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            pytest.param(
+                {"status": "failed", "error_class": "subprocess_nonzero", "returncode": 1, "completed_requests": 0},
+                id="nonzeroexit",
+            ),
+            pytest.param({"status": "failed", "output_throughput": 0.0}, id="failed"),
+        ],
+    )
+    async def test_gemm_paired_native_handler_rejects_invalid_measurement(
+        self, coord, monkeypatch, paired_handler, paired_empty_recipe, invalid
+    ):
+        from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+        before = SharedState.state_path(coord.session_dir).read_bytes()
+        bench = {**self._bench(300.0, 3000.0), "completed_requests": 2, **invalid}
+        measured = []
+
+        async def measure(executor, ctx):
+            measured.append(ctx.task.params)
+            return bench
+
+        monkeypatch.setattr(BaselineExecutor, "__call__", measure)
+        result = await paired_handler(paired_empty_recipe, session_dir=coord.session_dir)
+
+        assert len(measured) == 1
+        assert result["status"] == "failed"
+        assert result["decision"] == "REVERT"
+        assert result["rebaseline_detail"] == bench
+        assert not result.get("new_tput")
+        assert SharedState.state_path(coord.session_dir).read_bytes() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "artifact",
+        [
+            pytest.param({"patch_path": "/unexpected.patch"}, id="patch_path"),
+            pytest.param({"target_file": "/unexpected.py"}, id="target_file"),
+            pytest.param({"source_file": "/unexpected.py"}, id="source_file"),
+            pytest.param({"snapshot_dir": "/unexpected-snapshot"}, id="snapshot_dir"),
+            pytest.param(
+                {"preapplied_apply_result": {"status": "ok", "manifest_path": "/unexpected-manifest.json"}},
+                id="preapplied_apply_result",
+            ),
+        ],
+    )
+    async def test_gemm_paired_native_handler_rejects_artifacts(
+        self, coord, monkeypatch, paired_handler, paired_empty_recipe, artifact
+    ):
+        from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+        before = SharedState.state_path(coord.session_dir).read_bytes()
+        measured = []
+
+        async def measure(executor, ctx):
+            measured.append(ctx.task.params)
+            return {**self._bench(300.0, 3000.0), "completed_requests": 2}
+
+        monkeypatch.setattr(BaselineExecutor, "__call__", measure)
+        with pytest.raises(ValueError, match="cannot apply"):
+            await paired_handler({**paired_empty_recipe, **artifact}, session_dir=coord.session_dir)
+
+        assert measured == []
+        assert SharedState.state_path(coord.session_dir).read_bytes() == before
+
+    @pytest.mark.asyncio
+    async def test_gemm_refused_lift_does_not_claim_keep(self, coord, monkeypatch):
+        bench = self._bench(130.0, 1200.0, intvty=50.0)
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 20.0, "bench_result": bench}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        phase = KernelPhase(coord)
+        real_lift = phase._lift_to_current_best
+        lifts = []
+
+        def capture_lift(*args, **kwargs):
+            lifted = real_lift(*args, **kwargs)
+            lifts.append(lifted)
+            return lifted
+
+        monkeypatch.setattr(phase, "_lift_to_current_best", capture_lift)
+        result = self._result()
+        result["e2e_norm_intvty_p90"] = 50.0
+        anchor = dict(coord.shared_state.current_best)
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert lifts == [False]
+        assert result["decision"] == "REVERT"
+        assert result["e2e_results"]["kept"] == []
+        assert len(result["e2e_results"]["reverted"]) == 1
+        assert result["recommended_env"] == result["extra_envs"] == {}
+        assert "tuned_file" not in result
+        assert coord.shared_state.current_best == anchor
+        assert coord.shared_state.current_best_measurement == {}
+        assert coord.shared_state.optimization_stack == []
+        assert coord.shared_state.cumulative_gain_validated == 0.0
+        assert _journal_entries(coord.session_dir) == []
+
+    @pytest.mark.asyncio
+    async def test_gemm_runtime_artifact_not_applied_blocks_nested_keep(self, coord, monkeypatch):
+        candidate = coord.session_dir / "candidate.csv"
+        candidate.write_text("M,N,K\n32,64,128\n", encoding="utf-8")
+        server_log = coord.session_dir / "runs" / "integrate" / "integrate-gemm_tune_dense" / "server.log"
+        server_log.parent.mkdir(parents=True)
+        server_log.write_text(
+            "[aiter] shape is M:32, N:64, K:128, not found tuned config in "
+            "/runtime/a8w8_tuned_gemm.csv, will use default config!\n",
+            encoding="utf-8",
+        )
+        fake = _make_integrate(
+            [{"decision": "KEEP", "new_tput": 90.0, "gain_pct": 20.0, "bench_result": self._bench()}]
+        )
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        phase = KernelPhase(coord)
+        monkeypatch.setattr(phase, "_merge_gemm_candidate_with_runtime", lambda _var, value: value)
+        result = self._result()
+        result["candidates"] = [{"tuner": "dense", "env": {"AITER_CONFIG_GEMM_BF16": str(candidate)}}]
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "REVERT"
+        [reverted] = result["e2e_results"]["reverted"]
+        assert reverted["tuned_config_coverage"]["artifact_applied"] is False
+        assert "artifact_table_not_consulted" in reverted["reason"]
+        assert reverted["apply_verdict"]["blocks_keep"] is True
+        assert coord.shared_state.optimization_stack == []
+        assert coord.shared_state.cumulative_gain_validated == 0.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("explicit_output", [False, True], ids=["required_intvty", "explicit_output"])
+    async def test_gemm_legacy_measurement_does_not_borrow_micro_axes(self, coord, monkeypatch, explicit_output):
+        if explicit_output:
+            monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        result = self._result()
+        anchor = deepcopy(coord.shared_state.current_best)
+        await KernelPhase(coord)._validate_gemm_tuning_e2e(result)
+
+        assert result["decision"] == ("KEEP" if explicit_output else "REVERT")
+        if explicit_output:
+            assert result["e2e_gain_pct"] == pytest.approx(10.0)
+            assert coord.shared_state.cumulative_gain_validated == pytest.approx(10.0)
+            assert coord.shared_state.current_best["tput"] == 110.0
+            assert "total_throughput" not in coord.shared_state.current_best
+            assert "e2e_norm_intvty_p90" not in coord.shared_state.current_best
+            assert coord.shared_state.current_best_measurement["benchmark_workspace"] == ""
+        else:
+            assert result["e2e_results"]["kept"] == []
+            assert [row["tuner"] for row in result["e2e_results"]["reverted"]] == ["dense"]
+            assert result["recommended_env"] == result["extra_envs"] == {}
+            assert "tuned_file" not in result
+            assert coord.shared_state.current_best == anchor
+            assert coord.shared_state.current_best_measurement == {}
+            assert coord.shared_state.optimization_stack == []
+            assert coord.shared_state.cumulative_gain_validated == 0.0
+            assert coord.shared_state.cumulative_gain_validated_ts == ""
+            assert coord.shared_state.cumulative_gain_validated_stack_len == 0
+            assert _journal_entries(coord.session_dir) == []
 
 
 class TestValidateForgeGemmTuningE2E:

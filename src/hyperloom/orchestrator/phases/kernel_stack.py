@@ -410,6 +410,7 @@ class KernelStackPhase(PhaseHandler):
                     extra={"shared_state": self.shared_state},
                 )
             )
+            graded = None
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
                 graded_verdict = VERDICT_REVERT
@@ -422,13 +423,13 @@ class KernelStackPhase(PhaseHandler):
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
                 # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
                 # current_best rather than the total gain over the baseline.
+                # The verdict is the chokepoint's: it already applies the AgentX keep-threshold floor and the
+                # throughput guard, so the stack lane must not re-derive a KEEP from the raw incremental gain.
                 graded = resolve_graded_comparison(
                     self.shared_state,
                     bench_result,
                     keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
                 )
-                if graded.degrade_reason:
-                    log.info("stack-validate: %s graded on output throughput (%s)", stack_id, graded.degrade_reason)
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
@@ -444,6 +445,14 @@ class KernelStackPhase(PhaseHandler):
                     )
                 graded_verdict = graded.verdict
                 decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
+                if not graded.comparable:
+                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
+                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
+                    # is a call for a human, and the revert path below still leaves the tree clean either way.
+                    log.info(
+                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
+                    )
+                    decision = "NEEDS_REVIEW"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
@@ -501,6 +510,8 @@ class KernelStackPhase(PhaseHandler):
                 "base_tput": float(self.shared_state.baseline_tput or 0.0),
                 "new_tput": new_tput,
                 "gain_pct": gain_pct,
+                "graded_objective": graded.objective if graded is not None else None,
+                "bench_result": bench_result,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
                 # A stack cannot be left half-applied, so RECORDED reverts like
@@ -514,6 +525,8 @@ class KernelStackPhase(PhaseHandler):
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
             }
+            if graded is not None and not graded.comparable:
+                result["reason"] = f"performance comparison unavailable: {graded.degrade_reason}"
             if top_status == "failed":
                 result["error_class"] = "patch_revert_incomplete"
                 result["error"] = "Stack patch revert did not fully complete"

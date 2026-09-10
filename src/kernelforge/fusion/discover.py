@@ -1111,7 +1111,6 @@ def registered_agent_llm_fn(
                 model=selected_model,
                 writable=False,
                 timeout_sec=max(1, int(timeout_s)),
-                reasoning_effort="high",
                 tool_policy=AgentToolPolicy(
                     read=True,
                     search=True,

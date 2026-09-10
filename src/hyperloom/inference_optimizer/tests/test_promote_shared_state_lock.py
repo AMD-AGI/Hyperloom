@@ -7,7 +7,9 @@ and sweep/conc_sweep early-return.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -455,6 +457,154 @@ async def test_promote_integrate_patch_carries_nested_launch_evidence(session_di
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["fusion", "integrate_patch"])
+@pytest.mark.parametrize("vetoed", [False, True], ids=["intvty_win_output_drop", "intvty_regression"])
+async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monkeypatch, lane, vetoed):
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.framework = "sglang"
+    s.benchmark_mode = "agentx"
+    s.baseline_tput = 100.0
+    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    anchor = {
+        "action": "explore",
+        "tput": 100.0,
+        "total_throughput": 1100.0,
+        "e2e_norm_intvty_p90": 110.0,
+        "extra_server_args": "",
+        "extra_envs": {},
+    }
+    s.current_best = dict(anchor)
+    s.cumulative_gain_validated = 10.0
+    prior_fusion = {"decision": "DISCARD", "kernel_id": "prior-fusion"}
+    s.last_fusion_integrate = dict(prior_fusion)
+    bench = {
+        "status": "succeeded",
+        "output_throughput": 90.0,
+        "total_token_throughput": 1200.0,
+        "input_throughput": 1110.0,
+        "e2e_norm_intvty_p90": 50.0 if vetoed else 120.0,
+        "tpot_p90_ms": 10.0,
+        "ttft_mean_ms": 12.0,
+        "e2el_mean_ms": 23.0,
+        "tpot_mean_ms": 4.0,
+        "workspace": "/e2e/benchmark",
+        "raw_result_path": "/e2e/raw.json",
+        "report_path": "/e2e/report.json",
+        "materialized_config": "/e2e/config.yaml",
+        "launch_evidence": {
+            "framework": "sglang",
+            "observed_server_identity": {"model_path": "/models/e2e", "tp_size": 2},
+            "observed_server_launch_flags": "--model-path /models/e2e --tp-size 2",
+        },
+        "launch_evidence_path": "/e2e/launch_evidence.json",
+        "server_log_path": "/e2e/server.log",
+        "extra_server_args": "--stale-measured-args",
+        "extra_envs": {"STALE_MEASURED_ENV": "1"},
+        "source_snapshot": "/stale/measured-snapshot",
+    }
+    result = {
+        **{key: f"/outer/{key}" for key in ("workspace", "raw_result_path", "report_path", "materialized_config")},
+        "status": "kept",
+        "output_throughput": 140.0,
+        "new_tput": 9999.0,
+        "total_throughput": 2000.0,
+        "input_throughput": 1860.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "tpot_p90_ms": 99.0,
+        "ttft_mean_ms": 99.0,
+        "e2el_mean_ms": 99.0,
+        "tpot_mean_ms": 99.0,
+        "source": "forge_fusion",
+        "action_label": "fusion",
+        "kernel_id": "fuse-e2e",
+        "integration_id": "integration-e2e",
+        "patch_path": "/authored/kernel.patch",
+        "specialist_task_id": "spec-e2e",
+        "extra_server_args": "--page-size 32",
+        "extra_server_args_applied": "--page-size 32",
+        "extra_envs": {"ACCEPTED_ENV": "1"},
+        "extra_envs_applied": {"ACCEPTED_ENV": "1"},
+        **_keep_result(session_dir, import_root="python"),
+        "launch_evidence": {
+            "framework": "sglang",
+            "observed_server_identity": {"model_path": "/models/stale", "tp_size": 8},
+            "observed_server_launch_flags": "--model-path /models/stale --tp-size 8",
+        },
+        "launch_evidence_path": "/outer/launch_evidence.json",
+        "server_log_path": "/outer/server.log",
+        "bench_result": bench,
+    }
+    candidates = []
+    real_lift = coord.writeback._lift_to_current_best
+
+    def capture_lift(action, tput, variant, **kwargs):
+        candidates.append((tput, variant))
+        return real_lift(action, tput, variant, **kwargs)
+
+    monkeypatch.setattr(coord.writeback, "_lift_to_current_best", capture_lift)
+    if lane == "fusion":
+        await coord.writeback._record_integrate_keep(result)
+    else:
+        await coord.writeback._promote_integrate_patch(result, _task("integrate_patch"), wb._PromoteOutcome())
+
+    if vetoed:
+        assert s.current_best == anchor
+        assert s.optimization_stack == []
+        assert s.current_best_measurement == {}
+        assert s.cumulative_gain_validated == 10.0
+        assert s.cumulative_gain_validated_stack_len == 0
+        assert s.last_fusion_integrate == prior_fusion
+        return
+
+    assert s.current_best["tput"] == 90.0
+    assert s.current_best["total_throughput"] == 1200.0
+    assert s.current_best["input_throughput"] == 1110.0
+    assert s.current_best["e2e_norm_intvty_p90"] == 120.0
+    assert s.cumulative_gain_validated == pytest.approx(20.0)
+    assert s.cumulative_gain_validated_stack_len == 1
+    assert len(s.optimization_stack) == 1
+    entry = s.optimization_stack[0]
+    assert entry["action"] == lane
+    assert entry["tput"] == 90.0
+    assert entry["workspace"] == bench["workspace"]
+    assert s.current_best["extra_server_args"] == "--page-size 32"
+    assert s.current_best["extra_envs"] == {"ACCEPTED_ENV": "1"}
+    assert entry["candidate_extra_server_args"] == "--page-size 32"
+    if lane == "fusion":
+        assert entry["patch_path"] == result["patch_path"]
+        assert entry["integration_id"] == result["integration_id"]
+        assert s.last_fusion_integrate["decision"] == "KEEP"
+        assert s.last_fusion_integrate["kernel_id"] == "fuse-e2e"
+    else:
+        assert entry["candidate_extra_envs"] == {"ACCEPTED_ENV": "1"}
+        assert entry["source_snapshot"] == result["source_snapshot"]
+        assert entry["source_manifest"] == result["source_manifest"]
+        assert entry["framework_root"] == result["framework_root"]
+
+    [(new_tput, candidate)] = candidates
+    assert new_tput == bench["output_throughput"]
+    for key in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms", "tpot_p90_ms", "workspace"):
+        assert candidate[key] == s.current_best[key] == bench[key]
+    for key in ("raw_result_path", "report_path", "materialized_config"):
+        assert candidate[key] == bench[key]
+    measurement = s.current_best_measurement
+    assert measurement["tput"] == bench["output_throughput"]
+    assert measurement["benchmark_workspace"] == bench["workspace"]
+    for key in ("launch_evidence", "launch_evidence_path", "server_log_path"):
+        assert measurement[key] == bench[key]
+    assert measurement["identity_verification_status"] == "verified_observed"
+    spec = coord.build_env_spec()
+    assert (
+        spec["measurement_identity"]["observed_server_identity"] == bench["launch_evidence"]["observed_server_identity"]
+    )
+    assert spec["config"]["server_launch_flags"] == bench["launch_evidence"]["observed_server_launch_flags"]
+    assert measurement["declared_launch_identity"] == spec["launch_identity"]
+
+
+@pytest.mark.asyncio
 async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
     """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
     from hyperloom.orchestrator.state.optimization_journal import (
@@ -616,12 +766,21 @@ async def test_integrate_nonpromotion_never_stages_patch(session_dir, tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir):
+@pytest.mark.parametrize("benchmark_mode", ["", "agentx"], ids=["synthetic", "agentx"])
+async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir, monkeypatch, benchmark_mode):
     """A patch required to establish baseline stays reproducible but has no gain."""
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _coord(session_dir)
     s = coord.shared_state
+    s.framework = "sglang"
+    s.benchmark_mode = benchmark_mode
     s.baseline_tput = 0.0
     s.pending_integrate = {"task_id": "t-enable"}
+    validate = Mock()
+    watermark = AsyncMock()
+    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", validate)
+    monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
 
     await coord._promote_to_shared_state(
         "integrate_patch",
@@ -646,9 +805,17 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir)
     assert entry["baseline_enablement"] is True
     assert entry["attribution_eligible"] is False
     assert entry["recipe_publishable"] is False
+    assert s.current_best["action"] == "integrate_patch"
+    assert s.current_best["extra_server_args"] == "--mem-fraction-static 0.95"
+    assert s.current_best["optimization_stack"] == s.optimization_stack
+    assert s.current_best_measurement["tput"] == 140.0
+    assert s.baseline_tput == 0.0
     assert s.gain_per_stack_entry == [None]
     assert s.cumulative_gain_validated == 0.0
+    assert s.cumulative_gain_validated_stack_len == 0
     assert s.pending_integrate == {}
+    validate.assert_not_called()
+    watermark.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1668,6 +1835,262 @@ def test_lift_accepts_winner_that_beats_current_best(session_dir):
     assert s.optimization_stack[-1]["variant_name"] == "real-win"
 
 
+class TestWritebackRequiredAxes:
+    @pytest.fixture
+    def coord(self, session_dir, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+        monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+        coord = _coord(session_dir)
+        state = coord.shared_state
+        state.framework = "sglang"
+        state.benchmark_mode = "agentx"
+        state.baseline_tput = 100.0
+        state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+        state.current_best = {
+            "action": "explore",
+            "variant_name": "prior",
+            "tput": 120.0,
+            "total_throughput": 1200.0,
+            "e2e_norm_intvty_p90": 120.0,
+            "extra_server_args": "--page-size 16",
+            "extra_envs": {"PRIOR_ENV": "1"},
+        }
+        state.optimization_stack = [{"action": "explore", "variant_name": "prior", "tput": 120.0}]
+        state.gain_per_stack_entry = [20.0]
+        state.cumulative_gain_validated = 20.0
+        state.cumulative_gain_validated_ts = "2026-01-01T00:00:00+00:00"
+        state.cumulative_gain_validated_stack_len = 1
+        coord.writeback._stamp_current_best_measurement(
+            {
+                "workspace": "/prior/benchmark",
+                "launch_evidence": {
+                    "framework": "sglang",
+                    "observed_server_identity": {"model_path": "/models/prior", "tp_size": 1},
+                    "observed_server_launch_flags": "--model-path /models/prior --tp-size 1",
+                },
+            }
+        )
+        return coord
+
+    @staticmethod
+    def _candidate():
+        return {
+            "name": "next",
+            "output_throughput": 150.0,
+            "tput": 150.0,
+            "total_throughput": 1600.0,
+            "e2e_norm_intvty_p90": 150.0,
+            "extra_server_args": "--page-size 32",
+            "extra_envs": {"NEXT_ENV": "1"},
+            "unset_envs": ["PRIOR_ENV"],
+            "workspace": "/next/benchmark",
+            "launch_evidence": {
+                "framework": "sglang",
+                "observed_server_identity": {"model_path": "/models/next", "tp_size": 2},
+                "observed_server_launch_flags": "--model-path /models/next --tp-size 2",
+            },
+        }
+
+    @staticmethod
+    def _validation_state(state):
+        return (
+            state.cumulative_gain_validated,
+            state.cumulative_gain_validated_ts,
+            state.cumulative_gain_validated_stack_len,
+        )
+
+    @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
+    def test_lift_refuses_missing_required_axes_without_mutation(self, coord, missing_from, axis):
+        state = coord.shared_state
+        candidate = self._candidate()
+        if missing_from == "candidate":
+            candidate.pop(axis)
+        elif missing_from == "current_best":
+            state.current_best.pop(axis)
+        else:
+            state.current_best = {}
+            state.current_best_measurement = {}
+            state.optimization_stack = []
+            state.gain_per_stack_entry = []
+            state.cumulative_gain_validated_stack_len = 0
+            state.baseline_perf.pop(axis)
+        before = state.to_dict()
+        original_candidate = deepcopy(candidate)
+
+        lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+
+        assert lifted is False
+        assert state.to_dict() == before
+        assert candidate == original_candidate
+
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
+    def test_prebaseline_markers_cannot_bypass_measured_baseline(self, coord, axis):
+        state = coord.shared_state
+        candidate = self._candidate()
+        candidate.pop(axis)
+        candidate.update(baseline_enablement=True, attribution_eligible=False)
+        before = state.to_dict()
+        original_candidate = deepcopy(candidate)
+
+        lifted = coord.writeback._lift_to_current_best("integrate_patch", 150.0, candidate)
+
+        assert lifted is False
+        assert state.to_dict() == before
+        assert candidate == original_candidate
+
+    @pytest.mark.parametrize("missing_from", ["candidate", "baseline"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
+    def test_cumulative_missing_required_axes_preserves_validation(self, coord, monkeypatch, missing_from, axis):
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        state = coord.shared_state
+        candidate = self._candidate()
+        if missing_from == "candidate":
+            candidate.pop(axis)
+        else:
+            state.baseline_perf.pop(axis)
+        state.optimization_stack.append({"action": "explore", "variant_name": "unvalidated", "tput": 150.0})
+        state.gain_per_stack_entry.append(None)
+        before = state.to_dict()
+        record = Mock()
+        monkeypatch.setattr(instrument, "record_session_validation", record)
+
+        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+
+        assert state.to_dict() == before
+        record.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lane", ["integrate", "integrate_patch", "explore"])
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
+    async def test_complete_local_winner_with_missing_baseline_axes_skips_validation(
+        self, coord, monkeypatch, lane, axis
+    ):
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        state = coord.shared_state
+        state.baseline_perf.pop(axis)
+        prior_validation = self._validation_state(state)
+        prior_measurement = deepcopy(state.current_best_measurement)
+        prior_entry = deepcopy(state.optimization_stack[0])
+        record = Mock()
+        watermark = AsyncMock()
+        monkeypatch.setattr(instrument, "record_session_validation", record)
+        monkeypatch.setattr(coord.writeback, "_maybe_enqueue_watermark_roofline", watermark)
+        candidate = self._candidate()
+        outcome = wb._PromoteOutcome()
+        if lane == "integrate":
+            await coord.writeback._record_integrate_keep(
+                {
+                    "decision": "KEEP",
+                    "new_tput": 150.0,
+                    "kernel_id": "next",
+                    "extra_server_args": candidate["extra_server_args"],
+                    "extra_envs": candidate["extra_envs"],
+                    "bench_result": candidate,
+                }
+            )
+        elif lane == "integrate_patch":
+            await coord.writeback._promote_integrate_patch(
+                {
+                    "status": "kept",
+                    "output_throughput": 150.0,
+                    "specialist_task_id": "next",
+                    "extra_server_args_applied": candidate["extra_server_args"],
+                    "extra_envs_applied": candidate["extra_envs"],
+                    "bench_result": candidate,
+                },
+                _task("integrate_patch"),
+                outcome,
+            )
+        else:
+            await coord.writeback._promote_explore(
+                {
+                    "winners": [candidate],
+                    "best_variant": candidate,
+                    "output_throughput": 150.0,
+                    "round_id": "r-local-win",
+                },
+                _task("explore"),
+                outcome,
+            )
+
+        assert state.current_best["action"] == lane
+        assert state.current_best["variant_name"] == "next"
+        assert state.current_best["tput"] == 150.0
+        assert state.current_best["total_throughput"] == 1600.0
+        assert state.current_best["e2e_norm_intvty_p90"] == 150.0
+        assert state.current_best["extra_server_args"] == "--page-size 32"
+        assert state.current_best["extra_envs"]["NEXT_ENV"] == "1"
+        assert len(state.optimization_stack) == 2
+        assert state.optimization_stack[0] == prior_entry
+        assert state.optimization_stack[-1]["variant_name"] == "next"
+        assert state.current_best_measurement != prior_measurement
+        assert state.current_best_measurement["benchmark_workspace"] == candidate["workspace"]
+        assert state.current_best_measurement["observed_server_identity"] == {
+            "model_path": "/models/next",
+            "tp_size": 2,
+        }
+        assert self._validation_state(state) == prior_validation
+        record.assert_not_called()
+        watermark.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
+    async def test_incomparable_resume_revalidation_remains_pending(self, coord, monkeypatch, axis):
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        state = coord.shared_state
+        state.resume_pending_revalidation = True
+        prior_validation = self._validation_state(state)
+        prior_best = deepcopy(state.current_best)
+        prior_measurement = deepcopy(state.current_best_measurement)
+        prior_stack = deepcopy(state.optimization_stack)
+        candidate = self._candidate()
+        candidate.pop(axis)
+        record = Mock()
+        monkeypatch.setattr(instrument, "record_session_validation", record)
+
+        await coord.writeback._promote_explore(
+            {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
+            _task("explore", params={"source": "resume_stack_revalidate"}),
+            wb._PromoteOutcome(),
+        )
+
+        assert state.resume_pending_revalidation is True
+        assert self._validation_state(state) == prior_validation
+        assert state.current_best == prior_best
+        assert state.current_best_measurement == prior_measurement
+        assert state.optimization_stack == prior_stack
+        record.assert_not_called()
+
+    def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        state = coord.shared_state
+        candidate = self._candidate()
+        for axis in ("total_throughput", "e2e_norm_intvty_p90"):
+            state.baseline_perf.pop(axis)
+            state.current_best.pop(axis)
+            candidate.pop(axis)
+        record = Mock()
+        monkeypatch.setattr(instrument, "record_session_validation", record)
+
+        lifted = coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+        coord.writeback._update_cumulative_gain_validated(150.0, candidate, ts="2026-01-02T00:00:00+00:00")
+
+        assert lifted is True
+        assert state.current_best["tput"] == 150.0
+        assert state.current_best["extra_envs"] == {"NEXT_ENV": "1"}
+        assert len(state.optimization_stack) == 2
+        assert self._validation_state(state) == (50.0, "2026-01-02T00:00:00+00:00", 2)
+        record.assert_called_once()
+        assert record.call_args.kwargs["baseline_tput"] == 100.0
+        assert record.call_args.kwargs["validated_tput"] == 150.0
+
+
 def test_lift_does_not_double_append_same_fingerprint(session_dir):
     """A renamed variant with the same content fingerprint must not add a second stack entry."""
     coord = _coord(session_dir)
@@ -1758,6 +2181,95 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
     assert s.current_best["tput"] == 1210.0
     # gain_per_stack_entry must be index-aligned with optimization_stack.
     assert len(s.gain_per_stack_entry) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "last_tput,last_total,last_intvty,rejected",
+    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, False), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_winner_output_drop", "last_duplicate_recorded"],
+)
+async def test_promote_explore_cumulative_uses_last_lifted_measurement(
+    session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected
+):
+    """Cumulative validation must use the last successful lift's own measurement."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.framework = "sglang"
+    s.benchmark_mode = "agentx"
+    s.baseline_tput = 100.0
+    s.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    s.current_best = {"action": "baseline", "tput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    first = {
+        "name": "first",
+        "fingerprint": "fp_first",
+        "tput": 120.0,
+        "total_throughput": 1200.0,
+        "input_throughput": 1080.0,
+        "e2e_norm_intvty_p90": 120.0,
+        "tpot_p90_ms": 10.0,
+        "gain_pct": 20.0,
+        "candidate_extra_server_args": "--flag-a 1",
+        "extra_server_args": "--flag-a 1",
+        "workspace": "/first/benchmark",
+        "launch_evidence_path": "/first/launch_evidence.json",
+        "server_log_path": "/first/server.log",
+    }
+    last = {
+        "name": "last",
+        "fingerprint": first["fingerprint"] if rejected else "fp_last",
+        "tput": last_tput,
+        "total_throughput": last_total,
+        "input_throughput": last_total - last_tput,
+        "e2e_norm_intvty_p90": last_intvty,
+        "tpot_p90_ms": 9.0,
+        "gain_pct": 4.0,
+        "candidate_extra_server_args": "--flag-b 2",
+        "extra_server_args": "--flag-a 1 --flag-b 2",
+        "workspace": "/last/benchmark",
+        "launch_evidence_path": "/last/launch_evidence.json",
+        "server_log_path": "/last/server.log",
+    }
+    updates = []
+    real_update = coord.writeback._update_cumulative_gain_validated
+
+    def capture_update(new_tput, measurement, **kwargs):
+        updates.append((new_tput, dict(measurement), kwargs.get("measurement_basis")))
+        return real_update(new_tput, measurement, **kwargs)
+
+    monkeypatch.setattr(coord.writeback, "_update_cumulative_gain_validated", capture_update)
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [first, last],
+            "round_id": "r-last-lift",
+            "best_variant": first,
+            "best_gain_pct": first["gain_pct"],
+            "output_throughput": last_tput,
+        },
+        task=_task("explore", params={"gap_canonical_id": "g1"}),
+    )
+
+    expected = first if rejected else last
+    stack_len = 1 if rejected else 2
+    assert s.current_best["variant_name"] == expected["name"]
+    assert s.current_best["tput"] == expected["tput"]
+    assert s.current_best["total_throughput"] == expected["total_throughput"]
+    assert s.current_best["input_throughput"] == expected["input_throughput"]
+    assert len(s.optimization_stack) == stack_len
+    assert s.optimization_stack[-1]["variant_name"] == expected["name"]
+    assert s.cumulative_gain_validated == pytest.approx(20.0 if rejected else 25.0)
+    assert s.cumulative_gain_validated_stack_len == stack_len
+    [(new_tput, measurement, basis)] = updates
+    assert new_tput == expected["tput"]
+    assert {key: measurement[key] for key in expected} == expected
+    assert basis == "e2e_decision_round"
+    assert s.current_best_measurement["benchmark_workspace"] == expected["workspace"]
+    assert s.current_best_measurement["launch_evidence_path"] == expected["launch_evidence_path"]
+    assert s.current_best_measurement["server_log_path"] == expected["server_log_path"]
 
 
 @pytest.mark.asyncio
@@ -1882,6 +2394,27 @@ async def test_fusion_origin_integrate_keep_lifts_as_fusion(session_dir):
     # The remote-recipe fusion export gates on this being a KEEP.
     assert s.last_fusion_integrate["decision"] == "KEEP"
     assert s.last_fusion_integrate["kernel_id"] == "fuse_a"
+
+
+async def test_fusion_integrate_refused_lift_does_not_mark_keep(session_dir):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "explore", "tput": 1500.0}
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "new_tput": 1300.0,
+            "kernel_id": "refused-fusion",
+            "source": "forge_fusion",
+            "action_label": "fusion",
+        },
+    )
+
+    assert s.current_best == {"action": "explore", "tput": 1500.0}
+    assert s.optimization_stack == []
+    assert s.last_fusion_integrate == {}
+    assert s.cumulative_gain_validated == 0.0
 
 
 async def test_a_plain_integrate_keep_is_not_relabelled_fusion(session_dir):

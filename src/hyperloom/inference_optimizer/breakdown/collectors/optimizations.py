@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, GRADED_TOTAL
+
 from ..agent_ownership import UNATTRIBUTED, patch_author
 
 
@@ -311,6 +313,7 @@ def _recorded_attempt_row(
                 "name": name,
                 "value": measurement.get("value"),
                 "unit": str(measurement.get("unit") or ""),
+                "metric_basis": str(measurement.get("metric_basis") or ""),
                 # Which reading of this name it is, oldest first, so a reader can tell a re-measure from the one that
                 # was decided on without having to compare ids.
                 "occurrence": occurrence_index.get(str(measurement_id), 0),
@@ -515,9 +518,32 @@ def _latest_measurement_per_name(
     return [measurement_id for measurement_id in measurement_ids if measurement_id in chosen]
 
 
+# Short basis labels for the graded axes. ``intvty`` is the AgentX objective and ``total`` is now its guard axis;
+# both are session-wide aggregates, unlike the per-request ``output`` reading.
+_METRIC_BASES = frozenset({"output", "total", "intvty"})
+_SESSION_WIDE_BASES = frozenset({"total", "intvty"})
+
+
+def _metric_basis(value: Any) -> str:
+    return {GRADED_OUTPUT: "output", GRADED_TOTAL: "total", GRADED_INTVTY: "intvty"}.get(
+        str(value or ""), str(value or "")
+    )
+
+
+def _attempt_gain_basis(attempt: dict[str, Any], operation: dict[str, Any]) -> str:
+    for measurement in attempt.get("measurements") or []:
+        if measurement["name"] in _GAIN_NAMES and _to_float(measurement.get("value")) is not None:
+            basis = _metric_basis(measurement.get("metric_basis"))
+            if basis in _METRIC_BASES:
+                return basis
+    outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+    return _metric_basis(outputs.get("graded_objective")) or "output"
+
+
 def _recorded_baseline_throughput(
     operations: list[dict[str, Any]],
     measurement_by_id: dict[str, dict[str, Any]],
+    metric_basis: str = "output",
 ) -> float | None:
     """Return the session baseline throughput the recorder measured."""
     earliest: tuple[float, float] | None = None
@@ -535,6 +561,8 @@ def _recorded_baseline_throughput(
                 "baseline_throughput",
             }:
                 continue
+            if (_metric_basis(measurement.get("metric_basis")) or "output") != metric_basis:
+                continue
             value = _to_float(measurement.get("value"))
             if not value:
                 continue
@@ -547,7 +575,7 @@ def _recorded_baseline_throughput(
 def _recorded_session_validation(
     operations: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Return the last gain the run itself promoted as validated."""
+    """Return the operation carrying the last gain the run itself promoted as validated."""
     latest: tuple[int, float, dict[str, Any]] | None = None
     for operation in operations:
         if not isinstance(operation, dict) or _work_kind(operation) != "session_validation":
@@ -560,8 +588,37 @@ def _recorded_session_validation(
         stack_len = int(_to_float(outputs.get("validated_at_stack_len")) or 0)
         at = _parse_ts(operation.get("ended_at") or operation.get("started_at")) or 0.0
         if latest is None or (stack_len, at) >= (latest[0], latest[1]):
-            latest = (stack_len, at, outputs)
+            latest = (stack_len, at, operation)
     return latest[2] if latest else None
+
+
+def _checkpoint_gain_before_attempt(
+    operations: list[dict[str, Any]],
+    *,
+    stack_len: int,
+    metric_basis: str,
+    previous_at: float | None,
+    attempt_at: float | None,
+) -> float | None:
+    """Find an explicit baseline checkpoint covering exactly the preceding KEEP window."""
+    if previous_at is None or attempt_at is None:
+        return None
+    latest: tuple[float, float] | None = None
+    for operation in operations:
+        if not isinstance(operation, dict) or _work_kind(operation) != "session_validation":
+            continue
+        outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
+        if _to_float(outputs.get("validated_at_stack_len")) != stack_len:
+            continue
+        if _metric_basis(outputs.get("graded_objective")) != metric_basis:
+            continue
+        gain = _to_float(outputs.get("validated_gain_pct"))
+        at = _parse_ts(operation.get("ended_at") or operation.get("started_at"))
+        if gain is None or at is None or not previous_at <= at < attempt_at:
+            continue
+        if latest is None or at > latest[0]:
+            latest = (at, gain)
+    return latest[1] if latest else None
 
 
 def _summarize_by_agent(
@@ -790,30 +847,107 @@ def collect_recorded_optimizations(
 
     # Reported gain is measured against the session baseline, so each adopted step contributes the percentage points
     # it added to the cumulative figure.
-    baseline_tput = _recorded_baseline_throughput(operations, measurement_by_id)
+    operation_by_id = {
+        str(operation.get("operation_id") or ""): operation for operation in operations if isinstance(operation, dict)
+    }
+    basis_by_attempt = {
+        attempt["attempt_id"]: _attempt_gain_basis(attempt, operation_by_id[attempt["attempt_id"]])
+        for attempt in attempts
+    }
+    validation_operation = _recorded_session_validation(operations)
+    session_validation = validation_operation["outputs"] if validation_operation else None
+    ledger_basis = _metric_basis((session_validation or {}).get("graded_objective")) or next(
+        (
+            basis_by_attempt[attempt["attempt_id"]]
+            for attempt in attempts
+            if attempt.get("adopted") and attempt.get("attribution_eligible") is not False
+        ),
+        "output",
+    )
+    baseline_tput = _recorded_baseline_throughput(operations, measurement_by_id, ledger_basis)
     entries: list[dict[str, Any]] = []
+    incompatible_basis: list[str] = []
     cumulative = 0.0
     # Throughput the next adopted step is expected to start from: the baseline for the first one, then wherever the
     # previous one left off.
     expected_before = baseline_tput
     unattributed = 0.0
     attributed = 0.0
+    seen_gain_bases: set[str] = set()
+    baseline_gain_anchor: float | None = 0.0
+    adopted_count = 0
+    previous_adopted_at: float | None = None
     for attempt in attempts:
-        if not attempt.get("adopted") or attempt.get("attribution_eligible") is False:
+        if not attempt.get("adopted"):
+            continue
+        attempt_at = _parse_ts(attempt.get("ended_at") or attempt.get("started_at"))
+        if baseline_gain_anchor is None:
+            checkpoint_gain = _checkpoint_gain_before_attempt(
+                operations,
+                stack_len=adopted_count,
+                metric_basis=ledger_basis,
+                previous_at=previous_adopted_at,
+                attempt_at=attempt_at,
+            )
+            if checkpoint_gain is not None:
+                # A checkpoint can locate the workload again, but cannot award
+                # the previously unmeasured movement to the next optimizer.
+                unattributed += checkpoint_gain - cumulative
+                cumulative = checkpoint_gain
+                baseline_gain_anchor = checkpoint_gain
+                expected_before = baseline_tput * (1.0 + checkpoint_gain / 100.0) if baseline_tput else None
+        adopted_count += 1
+        previous_adopted_at = attempt_at
+        if attempt.get("attribution_eligible") is False:
             continue
         local_gain = _to_float(attempt.get("local_gain_pct"))
         throughput_before = _to_float(attempt.get("throughput_before"))
         throughput_after = _to_float(attempt.get("throughput_after"))
+        gain_basis = basis_by_attempt[attempt["attempt_id"]]
+        throughput_bases = {
+            _metric_basis(measurement.get("metric_basis")) or "output"
+            for measurement in attempt["measurements"]
+            if measurement["name"] in _THROUGHPUT_BEFORE_NAMES | _THROUGHPUT_AFTER_NAMES
+        } or {"output"}
+        matching_throughput = throughput_bases == {ledger_basis}
+        operation = operation_by_id[attempt["attempt_id"]]
+        extensions = operation.get("extensions") if isinstance(operation.get("extensions"), dict) else {}
+        gemm = extensions.get("gemm") if isinstance(extensions.get("gemm"), dict) else {}
+        session_baseline_gain = attempt["kind"] == "gemm_tuning" and gemm.get("e2e_validated") is True
         drift = 0.0
         chain_continuous = True
-        if baseline_tput and throughput_after:
+        if gain_basis != ledger_basis:
+            incompatible_basis.append(str(attempt["attempt_id"]))
+            gain = None
+            gain_method = "missing"
+            expected_before = None
+            chain_continuous = False
+        elif session_baseline_gain:
+            # The GEMM validator records a session-baseline watermark, not an
+            # increment from the previous KEEP. Generic gemm-kind operations
+            # without this producer's extension keep their local-gain semantics.
+            if baseline_gain_anchor is None:
+                gain = None
+                gain_method = "missing"
+                expected_before = None
+                chain_continuous = False
+            elif baseline_tput and throughput_after and matching_throughput:
+                gain = (throughput_after - baseline_tput) / baseline_tput * 100.0 - baseline_gain_anchor
+                gain_method = "baseline_chain"
+                expected_before = throughput_after
+            else:
+                gain = local_gain - baseline_gain_anchor if local_gain is not None else None
+                gain_method = "recorded_adoption" if gain is not None else "missing"
+                expected_before = None
+                chain_continuous = False
+        elif baseline_tput and throughput_after and matching_throughput:
             started_from = throughput_before or expected_before or baseline_tput
             drift = (started_from - expected_before) / baseline_tput * 100.0 if expected_before else 0.0
             # Percentage points of the baseline this step added.
             gain = (throughput_after - started_from) / baseline_tput * 100.0
             gain_method = "baseline_chain"
             expected_before = throughput_after
-        elif baseline_tput and expected_before and local_gain is not None:
+        elif baseline_tput and expected_before and local_gain is not None and matching_throughput:
             # The step ran and moved the workload; only its finishing throughput went unrecorded.
             projected_after = expected_before * (1.0 + local_gain / 100.0)
             gain = (projected_after - expected_before) / baseline_tput * 100.0
@@ -822,14 +956,27 @@ def collect_recorded_optimizations(
             # If the local figure was measured against something else, the next step's drift is what says so.
             chain_continuous = False
         else:
-            gain = local_gain
-            gain_method = "recorded_adoption" if local_gain is not None else "missing"
+            # Kernel gain is local to its integrate anchor. Output-only readings cannot prove continuity for a
+            # second KEEP graded on a session-wide axis, whichever of the two that session was graded on.
+            gain = (
+                None
+                if attempt["kind"] == "kernel_optimization"
+                and gain_basis in _SESSION_WIDE_BASES
+                and gain_basis in seen_gain_bases
+                else local_gain
+            )
+            gain_method = "recorded_adoption" if gain is not None else "missing"
             # Nothing left to chain from: crediting the next step's head start to whoever follows is the error this
             # guards against.
             expected_before = None
             chain_continuous = False
+        seen_gain_bases.add(gain_basis)
         unattributed += drift
         cumulative += drift + (gain or 0.0)
+        if gain is None:
+            baseline_gain_anchor = None
+        elif baseline_gain_anchor is not None:
+            baseline_gain_anchor = cumulative
         # Summed unrounded, so the reported gap equals the drift exactly rather than trailing it by a rounding step.
         attributed += gain or 0.0
         stack_index = len(entries)
@@ -861,6 +1008,12 @@ def collect_recorded_optimizations(
             }
         )
 
+    if incompatible_basis:
+        warnings.append(
+            f"optimizations: {len(incompatible_basis)} adopted step(s) have a different gain basis "
+            f"from the {ledger_basis} ledger, so only their local gain is retained: {sorted(incompatible_basis)[:5]}"
+        )
+
     # Below this the drift is float noise from re-serialized throughputs, well under any measurement's own
     # repeatability.
     if abs(unattributed) > 0.01:
@@ -875,7 +1028,7 @@ def collect_recorded_optimizations(
     if discontinuous:
         warnings.append(
             f"optimizations: {len(discontinuous)} adopted step(s) recorded no "
-            "finishing throughput, so the drift across them could not be "
+            f"finishing throughput on the {ledger_basis} gain basis, so the drift across them could not be "
             f"measured: {sorted(discontinuous)[:5]}"
         )
 
@@ -954,8 +1107,8 @@ def collect_recorded_optimizations(
     unmeasured = [str(entry["adopted_attempt_id"]) for entry in entries if entry.get("gain_method") == "missing"]
     if unmeasured:
         warnings.append(
-            f"optimizations: {len(unmeasured)} adopted step(s) recorded neither "
-            "a throughput nor a gain, so they contribute nothing to the "
+            f"optimizations: {len(unmeasured)} adopted step(s) have neither "
+            f"a usable throughput nor a gain on the {ledger_basis} basis, so they contribute nothing to the "
             f"session total: {sorted(unmeasured)[:5]}"
         )
     stale_evidence = [
@@ -977,9 +1130,32 @@ def collect_recorded_optimizations(
         if attempt.get("adopted") and attempt.get("validation_basis") == "keep_verdict_unscored"
     )
 
-    session_validation = _recorded_session_validation(operations)
     recorded_total = _to_float(session_validation.get("validated_gain_pct")) if session_validation else None
-    if recorded_total is not None and abs(recorded_total - cumulative) > 0.01:
+    validated_stack_len = (
+        int(_to_float(session_validation.get("validated_at_stack_len")) or 0) if session_validation else len(entries)
+    )
+    checkpoint_at = (
+        _parse_ts(validation_operation.get("ended_at") or validation_operation.get("started_at"))
+        if validation_operation
+        else None
+    )
+    checkpoint_stale = session_validation is not None and (
+        validated_stack_len < adopted_count
+        or (
+            checkpoint_at is not None
+            and any(
+                attempt.get("adopted")
+                and (_parse_ts(attempt.get("ended_at") or attempt.get("started_at")) or 0.0) > checkpoint_at
+                for attempt in attempts
+            )
+        )
+    )
+    if checkpoint_stale:
+        warnings.append(
+            f"optimizations: the validation checkpoint at stack length {validated_stack_len} is stale "
+            f"after {adopted_count} adopted steps; its historical gain is not reconciled against the current ledger"
+        )
+    if recorded_total is not None and not checkpoint_stale and abs(recorded_total - cumulative) > 0.01:
         # The one disagreement this section could never previously surface: the ledger and the figure the run promoted
         # are now two independent numbers, so they can be seen to part company.
         warnings.append(
@@ -1001,11 +1177,7 @@ def collect_recorded_optimizations(
         "summary_by_kind": summary_by_kind,
         "validation": {
             "method": ("recorded_session_validation" if recorded_total is not None else "ledger_sum"),
-            "validated_at_stack_len": (
-                int(_to_float(session_validation.get("validated_at_stack_len")) or 0)
-                if session_validation
-                else len(entries)
-            ),
+            "validated_at_stack_len": validated_stack_len,
             # What the session moved end to end, and how much of that any attempt is willing to claim.
             "validated_total_gain_pct": round(
                 recorded_total if recorded_total is not None else cumulative,
@@ -1017,12 +1189,15 @@ def collect_recorded_optimizations(
                 str(session_validation.get("measurement_basis") or "") if session_validation else "ledger_sum"
             ),
             "validation_source": (str(session_validation.get("source") or "") if session_validation else ""),
-            "reconciliation_gap_pct": (round(recorded_total - cumulative, 6) if recorded_total is not None else None),
+            "reconciliation_gap_pct": (
+                round(recorded_total - cumulative, 6) if recorded_total is not None and not checkpoint_stale else None
+            ),
             "attributed_total_gain_pct": round(attributed, 6),
             "unattributed_gain_pct": round(unattributed, 6),
-            "attribution_gap_pct": round(
-                (recorded_total if recorded_total is not None else cumulative) - attributed,
-                6,
+            "attribution_gap_pct": (
+                None
+                if checkpoint_stale
+                else round((recorded_total if recorded_total is not None else cumulative) - attributed, 6)
             ),
             "attempt_count": len(attempts),
             "keep_count": len(entries),

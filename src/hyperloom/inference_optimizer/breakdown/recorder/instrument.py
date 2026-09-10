@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, GRADED_TOTAL
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ..agent_ownership import (
@@ -31,6 +32,10 @@ log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
+
+# Graded objective -> the short basis label stamped on a measurement. An unrecognised objective falls back to
+# ``output`` at the call sites, so a new axis has to be listed here or its gains are recorded as output gains.
+_GRADED_METRIC_BASIS = {GRADED_OUTPUT: "output", GRADED_TOTAL: "total", GRADED_INTVTY: "intvty"}
 
 # kernel-agent backend -> invocation section.
 _GEAK_BACKENDS = frozenset({"geak"})
@@ -1829,9 +1834,10 @@ def record_gemm_tuning_operation(
     result: Mapping[str, Any] | None = None,
     macro_cycle: int | None = None,
     attempt_discriminator: str = "",
+    graded_objective: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record the independent Kernel-phase GEMM tuning run and KEEP adoption."""
+    """Record GEMM tuning; ``graded_objective`` labels gain, not output throughput."""
     if not session_dir:
         trace_skip(reason="no session_dir", section="operations")
         return
@@ -1892,7 +1898,13 @@ def record_gemm_tuning_operation(
         ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio", attempt_key),
         ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s", e2e_run),
         ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s", e2e_run),
-        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent", e2e_run),
+        (
+            "e2e_gain_pct",
+            value.get("e2e_gain_pct"),
+            _GRADED_METRIC_BASIS.get(graded_objective, "output"),
+            "percent",
+            e2e_run,
+        ),
     ):
         numeric = to_float(raw)
         if numeric is None:
@@ -1969,6 +1981,7 @@ def record_gemm_tuning_operation(
             "fallback_backend": value.get("fallback_backend"),
             "fallback_reason": value.get("fallback_reason"),
             "recommended_env": value.get("recommended_env"),
+            "graded_objective": graded_objective,
         },
         attempts=attempts,
         measurement_refs=measurement_refs,
@@ -3852,6 +3865,7 @@ def record_session_validation(
     stack_len: int,
     source: str,
     measurement_basis: str,
+    graded_objective: str | None = None,
     ts: str | None = None,
     producer: str = PRODUCER_COORDINATOR,
 ) -> str | None:
@@ -3898,6 +3912,7 @@ def record_session_validation(
             "validated_at_stack_len": stack_len,
             "source": source,
             "measurement_basis": measurement_basis,
+            "graded_objective": graded_objective,
             "validated_gain_pct": float(validated_gain_pct),
         },
         producer=producer,

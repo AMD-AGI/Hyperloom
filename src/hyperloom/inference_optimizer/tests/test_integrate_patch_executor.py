@@ -1642,6 +1642,229 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed"])
+async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, monkeypatch, status: str):
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    measured = VariantResult(
+        name="patch-measurement",
+        extra_server_args="--kv-cache-dtype fp8",
+        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+        status=status,
+        input_throughput=24900.0,
+        output_throughput=100.0,
+        total_token_throughput=25000.0,
+        intvty_p90=450.0,
+        tpot_p90_ms=3.0,
+        request_throughput=2.0,
+        completed_requests=10,
+        duration_seconds=5.0,
+        ttft_mean_ms=12.0,
+        e2el_mean_ms=1500.0,
+        tpot_mean_ms=2.0,
+        workspace=str(workspace),
+        report_path=str(workspace / "benchmark_report.json"),
+        raw_result_path=str(workspace / "raw_result.json"),
+        reported_success=status == "succeeded",
+        returncode=0 if status == "succeeded" else 7,
+        nonfatal_warnings=["recovered_artifacts"],
+        error="" if status == "succeeded" else "benchmark subprocess failed",
+        error_class="" if status == "succeeded" else "benchmark_failed",
+        note="integrate_patch:measurement",
+        runtime_sec=8.0,
+        launch_evidence={"observed": {"model_path": "/models/test"}},
+        launch_evidence_path=str(workspace / "launch_evidence.json"),
+        server_log_path=str(workspace / "server.log"),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    executor = IntegratePatchExecutor(session_dir=tmp_path)
+    bench, gate = await executor._bench_patch(
+        params={"config_path": str(config_path), "framework": "vllm", "base_extra_args": "--async-scheduling"},
+        output_root=tmp_path / "out",
+        extra_server_args_applied=measured.extra_server_args,
+        extra_envs_applied={**measured.extra_envs, "RUN_EVAL": "true"},
+        specialist_task_id="task-measurement",
+    )
+
+    assert bench["total_token_throughput"] == 25000.0
+    assert bench["e2e_norm_intvty_p90"] == 450.0
+    assert "intvty_p90" not in bench
+    assert bench["input_throughput"] == 24900.0
+    assert bench["tpot_p90_ms"] == 3.0
+    assert measured.to_dict().items() <= bench.items()
+    assert bench["ttft_ms"] == 12.0
+    assert bench["itl_ms"] == 2.0
+    assert bench["materialized_config"] == str(config_path)
+    assert bench["effective_config"] == {
+        "extra_envs": measured.extra_envs,
+        "extra_server_args": "--async-scheduling --kv-cache-dtype fp8",
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "append",
+    }
+    assert gate == {
+        "accuracy_pass": None,
+        "accuracy": None,
+        "enablement_accuracy": None,
+        "enablement_accuracy_task": "",
+        "enablement_accuracy_metric": "",
+        "eval_probe": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "grading_mode,total,intvty,output,missing,expected_status,expected_delta",
+    [
+        pytest.param("agentx", 15000.0, 450.0, 200.0, None, "reverted", None, id="throughput-tradeoff"),
+        pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", None, id="interactivity-tradeoff"),
+        pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", None, id="both-axes-regress"),
+        pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", None, id="flat-interactivity"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "kept", 10.0, id="intvty-win-output-down"),
+        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "kept", 2.0, id="exact-floor-and-throughput-guard"),
+        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "reverted", None, id="throughput-guard-breach"),
+        pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", None, id="below-agentx-floor"),
+        pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
+        *[
+            pytest.param(
+                "agentx",
+                25000.0,
+                450.0,
+                output,
+                (side, axis),
+                "reverted",
+                output - 100.0,
+                id=f"missing-{side}-{axis}-output-{direction}",
+            )
+            for side in ("candidate", "reference")
+            for axis in ("total", "intvty")
+            for direction, output in (("up", 200.0), ("down", 90.0))
+        ],
+        *[
+            pytest.param(mode, None, None, 200.0, ("reference", "total"), "kept", 100.0, id=f"{mode}-missing-axes")
+            for mode in ("synthetic", "explicit-output")
+        ],
+    ],
+)
+async def test_executor_grades_real_patch_bench(
+    tmp_path: Path, monkeypatch, grading_mode, total, intvty, output, missing, expected_status, expected_delta
+):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
+    if grading_mode == "explicit-output":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    session_dir = tmp_path / "session"
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-grading", patch_contents=[_VALID_PATCH])
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    (workspace.parent / "results.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+    )
+    measured = VariantResult(
+        name="patch-grading",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        input_throughput=total - output if total is not None else None,
+        output_throughput=output,
+        total_token_throughput=total,
+        intvty_p90=intvty,
+        tpot_p90_ms=3.0,
+        workspace=str(workspace),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    state = SimpleNamespace(
+        framework="vllm",
+        benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
+        current_best={"tput": 100.0, "total_throughput": 20000.0, "e2e_norm_intvty_p90": 450.0},
+        baseline_accuracy=0.9,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+    if missing:
+        side, axis = missing
+        if side == "candidate":
+            if axis == "total":
+                measured.total_token_throughput = measured.input_throughput = None
+            else:
+                measured.intvty_p90 = None
+        else:
+            state.current_best.pop("total_throughput" if axis == "total" else "e2e_norm_intvty_p90")
+    original_measurement = measured.to_dict()
+    original_best = dict(state.current_best)
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "t-int-grading",
+        {
+            "specialist_task_id": "t-spec-grading",
+            "framework_source_root": str(repo),
+            "framework": "vllm",
+            "config_path": str(config_path),
+            "require_accuracy_for_keep": True,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    result = await executor(ctx)
+
+    assert result["status"] == expected_status
+    if expected_delta is None:
+        assert result["delta_pct"] is None
+    else:
+        assert result["delta_pct"] == pytest.approx(expected_delta)
+    assert result["accuracy_pass"] is True
+    assert result["base_tput"] == 100.0
+    assert result["keep_threshold_pct"] == executor.keep_threshold_pct
+    assert result["output_throughput"] == output
+    for key in (
+        "output_throughput",
+        "input_throughput",
+        "total_token_throughput",
+        "e2e_norm_intvty_p90",
+        "tpot_p90_ms",
+        "workspace",
+    ):
+        assert result["bench_result"][key] == original_measurement[key]
+    assert measured.to_dict() == original_measurement
+    assert state.current_best == original_best
+    if missing and grading_mode == "agentx":
+        reason = "candidate_axes_missing" if missing[0] == "candidate" else "current_best_axes_missing"
+        assert reason in result["reason"]
+        assert result["patches_applied"] == []
+        assert len(result["patches_reverted"]) == 1
+    expected_return = 2 if expected_status == "kept" else 1
+    assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")
+
+
+@pytest.mark.asyncio
 async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monkeypatch):
     """TOCTOU regression: when a task was queued at baseline tput/args, but an
     Explore KEEP advanced current_best before execution, bench must use the live

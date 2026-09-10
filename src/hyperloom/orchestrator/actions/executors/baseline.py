@@ -42,6 +42,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 )
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
+from ...measurement.integrate_performance import assess_integrate_performance
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
@@ -3226,17 +3227,39 @@ class BaselineExecutor:
                     ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
                 )
                 if defer_accuracy_until_after_measure:
-                    try:
-                        min_tput = float(
-                            params.get(
-                                "post_measure_accuracy_min_tput",
-                                0.0,
-                            )
-                            or 0.0
-                        )
-                    except (TypeError, ValueError):
-                        min_tput = 0.0
-                    if float(_hot or 0.0) >= min_tput:
+                    keep_policy = params.get("post_measure_accuracy_keep_policy")
+                    if keep_policy is not None:
+                        performance = assess_integrate_performance(live_shared_state, result, **keep_policy)
+                        run_accuracy = performance.decision == "KEEP"
+                        graded = performance.graded
+                        skipped_accuracy = {
+                            "status": "skipped",
+                            "reason": (
+                                "intvty_regression"
+                                if graded.graded_on_intvty and graded.verdict == "REVERT"
+                                else "performance_keep_not_eligible"
+                            ),
+                            "graded_objective": graded.objective,
+                            "candidate": graded.candidate,
+                            "reference": graded.reference,
+                            "base_tput": keep_policy["base_tput"],
+                            "gain_pct": performance.gain_pct,
+                            "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
+                            "degrade_reason": graded.degrade_reason,
+                        }
+                    else:
+                        try:
+                            min_tput = float(params.get("post_measure_accuracy_min_tput", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            min_tput = 0.0
+                        run_accuracy = float(_hot or 0.0) >= min_tput
+                        skipped_accuracy = {
+                            "status": "skipped",
+                            "reason": "throughput_below_threshold",
+                            "minimum_tput": min_tput,
+                            "observed_tput": float(_hot or 0.0),
+                        }
+                    if run_accuracy:
                         accuracy_dir = output_dir / "accuracy_round"
                         accuracy_cfg = self._write_lifecycle_config(
                             materialized_config_path,
@@ -3283,12 +3306,7 @@ class BaselineExecutor:
                             result.setdefault("nonfatal_warnings", [])
                             result["nonfatal_warnings"].append("post_measure_accuracy_failed")
                     else:
-                        result["accuracy_stage"] = {
-                            "status": "skipped",
-                            "reason": "throughput_below_threshold",
-                            "minimum_tput": min_tput,
-                            "observed_tput": float(_hot or 0.0),
-                        }
+                        result["accuracy_stage"] = skipped_accuracy
             return result
         finally:
             # Defensive teardown so no persistent server leaks.

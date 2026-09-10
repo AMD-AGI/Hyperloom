@@ -302,6 +302,184 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert len(repeated) == 2
 
 
+def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
+    state = coord.shared_state
+    state.benchmark_mode = "agentx"
+    state.framework = "vllm"
+    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 500.0, "e2e_norm_intvty_p90": 5.0}
+    state.current_best.update({"input_throughput": 450.0, "total_throughput": 600.0, "e2e_norm_intvty_p90": 6.0})
+    state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
+    state.cumulative_gain = 20.0
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+    state.cumulative_gain_validated_ts = "2026-09-08T00:00:00Z"
+    state.resume_pending_revalidation = True
+    state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+    state.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 2.0,
+        "accepted_config": {"flags": "--max-num-batched-tokens 4096", "env": ""},
+        "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
+        # Proposal measurements must never fill missing canonical rebench axes.
+        "input_throughput": 9999.0,
+        "total_throughput": 10000.0,
+        "e2e_norm_intvty_p90": 99.0,
+    }
+    return coord
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_mode,ambient", [("agentx", ""), ("agentx", "0"), ("", "1")])
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_agentx_2a_refuses_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persisted_mode: str, ambient: str, bench_client: str
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_AGENTX", ambient)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
+    coord = _agentx_rebench_coord(tmp_path)
+    state = coord.shared_state
+    state.benchmark_mode = persisted_mode
+    state.geak_result["bench_client"] = bench_client
+    before_best = dict(state.current_best)
+    before_pending = dict(state.geak_pending)
+
+    async def _must_not_launch(**_kwargs):
+        raise AssertionError("GEAK cannot replay the canonical AgentX workload")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
+    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+
+    assert outcome == {
+        "validated": False,
+        "status": "incomparable",
+        "reason": "geak_harness_unsupported_canonical_workload",
+    }
+    assert state.current_best == before_best
+    assert state.geak_pending == before_pending
+    assert state.resume_pending_revalidation is True
+    assert state.cumulative_gain_validated == 20.0
+    assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_persisted_legacy_mode_allows_existing_geak_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_client: str
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
+    coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
+    coord.shared_state.benchmark_mode = "synthetic"
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "bench_client": bench_client,
+        "throughput_speedup": 2.0,
+        "accepted_config": {"flags": "--candidate", "env": ""},
+    }
+    calls = []
+
+    async def _replay(**kwargs):
+        calls.append(kwargs)
+        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 200.0}}
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
+    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+
+    assert outcome["validated"] is True
+    assert len(calls) == 1
+    assert calls[0]["result"]["bench_client"] == bench_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("measurement_location", ["flat", "bench_result", "measurement"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "positive",
+        "output_drop",
+        "missing_axes",
+        "missing_output",
+        "identity_mismatch",
+        "total_regression",
+        "lift_refused",
+    ],
+)
+async def test_agentx_2b_uses_current_canonical_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, measurement_location: str
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    coord = _agentx_rebench_coord(tmp_path)
+    state = coord.shared_state
+    before_best = dict(state.current_best)
+    before_stack = list(state.optimization_stack)
+    before_proposal = dict(state.geak_result)
+    measured = 140.0 if case == "output_drop" else 200.0
+    measurement = {
+        "fingerprint": "drifted" if case == "identity_mismatch" else "accepted",
+        "tput": measured,
+        "input_throughput": 800.0 - measured,
+        "total_throughput": 800.0,
+        "e2e_norm_intvty_p90": 8.0,
+    }
+    if case == "missing_axes":
+        measurement.pop("e2e_norm_intvty_p90")
+    elif case == "missing_output":
+        measured = None
+        measurement.pop("tput")
+    elif case == "total_regression":
+        measurement.update(input_throughput=350.0, total_throughput=550.0)
+    elif case == "lift_refused":
+        monkeypatch.setattr(coord, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
+
+    async def _must_not_launch(**_kwargs):
+        raise AssertionError("Inconclusive AgentX 2b must not launch GEAK 2a")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
+    variant = measurement
+    if measurement_location != "flat":
+        variant = {
+            "fingerprint": measurement.pop("fingerprint"),
+            measurement_location: measurement,
+            "total_throughput": 10000.0,
+            "e2e_norm_intvty_p90": 99.0,
+        }
+    result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
+
+    assert not state.geak_pending
+    attempt = state.explore_attempts[-1]
+    if case in {"positive", "output_drop"}:
+        assert attempt["decision"] == "promoted"
+        assert state.current_best["tput"] == measured
+        assert state.current_best["input_throughput"] == 800.0 - measured
+        assert state.current_best["total_throughput"] == 800.0
+        assert state.current_best["e2e_norm_intvty_p90"] == 8.0
+        assert state.cumulative_gain_validated == pytest.approx(60.0)
+        assert state.cumulative_gain_validated_stack_len == 2
+        assert state.resume_pending_revalidation is False
+    else:
+        assert state.current_best == before_best
+        assert state.optimization_stack == before_stack
+        assert state.cumulative_gain == 20.0
+        assert state.cumulative_gain_validated == 20.0
+        assert state.cumulative_gain_validated_stack_len == 1
+        assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
+        assert state.resume_pending_revalidation is True
+        if case in {"total_regression", "lift_refused"}:
+            assert attempt["decision"] == "no_promote"
+            assert attempt["status"] == "no_promote"
+            assert state.geak_result["revalidation_status"] == "no_promote"
+            assert result["status"] == "no_promote"
+        else:
+            assert attempt["status"] == "incomparable"
+            assert state.geak_result["revalidation_status"] == "fallback_failed"
+            assert state.geak_result["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
+            assert result["status"] == "incomparable"
+    assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
+
+
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
 
 
@@ -442,7 +620,7 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
-    assert ss.resume_pending_revalidation is False
+    assert ss.resume_pending_revalidation is True
     assert ss.geak_result["revalidation_status"] == "fallback_failed"
 
 
@@ -473,7 +651,7 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert ss.resume_pending_revalidation is False
+    assert ss.resume_pending_revalidation is True
     assert not ss.geak_pending
     assert ss.geak_result["revalidation_status"] == "no_promote"
 

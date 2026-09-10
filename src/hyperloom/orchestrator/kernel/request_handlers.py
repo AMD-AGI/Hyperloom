@@ -32,6 +32,7 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
@@ -1060,6 +1061,18 @@ def _fill_integrate_defaults_from_state(
     from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 
     resolved = dict(payload)
+    if resolved.get("source") == "forge_gemm_paired":
+        reference = resolved.get("paired_reference")
+        if (
+            not isinstance(reference, dict)
+            or float(reference.get("tput") or 0.0) <= 0
+            or not resolved.get("config_path")
+            or "extra_server_args" not in resolved
+            or not isinstance(resolved.get("extra_envs"), dict)
+        ):
+            raise ValueError("GEMM paired measurement requires an explicit entry reference and recipe")
+        resolved["base_tput"] = reference["tput"]
+        return resolved
     state = SharedState.load_or_init(session_dir)
 
     integration_id = str(resolved.get("integration_id") or "")
@@ -1151,18 +1164,23 @@ def _fill_integrate_defaults_from_state(
         if cb_args:
             resolved["extra_server_args"] = cb_args
     if isinstance(current_best, dict):
+        for key in ("remove_args", "unset_envs"):
+            resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
+        resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
         current_envs = current_best.get("extra_envs")
         current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
+        for key in resolved["unset_envs"]:
+            current_envs.pop(key, None)
         requested_envs = resolved.get("extra_envs")
         requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
-        if current_envs or requested_envs:
-            # The candidate stacks onto current_best. Candidate-specific
-            # overrides win, but omitting an env must not silently drop the
-            # accepted recipe during E2E validation.
-            resolved["extra_envs"] = {
-                **current_envs,
-                **requested_envs,
-            }
+        # A candidate can replace an inherited removal, not its own explicit unset.
+        if "unset_envs" not in payload:
+            resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
+        else:
+            for key in resolved["unset_envs"]:
+                requested_envs.pop(key, None)
+        if current_envs or requested_envs or "extra_envs" in resolved:
+            resolved["extra_envs"] = {**current_envs, **requested_envs}
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id:
@@ -3882,6 +3900,10 @@ async def _run_geak_gemm_tuning(
     if baseline_tput is None:
         baseline_tput = state.baseline_tput
 
+    from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
+
+    _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
         "cwd": str(workspace),
@@ -3895,7 +3917,11 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        "env": {"E2E_METRIC": "output"},
+        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
+        # read on that axis too, so a pinned "output" here would price every
+        # tuned GEMM against a reference measured differently. Synthetic runs
+        # resolve to "output" and are unaffected.
+        "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:
         input_payload["config"] = geak_config
@@ -3922,7 +3948,7 @@ async def _run_geak_gemm_tuning(
 
     cmd = [
         "env",
-        "E2E_METRIC=output",
+        f"E2E_METRIC={_geak_e2e_metric}",
         "python3",
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",
@@ -5520,12 +5546,21 @@ async def integrate_handler(
         ``gain_pct``, ``kernel_id``, ``patch_path``, ``report_path``,
         ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
         ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
+        ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
+        follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
     """
     from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
+    from ..measurement.integrate_performance import assess_integrate_performance
+    from ..state.shared_state import SharedState
     from ..state.task_registry import Task
 
+    requested_controls = (
+        bool(to_str_list(payload.get("remove_args")))
+        or bool(to_str_list(payload.get("unset_envs")))
+        or str(payload.get("args_mode") or "append").strip().lower() == "replace"
+    )
     # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
@@ -5559,19 +5594,26 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    # Coordinator-internal: the GEMM lanes call this handler directly and set
-    # env_only to measure a config change with no patch. It is not in the agent
-    # request schema -- an agent integrate always lands a KEEP'd patch, and
-    # env / serve-flag changes are explore's lever, fingerprint-deduped.
-    # env_only skips artifact resolution entirely: back-filling patch_path from
-    # the last kernel optimization would silently measure an unrelated patch.
+    # Coordinator-internal: config-only measurements opt in explicitly; agent
+    # integrate requests retain main's patch-resolution contract.
     mode = str(payload.get("mode") or "patch").strip().lower()
+    paired_measurement = payload.get("source") == "forge_gemm_paired"
+    if paired_measurement and any(
+        payload.get(key)
+        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
+    ):
+        raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
     if mode == "env_only":
-        if not payload.get("extra_envs") and not str(payload.get("extra_server_args") or "").strip():
+        if not (
+            payload.get("extra_envs")
+            or str(payload.get("extra_server_args") or "").strip()
+            or requested_controls
+            or paired_measurement
+        ):
             return {
                 "status": "failed",
                 "error_class": "env_only_missing_envs",
-                "error": "env_only integrate requires extra_envs or extra_server_args",
+                "error": "env_only integrate requires runtime configuration or an explicit paired reference",
             }
     else:
         payload, missing_inputs = _resolve_integrate_payload(
@@ -5581,6 +5623,7 @@ async def integrate_handler(
         if missing_inputs is not None:
             return missing_inputs
 
+    state = SharedState.load_or_init(session_dir)
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
     preapplied = payload.get("preapplied_apply_result")
@@ -5640,6 +5683,11 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
+    performance_policy = {
+        "base_tput": base_tput,
+        "keep_threshold_pct": keep_threshold_pct,
+        "stack_incremental_keep_threshold_pct": STACK_INCREMENTAL_KEEP_THRESHOLD_PCT,
+    }
     extra_args = str(payload.get("extra_server_args") or "").strip()
     # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
     # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
@@ -5654,28 +5702,7 @@ async def integrate_handler(
     # It is a legal id but not a legal directory name everywhere -- fold it.
     fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
-    baseline_executor = BaselineExecutor(session_dir=session_dir)
-    from ..state.shared_state import SharedState
-
-    # Read-only, and only to learn whether this session is AgentX. A strict load
-    # that raises here lands AFTER the kernel patch has been applied, so a
-    # truncated or concurrently-written state.json would throw away work that
-    # already succeeded -- to answer an advisory question. Fall back to the env
-    # signal instead: ``agentx_active(None)`` consults HYPERLOOM_AGENTX, which is
-    # the same answer in every case except a run resumed into a shell that lost
-    # the variable, and there the cost is the un-raised timeout we had before.
-    try:
-        _state_for_mode = SharedState.load_or_init(session_dir)
-    except Exception as exc:  # noqa: BLE001 - advisory read, never fatal
-        log.warning(
-            "integrate: could not read session state to detect the benchmark mode "
-            "(%s: %s); falling back to the HYPERLOOM_AGENTX env signal. The applied "
-            "patch is unaffected.",
-            type(exc).__name__,
-            exc,
-        )
-        _state_for_mode = None
-
+    baseline_executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
     rebaseline_timeout_sec = _agentx_rebaseline_timeout(
         _cold_start_rebaseline_timeout(
             _integrate_rebaseline_timeout_sec(
@@ -5683,7 +5710,7 @@ async def integrate_handler(
                 default_timeout_sec=baseline_executor.default_timeout_sec,
             )
         ),
-        shared_state=_state_for_mode,
+        shared_state=state,
     )
     fake_task = Task(
         task_id=fake_task_id,
@@ -5695,11 +5722,15 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            "remove_args": to_str_list(payload.get("remove_args")),
+            "unset_envs": to_str_list(payload.get("unset_envs")),
+            "args_mode": str(payload.get("args_mode") or "append"),
             # The only artifact that patches FlyDSL sources, so the only run that
             # needs the JIT cache key widened.
             "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
+            **({"post_measure_accuracy_keep_policy": performance_policy} if not paired_measurement else {}),
             "accuracy_timeout_sec": rebaseline_timeout_sec,
             # Synthetic kind="baseline": candidate A/B validation against the
             # already-anchored reference. It runs eval for the kernel accuracy
@@ -5866,32 +5897,23 @@ async def integrate_handler(
             }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
-    from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-
-    gain_pct = gain_pct_or_zero(new_tput, base_tput)
-    stack_positive_keep = False
-    stack_incremental_gain_pct: float | None = None
-    try:
-        from ..state.shared_state import SharedState
-
-        state = SharedState.load_or_init(session_dir)
-        current_best = state.current_best or {}
-        current_best_tput = float(current_best.get("tput") or 0.0)
-        if current_best_tput > 0:
-            stack_incremental_gain_pct = incremental_gain_pct(new_tput, current_best_tput)
-        stack_positive_keep = (
-            bool(state.optimization_stack)
-            and str(current_best.get("action") or "") == "integrate"
-            and current_best_tput > 0
-            and stack_incremental_gain_pct >= STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
-        )
-    except Exception:  # noqa: BLE001 - fall back to the original threshold
-        stack_positive_keep = False
-    decision = (
-        "KEEP"
-        if (gain_pct > keep_threshold_pct or stack_positive_keep)
-        else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
-    )
+    if paired_measurement:
+        return {
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "base_tput": base_tput,
+            "new_tput": new_tput,
+            "bench_result": bench_result,
+            "workspace": bench_result.get("workspace"),
+        }
+    performance = assess_integrate_performance(state, bench_result, **performance_policy)
+    graded = performance.graded
+    if graded.degrade_reason:
+        log.info("integrate_handler: grading on output throughput (%s)", graded.degrade_reason)
+    gain_pct = performance.gain_pct
+    stack_incremental_gain_pct = performance.stack_incremental_gain_pct
+    stack_positive_keep = performance.stack_positive_keep
+    decision = performance.decision
 
     # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
     # ONLY for a candidate that already cleared the throughput bar, so a
@@ -5995,6 +6017,8 @@ async def integrate_handler(
         "base_tput": base_tput,
         "new_tput": new_tput,
         "gain_pct": gain_pct,
+        "graded_objective": graded.objective,
+        "bench_result": bench_result,
         "report_path": bench_result.get("report_path"),
         "workspace": bench_result.get("workspace"),
         "extra_server_args": extra_args,
@@ -6020,6 +6044,8 @@ async def integrate_handler(
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
+    if graded.graded_on_intvty and graded.verdict == "REVERT":
+        result["decision_reason"] = "intvty_regression"
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
