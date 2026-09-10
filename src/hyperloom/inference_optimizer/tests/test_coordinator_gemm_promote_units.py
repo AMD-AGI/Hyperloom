@@ -551,7 +551,7 @@ class TestQueueFusionSiblings:
 
         monkeypatch.setattr(krh_mod, "run_fusion_handler", _raise)
 
-        await phase._run_forge_fusion()
+        await phase._run_fusion_lane()
 
         assert coord.shared_state.last_fusion["decision"] == "REVERT"
         assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"

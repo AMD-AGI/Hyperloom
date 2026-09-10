@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -143,6 +144,70 @@ def _geak_decline_status(decline_reason: Any) -> str:
     """Map a 2b decline reason to the status left on ``geak_pending``."""
     reason = str(decline_reason or "").strip().lower()
     return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
+
+
+def lane_failure(exc: BaseException, **extra: Any) -> dict[str, Any]:
+    """The one shape a lane reports a crash in.
+
+    Three lanes each invented their own, so which key carried the reason
+    depended on which one failed.
+    """
+    return {
+        "status": "failed",
+        "decision": "REVERT",
+        "error_class": exc.__class__.__name__,
+        "error": repr(exc),
+        **extra,
+    }
+
+
+@dataclass(frozen=True)
+class ForgeLane:
+    """One KERNEL lane: when it runs, and what running it means.
+
+    The three lanes do very different work inside ``run`` -- tune a shape
+    table, author a fused kernel, drive a rewrite campaign -- and nothing is
+    gained by pretending otherwise. What they share is everything around it:
+    a gate, a snapshot refresh, an evidence row, one failure envelope and one
+    response on the bus. That is what this collects, so a lane cannot quietly
+    grow a second exit or report itself in a shape of its own.
+
+    ``run`` returns the lane's finished result, its own integration included.
+    """
+
+    #: Evidence key and log label.
+    name: str
+    #: The ``<kind>_done`` response orchestration reads from its inbox.
+    response_kind: str
+    gate: Callable[["KernelPhase"], bool]
+    run: Callable[["KernelPhase"], Any]
+
+
+#: Run order is the contract: GEMM tunes the shape tables the later lanes
+#: measure against, and fusion changes the decode path the rewrite controller
+#: then reads a trace of.
+FORGE_LANES: tuple[ForgeLane, ...] = (
+    ForgeLane(
+        name="gemm_tuning",
+        response_kind="run_gemm_tuning_done",
+        gate=lambda phase: phase._gemm_tuning_required_before_kernel_opt(),
+        run=lambda phase: phase._run_gemm_lane(),
+    ),
+    ForgeLane(
+        name="fusion",
+        response_kind="run_fusion_done",
+        gate=lambda phase: phase._fusion_required_before_kernel_opt(),
+        run=lambda phase: phase._run_fusion_lane(),
+    ),
+    ForgeLane(
+        name="kernel_rewrite_controller",
+        response_kind="kernel_rewrite_controller_done",
+        # No gate. Choosing operators is the controller's own job, so no trace,
+        # candidate count or source-resolution verdict decides it for them.
+        gate=lambda _phase: True,
+        run=lambda phase: phase._run_rewrite_lane(),
+    ),
+)
 
 
 class KernelPhase(PhaseHandler):
@@ -406,46 +471,34 @@ class KernelPhase(PhaseHandler):
             from_phase=from_phase,
         )
         if geak_enabled:
-            # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
-            # hand straight to SWEEP.
+            # GEAK is not a lane: it owns the whole KERNEL_AGENT phase in one
+            # in-process e2e run seeded with the best config so far, then hands
+            # straight to SWEEP. Nothing below this line runs.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
-        if not self._gemm_tuning_required_before_kernel_opt():
-            await self._finish_kernel_entry()
+        for lane in FORGE_LANES:
+            await self._run_forge_lane(lane)
+        self.shared_state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+        self.shared_state.save(self.session_dir)
+
+    async def _run_forge_lane(self, lane: ForgeLane) -> None:
+        """Run one lane, or say why it did not run, in the one shape they share."""
+        if not lane.gate(self):
             return
-
-        # Refresh the snapshot before GEMM tuning targets the bottleneck.
+        # Every lane targets the current bottleneck, and the lane before it may
+        # have moved one. The refresh is idempotent, so a lane that changed
+        # nothing costs a check rather than a profile.
         await self._maybe_reprofile_for_kernel()
-        log.info(
-            "KERNEL entry: running GEMM tuning before source-level kernel_opt",
-        )
-        self._record_phase_entry_evidence(
-            gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
-        )
-        run_gemm_tuning_handler = None
+        log.info("KERNEL entry: running %s", lane.name)
+        self._record_phase_entry_evidence(**{lane.name: {"status": "running", "source": "kernel_entry_auto"}})
         try:
-            from ..kernel.request_handlers import run_gemm_tuning_handler
-
-            # The fp8 -> bf16 dense retry now lives inside the tuner router: an fp8 run whose tuning comes back empty
-            # runs the bf16 dense pass in the same call (router selects it as a fallback).
-            result = await run_gemm_tuning_handler(
-                {
-                    "task_id": "kernel_entry_gemm_tuning",
-                    "reason": "kernel_entry_auto",
-                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                },
-                session_dir=self.session_dir,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry GEMM tuning failed")
-            result = {
-                "status": "failed",
-                "decision": "REVERT",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
-            }
-        await self._handle_gemm_tuning_result(result)
-
+            result = await lane.run(self)
+        except Exception as exc:  # noqa: BLE001 - one lane's crash is not the phase's
+            # The backstop, not the ordinary path: a lane whose result feeds a
+            # ledger converts its own handler crash so the record is still
+            # written. What lands here is a defect anywhere else in the lane.
+            log.exception("KERNEL entry: %s failed", lane.name)
+            result = lane_failure(exc)
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -454,7 +507,7 @@ class KernelPhase(PhaseHandler):
                 "response",
                 {
                     "in_reply_to": "",
-                    "kind": "run_gemm_tuning_done",
+                    "kind": lane.response_kind,
                     "status": status,
                     "result": result,
                     "source": "kernel_entry_auto",
@@ -463,15 +516,40 @@ class KernelPhase(PhaseHandler):
             )
         )
         self._record_phase_entry_evidence(
-            gemm_tuning={
-                "status": "done" if status in {"ok", "complete", "succeeded"} else status,
-                "source": "kernel_entry_auto",
-                "best_speedup": result.get("best_speedup"),
-                "tuned_file": result.get("tuned_file"),
-            },
+            **{
+                lane.name: {
+                    "status": "done" if status in {"ok", "complete", "succeeded"} else status,
+                    "source": "kernel_entry_auto",
+                    **{
+                        key: result[key]
+                        for key in ("best_speedup", "tuned_file", "kept", "patch_count")
+                        if key in result
+                    },
+                }
+            }
         )
-        # Capture explore + GEMM-tuning gains before the entry batch.
-        await self._finish_kernel_entry()
+
+    async def _run_gemm_lane(self) -> dict[str, Any]:
+        """Tune the GEMM shape tables the later lanes will measure against."""
+        from ..kernel.request_handlers import run_gemm_tuning_handler
+
+        # The fp8 -> bf16 dense retry lives inside the tuner router: an fp8 run
+        # whose tuning comes back empty runs the bf16 dense pass in the same
+        # call, with the router selecting it as a fallback.
+        try:
+            result = await run_gemm_tuning_handler(
+                {
+                    "task_id": "kernel_entry_gemm_tuning",
+                    "reason": "kernel_entry_auto",
+                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                },
+                session_dir=self.session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - the attempt ledger records crashes too
+            log.exception("KERNEL entry GEMM tuning failed")
+            result = lane_failure(exc)
+        await self._handle_gemm_tuning_result(result)
+        return result
 
     @staticmethod
     def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
@@ -3244,10 +3322,8 @@ class KernelPhase(PhaseHandler):
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
 
-    async def _finish_kernel_entry(self) -> None:
-        """Run the gated kernel lanes, write the handoff, and delegate rewrite control."""
-        await self._maybe_reprofile_for_kernel()
-        await self._maybe_run_forge_fusion_before_kernel_opt()
+    async def _run_rewrite_lane(self) -> dict[str, Any]:
+        """Seal the serving trees, hand the evidence over, and drive one campaign."""
         from hyperloom.inference_optimizer.session.session_paths import (
             next_forge_attempt_dir,
         )
@@ -3260,11 +3336,11 @@ class KernelPhase(PhaseHandler):
         )
         handoff_dir = attempt_dir / "handoff"
         # Sealed before the handoff is written and before the controller starts,
-        # which is the last moment the serving trees stand still: reprofile,
-        # fusion and collective have all finished, and every uncommitted change
-        # they left is part of what the server is now running. Committing it is
-        # what lets a campaign name its own baseline -- the diff's starting
-        # point, and the state a borrowed repository is handed back at.
+        # which is the last moment the serving trees stand still: every earlier
+        # lane has finished, and every uncommitted change they left is part of
+        # what the server is now running. Committing it is what lets a campaign
+        # name its own baseline -- the diff's starting point, and the state a
+        # borrowed repository is handed back at.
         baselines: dict[str, object] = {}
         try:
             from ..kernel.campaign_baseline import seal_campaign_baseline
@@ -3304,7 +3380,7 @@ class KernelPhase(PhaseHandler):
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: Forge handoff generation failed")
-        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
+        return await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
     async def _run_kernel_rewrite_controller(
         self,
@@ -3414,7 +3490,6 @@ class KernelPhase(PhaseHandler):
                 }
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
-        # The summary rides a ``response`` message the inbox dumps raw once.
         _integration = result.get("integration")
         if isinstance(_integration, dict):
             _skipped = [
@@ -3432,25 +3507,8 @@ class KernelPhase(PhaseHandler):
                         "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
                     },
                 )
-        self.shared_state.set_pending_escalate_hint(
-            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
-        )
         self.shared_state.save(self.session_dir)
-        await self.bus.append_and_seq(
-            Message.new(
-                "kernel_agent",
-                "orchestration",
-                "response",
-                {
-                    "in_reply_to": "",
-                    "kind": "kernel_rewrite_controller_done",
-                    "status": result.get("status", "failed"),
-                    "result": result,
-                    "source": "kernel_entry_auto",
-                },
-                priority=1,
-            )
-        )
+        return result
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry."""
@@ -3484,33 +3542,20 @@ class KernelPhase(PhaseHandler):
                 return False
         return True
 
-    async def _maybe_run_forge_fusion_before_kernel_opt(self) -> None:
-        """Run the independently gated forge-fusion stage before kernel_opt."""
-        if not self._fusion_required_before_kernel_opt():
-            return
-        await self._run_forge_fusion()
-        await self._maybe_reprofile_for_kernel()
+    async def _run_fusion_lane(self) -> dict[str, Any]:
+        """Collapse the launch-bound decode tail into one authored kernel."""
+        from ..kernel.request_handlers import run_fusion_handler
 
-    async def _run_forge_fusion(self) -> None:
-        """Run autonomous kernel fusion during KERNEL entry."""
-        log.info("KERNEL entry: running forge-fusion (autonomous kernel fusion)")
         try:
-            from ..kernel.request_handlers import run_fusion_handler
-
             result = await run_fusion_handler(
                 {"task_id": "kernel_entry_fusion", "reason": "kernel_entry_auto"},
                 session_dir=self.session_dir,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - last_fusion is this lane's ledger
             log.exception("KERNEL entry forge-fusion failed")
-            result = {
-                "status": "failed",
-                "decision": "REVERT",
-                "engine": "forge_fusion",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
-            }
+            result = lane_failure(exc, engine="forge_fusion")
         await self._handle_fusion_result(result)
+        return result
 
     async def _handle_fusion_result(self, result: dict) -> None:
         """Record the forge-fusion result + surface it on the bus."""
@@ -3551,24 +3596,6 @@ class KernelPhase(PhaseHandler):
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
             pass
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "kernel_agent",
-                    "orchestration",
-                    "response",
-                    {
-                        "in_reply_to": "",
-                        "kind": "run_fusion_done",
-                        "status": status,
-                        "result": result,
-                        "source": "kernel_entry_auto",
-                    },
-                    priority=1,
-                )
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("failed to post run_fusion_done bus message")
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             await self._integrate_fusion(result)
