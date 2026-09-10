@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
 
 

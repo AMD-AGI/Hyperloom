@@ -702,7 +702,7 @@ async def test_revalidation_prefers_accepted_config_over_probe():
 @pytest.mark.asyncio
 async def test_revalidation_carries_active_runtime():
     """When an active runtime is recorded, its override is included in params."""
-    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime
 
     rt = FrameworkRuntime(bin_path="/attempt/bin", python_path="/attempt/bin/python", venv_root="/attempt/venv")
     fake = _enqueue_self(
