@@ -59,7 +59,18 @@ def test_sglang_reuse_checks_out_requested_ref_after_fallback_fetch(tmp_path: Pa
     tracked.write_text("target\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(upstream), "add", "tracked"], check=True)
     subprocess.run(
-        ["git", "-C", str(upstream), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "target"],
+        [
+            "git",
+            "-C",
+            str(upstream),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "target",
+        ],
         check=True,
     )
     target_ref = subprocess.run(
@@ -70,7 +81,18 @@ def test_sglang_reuse_checks_out_requested_ref_after_fallback_fetch(tmp_path: Pa
     ).stdout.strip()
     tracked.write_text("main\n", encoding="utf-8")
     subprocess.run(
-        ["git", "-C", str(upstream), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "main"],
+        [
+            "git",
+            "-C",
+            str(upstream),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qam",
+            "main",
+        ],
         check=True,
     )
 
@@ -84,7 +106,7 @@ def test_sglang_reuse_checks_out_requested_ref_after_fallback_fetch(tmp_path: Pa
     bin_dir.mkdir()
     git_wrapper = bin_dir / "git"
     git_wrapper.write_text(
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'if [[ "$*" == *"fetch --depth 1 origin ${BLOCKED_REF}"* ]]; then exit 1; fi\n'
         'exec "$REAL_GIT" "$@"\n',
         encoding="utf-8",
