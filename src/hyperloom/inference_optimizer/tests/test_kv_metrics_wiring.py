@@ -834,6 +834,85 @@ def test_eval_rows_survive_the_aiperf_adoption(tmp_path):
     assert payload["sample_source"] == "aiperf_server_metrics"
 
 
+def test_an_unstamped_aiperf_record_is_boot_not_measured(tmp_path):
+    """aiperf's baseline capture carries no phase, and it is not measured data.
+
+    Observed on a live AgentX round: two records stamped ``null`` sat before the
+    warmup `start_ns`, readings of an idle pool taken before any phase began.
+    Defaulting them to "measured" put them in the one phase allowed into a
+    comparison and produced a measured prefix-cache delta of 34,395 describing
+    nothing that happened.
+    """
+    base = 1_789_048_708_000_000_000
+    _write_server_metrics(
+        tmp_path,
+        [
+            {
+                "endpoint_url": "http://localhost:8000/metrics",
+                "timestamp_ns": base,
+                "endpoint_latency_ns": 19_658_211,
+                "request_sent_ns": base - 19_658_211,
+                "benchmark_phase": None,
+                "metrics": {"vllm:kv_cache_usage_perc": [{"labels": {"engine": "0"}, "value": 0.0}]},
+            },
+            _slim_record(ts_ns=base + 30_000_000_000, usage=0.5, retracts=0, phase="profiling"),
+        ],
+    )
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    payload = rec.summary()
+
+    assert [r["phase"] for r in payload["samples"]] == ["boot", "measured"]
+
+
+def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
+    """On an AgentX round nothing pins ``PORT`` and vLLM binds its own 8000.
+
+    The synthetic path pins 8888, which is what the default matches, so a default
+    can only ever be right for one of the two. The server's own banner is right
+    for both.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log, resolve_metrics_port
+
+    nested = tmp_path / "benchmark_vllm_1"
+    nested.mkdir()
+    (nested / "server.log").write_text(
+        "INFO 09-10 13:57:01 [api_server.py:1] Starting vLLM API server\n"
+        "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)\n"
+        "INFO:     Application startup complete.\n",
+        encoding="utf-8",
+    )
+
+    assert port_from_server_log(tmp_path) == 8000
+    assert resolve_metrics_port({}, tmp_path) == 8000
+
+
+def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
+    """Both exist on a synthetic round and the config is the earlier authority."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+
+    (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
+    (tmp_path / "server.log").write_text("INFO:     Uvicorn running on http://0.0.0.0:8000\n", encoding="utf-8")
+
+    assert resolve_metrics_port({}, tmp_path) == 34407
+
+
+def test_the_port_is_resolved_on_first_use_not_at_construction(tmp_path):
+    """The server writes its banner after the recorder is built, so resolving
+    eagerly would cache the default and scrape a port nothing is listening on."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+
+    poller = KvMetricsPoller(workspace=tmp_path)
+    # The round has not booted yet; the log appears only now.
+    (tmp_path / "server.log").write_text("INFO:     Uvicorn running on http://0.0.0.0:8000\n", encoding="utf-8")
+
+    assert poller.port == 8000
+    assert poller.url == "http://127.0.0.1:8000/metrics"
+
+
 def test_a_round_without_an_aiperf_export_keeps_the_watchdog_rows(tmp_path):
     """Synthetic benchmarks, the accuracy eval and any round killed before aiperf
     flushed have no export, and are still the majority of rounds."""

@@ -48,6 +48,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -92,6 +93,11 @@ _SCRAPE_TIMEOUT_SEC = 0.4
 #: corporate host routes a loopback scrape through an external proxy: wrong by construction, and slow enough that the
 #: blocking call visibly delays the watchdog loop it runs inside.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+#: How much of a server log to read when hunting for the bound-port banner. It is logged during startup and these logs
+#: grow to megabytes on shared storage, so reading the head is both sufficient and the difference between a cheap check
+#: and a slow one.
+_SERVER_LOG_HEAD_BYTES = 262144
 
 #: Consecutive failures after which the poller stops trying. A server that never exposes ``/metrics`` (SGLang without
 #: ``--enable-metrics``) would otherwise pay a connection refusal every couple of seconds for the whole round.
@@ -579,6 +585,31 @@ def _port_value(raw: Any) -> int | None:
     return port if port > 0 else None
 
 
+def port_from_server_log(workspace: Any) -> int | None:
+    """Read the port the server actually bound out of its own log.
+
+    The last resort before the default, and the only source that is right by construction: it is what the server said
+    it was listening on. Needed because the port is not always pinned anywhere else -- on an AgentX round the config
+    carries no ``PORT`` at all and vLLM falls back to its own 8000, while the synthetic path pins 8888. A default can
+    only ever match one of those.
+    """
+    try:
+        root = Path(workspace)
+        for pattern in ("server.log", "*/server.log"):
+            for candidate in sorted(root.glob(pattern)):
+                # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
+                with candidate.open(encoding="utf-8", errors="ignore") as handle:
+                    head = handle.read(_SERVER_LOG_HEAD_BYTES)
+                match = re.search(r"(?:Uvicorn running on|running on)\s+https?://[^\s:]+:(\d+)", head)
+                if match:
+                    port = _port_value(match.group(1))
+                    if port is not None:
+                        return port
+    except OSError:
+        return None
+    return None
+
+
 def port_from_workspace(workspace: Any) -> int | None:
     """Read ``benchmark.envs.PORT`` out of the round's materialized config.
 
@@ -624,9 +655,10 @@ def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: A
         if port is not None:
             return port
     if workspace is not None:
-        port = port_from_workspace(workspace)
-        if port is not None:
-            return port
+        for probe in (port_from_workspace, port_from_server_log):
+            port = probe(workspace)
+            if port is not None:
+                return port
     return DEFAULT_METRICS_PORT
 
 
@@ -651,15 +683,35 @@ class KvMetricsPoller:
         timeout_sec: float = _SCRAPE_TIMEOUT_SEC,
         workspace: Any = None,
     ) -> None:
-        """Bind the poller to an endpoint without contacting it."""
-        self.port = int(port) if port else resolve_metrics_port(config_envs, workspace)
-        self.url = f"http://{host}:{self.port}/metrics"
+        """Bind the poller to an endpoint without contacting it, or yet resolving it.
+
+        The port is resolved on first use rather than here, because the most reliable source for it -- the line the
+        server logs when it binds -- does not exist when the recorder is built. By the first scrape it does: ticking is
+        gated on the ready marker, which the server writes after that line.
+        """
+        self._explicit_port = int(port) if port else None
+        self._config_envs = dict(config_envs or {})
+        self._host = host
+        self._port_workspace = workspace
+        self._port: int | None = None
         self.timeout_sec = float(timeout_sec)
         self._failures = 0
         self._succeeded = False
         self._gave_up = False
         self._warned = False
         self._first_attempt_mono: float | None = None
+
+    @property
+    def port(self) -> int:
+        """Port the engine serves ``/metrics`` on, resolved once on first use."""
+        if self._port is None:
+            self._port = self._explicit_port or resolve_metrics_port(self._config_envs, self._port_workspace)
+        return self._port
+
+    @property
+    def url(self) -> str:
+        """Endpoint this poller scrapes."""
+        return f"http://{self._host}:{self.port}/metrics"
 
     @property
     def available(self) -> bool | None:
@@ -1181,7 +1233,11 @@ class KvMetricsRecorder:
             self._last_counters = {}
             previous_phase = self._phase
             for sample, timing, phase in records:
-                self._phase = phase or "measured"
+                # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
+                # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
+                # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
+                # prefix-cache delta of 34,395 describing nothing that happened.
+                self._phase = phase or "boot"
                 self._absorb(sample, timing=timing)
             self._phase = previous_phase
             if kept:
