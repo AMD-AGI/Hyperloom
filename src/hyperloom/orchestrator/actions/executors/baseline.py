@@ -2510,8 +2510,13 @@ class BaselineExecutor:
             return
         if self._eval_disabled(ctx):
             return
-        # A failed status must NOT skip straight past the salvage below.
-        if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
+        # A failed status must NOT skip straight past the salvage below -- with one exception. An eval that never
+        # reached a verdict because the server was unreachable produced no accuracy signal at all, so neither the
+        # accuracy stop nor the enablement routing below has anything to act on. Without this the run is stamped with
+        # an accuracy-flavoured verdict on evidence that says only that the measurement broke.
+        if result.get("status") != "succeeded" and (
+            not self._is_eval_rooted_failure(result) or self._is_server_unreachable_eval_failure(result)
+        ):
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
