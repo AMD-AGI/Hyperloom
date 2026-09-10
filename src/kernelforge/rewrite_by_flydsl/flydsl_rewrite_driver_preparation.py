@@ -29,6 +29,7 @@ from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_bytes
+from kernelforge.tracker import UsageAccumulator
 
 
 DRIVER_PREPARATION_FAILED = "driver_preparation_failed"
@@ -315,6 +316,7 @@ async def _run_agent(
     prompt: str,
     timeout_sec: int,
     progress_log: list[str],
+    usage: UsageAccumulator | None = None,
 ) -> str:
     runtime = with_writable_sandbox(config.agent_runtime())
     backend = create_registered_backend(runtime)
@@ -342,7 +344,7 @@ async def _run_agent(
         progress_log=progress_log,
     )
     result = await asyncio.wait_for(
-        backend.run(run_spec),
+        backend.run(run_spec, usage=usage),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
@@ -500,6 +502,7 @@ async def prepare_rewrite_driver(
     invocation_spec_file: str = "",
     initial_preflight: DriverPreflight | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    usage: UsageAccumulator | None = None,
 ) -> DriverPreparationResult:
     """Author or repair one driver without exposing the caller's tree to writes."""
 
@@ -594,6 +597,7 @@ async def prepare_rewrite_driver(
                         prompt=prompt,
                         timeout_sec=timeout_sec,
                         progress_log=progress_log,
+                        usage=usage,
                     )
                     _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
                 except asyncio.TimeoutError:
