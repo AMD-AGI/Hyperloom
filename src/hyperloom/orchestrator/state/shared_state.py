@@ -126,6 +126,7 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -135,6 +136,13 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
+    # The session's latency ceiling is a constraint on the same verdict the gain
+    # gates decide, not a second opinion beside it: a candidate that clears its
+    # objective and breaks the SLA is a REVERT, on whichever axis graded it.
+    sla_veto = latency_veto_reason(
+        measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None,
+        float(getattr(state, "latency_budget_ms", 0.0) or 0.0),
+    )
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -162,9 +170,10 @@ def resolve_graded_comparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
+                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
+                veto_reason=sla_veto,
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -186,8 +195,9 @@ def resolve_graded_comparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=verdict,
+        verdict=VERDICT_REVERT if sla_veto else verdict,
         degrade_reason=degrade_reason,
+        veto_reason=sla_veto,
     )
 
 
@@ -376,6 +386,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     conc_sweep_total_budget_sec: int = 9000
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
+    # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
+    latency_budget_ms: float = 0.0
+    # Winners the budget refused: {action, variant_name, tput, e2el_mean_ms, budget_ms, reason, ts}. A constrained
+    # session that ends near baseline is otherwise indistinguishable from one that found no headroom.
+    latency_refusals: list[dict[str, Any]] = field(default_factory=list)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
     # state.osl placeholders. Absent on synthetic sessions.
