@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation
-from hyperloom.inference_optimizer.session.session_paths import reports_dir
+from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT, reports_dir
 from hyperloom.orchestrator.bringup.ladder import observation_summary
 from hyperloom.orchestrator.bringup.trees import path_slug
 
@@ -43,7 +43,7 @@ class LoadedObservation:
 def _observation_path(session_dir: Path, output_dir: Path, attempt: int) -> Path:
     """Return ``<session_dir>/reports/bringup/<slot>-<digest>-<attempt>.json``."""
     slug = path_slug(str(output_dir), fallback="round")
-    return reports_dir(session_dir) / "bringup" / f"{slug}-{attempt:03d}.json"
+    return reports_dir(session_dir) / BRINGUP_SEGMENT / f"{slug}-{attempt:03d}.json"
 
 
 def write_boot_observation(
