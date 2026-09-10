@@ -8,7 +8,10 @@ the prompt/transcript/heartbeat/done writers."""
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists.runner import (
@@ -234,7 +237,7 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
-def _finalize(r, tmp_path, payload):
+async def _finalize(r, tmp_path, payload):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
@@ -242,7 +245,7 @@ def _finalize(r, tmp_path, payload):
         workspace=tmp_path,
     )
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    result = r._finalize(
+    result = await r._finalize(
         ctx=ctx,
         prep=prep,
         specialist_done_payload=payload,
@@ -255,11 +258,12 @@ def _finalize(r, tmp_path, payload):
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
-def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
+@pytest.mark.asyncio
+async def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
     """The Critic is told to reject a proposal_set carrying self-reported gain
     fields, which costs the round every idea in it. Dropping them makes that
     verdict unreachable; the audit note still records what was there."""
-    result, written = _finalize(
+    result, written = await _finalize(
         _runner(),
         tmp_path,
         {
@@ -277,14 +281,32 @@ def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_pat
     assert "expected_gain" in joined and "score" in joined
 
 
-def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
-    _, written = _finalize(
+@pytest.mark.asyncio
+async def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
+    _, written = await _finalize(
         _runner(),
         tmp_path,
         {"proposal_set": [{"name": "v1"}], "confidence": 0.6},
     )
 
     assert written["confidence"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
+    """``vet_patches`` serialises ``git apply --check``; that must not freeze the loop."""
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+    orig = sr._patch_safety.vet_patches
+
+    def _spy_vet(*args, **kwargs):
+        seen["ident"] = threading.get_ident()
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
+    await _finalize(_runner(), tmp_path, {"proposal_set": [{"name": "v1"}], "summary": "s"})
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
 
 
 def test_write_specialist_done_partial_noop_none_workspace():

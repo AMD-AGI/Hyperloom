@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -1433,6 +1434,51 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     assert result["status"] == "kept"
     assert result["setup_commands_applied"] == ["pip install -U transformers"]
     assert replayed["commands"] == ["pip install -U transformers"]
+
+
+@pytest.mark.asyncio
+async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monkeypatch):
+    """Enablement setup replay must not occupy the coordinator event-loop thread.
+
+    ``_run_setup_commands`` is a blocking ``subprocess.run`` loop. If it ran on
+    the loop thread, concurrent in-flight LLM streams, the dispatcher's re-scan
+    poll, and cancel grace would freeze until the installs finished.
+    """
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+
+    def _spy_run_setup(commands, *, cwd, log_dir):
+        seen["ident"] = threading.get_ident()
+        return {"applied": [], "skipped": [], "failed": []}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx("t-int-setup-thread", {"enablement": True})
+    ctx._ip_specialist_workspace = workspace  # type: ignore[attr-defined]
+
+    result = await executor._stage_apply(
+        ctx,
+        {
+            "enablement": True,
+            "enablement_setup_commands": ["pip install -U transformers"],
+        },
+        {},
+        "t-spec-setup-thread",
+        None,
+        None,
+    )
+
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
+    assert result is not None
+    assert result["status"] == "no_patches"
 
 
 def test_integrate_patch_executor_imports_clean():

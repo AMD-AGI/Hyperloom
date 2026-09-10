@@ -13,6 +13,7 @@ outcome for the audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import logging
@@ -1078,7 +1079,7 @@ class SpecialistRunner:
             status="finished",
         )
 
-        return self._finalize(
+        return await self._finalize(
             ctx=ctx,
             prep=prep,
             specialist_done_payload=(
@@ -1246,7 +1247,7 @@ class SpecialistRunner:
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
-        return self._finalize(
+        return await self._finalize(
             ctx=ctx,
             prep=prep,
             specialist_done_payload=sub_result.done_payload,
@@ -1259,7 +1260,7 @@ class SpecialistRunner:
         )
 
     # Finalize phase (shared)
-    def _finalize(
+    async def _finalize(
         self,
         *,
         ctx: RunnerContext,
@@ -1411,7 +1412,8 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
+        kept, ungrounded, grounding, spans_roots = await asyncio.to_thread(
+            _patch_safety.vet_patches,
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,

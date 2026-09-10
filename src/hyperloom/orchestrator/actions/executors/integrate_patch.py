@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import functools
 import json
@@ -2197,7 +2198,8 @@ class IntegratePatchExecutor:
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
             if setup_cmds:
-                setup_result = _run_setup_commands(
+                setup_result = await asyncio.to_thread(
+                    _run_setup_commands,
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
@@ -3089,7 +3091,8 @@ class IntegratePatchExecutor:
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
         # Editable-refresh the localized closure + snapshot a manifest that
         # survives rearm so the closure is recorded and not re-fetched.
-        manifest = self._finalize_localization_keep(
+        manifest = await asyncio.to_thread(
+            self._finalize_localization_keep,
             ctx,
             framework_root=framework_root,
             specialist_task_id=specialist_task_id,
