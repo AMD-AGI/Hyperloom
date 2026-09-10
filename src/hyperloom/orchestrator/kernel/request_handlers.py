@@ -32,7 +32,7 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
 from hyperloom.orchestrator.roles.agent_role import (
@@ -41,10 +41,10 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
+from .kernel_context import resolve_precision_and_quant
 from .kernel_evidence import (
     resolve_forge_server_log,
     resolve_forge_untuned_csv,
-    resolve_fp8_quant_type,
     resolve_fusion_decode_trace,
     resolve_trace_shape_manifest,
     tokens_from_serving_log,
@@ -1892,73 +1892,6 @@ def _resolve_aiter_root_for_forge() -> str:
     return ""
 
 
-def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
-    """Resolve the actual runtime precision and quant_type for forge tuning.
-
-    Priority:
-    1. Explicit payload override
-    2. --quantization from current_best server args (actual runtime)
-    3. state.precision (session-level, may be stale)
-    4. Default: bf16
-
-    Returns (precision, quant_type) tuple.
-    """
-    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
-
-    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
-
-    if payload.get("precision"):
-        precision = _normalize_precision(payload["precision"])
-        quant_type = str(payload.get("quant_type") or "auto").strip()
-        if precision == "fp8" and quant_type.lower() == "auto":
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
-        return precision, quant_type
-
-    # Resolve from actual server args (baseline yaml + current_best overlay).
-    current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
-    extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
-    ref_envs = dict(getattr(state, "reference_envs", None) or {})
-    per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
-        ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
-    )
-
-    quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
-
-    if quantization_arg == "fp8":
-        precision = "fp8"
-        # Hand forge the fp8 GEMM path the model runs: explicit per-token env wins,
-        # else the checkpoint's static format, else "auto".
-        if per_token_signal:
-            quant_type = "per_token"
-        else:
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
-        return precision, quant_type
-
-    if quantization_arg in ("fp4", "mxfp4"):
-        return quantization_arg, "fp4"
-
-    # Fall back to session precision.
-    precision = _normalize_precision(state.precision)
-    if not precision:
-        precision = "bf16"
-    quant_type = str(payload.get("quant_type") or "auto").strip()
-    if precision == "fp8" and quant_type.lower() == "auto":
-        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-        quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
-    return precision, quant_type
-
-
 def _is_forge_compatible_shapes_json(path: Path) -> bool:
     """Validate that a shapes JSON file matches forge's expected format.
 
@@ -3377,7 +3310,7 @@ async def _run_forge_gemm_tuning(
         }
 
     # Resolve precision from actual runtime, not just session-level state.
-    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+    precision, quant_type = resolve_precision_and_quant(state, payload)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)

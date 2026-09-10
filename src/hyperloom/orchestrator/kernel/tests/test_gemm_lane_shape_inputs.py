@@ -68,7 +68,7 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         from hyperloom.orchestrator.policy import gate
 
         monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
+        monkeypatch.setattr(rh, "resolve_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
         monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
         monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)
@@ -105,7 +105,7 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         from hyperloom.orchestrator.policy import gate
 
         monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
+        monkeypatch.setattr(rh, "resolve_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
         monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
         monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)

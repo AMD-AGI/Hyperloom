@@ -88,53 +88,6 @@ class TestForgeGemmHelperCoverage:
     def test_truthy_env_value_false(self, value):
         assert is_truthy(value) is False
 
-    def test_resolve_forge_precision_payload_override(self):
-        state = SharedState(precision="bf16")
-        assert krh._resolve_forge_precision_and_quant(
-            state,
-            {"precision": "fp8", "quant_type": "blockscale"},
-        ) == ("fp8", "blockscale")
-
-    def test_resolve_forge_precision_from_runtime_fp4(self):
-        state = SharedState(precision="bf16")
-        state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
-
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
-
-    def test_resolve_forge_precision_per_token_from_reference_env(self):
-        state = SharedState(precision="bf16")
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
-
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
-
-    @staticmethod
-    def _write_cfg(model_dir: Path, cfg: dict) -> str:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
-        return str(model_dir)
-
-    def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
-        model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
-        state = SharedState(precision="bf16", model_path=model)
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
-
-    def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
-        model = self._write_cfg(
-            tmp_path / "block",
-            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
-        )
-        state = SharedState(precision="bf16", model_path=model)
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
-
-    def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
-        # No readable config: do not force a tuner; let forge sniff the log.
-        state = SharedState(precision="bf16", model_path="/models/does-not-exist")
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
-
     def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
         # The probe must be the same invocation the tool makes, in the same interpreter.
         seen: list[list[str]] = []
@@ -204,18 +157,6 @@ class TestForgeGemmHelperCoverage:
 
         assert "preflight timed out" in caplog.text
         assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
-
-    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
-        # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
-        state = SharedState(precision="")
-        state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        import hyperloom.orchestrator.kernel.roofline_ceiling as rc
-
-        def _raise(*_a, **_k):
-            raise RuntimeError("no runtime workload")
-
-        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
 
     def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
         state = SharedState()

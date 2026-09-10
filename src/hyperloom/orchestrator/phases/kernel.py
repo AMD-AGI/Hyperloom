@@ -2539,9 +2539,9 @@ class KernelPhase(PhaseHandler):
         if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
             return True
         try:
-            from ..kernel.request_handlers import _resolve_forge_precision_and_quant
+            from ..kernel.kernel_context import resolve_precision_and_quant
 
-            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+            precision, _ = resolve_precision_and_quant(self.shared_state, {})
             if str(precision or "").strip().lower() == "fp8":
                 return True
         except Exception:  # noqa: BLE001 - best-effort runtime resolution

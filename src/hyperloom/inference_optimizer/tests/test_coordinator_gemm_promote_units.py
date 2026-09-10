@@ -1139,7 +1139,7 @@ class TestCkBlockscaleSwitchEligible:
     def test_not_eligible_non_fp8(self, tmp_path, monkeypatch):
         # Non-fp8 session precision and no runtime fp8 signal -> not eligible.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
+        monkeypatch.setattr(krh_mod, "resolve_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_gfx942_gpu(self, tmp_path, monkeypatch):
@@ -1156,13 +1156,13 @@ class TestCkBlockscaleSwitchEligible:
     def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
         # Session precision is bf16, but the forge result stamps runtime precision fp8.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
+        monkeypatch.setattr(krh_mod, "resolve_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"}) is True
 
     def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
         # Runtime --quantization fp8 is resolved from server args.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
+        monkeypatch.setattr(krh_mod, "resolve_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is True
 
     def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):
