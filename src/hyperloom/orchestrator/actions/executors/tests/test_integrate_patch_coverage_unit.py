@@ -14,11 +14,11 @@ from typing import Any
 
 import pytest
 
-from .conftest import patch_integrate_patch_roots
+from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
-from ._optimize_fixtures import variant_result
+from hyperloom.orchestrator.tests._helpers import variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
