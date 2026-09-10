@@ -20,6 +20,7 @@ from hyperloom.common.codex_session import (
     DEFAULT_CODEX_SANDBOX_MODE,
 )
 from hyperloom.common.env import is_truthy
+from hyperloom.orchestrator.kernel import kernel_context as kc_mod
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.roles.agent_role import (
@@ -1838,7 +1839,7 @@ class TestForgeGemmHelperCoverage:
         captured: dict = {}
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            krh,
+            kc_mod,
             "resolve_forge_untuned_csv",
             lambda *args, **kwargs: str(specialist_csv),
         )
@@ -3386,7 +3387,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", fake_capture)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            krh,
+            kc_mod,
             "resolve_forge_untuned_csv",
             lambda *args, **kwargs: str(stale_untuned),
         )

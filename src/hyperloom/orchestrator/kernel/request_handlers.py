@@ -41,11 +41,8 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
-from .kernel_context import build_kernel_context, resolve_precision_and_quant
+from .kernel_context import build_kernel_context
 from .kernel_evidence import (
-    resolve_forge_server_log,
-    resolve_forge_untuned_csv,
-    resolve_trace_shape_manifest,
     tokens_from_serving_log,
 )
 from .lane_budget import (
@@ -54,7 +51,14 @@ from .lane_budget import (
     allocate as _allocate_lane_budgets,
     gemm_per_tuner_timeout_sec,
 )
-from .lane_inputs import FusionAgent, FusionExecution, fusion_input
+from .lane_inputs import (
+    FusionAgent,
+    FusionExecution,
+    GemmExecution,
+    GemmShapeSources,
+    fusion_input,
+    gemm_input,
+)
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -3298,26 +3302,22 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    # Resolve precision from actual runtime, not just session-level state.
-    precision, quant_type = resolve_precision_and_quant(state, payload)
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    # Off the event loop: the evidence index walks runs/ and byte-scans serving
+    # logs that measure ~17MB apiece on the fleet. Inline, that stalled every
+    # other coroutine on this orchestrator -- heartbeats included.
+    context = await asyncio.to_thread(build_kernel_context, state, session_dir, overrides=payload)
+    workload = context.workload
+    precision, quant_type = workload.precision, workload.quant_type
+    framework = context.serving.framework or "sglang"
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    raw_model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    raw_model_path = workload.model_path
     if not raw_model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
-    from hyperloom.common.model_paths import resolve_serving_model_path
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
-
-    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
-    # serve; probing only the hub cache here would reject a repo id that the
-    # running server resolved fine.
-    resolved_model_dir = resolve_local_model_dir(resolve_serving_model_path(raw_model_path) or raw_model_path)
-    if resolved_model_dir is None:
+    resolved_model_path = workload.resolved_model_path
+    if not resolved_model_path:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
         # Reporting it as failed spends a REVERT verdict on an experiment that
@@ -3331,11 +3331,12 @@ async def _run_forge_gemm_tuning(
             ),
             "backend": "forge",
         }
-    resolved_model_path = str(resolved_model_dir)
 
-    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
-    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
-    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
+    # The tuner requires concrete values where the context leaves an unstated
+    # fact absent, so the lane's own defaults land here.
+    tp = workload.tp or 1
+    conc = workload.conc or 64
+    gpu_type = workload.gpu_type or "mi300x"
     tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs.
     from ..policy.gate import detect_gpu_count
@@ -3343,14 +3344,8 @@ async def _run_forge_gemm_tuning(
     detected_gpus = detect_gpu_count() or tp
     mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
 
-    # Resolve server log for 1-stage ASM detection.
-    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
-    if not kernel_sig_log:
-        # Off the event loop: this walks runs/ and byte-scans server logs that
-        # measure ~17MB apiece on the fleet. Inline, it stalled every other
-        # coroutine on this orchestrator -- heartbeats included -- for the
-        # duration.
-        kernel_sig_log = await asyncio.to_thread(resolve_forge_server_log, state, session_dir)
+    # Server log, for 1-stage ASM detection and the observed M sweep.
+    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip() or context.evidence.server_log.usable
 
     # Explicit operator/benchmark input wins. Automatic SGLang priority is:
     # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
@@ -3370,12 +3365,7 @@ async def _run_forge_gemm_tuning(
             precision=precision,
         )
         if not shapes_json:
-            untuned_csv = resolve_forge_untuned_csv(
-                session_dir,
-                precision,
-                quant_type,
-                resolved_model_path,
-            )
+            untuned_csv = context.evidence.untuned_csv.usable
 
     # forge's own fallback derives --tokens from ``conc``, which is a guess
     # about M. The serving log records the M values the model actually ran, so
@@ -3498,9 +3488,8 @@ async def _run_forge_gemm_tuning(
             # specialist CSV resolved before the capture pass.
             untuned_csv = ""
 
-    # forge prefers the manifest over shapes_json as a dense-shape source, and
-    # an explicit demand.json over re-deriving demand from the serving log.
-    # Both are optional: forge drops a path that is not there, with a warning.
+    # forge prefers the manifest over shapes_json as a dense-shape source. It is
+    # optional: forge drops a path that is not there, with a warning.
     shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
     if not shapes_manifest:
         # Scavenge one from the session only when nothing more specific was
@@ -3519,14 +3508,9 @@ async def _run_forge_gemm_tuning(
                 "untuned_csv" if untuned_csv else "shapes_json",
             )
         else:
-            # Off the event loop for the same reason: a ``**/`` walk of a
-            # session tree that holds thousands of run artifacts.
-            shapes_manifest = await asyncio.to_thread(resolve_trace_shape_manifest, state, session_dir)
+            shapes_manifest = context.evidence.shape_manifest.usable
     if shapes_manifest and not _path_is_existing_file(shapes_manifest):
         shapes_manifest = ""
-    demand_json = str(payload.get("demand_json") or "").strip()
-    if demand_json and not _path_is_existing_file(demand_json):
-        demand_json = ""
 
     # The lane's share, priced on the router's own per-tuner estimates. A share
     # funding none of them degrades to the module default, not to a doomed run.
@@ -3539,7 +3523,7 @@ async def _run_forge_gemm_tuning(
         gpu_type=gpu_type,
         kernel_signature_log=kernel_sig_log,
         has_untuned_csv=bool(untuned_csv),
-        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+        has_shapes_json=bool(shapes_json or shapes_manifest),
         has_tunableop_input=bool(tunableop_input),
     )
     gemm_lane = _lane_budget(
@@ -3572,39 +3556,32 @@ async def _run_forge_gemm_tuning(
             mp=mp,
         )
 
-    input_payload = {
-        "model_path": resolved_model_path,
-        "framework": forge_framework,
-        "precision": precision,
-        "quant_type": quant_type,
-        "gpu_type": gpu_type,
-        "tp": tp,
-        "conc": conc,
-        "mp": mp,
-        "output_dir": str(workspace),
-        # Passing the same value to both made the producer's own
-        # min(per_tuner, remaining) an identity, so the first tuner could
-        # consume the entire session and every later one was skipped for lack of
-        # time. The per-target cap must stay strictly below the global one.
-        "timeout": gemm_per_tuner_timeout_sec(timeout),
-        # Bounds the whole session across all tuners.
-        "global_timeout": timeout,
-        "skip_gpu_check": True,
-        "tokens": tokens,
-        "untuned_csv": untuned_csv,
-        "moe_untuned_csv": moe_untuned_csv,
-        "shapes_json": shapes_json,
-        "shapes_manifest": shapes_manifest,
-        "demand_json": demand_json,
-        "tunableop_input": tunableop_input,
-        "kernel_signature_log": kernel_sig_log,
-        "tuner": str(payload.get("tuner") or ""),
-        # How many routed tuners the lane's share pays for. Omitted when none
-        # could be derived, which leaves the producer's own routing intact.
-        **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
-        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
-        "thorough": bool(session_max_min >= 1440 and mp >= 4),
-    }
+    input_payload = gemm_input(
+        context,
+        workspace=workspace,
+        shapes=GemmShapeSources(
+            tokens=tokens,
+            untuned_csv=untuned_csv,
+            moe_untuned_csv=moe_untuned_csv,
+            shapes_json=shapes_json,
+            shapes_manifest=shapes_manifest,
+            tunableop_input=tunableop_input,
+            kernel_signature_log=kernel_sig_log,
+        ),
+        execution=GemmExecution(
+            framework=forge_framework,
+            global_timeout=timeout,
+            per_tuner_timeout=gemm_per_tuner_timeout_sec(timeout),
+            mp=mp,
+            tp=tp,
+            conc=conc,
+            gpu_type=gpu_type,
+            max_tuners=gemm_tuner_ceiling,
+            # Exhaustive search when budget allows (>= 24h) and mp >= 4.
+            thorough=bool(session_max_min >= 1440 and mp >= 4),
+            tuner=str(payload.get("tuner") or ""),
+        ),
+    )
     input_json = workspace / "forge_gemm_tuning_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [

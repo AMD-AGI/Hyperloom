@@ -60,7 +60,6 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     # forge calls the manifest its preferred dense-shape source, and Hyperloom has produced one since WP-1 -- but
     # nothing forwarded it, so the file was written and never read.
     _add_opt(cmd, args, "shapes_manifest", "--shapes-manifest")
-    _add_opt(cmd, args, "demand_json", "--demand")
     _add_opt(cmd, args, "tunableop_input", "--tunableop-input")
     _add_opt(cmd, args, "kernel_signature_log", "--kernel-signature-log")
     _add_opt(cmd, args, "gpu_ids", "--gpu-ids")

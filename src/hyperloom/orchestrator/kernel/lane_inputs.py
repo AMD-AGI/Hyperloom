@@ -24,6 +24,48 @@ from .kernel_context import KernelContext
 
 
 @dataclass(frozen=True)
+class GemmShapeSources:
+    """Shape inputs after the GEMM lane materialized whatever it needed.
+
+    Discovery puts the candidates in the context; this is what survived the
+    lane's own preference rules, a TunableOp capture, a block-FP8 profile reuse
+    or an aiter re-keying pass.
+    """
+
+    tokens: str = ""
+    untuned_csv: str = ""
+    moe_untuned_csv: str = ""
+    shapes_json: str = ""
+    shapes_manifest: str = ""
+    tunableop_input: str = ""
+    kernel_signature_log: str = ""
+
+
+@dataclass(frozen=True)
+class GemmExecution:
+    """How the GEMM lane intends to spend its share of the phase.
+
+    ``framework``, ``tp``, ``conc`` and ``gpu_type`` are carried here rather
+    than read off the context because the tuner requires concrete values and
+    this lane substitutes its own when the session did not state them -- unlike
+    fusion, which omits the flag and lets forge-fuse decide. ``framework`` is
+    the routed one, which is not always the one being served: a vLLM run whose
+    GEMMs go through aiter is handed to the aiter tuner family.
+    """
+
+    framework: str
+    global_timeout: int
+    per_tuner_timeout: int
+    mp: int
+    tp: int
+    conc: int
+    gpu_type: str
+    max_tuners: int = 0
+    thorough: bool = False
+    tuner: str = ""
+
+
+@dataclass(frozen=True)
 class FusionAgent:
     """The authoring agent forge-fuse should run."""
 
@@ -62,6 +104,48 @@ def _when_positive(key: str, value: int) -> dict[str, int]:
     different instruction from an explicit zero.
     """
     return {key: int(value)} if int(value or 0) > 0 else {}
+
+
+def gemm_input(
+    context: KernelContext,
+    *,
+    workspace: Path,
+    shapes: GemmShapeSources,
+    execution: GemmExecution,
+) -> dict[str, Any]:
+    """Build the ``forge_gemm_tuning.py`` payload for one tuning run."""
+    workload = context.workload
+    return {
+        # The resolved directory, not the logical id: forge reads config.json
+        # off it. Provenance and durable artifact names keep the logical one.
+        "model_path": workload.resolved_model_path,
+        "framework": execution.framework,
+        "precision": workload.precision,
+        "quant_type": workload.quant_type,
+        "gpu_type": execution.gpu_type,
+        "tp": execution.tp,
+        "conc": execution.conc,
+        "mp": execution.mp,
+        "output_dir": str(workspace),
+        # Strictly below ``global_timeout`` so the producer's own
+        # min(per_tuner, remaining) bounds something: at parity the first tuner
+        # could consume the session and every later one was skipped for time.
+        "timeout": execution.per_tuner_timeout,
+        "global_timeout": execution.global_timeout,
+        "skip_gpu_check": True,
+        "tokens": shapes.tokens,
+        "untuned_csv": shapes.untuned_csv,
+        "moe_untuned_csv": shapes.moe_untuned_csv,
+        "shapes_json": shapes.shapes_json,
+        "shapes_manifest": shapes.shapes_manifest,
+        "tunableop_input": shapes.tunableop_input,
+        "kernel_signature_log": shapes.kernel_signature_log,
+        "tuner": execution.tuner,
+        # How many routed tuners the lane's share pays for. Omitted when none
+        # could be derived, which leaves the producer's own routing intact.
+        **_when_positive("max_tuners", execution.max_tuners),
+        "thorough": execution.thorough,
+    }
 
 
 def fusion_input(
@@ -112,5 +196,8 @@ def fusion_input(
 __all__ = [
     "FusionAgent",
     "FusionExecution",
+    "GemmExecution",
+    "GemmShapeSources",
     "fusion_input",
+    "gemm_input",
 ]
