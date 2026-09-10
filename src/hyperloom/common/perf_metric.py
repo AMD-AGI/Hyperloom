@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool, env_str
@@ -195,6 +196,28 @@ def passes_intvty_gate(
     return _within_band(intvty_of(candidate), intvty_of(anchor), band)
 
 
+def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
+    """Why the latency budget refuses this candidate, or "" when it does not.
+
+    The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
+    it refuses a candidate whose throughput won: a lever that buys throughput by
+    making each stream slower is exactly the case a throughput-only comparison
+    selects for. Off entirely when *budget_ms* is not positive.
+
+    Fails closed on an unmeasured candidate — a constraint nobody measured is not
+    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
+    the dict it promotes.
+    """
+    if not budget_ms or budget_ms <= 0:
+        return ""
+    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
+        return "latency_unmeasured"
+    observed = float(observed_ms)
+    if not isfinite(observed) or observed <= 0:
+        return "latency_unmeasured"
+    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+
+
 def passes_tput_guard(
     candidate: Mapping[str, float],
     anchor: Mapping[str, float],
@@ -214,6 +237,7 @@ class GradedComparison:
 
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry the guard axis and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
+    ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
     """
 
     objective: str
@@ -223,6 +247,7 @@ class GradedComparison:
     tput_candidate: float = 0.0
     tput_reference: float = 0.0
     degrade_reason: str = ""
+    veto_reason: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -256,6 +281,7 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "latency_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "passes_intvty_gate",

@@ -130,6 +130,8 @@ async def run_specialist_rebench(
         # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
+        # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
+        "e2el_mean_ms": rb.e2el_mean_ms,
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,
