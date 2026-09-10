@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
-from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
 
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
@@ -399,8 +398,6 @@ class EnablementBuild(CoordinatorCollaborator):
         """Turn a succeeded targeted build into a launch probe, or a no-progress round."""
         task_id = str(getattr(task, "task_id", "") or "")
         attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
-        if not attempt_root and task_id:
-            attempt_root = str(enablement_builds_dir(self.session_dir, task_id))
         br = None
         if attempt_root:
             from .runtime.targeted_build import _load_result_json

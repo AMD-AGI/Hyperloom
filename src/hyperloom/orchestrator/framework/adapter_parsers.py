@@ -3,14 +3,11 @@
 
 """Per-framework argv-parser source strings.
 
-Each string is Python source that defines ``_build_parser()`` in the target
-framework's interpreter.  The sole caller is
-``hyperloom.orchestrator.bringup.argv_preflight.check_server_argv``, which
-previously reached these through ``get_adapter(name).argv_parser_source()``.
+Each string is Python source defining ``_build_parser()``, run in the interpreter
+that will serve so an argv is judged by the parser that would actually reject it.
 
-Keeping the strings here lets ``bringup`` import from ``framework.adapter_parsers``
-without pulling in the acquisition half of ``adapters`` (venv creation, pip
-installs) — that half lives in ``enablement/runtime/adapters.py``.
+Kept apart from the adapters so ``bringup`` can judge an argv without importing
+runtime acquisition, which would invert the layering.
 """
 
 from __future__ import annotations
