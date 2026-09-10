@@ -136,8 +136,8 @@ started, …).
 ## `metadata` — `V6Metadata`
 
 Task identity, recorded as each fact is decided rather than re-derived at
-export. Four blocks: `session`, `task_config`, `versions` and `langfuse`, plus
-the export's own `exported_at_utc` and `warnings`.
+export. Five blocks: `session`, `task_config`, `grading`, `versions` and
+`langfuse`, plus the export's own `exported_at_utc` and `warnings`.
 
 `metadata.session` — identity and lifecycle:
 
@@ -170,6 +170,24 @@ GPU type, shape, precision, launch overrides, and the optimization objective
 treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
 model's own `config.json`, and is empty on non-transformers models.
+
+`metadata.grading` — which axis this session was configured to grade on:
+`benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
+that rides along with the interactivity objective (`enabled`, `noise_pct`).
+
+An AgentX replay is ranked on the slow-tail interactivity percentile
+(`e2e_norm_intvty_p90`) with total throughput held as a guard; a synthetic run
+is ranked on output throughput alone. Every throughput field elsewhere in this
+document is the output axis by construction, so without this block a consumer
+cannot tell the two kinds of session apart — and on the canonical corpus the
+two axes differ by roughly two orders of magnitude.
+
+This is the session-level *setting*. What the run actually decided a given
+promotion on is `outcome.validation.graded_on`, read off the promotion itself:
+a session configured for interactivity still grades an individual comparison
+on output whenever either side of it cannot supply the axis pair. Neither field
+resolves the other. `tput_guard.noise_pct` is null on a session that predates
+the band being recorded.
 
 `metadata.versions` — the schema version, the Hyperloom revision, the framework
 and its version, and a `tools` map carrying `{tool, root_dir, commit, version}`
@@ -205,6 +223,14 @@ the exact baseline benchmark.
 `extra_envs` is allowlist-filtered to keep secrets out of the
 breakdown. Do not assume it contains every env var the session ran with.
 
+`baseline.perf` and `final.perf` carry the four AgentX axes the measurement
+reported — `e2e_norm_intvty_p90`, `total_throughput`, `input_throughput`,
+`tpot_p90_ms` — each an explicit `null` where nothing measured it. Absent would
+be indistinguishable from an axis the framework failed to report, and zero
+reads as "measured, and it was zero", so a synthetic run publishes four nulls.
+`final.graded_on` names the axis `final.gain_pct` is on, and always agrees with
+`outcome.validation.graded_on`: they are the same figure read twice.
+
 ---
 
 ## `outcome.final` — `Final` (SaFE contract core)
@@ -237,7 +263,11 @@ downstream consumers:
 
 `outcome` is the terminal result: `status`, `stop_reason`, `stage_reached`,
 the `baseline` and `final` blocks documented above, and the `validation`
-block that reconciles the optimization stack's parts against its total.
+block that reconciles the optimization stack's parts against its total. That
+reconciliation is single-axis and `validation.graded_on` names the axis: an
+attributed figure on one axis against an unattributed figure on another makes
+the gap meaningless. `validation.notes` reports any adoption that fell off
+that axis, because its contribution sits in the same sum as the rest.
 
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its
@@ -369,6 +399,11 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "launch_server_args": "",
       "architecture": { "model_class": "moe_mla_nsa", "model_type": "glm5", "is_moe": true }
     },
+    "grading": {
+      "benchmark_mode": "synthetic",
+      "objective": "output_throughput",
+      "tput_guard": { "enabled": false, "noise_pct": 5.0 }
+    },
     "langfuse": { "enabled": false, "disabled_reason": "no_credentials", "trace_url": null, "counts": {} },
     "warnings": []
   },
@@ -383,6 +418,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "accuracy": 0.812,
       "ttft_mean_ms": 0.0,
       "e2el_mean_ms": 0.0,
+      "perf": {
+        "e2e_norm_intvty_p90": null,
+        "total_throughput": null,
+        "input_throughput": null,
+        "tpot_p90_ms": null
+      },
       "ttft_e2el_source": "state_workspace",
       "config_path": "runs/baseline/baseline_config.with_envs.yaml",
       "benchmark_report_path": "runs/baseline/report.json",

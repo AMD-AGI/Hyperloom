@@ -25,6 +25,7 @@ __all__ = [
     "clip",
     "failure_row",
     "float_or_none",
+    "graded_axes",
     "int_or_none",
     "now_iso_micros",
     "now_iso_seconds",
@@ -98,6 +99,23 @@ def text_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def graded_axes(source: Any) -> dict[str, Any]:
+    """The four graded axes a measurement carries, as explicit nulls where it carries none.
+
+    A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
+    reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
+    and it was zero", so all four are always present.
+
+    Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
+    slow-tail interactivity percentile with total throughput held as a guard, and none of that is recoverable from
+    the output axis -- on the canonical corpus the two throughputs differ by roughly two orders of magnitude.
+    """
+    from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
+
+    axes = graded_axes_of(source)
+    return {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
