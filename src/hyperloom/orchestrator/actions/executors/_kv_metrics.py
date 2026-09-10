@@ -776,14 +776,20 @@ class KvMetricsRecorder:
         end_mono = time.monotonic()
         if sample is None:
             return None
+        # Widened to the enclosing millisecond, not rounded to the nearest one. These two bound the interval that
+        # workload records are joined against, so the stored window has to contain the real one: nearest-rounding
+        # shrinks it by up to half a millisecond at each end, and a request that began inside a sub-millisecond scrape
+        # then falls outside the window that observed it. Measured at ~13% of scrapes on a host fast enough for the
+        # rounding to bite, and invisible on a coarse clock -- which is exactly how it reached CI unnoticed.
+        elapsed = end_mono - start_mono
         self._absorb(
             sample,
             timing={
-                "scrape_start_unix": round(start_unix, 3),
-                "scrape_end_unix": round(start_unix + (end_mono - start_mono), 3),
+                "scrape_start_unix": math.floor(start_unix * 1000) / 1000,
+                "scrape_end_unix": math.ceil((start_unix + elapsed) * 1000) / 1000,
                 "scrape_start_mono": round(start_mono, 3),
                 "scrape_end_mono": round(end_mono, 3),
-                "scrape_sec": round(end_mono - start_mono, 4),
+                "scrape_sec": round(elapsed, 4),
             },
             workload=workload,
         )

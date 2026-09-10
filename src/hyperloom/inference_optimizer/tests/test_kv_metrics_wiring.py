@@ -11,6 +11,7 @@ has been reachable and untested since it was written.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -829,6 +830,70 @@ def test_rows_carry_scrape_start_and_end_not_just_a_duration():
     assert row["scrape_end_unix"] >= row["scrape_start_unix"]
 
 
+def test_the_stored_scrape_window_contains_the_real_one():
+    """Widened to the enclosing millisecond, never rounded to the nearest.
+
+    These bounds are what workload records are joined against. Nearest-rounding
+    shrinks the window by up to half a millisecond at each end, so a request that
+    began inside a sub-millisecond scrape falls outside the window that observed
+    it -- silently, and only on a host whose clock is fine enough to notice.
+    """
+    import time
+
+    before = time.time()
+    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), min_interval_sec=0)
+    rec.tick(1.0)
+    after = time.time()
+    row = rec.summary()["samples"][0]
+
+    assert row["scrape_start_unix"] <= before
+    assert row["scrape_end_unix"] >= after
+    # Still milliseconds, not full float noise.
+    assert row["scrape_start_unix"] == round(row["scrape_start_unix"], 3)
+    assert row["scrape_end_unix"] == round(row["scrape_end_unix"], 3)
+
+
+def test_a_request_starting_at_the_scrape_instant_is_still_correlated(tmp_path):
+    """The regression: a sub-millisecond scrape must not lose the work it saw."""
+    from hyperloom.orchestrator.actions.executors._agentx_timeline import (
+        correlate_rows,
+        parse_profile_export,
+    )
+
+    art = tmp_path / "aiperf_artifacts"
+    art.mkdir()
+    # A request beginning a quarter of a millisecond after the window opens: inside
+    # it, but below the resolution the window is stored at.
+    start_ns = 1_789_000_000_144_255_000
+    (art / "profile_export.jsonl").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "x_request_id": "req-1",
+                    "x_correlation_id": "traj-1",
+                    "turn_index": 0,
+                    "request_start_ns": start_ns,
+                    "request_end_ns": start_ns + 1_000_000_000,
+                },
+                "metrics": {},
+                "error": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = parse_profile_export(art / "profile_export.jsonl")
+    exact = start_ns / 1e9
+    rows = [
+        {
+            "scrape_start_unix": math.floor((exact - 0.00025) * 1000) / 1000,
+            "scrape_end_unix": math.ceil((exact - 0.00020) * 1000) / 1000,
+        }
+    ]
+
+    assert correlate_rows(rows, records) == 1
+
+
 def test_rows_carry_the_workload_in_flight_at_the_scrape():
     """The correlation the timeline supports: engine-wide KV against the active
     phase's own counters, at the granularity aiperf actually exposes."""
@@ -888,7 +953,10 @@ def test_recorder_writes_the_workload_timeline_beside_the_kv_artifact(tmp_path):
                     "conversation_id": "conv-1",
                     "turn_index": 0,
                     "request_start_ns": start_ns,
-                    "request_end_ns": start_ns + 10_000_000_000,
+                    # Generously long, so a loaded CI box cannot end the request
+                    # before the scrape below happens. What this test is about is
+                    # the wiring, not the width of the window.
+                    "request_end_ns": start_ns + 600_000_000_000,
                     "benchmark_phase": "profiling",
                 },
                 "metrics": {"time_to_first_token": {"value": 250.0, "unit": "ms"}},
