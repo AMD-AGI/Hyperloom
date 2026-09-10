@@ -3,8 +3,6 @@
 
 """Enablement discovery + authoring operations.
 
-Moved from ``hyperloom.agents.framework.enablement_ops``.
-
 Two halves of the enablement flow that both build on a
 :class:`.FailureSignature`:
 
@@ -220,10 +218,7 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     Falls back to the generic prose hints when discovery yields nothing. Also
     appends version info for the target framework package.
     """
-    try:
-        roots = resolve_kernel_search_roots()
-    except Exception:  # noqa: BLE001 — probe failure is best-effort
-        return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    roots = resolve_kernel_search_roots()
     if roots:
         hints: list[str] = list(roots)
         hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")

@@ -18,7 +18,6 @@ from ...enablement.runtime.targeted_build import (
     spawn_build,
 )
 from ...loop.build_lifecycle import _driver_command
-from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
 
 if TYPE_CHECKING:
     from ...loop.sub_agent_runner import RunnerContext
@@ -32,9 +31,7 @@ class TargetedBuildExecutor:
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
-        # attempt_root is pre-filled by enqueue_targeted_build; fall back to
-        # deriving it here for tasks enqueued by older code that lacked it.
-        attempt_root = str(action.attempt_root or enablement_builds_dir(session_dir, task.task_id))
+        attempt_root = str(action.attempt_root)
         budget_sec = float(_resolve_budget_sec(action))
         shared_state = ctx.extra.get("shared_state")
 

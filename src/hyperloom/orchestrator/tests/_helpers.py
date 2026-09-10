@@ -1,16 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared plain-function test helpers for orchestrator tests.
+"""Test helpers shared across orchestrator test packages.
 
-These are plain functions (not pytest fixtures) shared across multiple test files
-under ``src/hyperloom/orchestrator/``.  They were previously imported via
-``from .conftest import X``, which worked only because ``inference_optimizer/tests/``
-has ``__init__.py``.  Now that test files live in multiple packages, they need a
-real importable module.
-
-Files that still live in ``inference_optimizer/tests/`` import from here as:
-    from hyperloom.orchestrator.tests._helpers import init_git_repo, ...
+Plain functions rather than fixtures, so they need an importable module: pytest
+only shares ``conftest.py`` fixtures across packages, not its module-level names.
 """
 
 from __future__ import annotations

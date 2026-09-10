@@ -33,8 +33,6 @@ log = _logging.getLogger(__name__)
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 
 #: Consecutive empty discovery rounds tolerated before the source arm declines.
-#: Moved here from ``framework/client.py`` which was deleted in the
-#: enablement-refactor-2 relocation.
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
