@@ -58,6 +58,23 @@ MAX_RELATIVE_ERROR = 5e-2
 # of those.
 MAX_RELATIVE_ERROR_DEFINITION = "max|got - ref| / mean|ref|, over the whole output tensor, with ref computed in fp32"
 
+# The rationale for the dense rule above. It is a default, not the rule: a table whose adapter screens differently
+# supplies its own through ``dispatch.describe_correctness_rule``. Stating the dense rationale to an author who cannot
+# follow it is worse than saying nothing, because it sounds authoritative -- see that function's docstring for what it
+# cost the first time.
+DENSE_CORRECTNESS_NOTE = """\
+Use that definition and not an element-wise ratio. Dividing element by element
+and flooring the denominator lets any output element that happens to land near
+zero dominate the result, and a large-K random GEMM produces plenty of those:
+measured that way the unmodified `torch.matmul` scores 1.375 against its own
+fp32 reference, so such a gate rejects the default path itself.
+
+One check is not enough, and this is not a hypothetical: four split-K winners
+measured on this hardware -- two picked by a generated tuner, two by the vendor's
+own official tuner -- were wrong on 1.25-3.98% of output elements, and which
+elements were wrong changed between identical calls. A single check passes such
+a kernel roughly at random."""
+
 
 @dataclass
 class TunerMandate:
@@ -76,6 +93,12 @@ class TunerMandate:
     output_csv: str = "/tmp/generated_tuner/out.csv"
     candidates_json: str = "/tmp/generated_tuner/candidates.json"
     max_candidates_per_shape: int = 5
+    # The screen the referee will apply. Defaults are the dense adapter's; a table whose adapter differs overrides all
+    # four together, because a limit without its metric is not a rule.
+    correctness_trials: int = CORRECTNESS_TRIALS
+    max_relative_error: float = MAX_RELATIVE_ERROR
+    max_relative_error_definition: str = MAX_RELATIVE_ERROR_DEFINITION
+    correctness_note: str = DENSE_CORRECTNESS_NOTE
 
     @property
     def output_columns(self) -> list[str]:
@@ -97,9 +120,9 @@ class TunerMandate:
             "output_csv": self.output_csv,
             "candidates_json": self.candidates_json,
             "max_candidates_per_shape": self.max_candidates_per_shape,
-            "correctness_trials": CORRECTNESS_TRIALS,
-            "max_relative_error": MAX_RELATIVE_ERROR,
-            "max_relative_error_definition": MAX_RELATIVE_ERROR_DEFINITION,
+            "correctness_trials": self.correctness_trials,
+            "max_relative_error": self.max_relative_error,
+            "max_relative_error_definition": self.max_relative_error_definition,
         }
 
     def render(self) -> str:
@@ -123,9 +146,10 @@ class TunerMandate:
                 "describe each one however is clearest and expect the result to be reported\n"
                 "rather than promoted."
             ),
-            trials=CORRECTNESS_TRIALS,
-            max_rel=MAX_RELATIVE_ERROR,
-            max_rel_def=MAX_RELATIVE_ERROR_DEFINITION,
+            trials=self.correctness_trials,
+            max_rel=self.max_relative_error,
+            max_rel_def=self.max_relative_error_definition,
+            correctness_note=self.correctness_note,
             budget=self.budget_seconds,
             skeleton=self.reference_skeleton or "(none supplied)",
         )
@@ -170,17 +194,12 @@ Check every candidate against a reference implementation {trials} times, on
 fresh inputs each time, and keep the worst result. Discard anything above
 {max_rel}, where the error is `{max_rel_def}`. Report how many you discarded.
 
-Use that definition and not an element-wise ratio. Dividing element by element
-and flooring the denominator lets any output element that happens to land near
-zero dominate the result, and a large-K random GEMM produces plenty of those:
-measured that way the unmodified `torch.matmul` scores 1.375 against its own
-fp32 reference, so such a gate rejects the default path itself.
+This is the screen the harness itself applies to your candidates, quoted from the
+code that applies it. Applying it yourself is not duplicated work: every
+candidate you send up that fails it is a slot spent on something that cannot be
+promoted.
 
-One check is not enough, and this is not a hypothetical: four split-K winners
-measured on this hardware -- two picked by a generated tuner, two by the vendor's
-own official tuner -- were wrong on 1.25-3.98% of output elements, and which
-elements were wrong changed between identical calls. A single check passes such
-a kernel roughly at random.
+{correctness_note}
 
 ## Timing
 Measure with a captured graph replayed N times, not a Python loop. One dispatch
@@ -238,12 +257,20 @@ def build_mandate(
     table says it can run, rather than to nothing: the author has no other way
     to learn it, and a candidate the referee cannot re-dispatch is unpromotable
     however well it was measured.
+
+    The correctness rule arrives the same way and for the same reason. A
+    candidate the referee's screen rejects is just as unpromotable, and an author
+    given the wrong screen spends its whole budget on candidates that cannot
+    survive -- which is exactly what happened on the first real fused-MoE run.
     """
     table = str(getattr(gap, "table", "") or "")
     if candidate_protocol is None:
         from .dispatch import describe_candidate_protocol
 
         candidate_protocol = describe_candidate_protocol(table)
+    from .dispatch import describe_correctness_rule
+
+    rule = describe_correctness_rule(table) or {}
     return TunerMandate(
         table=table,
         key_schema=list(getattr(gap, "key_schema", []) or []),
@@ -255,6 +282,10 @@ def build_mandate(
         candidate_protocol=candidate_protocol,
         reference_skeleton=reference_skeleton,
         budget_seconds=budget_seconds,
+        correctness_trials=int(rule.get("trials", CORRECTNESS_TRIALS)),
+        max_relative_error=float(rule.get("limit", MAX_RELATIVE_ERROR)),
+        max_relative_error_definition=str(rule.get("definition", MAX_RELATIVE_ERROR_DEFINITION)),
+        correctness_note=str(rule.get("note", DENSE_CORRECTNESS_NOTE)),
     )
 
 

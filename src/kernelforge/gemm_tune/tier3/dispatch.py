@@ -121,6 +121,54 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
 }
 
 
+def describe_correctness_rule(table: str) -> dict[str, Any] | None:
+    """The screen the referee will apply to this table, or ``None`` for the default.
+
+    The mandate used to state one rule for every table: eight trials against an
+    fp32 reference, discard above 5e-2. That is the dense rule, and it is the
+    rule :class:`_Bf16DenseAdapter` enforces. Handed to a fused-MoE author it
+    asks for a reference that cannot be built -- aiter's generator returns
+    weights already quantized and pre-shuffled, with no unquantized copy -- so
+    the author invents a screen of its own, and the referee then rejects what it
+    passed.
+
+    That is not hypothetical. A real authoring session proposed five candidates
+    per shape, reported all fifteen as improvements, and the referee threw out
+    all fifteen at a mean error of 0.1441-0.1446 against the untuned path: fast
+    stage-1 kernels from the ``_kw2_fp4`` family that return a different answer.
+    An author told the real limit can discard those itself and spend the budget
+    on candidates that can actually be promoted.
+
+    So the rule lives next to the code that enforces it, and the mandate quotes
+    it rather than restating it.
+    """
+    if table != MOE_TABLE:
+        return None
+    return {
+        "trials": MOE_CORRECTNESS_TRIALS,
+        "limit": MAX_MOE_MEAN_ERROR,
+        "definition": (
+            "mean|got - ref| / mean|ref| over the whole output tensor, where ref is this same "
+            "call with an empty tuned-config CSV -- the path production serves today"
+        ),
+        "note": (
+            "There is no fp32 reference to build here, so do not look for one: aiter hands over\n"
+            "weights that are already quantized and pre-shuffled, and no unquantized copy exists.\n"
+            "The reference is the unmodified path -- run the same key with an empty tuned-config\n"
+            "CSV, keep the output, then point `AITER_CONFIG_FMOE` at your candidate and compare.\n"
+            "That is the right question for a promotion anyway: would swapping this in change\n"
+            "what we serve?\n"
+            "\n"
+            "The limit is tight on purpose and it is the one the harness applies, verbatim. A\n"
+            "candidate above it is discarded whatever it timed. Measured on this hardware, the\n"
+            "stage-1 kernels whose names carry `_kw2_fp4` were among the fastest in the registry\n"
+            "and scored 0.1441-0.1446 by this metric -- fast and wrong, which is what the screen\n"
+            "exists to catch. Vary the activations between trials; a kernel that is wrong\n"
+            "intermittently passes a single check roughly at random."
+        ),
+    }
+
+
 def describe_candidate_protocol(table: str) -> str:
     """How to write a candidate this module can actually dispatch, or "".
 

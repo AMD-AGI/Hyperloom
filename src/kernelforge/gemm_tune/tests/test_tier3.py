@@ -20,6 +20,7 @@ from kernelforge.gemm_tune.tier3 import (
     validate_output_csv,
 )
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.gemm_tune.tier3.dispatch import MAX_MOE_MEAN_ERROR, MOE_CORRECTNESS_TRIALS, MOE_TABLE
 from kernelforge.gemm_tune.tuners.base import TuneResult
 
 
@@ -196,6 +197,43 @@ class TestMandate:
 
     def test_the_definition_reaches_the_machine_readable_form(self):
         assert "mean|ref|" in self._mandate().to_dict()["max_relative_error_definition"]
+
+    def _moe_mandate(self):
+        gap = CoverageGap(
+            table=MOE_TABLE,
+            tuner="fmoe_ck",
+            env_var="AITER_CONFIG_FMOE",
+            key_schema=["token", "model_dim"],
+            miss_count=36,
+            reason="fmoe_ck produced empty output",
+        )
+        return build_mandate(gap, [{"token": 512, "model_dim": 6144}])
+
+    def test_the_fused_moe_brief_quotes_the_screen_its_referee_applies(self):
+        # The first real authoring session was handed the dense rule: fp32 reference, limit 0.05. Its author cannot
+        # build an fp32 reference at all -- aiter's weights arrive quantized and pre-shuffled -- so it invented a
+        # screen of its own, passed fifteen candidates, and the referee rejected all fifteen at ~0.144.
+        m = self._moe_mandate()
+        assert m.correctness_trials == MOE_CORRECTNESS_TRIALS
+        assert m.max_relative_error == MAX_MOE_MEAN_ERROR
+        text = m.render()
+        assert "0.01" in text
+        assert "4 times" in text
+        assert "There is no fp32 reference to build here" in text
+        assert "empty tuned-config CSV" in text
+        assert "1.375" not in text, "the dense rationale does not apply here and reads as authoritative"
+
+    def test_the_dense_rule_is_still_the_default(self):
+        # Only a table whose adapter screens differently overrides it; everything else keeps what was learned on dense.
+        m = self._mandate()
+        assert (m.correctness_trials, m.max_relative_error) == (8, 5e-2)
+        assert "1.375" in m.render()
+
+    def test_the_moe_rule_reaches_the_machine_readable_form(self):
+        d = self._moe_mandate().to_dict()
+        assert d["correctness_trials"] == MOE_CORRECTNESS_TRIALS
+        assert d["max_relative_error"] == MAX_MOE_MEAN_ERROR
+        assert json.loads(json.dumps(d))["max_relative_error_definition"].startswith("mean|got - ref|")
 
 
 class TestContract:
