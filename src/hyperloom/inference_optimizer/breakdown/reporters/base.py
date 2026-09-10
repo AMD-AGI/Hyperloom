@@ -19,11 +19,13 @@ __all__ = [
     "REGISTRY",
     "as_dict",
     "close_of",
+    "critic_iterations_of",
     "dict_rows",
     "events_of",
     "outcome_of",
     "register_renderer",
     "render_section",
+    "robustness_turns_of",
     "session_of",
     "stop_reason_of",
     "task_config_of",
@@ -135,6 +137,30 @@ def close_of(breakdown: Any) -> dict[str, Any]:
         ``close``, or ``{}`` when absent.
     """
     return as_dict(as_dict(breakdown).get("close"))
+
+
+def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The critic agent's own review passes, in the order it ran them.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``critic.iterations``, or ``[]`` when the critic never ran.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("critic")).get("iterations"))
+
+
+def robustness_turns_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The robustness agent's turns, in turn order.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``robustness.turns``, or ``[]`` when the agent never took a turn.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("robustness")).get("turns"))
 
 
 def stop_reason_of(breakdown: Any) -> str:

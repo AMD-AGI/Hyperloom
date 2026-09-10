@@ -37,6 +37,11 @@ from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import finish_event, open_event
 
+# Every section an enablement event assembles from. Named from the leaf module
+# the assembler shares, so this writer reads its parts without an import cycle.
+from .sections import ENABLEMENT_EVENT_SECTIONS
+from .recorder_warnings import note_failure
+
 log = logging.getLogger(__name__)
 
 EVENT_TYPE = "enablement"
@@ -116,8 +121,8 @@ def _sink() -> EventSink | None:
         if bound_session_or_none() is None:
             return None
         return make_sink(enablement_event_id(), producer=PRODUCER)
-    except Exception:  # noqa: BLE001 — the lane outranks its own record
-        log.debug("enablement event: cannot resolve a sink", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — the lane outranks its own record
+        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot resolve a sink")
         return None
 
 
@@ -201,8 +206,8 @@ def record_trigger(
                 "trigger": trigger,
             },
         )
-    except Exception:  # noqa: BLE001 — the lane outranks its own record
-        log.debug("enablement event: trigger record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — the lane outranks its own record
+        note_failure(section="enablement_event", error=exc, detail="enablement event: trigger record failed")
 
 
 def record_dispatch(
@@ -240,8 +245,8 @@ def record_dispatch(
             row_type="attempt",
             natural_ids=_row_id(task_id, attempt),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: dispatch record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: dispatch record failed")
 
 
 def record_round(
@@ -295,8 +300,8 @@ def record_round(
             "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
         }
         sink.record(SECTION_ATTEMPT, row, row_type="attempt", natural_ids=_row_id(task_id, attempt))
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: round record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: round record failed")
 
 
 def record_human_review(*, digest: str, failure_kind: str, reason: str = "", signature: Any = None) -> None:
@@ -321,8 +326,8 @@ def record_human_review(*, digest: str, failure_kind: str, reason: str = "", sig
             row_type="human_review",
             natural_ids=str(digest),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: human-review record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: human-review record failed")
 
 
 def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelty_key: str = "") -> None:
@@ -362,8 +367,8 @@ def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelt
             row["failure_class"] = str(manifest.get("failure_class") or "ok")
             row["failure_summary"] = _clip(manifest.get("failure_summary"), 1000)
         sink.record(SECTION_BUILD, row, row_type="build", natural_ids=str(task_id))
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: build record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: build record failed")
 
 
 def record_revalidation(
@@ -392,8 +397,8 @@ def record_revalidation(
             row_type="revalidation",
             natural_ids=str(int(generation or 0)),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: revalidation record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: revalidation record failed")
 
 
 def record_revalidation_outcome(
@@ -435,8 +440,10 @@ def record_revalidation_outcome(
             row_type="revalidation",
             natural_ids=str(int(generation or 0)),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: revalidation outcome record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(
+            section="enablement_event", error=exc, detail="enablement event: revalidation outcome record failed"
+        )
 
 
 def finish(
@@ -492,7 +499,10 @@ def finish(
 
         from .assembler import event_parts
 
-        ext, derived = assemble_enablement_ext(event_parts(ENABLEMENT_EVENT_SECTIONS), event=enablement_event_id())
+        ext, derived = assemble_enablement_ext(
+            event_parts(ENABLEMENT_EVENT_SECTIONS, event=enablement_event_id()),
+            event=enablement_event_id(),
+        )
         finish_event(
             event_type=EVENT_TYPE,
             event=enablement_event_id(),
@@ -503,21 +513,12 @@ def finish(
             start_time=_start_time(),
             end_time=end_time,
         )
-    except Exception:  # noqa: BLE001
-        log.debug("enablement event: finish failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: finish failed")
 
 
 #: Every section the enablement event assembles from. Duplicated from the
 #: assembler so :func:`finish` can read its own parts without an import cycle.
-ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
-    SECTION_EVENT,
-    SECTION_ATTEMPT,
-    SECTION_BUILD,
-    SECTION_REVALIDATION,
-    SECTION_HUMAN_REVIEW,
-)
-
-
 def assemble_enablement_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -609,8 +610,8 @@ def _recorded_trigger() -> bool:
 
         rows = rows_for_event(event_parts((SECTION_EVENT,)).get(SECTION_EVENT) or [], enablement_event_id())
         return any(_as_dict(row.get("trigger")) for row in rows)
-    except Exception:  # noqa: BLE001 — a spool we cannot read is not a trigger we have
-        log.debug("enablement event: cannot read back the trigger", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a spool we cannot read is not a trigger we have
+        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot read back the trigger")
         return False
 
 
@@ -625,8 +626,8 @@ def _start_time() -> str:
             recorded = str(row.get("start_time") or "")
             if recorded:
                 return recorded
-    except Exception:  # noqa: BLE001 — a missing start time is not worth failing the close
-        log.debug("enablement event: cannot read back the start time", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a missing start time is not worth failing the close
+        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot read back the start time")
     return ""
 
 

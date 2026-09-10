@@ -9,7 +9,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import threading
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -17,6 +16,7 @@ from typing import Any, Literal, Mapping
 from hyperloom.common.io import atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
+from .sections import slug
 from .trace import trace_enabled, trace_write
 
 SectionShape = Literal["item", "singleton"]
@@ -129,7 +129,6 @@ def section_shape(section: str) -> SectionShape | None:
 
 log = logging.getLogger(__name__)
 
-_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 _ENTITY_ID_FIELDS = (
     "attempt_id",
     "substep_id",
@@ -144,10 +143,9 @@ _ENTITY_ID_FIELDS = (
 )
 
 
-def _slug(value: str) -> str:
-    """Filesystem-safe token; empty input collapses to ``unknown``."""
-    s = _SANITIZE.sub("-", str(value or "").strip())
-    return s.strip("-.") or "unknown"
+#: Shared with the read side so a fragment's name and the glob that finds it
+#: can never disagree.
+_slug = slug
 
 
 def _merge_mappings(

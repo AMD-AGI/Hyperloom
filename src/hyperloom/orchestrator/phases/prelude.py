@@ -1085,14 +1085,13 @@ class PreludePhase(PhaseHandler):
         """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior."""
         state = self.shared_state
         if not getattr(self, "_warm_replay_enabled", True):
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "disabled_by_flag",
-            }
-            self._record_warm_replay_skip(code=SKIP_DISABLED_BY_FLAG, outcome=state.warm_replay_outcome)
-            # Flip the one-shot guard even on disabled-skip so a resume without --no-warm-replay can't
-            # retroactively trigger a replay against the operator's original intent.
-            state.warm_replay_attempted = True
+            # The guard is flipped even on a disabled-skip so a resume without
+            # --no-warm-replay cannot retroactively trigger a replay against
+            # the operator's original intent.
+            self._skip_warm_replay(
+                code=SKIP_DISABLED_BY_FLAG,
+                outcome={"status": "skipped", "reason": "disabled_by_flag"},
+            )
             return None
         if state.warm_replay_attempted:
             # Resume safety: a previous boot already enqueued/ran the replay.
@@ -1105,64 +1104,55 @@ class PreludePhase(PhaseHandler):
         if current_remote:
             recipe_metadata = warm.get("recipe") or {}
             if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": str(recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"),
-                    "view_source": str(recipe_metadata.get("view_source") or ""),
-                }
-                self._record_warm_replay_skip(
+                self._skip_warm_replay(
                     code=SKIP_RECIPE_NOT_REPLAYABLE,
-                    outcome=state.warm_replay_outcome,
+                    outcome={
+                        "status": "skipped",
+                        "reason": str(
+                            recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"
+                        ),
+                        "view_source": str(recipe_metadata.get("view_source") or ""),
+                    },
                     details={"view_source": str(recipe_metadata.get("view_source") or "")},
                 )
-                state.save(self.session_dir)
                 return None
             try:
                 sdk_replay = self._read_current_recipe_replay()
             except Exception as exc:  # noqa: BLE001 — current replay fails closed
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
-                }
-                self._record_warm_replay_skip(
+                self._skip_warm_replay(
                     code=SKIP_RECIPE_READ_FAILED,
-                    outcome=state.warm_replay_outcome,
+                    outcome={
+                        "status": "skipped",
+                        "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
+                    },
                     details={"error_class": type(exc).__name__},
                 )
-                state.save(self.session_dir)
                 return None
             if patch_entries := list(sdk_replay.get("patches") or []):
                 # Every overlay names the checkout it was measured on.
                 recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
                 if not all(recorded):
-                    state.warm_replay_attempted = True
-                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason="framework_apply_root_missing",
-                        root_kind="framework",
-                        roots=[root for root in recorded if root],
-                    )
-                    self._record_warm_replay_skip(
+                    known = [root for root in recorded if root]
+                    self._skip_warm_replay(
                         code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=state.warm_replay_outcome,
-                        details={"root_kind": "framework", "recorded_roots": [root for root in recorded if root]},
+                        outcome=self._warm_replay_root_skip_outcome(
+                            reason="framework_apply_root_missing",
+                            root_kind="framework",
+                            roots=known,
+                        ),
+                        details={"root_kind": "framework", "recorded_roots": known},
                     )
-                    state.save(self.session_dir)
                     return None
                 if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
-                    state.warm_replay_attempted = True
-                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason="framework_apply_root_absent",
-                        root_kind="framework",
-                        roots=absent,
-                    )
-                    self._record_warm_replay_skip(
+                    self._skip_warm_replay(
                         code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=state.warm_replay_outcome,
+                        outcome=self._warm_replay_root_skip_outcome(
+                            reason="framework_apply_root_absent",
+                            root_kind="framework",
+                            roots=absent,
+                        ),
                         details={"root_kind": "framework", "recorded_roots": list(absent)},
                     )
-                    state.save(self.session_dir)
                     return None
         try:
             kernel = (
@@ -1200,24 +1190,19 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
-                "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
-                "rollback": rollback,
-            }
-            self._record_warm_replay_skip(
+            self._skip_warm_replay(
                 code=SKIP_KERNEL_PREPARATION_FAILED,
-                outcome=state.warm_replay_outcome,
+                outcome={
+                    "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
+                    "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
+                    "rollback": rollback,
+                },
                 details={"kernel_status": str(kernel.get("status") or "")},
             )
-            state.save(self.session_dir)
             return None
         kernel_root_block = self._warm_replay_kernel_root_block_reason(state)
         if kernel_root_block is not None:
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = kernel_root_block
-            self._record_warm_replay_skip(
+            self._skip_warm_replay(
                 code=SKIP_KERNEL_ROOT_MISSING,
                 outcome=kernel_root_block,
                 details={
@@ -1225,7 +1210,6 @@ class PreludePhase(PhaseHandler):
                     "recorded_roots": list(kernel_root_block.get("kernel_patch_recorded_roots") or []),
                 },
             )
-            state.save(self.session_dir)
             return None
         kernel_pending = list(kernel.get("pending") or []) if kernel.get("status") == "prepared" else []
         kernel_applied = list(kernel.get("applied") or []) if kernel_pending else []
@@ -1241,12 +1225,10 @@ class PreludePhase(PhaseHandler):
         if not warm and not kernel_pending:
             if str(kernel.get("status") or "") in {"empty", "loaded"}:
                 state.warm_replay_pending = {}
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "no_warm_start_recipe",
-            }
-            self._record_warm_replay_skip(code=SKIP_NO_WARM_START_RECIPE, outcome=state.warm_replay_outcome)
-            state.warm_replay_attempted = True
+            self._skip_warm_replay(
+                code=SKIP_NO_WARM_START_RECIPE,
+                outcome={"status": "skipped", "reason": "no_warm_start_recipe"},
+            )
             return None
         # tier/conf stamped at T0.
         tier = str(warm.get("tier") or "").strip()
@@ -1319,21 +1301,19 @@ class PreludePhase(PhaseHandler):
                 config_tier = "suppressed_low_confidence"
                 donor_expected_gain = 0.0
             else:
-                state.warm_replay_outcome = {
-                    "status": "skipped",
-                    "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
-                    "warm_recipe_tier": tier,
-                    "warm_recipe_conf": conf,
-                    "config_donor_tier": config_tier,
-                    "config_source": config_source,
-                    **donor_metadata,
-                }
-                self._record_warm_replay_skip(
+                self._skip_warm_replay(
                     code=SKIP_CONFIDENCE_BELOW_THRESHOLD,
-                    outcome=state.warm_replay_outcome,
+                    outcome={
+                        "status": "skipped",
+                        "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
+                        "warm_recipe_tier": tier,
+                        "warm_recipe_conf": conf,
+                        "config_donor_tier": config_tier,
+                        "config_source": config_source,
+                        **donor_metadata,
+                    },
                     details={"observed": replay_conf, "threshold": min_conf},
                 )
-                state.warm_replay_attempted = True
                 return None
         # Current records derive fail-closed mode from their exact SDK timeline.
         wsc_patches = (
@@ -1375,33 +1355,29 @@ class PreludePhase(PhaseHandler):
                     }
                     if hasattr(state, "set_stop_reason"):
                         state.set_stop_reason("warm_replay_rollback_failed")
-                state.warm_replay_attempted = True
-                state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                    reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
-                    root_kind="framework",
-                    roots=unusable or [root for root in recorded_roots if root],
-                    rollback=rollback,
-                )
-                self._record_warm_replay_skip(
+                blocking_roots = unusable or [root for root in recorded_roots if root]
+                self._skip_warm_replay(
                     code=SKIP_FRAMEWORK_ROOT_MISSING,
-                    outcome=state.warm_replay_outcome,
-                    details={
-                        "root_kind": "framework",
-                        "recorded_roots": list(unusable or [root for root in recorded_roots if root]),
-                    },
+                    outcome=self._warm_replay_root_skip_outcome(
+                        reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
+                        root_kind="framework",
+                        roots=blocking_roots,
+                        rollback=rollback,
+                    ),
+                    details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
                 )
-                state.save(self.session_dir)
                 return None
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "best_config_empty",
-                "warm_recipe_tier": tier,
-                "warm_recipe_conf": conf,
-                **donor_metadata,
-            }
-            self._record_warm_replay_skip(code=SKIP_BEST_CONFIG_EMPTY, outcome=state.warm_replay_outcome)
-            state.warm_replay_attempted = True
+            self._skip_warm_replay(
+                code=SKIP_BEST_CONFIG_EMPTY,
+                outcome={
+                    "status": "skipped",
+                    "reason": "best_config_empty",
+                    "warm_recipe_tier": tier,
+                    "warm_recipe_conf": conf,
+                    **donor_metadata,
+                },
+            )
             return None
         # Historical gain anchor: donor's expected gain, else MAX gain across attrs.sessions[], else the flat
         # gain_pct.
@@ -1479,26 +1455,24 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
-                "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
-                "target_workload_shape": {
-                    "conc": int(getattr(state, "conc", 0) or 0),
-                    "isl": int(getattr(state, "isl", 0) or 0),
-                    "osl": int(getattr(state, "osl", 0) or 0),
-                },
-                "rollback": rollback,
+            target_workload_shape = {
+                "conc": int(getattr(state, "conc", 0) or 0),
+                "isl": int(getattr(state, "isl", 0) or 0),
+                "osl": int(getattr(state, "osl", 0) or 0),
             }
-            self._record_warm_replay_skip(
+            self._skip_warm_replay(
                 code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
-                outcome=state.warm_replay_outcome,
+                outcome={
+                    "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
+                    "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
+                    "target_workload_shape": target_workload_shape,
+                    "rollback": rollback,
+                },
                 details={
                     "error_class": type(exc).__name__,
-                    "target_workload_shape": dict(state.warm_replay_outcome["target_workload_shape"]),
+                    "target_workload_shape": dict(target_workload_shape),
                 },
             )
-            state.save(self.session_dir)
             return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
@@ -1553,18 +1527,15 @@ class PreludePhase(PhaseHandler):
                 }
                 if hasattr(state, "set_stop_reason"):
                     state.set_stop_reason("warm_replay_rollback_failed")
-            state.warm_replay_attempted = True
-            state.warm_replay_outcome = {
-                "status": ("enqueue_failed" if rollback.get("ok") else "rollback_failed"),
-                "reason": f"warm replay enqueue failed: {type(exc).__name__}",
-                "rollback": rollback,
-            }
-            self._record_warm_replay_skip(
+            self._skip_warm_replay(
                 code=SKIP_ENQUEUE_FAILED,
-                outcome=state.warm_replay_outcome,
+                outcome={
+                    "status": ("enqueue_failed" if rollback.get("ok") else "rollback_failed"),
+                    "reason": f"warm replay enqueue failed: {type(exc).__name__}",
+                    "rollback": rollback,
+                },
                 details={"error_class": type(exc).__name__},
             )
-            state.save(self.session_dir)
             raise
         if not was_existing:
             log.info(
@@ -2007,6 +1978,30 @@ class PreludePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — observability cannot change replay behavior
             log.debug("warm replay timeline: rebinding to the event failed", exc_info=True)
             return None
+
+    def _skip_warm_replay(
+        self,
+        *,
+        code: str,
+        outcome: Mapping[str, Any],
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Settle the one-shot guard for a replay that will not run.
+
+        Every refusal owes the same four things: flip the guard, state the
+        outcome, close the timeline event, and persist. The persist is the one
+        that used to be left out of some branches, and it is what makes the
+        guard mean anything -- a refusal that never reached disk would let the
+        next boot replay against the decision just taken.
+
+        Call this after any rollback or stop-reason the branch also sets, so
+        that one save carries the whole refusal.
+        """
+        state = self.shared_state
+        state.warm_replay_attempted = True
+        state.warm_replay_outcome = dict(outcome)
+        self._record_warm_replay_skip(code=code, outcome=state.warm_replay_outcome, details=details)
+        state.save(self.session_dir)
 
     def _record_warm_replay_skip(
         self,

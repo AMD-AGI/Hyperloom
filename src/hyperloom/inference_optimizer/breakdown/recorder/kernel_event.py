@@ -487,7 +487,7 @@ def _republish_closed_event(event: str) -> None:
     """
     from ...session.sbd_v6 import timeline_sequence
 
-    parts = event_parts(EVENT_SECTIONS)
+    parts = event_parts(EVENT_SECTIONS, event=event)
     rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = rows[0] if rows else {}
     end_time = _text(header.get("end_time"))
@@ -1521,7 +1521,7 @@ class KernelEventRecorder:
         )
         # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
         # fill the re-profile block.
-        ext, derived = assemble_kernel_ext(event_parts(EVENT_SECTIONS), event=self._event_id)
+        ext, derived = assemble_kernel_ext(event_parts(EVENT_SECTIONS, event=self._event_id), event=self._event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self._event_id,

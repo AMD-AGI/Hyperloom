@@ -92,9 +92,8 @@ def test_json_default_typeerror():
 def test_build_empty_session(tmp_path):
     out = ex.build(tmp_path)
     assert out["exporter_version"] == ex.EXPORTER_VERSION
-    assert "warnings" in out
     assert "session" in out["metadata"]
-    assert any("missing" in w for w in out["warnings"])
+    assert any("missing" in w for w in out["metadata"]["warnings"])
 
 
 # ---- write_breakdown_json ----
@@ -330,6 +329,30 @@ def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
     assert task_config["framework_version"] == "0.4.1"
     assert task_config["conc"] == 64
     assert task_config["tp"] is None
+
+
+def _snapshot_session_row(tmp_path, **state_attrs) -> dict:
+    """Snapshot a live state and read back the ``session`` fragment it wrote."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+
+    instrument.snapshot_state_sections(tmp_path, SimpleNamespace(session_id="s", **state_attrs))
+    return assemble_parts(tmp_path, warnings=[])["session"]
+
+
+def test_a_budget_nobody_set_is_left_off_the_snapshot(tmp_path):
+    """Writing it as 0 is what forced the export to guess, and guess wrong."""
+    row = _snapshot_session_row(tmp_path)
+    assert "max_minutes" not in row
+    assert "tick_count" not in row
+
+
+def test_a_session_that_really_ran_zero_ticks_records_the_zero(tmp_path):
+    row = _snapshot_session_row(tmp_path, max_minutes=0, tick=0)
+    assert row["max_minutes"] == 0
+    assert row["tick_count"] == 0
 
 
 # ---- session elapsed time ----
@@ -612,13 +635,23 @@ def test_a_section_with_no_fragment_is_returned_untouched():
 
 
 def test_an_unrecorded_budget_does_not_erase_the_collected_one():
-    """The snapshot writes every key on every save, so an unset int arrives as 0."""
+    """An unset int is left off the snapshot, so the collected one stands."""
     merged = ex._merge_session(
-        {"max_minutes": 0, "tick_count": 0},
+        {"session_id": "sess-1178"},
         {"max_minutes": 360, "tick_count": 12},
     )
     assert merged["max_minutes"] == 360
     assert merged["tick_count"] == 12
+
+
+def test_a_recorded_zero_is_a_fact_and_wins():
+    """A session really can run zero ticks, and only the recorder saw it."""
+    merged = ex._merge_session(
+        {"max_minutes": 0, "tick_count": 0},
+        {"max_minutes": 360, "tick_count": 12},
+    )
+    assert merged["max_minutes"] == 0
+    assert merged["tick_count"] == 0
 
 
 def test_the_live_phase_stays_in_the_section_even_when_blank():

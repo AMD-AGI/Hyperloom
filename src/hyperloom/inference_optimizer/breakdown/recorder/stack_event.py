@@ -35,6 +35,11 @@ from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import finish_event, open_event
 
+# Every section a stack event assembles from. Named from the leaf module the
+# assembler shares, so this writer reads its parts without an import cycle.
+from .sections import STACK_EVENT_SECTIONS
+from .recorder_warnings import note_failure
+
 log = logging.getLogger(__name__)
 
 EVENT_TYPE = "stack"
@@ -134,8 +139,8 @@ def _sink() -> EventSink | None:
         if bound_session_or_none() is None:
             return None
         return make_sink(stack_event_id(), producer=PRODUCER)
-    except Exception:  # noqa: BLE001 — the stack outranks its own record
-        log.debug("stack event: cannot resolve a sink", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — the stack outranks its own record
+        note_failure(section="stack_event", error=exc, detail="stack event: cannot resolve a sink")
         return None
 
 
@@ -231,8 +236,8 @@ def record_adoption(
             "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
         }
         sink.record(SECTION_ADOPTION, row, row_type="adoption", natural_ids=str(int(stack_index)))
-    except Exception:  # noqa: BLE001 — an adoption outranks its own record
-        log.debug("stack event: adoption record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — an adoption outranks its own record
+        note_failure(section="stack_event", error=exc, detail="stack event: adoption record failed")
 
 
 def record_validation(
@@ -288,8 +293,8 @@ def record_validation(
             row_type="validation",
             natural_ids=str(int(stack_len or 0)),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("stack event: validation record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="stack_event", error=exc, detail="stack event: validation record failed")
 
 
 def finish(*, end_time: str = "") -> None:
@@ -309,7 +314,9 @@ def finish(*, end_time: str = "") -> None:
 
         from .assembler import event_parts
 
-        ext, status = assemble_stack_ext(event_parts(STACK_EVENT_SECTIONS), event=stack_event_id())
+        ext, status = assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS, event=stack_event_id()), event=stack_event_id()
+        )
         finish_event(
             event_type=EVENT_TYPE,
             event=stack_event_id(),
@@ -319,8 +326,8 @@ def finish(*, end_time: str = "") -> None:
             kind=EVENT_KIND,
             end_time=closed,
         )
-    except Exception:  # noqa: BLE001
-        log.debug("stack event: finish failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="stack_event", error=exc, detail="stack event: finish failed")
 
 
 def _pct(value: Any, against: Any, denominator: Any) -> float | None:
@@ -338,13 +345,6 @@ def _pct(value: Any, against: Any, denominator: Any) -> float | None:
 
 #: Every section the stack event assembles from. Duplicated from the assembler
 #: so :func:`finish` can read its own parts without an import cycle.
-STACK_EVENT_SECTIONS: tuple[str, ...] = (
-    SECTION_EVENT,
-    SECTION_ADOPTION,
-    SECTION_VALIDATION,
-)
-
-
 def assemble_stack_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,

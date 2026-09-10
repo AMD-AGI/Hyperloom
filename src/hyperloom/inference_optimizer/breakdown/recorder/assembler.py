@@ -18,6 +18,25 @@ from typing import Any
 
 from hyperloom.common.jsonio import read_json
 
+# Re-exported: callers have always named the section tuples through the
+# assembler, and they now live in a leaf module the event writers can share.
+from .sections import (  # noqa: F401
+    BASELINE_EVENT_SECTIONS,
+    CONC_SWEEP_EVENT_SECTIONS,
+    ENABLEMENT_EVENT_SECTIONS,
+    EVENT_SECTIONS,
+    FRAMEWORK_EVENT_SECTIONS,
+    KERNEL_EVENT_SECTIONS,
+    PHASE_EVENT_SECTIONS,
+    ROOFLINE_EVENT_SECTIONS,
+    STACK_EVENT_SECTIONS,
+    WARM_REPLAY_EVENT_SECTIONS,
+    WARM_START_EVENT_SECTIONS,
+    may_hold_event,
+    section_glob,
+    slug,
+)
+
 _UNREADABLE = object()
 
 
@@ -49,13 +68,40 @@ def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
     return rec
 
 
+def _fragment_paths(d: Path, only: tuple[str, ...] | None, event: str) -> list[Path]:
+    """The spool fragments to read, narrowed to what the caller asked for.
+
+    Narrowing happens on the file names rather than after the parse. The spool
+    is one file per row and a long run leaves tens of thousands of them, so a
+    reader after one event would otherwise pay to parse the whole session in
+    order to throw nearly all of it away.
+    """
+    if only is None:
+        return sorted(d.glob("*.json"))
+    paths: set[Path] = set()
+    for section in only:
+        paths.update(d.glob(section_glob(section)))
+    if event:
+        event_slug = slug(event)
+        paths = {path for path in paths if may_hold_event(path.name, event_slug)}
+    return sorted(paths)
+
+
 def assemble_parts(
     session_dir: Path | str,
     *,
     warnings: list[str] | None = None,
     keep_event_rows: bool = False,
+    only_sections: tuple[str, ...] | None = None,
+    only_event: str = "",
 ) -> dict[str, Any]:
-    """Return ``{section: list | dict}`` assembled from the spool directory."""
+    """Return ``{section: list | dict}`` assembled from the spool directory.
+
+    ``only_sections`` restricts the read to those sections, and ``only_event``
+    further restricts it to the fragments that could belong to that event. The
+    result is then a partial view of the session, so both are for callers
+    after one event's rows, not for building the breakdown envelope.
+    """
     warns = warnings if warnings is not None else []
     d = parts_dir(session_dir)
     if not d.is_dir():
@@ -65,7 +111,7 @@ def assemble_parts(
     singletons: dict[str, dict[str, Any]] = {}
     discarded: dict[str, list[str]] = {}
 
-    for path in sorted(d.glob("*.json")):
+    for path in _fragment_paths(d, only_sections, only_event):
         rec = _load(path, warns)
         if rec is None:
             continue
@@ -243,110 +289,32 @@ def _compose_robustness(out: dict[str, Any]) -> None:
     out["robustness"] = {"turns": turns}
 
 
-KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
-    "kernel_event",
-    "kernel_lane_run",
-    "kernel_rebench_attempt",
-    "kernel_trace_analyze",
-    "kernel_geak_attempt",
-    "kernel_geak_discovery",
-    "kernel_geak_acceptance",
-    "kernel_discovered",
-    "kernel_integrate",
-)
-
-#: The roofline substreams. Rows belong to whichever event tagged them: the
-#: roofline's own when dispatched, the enclosing phase's when called inline.
-ROOFLINE_EVENT_SECTIONS: tuple[str, ...] = (
-    "roofline_event",
-    "roofline_action",
-    "roofline_profile_run",
-    "roofline_analysis_run",
-    "roofline_kernel",
-)
-
-BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
-    "baseline_event",
-    "baseline_action",
-    "baseline_run",
-    "baseline_round",
-)
-
-CONC_SWEEP_EVENT_SECTIONS: tuple[str, ...] = (
-    "conc_sweep_event",
-    "conc_sweep_action",
-    "conc_sweep_arm",
-    "conc_sweep_variant",
-    "conc_sweep_pair",
-)
-
-ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
-    "enablement_event",
-    "enablement_attempt",
-    "enablement_build",
-    "enablement_revalidation",
-    "enablement_human_review",
-)
-
-PHASE_EVENT_SECTIONS: tuple[str, ...] = (
-    "phase_event",
-    "phase_segment",
-    "phase_action",
-    "phase_marker",
-    "phase_proposal",
-)
-
-STACK_EVENT_SECTIONS: tuple[str, ...] = (
-    "stack_event",
-    "stack_adoption",
-    "stack_validation",
-)
-
-WARM_REPLAY_EVENT_SECTIONS: tuple[str, ...] = (
-    "warm_replay_event",
-    "warm_replay_gate",
-)
-
-WARM_START_EVENT_SECTIONS: tuple[str, ...] = (
-    "warm_start_event",
-    "warm_start_read",
-)
-
-FRAMEWORK_EVENT_SECTIONS: tuple[str, ...] = (
-    "framework_event",
-    "framework_plateau",
-    "framework_run",
-    "framework_proposal",
-    "framework_proposal_step",
-    "framework_attempt",
-    "framework_attempt_gate",
-)
-
-#: Every section holding v6 event rows. Consumed by the timeline rather than
-#: the breakdown envelope, so assembly pops them out of the wire shape.
-EVENT_SECTIONS: tuple[str, ...] = (
-    KERNEL_EVENT_SECTIONS
-    + ROOFLINE_EVENT_SECTIONS
-    + BASELINE_EVENT_SECTIONS
-    + CONC_SWEEP_EVENT_SECTIONS
-    + ENABLEMENT_EVENT_SECTIONS
-    + PHASE_EVENT_SECTIONS
-    + STACK_EVENT_SECTIONS
-    + WARM_REPLAY_EVENT_SECTIONS
-    + WARM_START_EVENT_SECTIONS
-    + FRAMEWORK_EVENT_SECTIONS
-)
-
-
-def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Read back the event rows of the bound session, keyed by section.
+
+    Only the named sections are read off disk, and naming ``event`` narrows
+    that again to the fragments that could belong to it. This runs on the
+    write path -- an event assembles its own ``ext`` every time it closes --
+    so reading the whole spool here would make each write cost the size of the
+    session, and a long run would spend most of its time re-parsing its own
+    history.
+
+    Passing ``event`` is an optimization, not a filter the caller can rely on:
+    the rows that come back may still include other events', and callers pick
+    out their own with :func:`~.event_rows.rows_for_event` as before.
 
     Raises :exc:`SessionNotBoundError` when no session is bound, as do the
     per-event wrappers below, which only name their own section tuple.
     """
     from ...session.session_binding import bound_session  # local: avoid import cycle
 
-    assembled = assemble_parts(bound_session(), warnings=[], keep_event_rows=True)
+    assembled = assemble_parts(
+        bound_session(),
+        warnings=[],
+        keep_event_rows=True,
+        only_sections=tuple(sections),
+        only_event=event,
+    )
     parts: dict[str, list[dict[str, Any]]] = {}
     for section in sections:
         rows = assembled.get(section)
@@ -354,54 +322,54 @@ def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
     return parts
 
 
-def kernel_event_parts() -> dict[str, list[dict[str, Any]]]:
+def kernel_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the KERNEL substreams of the bound session, keyed by section."""
-    return event_parts(KERNEL_EVENT_SECTIONS)
+    return event_parts(KERNEL_EVENT_SECTIONS, event=event)
 
 
-def roofline_event_parts() -> dict[str, list[dict[str, Any]]]:
+def roofline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the roofline substreams of the bound session, keyed by section."""
-    return event_parts(ROOFLINE_EVENT_SECTIONS)
+    return event_parts(ROOFLINE_EVENT_SECTIONS, event=event)
 
 
-def baseline_event_parts() -> dict[str, list[dict[str, Any]]]:
+def baseline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the baseline substreams of the bound session, keyed by section."""
-    return event_parts(BASELINE_EVENT_SECTIONS)
+    return event_parts(BASELINE_EVENT_SECTIONS, event=event)
 
 
-def conc_sweep_event_parts() -> dict[str, list[dict[str, Any]]]:
+def conc_sweep_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the conc-sweep substreams of the bound session, keyed by section."""
-    return event_parts(CONC_SWEEP_EVENT_SECTIONS)
+    return event_parts(CONC_SWEEP_EVENT_SECTIONS, event=event)
 
 
-def enablement_event_parts() -> dict[str, list[dict[str, Any]]]:
+def enablement_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the enablement substreams of the bound session, keyed by section."""
-    return event_parts(ENABLEMENT_EVENT_SECTIONS)
+    return event_parts(ENABLEMENT_EVENT_SECTIONS, event=event)
 
 
-def phase_event_parts() -> dict[str, list[dict[str, Any]]]:
+def phase_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the phase substreams of the bound session, keyed by section."""
-    return event_parts(PHASE_EVENT_SECTIONS)
+    return event_parts(PHASE_EVENT_SECTIONS, event=event)
 
 
-def stack_event_parts() -> dict[str, list[dict[str, Any]]]:
+def stack_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the stack-ledger substreams of the bound session, keyed by section."""
-    return event_parts(STACK_EVENT_SECTIONS)
+    return event_parts(STACK_EVENT_SECTIONS, event=event)
 
 
-def warm_replay_event_parts() -> dict[str, list[dict[str, Any]]]:
+def warm_replay_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the warm-replay substreams of the bound session, keyed by section."""
-    return event_parts(WARM_REPLAY_EVENT_SECTIONS)
+    return event_parts(WARM_REPLAY_EVENT_SECTIONS, event=event)
 
 
-def warm_start_event_parts() -> dict[str, list[dict[str, Any]]]:
+def warm_start_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the warm-start substreams of the bound session, keyed by section."""
-    return event_parts(WARM_START_EVENT_SECTIONS)
+    return event_parts(WARM_START_EVENT_SECTIONS, event=event)
 
 
-def framework_event_parts() -> dict[str, list[dict[str, Any]]]:
+def framework_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
     """Return the framework substreams of the bound session, keyed by section."""
-    return event_parts(FRAMEWORK_EVENT_SECTIONS)
+    return event_parts(FRAMEWORK_EVENT_SECTIONS, event=event)
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:

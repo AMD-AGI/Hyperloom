@@ -713,7 +713,7 @@ class RooflineEventRecorder:
             return
         from .assembler import roofline_event_parts
 
-        ext, derived = assemble_roofline_ext(roofline_event_parts(), event=self.event_id)
+        ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self.event_id,

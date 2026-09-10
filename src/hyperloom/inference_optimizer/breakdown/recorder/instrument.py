@@ -72,28 +72,47 @@ def snapshot_state_sections(
             trace_skip(reason="writer raised", section=name, error=exc)
 
 
+def _unset_or_int(st: Any, attr: str) -> int | None:
+    """The integer at ``attr``, or ``None`` when the state never set it.
+
+    A budget nobody set and a budget of zero are different facts, and writing
+    the first one as ``0`` destroys the difference: the export then has to
+    guess, and the only guess available -- treat zero as unset -- throws away
+    the sessions that really did run zero ticks.
+    """
+    value = getattr(st, attr, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _snapshot_session(rec, st: Any) -> None:
     """Snapshot the ``session`` singleton from ``st`` (no-op without a session id)."""
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
     stop_reason = str(getattr(st, "stop_reason", "") or "")
-    rec.record_singleton(
-        "session",
-        {
-            "session_id": session_id,
-            "claw_session_id": getattr(st, "claw_session_id", "") or "",
-            "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
-            "start_ts": str(getattr(st, "start_ts", "") or ""),
-            # A resumed run clears its reason but not necessarily the stale timestamp, so the pair is only ever
-            # emitted together.
-            "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
-            "stop_reason": stop_reason,
-            "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
-            "tick_count": int(getattr(st, "tick", 0) or 0),
-            "phase": str(getattr(st, "phase", "") or ""),
-        },
-    )
+    row = {
+        "session_id": session_id,
+        "claw_session_id": getattr(st, "claw_session_id", "") or "",
+        "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
+        "start_ts": str(getattr(st, "start_ts", "") or ""),
+        # A resumed run clears its reason but not necessarily the stale timestamp, so the pair is only ever
+        # emitted together.
+        "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
+        "stop_reason": stop_reason,
+        "phase": str(getattr(st, "phase", "") or ""),
+    }
+    # Left off the row entirely when unset, so that a recorded number -- zero
+    # included -- always means the state actually carried it.
+    for key, attr in (("max_minutes", "max_minutes"), ("tick_count", "tick")):
+        value = _unset_or_int(st, attr)
+        if value is not None:
+            row[key] = value
+    rec.record_singleton("session", row)
 
 
 def _to_bool(value: Any) -> bool | None:

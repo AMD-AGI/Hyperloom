@@ -162,7 +162,7 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert all(event["type"] != "close" for event in after["timeline"])
 
 
-def test_invalid_v6_event_does_not_change_v5_warnings(tmp_path):
+def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
     before = exporter.build(tmp_path)
     path = tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-install.json"
     path.parent.mkdir(parents=True)
@@ -170,7 +170,7 @@ def test_invalid_v6_event_does_not_change_v5_warnings(tmp_path):
 
     after = exporter.build(tmp_path)
 
-    assert after["warnings"] == before["warnings"]
+    assert after["outcome"] == before["outcome"]
     assert any("timeline.install" in warning for warning in after["metadata"]["warnings"])
     assert after["timeline"] == []
 

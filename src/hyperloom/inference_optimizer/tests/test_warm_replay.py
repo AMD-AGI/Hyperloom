@@ -56,8 +56,26 @@ class _StubSharedState:
     max_model_len: int = 0
     last_action_failures: list = field(default_factory=list)
 
-    def save(self, *args, **kwargs):  # noqa: D401 — stub
-        pass
+    def save(self, session_dir=None, *args, **kwargs):
+        """Persist the one-shot guard so a resume can be tested against disk.
+
+        The guard only does its job if it survives a restart, so the stub
+        writes it rather than dropping it: a branch that forgets to save is
+        then a failing resume test instead of a silent replay.
+        """
+        if session_dir is None:
+            return
+        path = Path(session_dir) / "state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "warm_replay_attempted": bool(self.warm_replay_attempted),
+                    "warm_replay_outcome": dict(self.warm_replay_outcome or {}),
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def record_action_failure(self, *, action, task_id, result, **kwargs):
         self.last_action_failures.append(
@@ -117,7 +135,11 @@ def _make_coord(
     warm_replay_min_confidence: float = 0.7,
     warm_replay_min_reproduce_pct: float = 0.8,
     warm_replay_attempted: bool = False,
+    resume_from_disk: bool = False,
 ) -> Coordinator:
+    if resume_from_disk:
+        persisted = json.loads((Path(tmp_path) / "state.json").read_text(encoding="utf-8"))
+        warm_replay_attempted = bool(persisted.get("warm_replay_attempted"))
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = _StubSharedState(
@@ -666,7 +688,11 @@ async def test_warm_replay_skips_when_disabled_by_flag(tmp_path):
 async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
     tmp_path,
 ):
-    """Resume safety: after a disabled launch flips warm_replay_attempted, a flag-less resume still short-circuits."""
+    """Resume safety: after a disabled launch flips warm_replay_attempted, a flag-less resume still short-circuits.
+
+    The second coordinator reads the guard back off disk rather than being
+    handed it, so a refusal that never persisted fails here.
+    """
     coord1 = _make_coord(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(),
@@ -678,7 +704,7 @@ async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(),
         warm_replay_enabled=True,
-        warm_replay_attempted=True,  # restored from state.json
+        resume_from_disk=True,
     )
     task = await coord2._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is None
@@ -734,6 +760,33 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is None
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"warm_start_recipe": {}}, id="no_warm_start_recipe"),
+        pytest.param({"warm_start_recipe": _warm_recipe_t1(), "warm_replay_enabled": False}, id="disabled_by_flag"),
+        pytest.param(
+            {"warm_start_recipe": _warm_recipe_t1(confidence=0.55, tier="T3_same_family")},
+            id="confidence_below_threshold",
+        ),
+        pytest.param(
+            {"warm_start_recipe": _warm_recipe_t1(extra_server_args="", extra_envs={})},
+            id="best_config_empty",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_refusal_persists_the_one_shot_guard(tmp_path, kwargs):
+    """A refusal that stays in memory would replay after a restart."""
+    coord = _make_coord(tmp_path, **kwargs)
+
+    assert await coord._maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["warm_replay_attempted"] is True
+    assert persisted["warm_replay_outcome"]["reason"]
 
 
 @pytest.mark.asyncio

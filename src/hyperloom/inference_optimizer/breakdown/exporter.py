@@ -28,10 +28,13 @@ BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
 def _recorded_session_value(value: Any) -> bool:
-    """Whether a recorder ``session`` field carries evidence."""
-    if value is None or value == "":
-        return False
-    return not (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
+    """Whether a recorder ``session`` field carries evidence.
+
+    Only an absent field counts as no evidence. A recorded zero is a fact the
+    recorder observed -- a session really can have run zero ticks -- so it must
+    win over the collector rebuild rather than read as a missing value.
+    """
+    return value is not None and value != ""
 
 
 def _merge_session(fragment: Any, collector_value: Any) -> Any:
@@ -59,7 +62,13 @@ def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str,
 
 
 def build(session_dir: Path | str) -> dict[str, Any]:
-    """Build a complete :class:`SessionBreakdown` for ``session_dir`` (pure; reads disk).
+    """Build a complete :class:`SessionBreakdown` for ``session_dir``.
+
+    Not pure: before the timeline is read this closes any event whose phase was
+    killed before it could close itself, which writes those fragments back to
+    the spool. The close is idempotent -- the first build settles the orphans
+    and every later build over the same session sees the same closed events --
+    so repeated builds still return the same breakdown.
 
     Args:
         session_dir: hyperloom session directory (needs ``manifest.json``
@@ -110,14 +119,13 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
         default={},
     )
-    v6_warnings = list(warnings)
     # Events whose phase was killed before it could close them are closed here, before the timeline is read: their
     # fragments are on disk, and an event left open would otherwise be read back as still running.
-    _safe_collect("timeline_finalize", lambda: finalize_events(sd), v6_warnings, default=[])
+    _safe_collect("timeline_finalize", lambda: finalize_events(sd), warnings, default=[])
     timeline = _safe_collect(
         "timeline",
-        lambda: collectors.collect_v6_timeline(sd, v6_warnings),
-        v6_warnings,
+        lambda: collectors.collect_v6_timeline(sd, warnings),
+        warnings,
         default=[],
     )
     # Before ``outcome``, which reads the recipe the close-out settled: the
@@ -126,10 +134,10 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     v6_close = _safe_collect(
         "close",
         lambda: collectors.collect_v6_close(
-            v6_warnings,
+            warnings,
             recorded=assembled.get("close"),
         ),
-        v6_warnings,
+        warnings,
         default={},
     )
     outcome = _safe_collect(
@@ -140,7 +148,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             state=state,
             timeline=timeline,
         ),
-        v6_warnings,
+        warnings,
         default={},
     )
     metadata = _safe_collect(
@@ -152,28 +160,30 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             model_info=model_info,
             langfuse=langfuse,
             state=state,
-            warnings=v6_warnings,
+            warnings=warnings,
             recorded=assembled.get("metadata"),
         ),
-        v6_warnings,
+        warnings,
         default={},
     )
     v6_critic = _safe_collect(
         "critic",
         lambda: collectors.collect_v6_critic(assembled.get("critic")),
-        v6_warnings,
+        warnings,
         default={},
     )
     v6_robustness = _safe_collect(
         "robustness",
         lambda: collectors.collect_v6_robustness(assembled.get("robustness")),
-        v6_warnings,
+        warnings,
         default={},
     )
-    # Snapshot last: every V6 collector above feeds this list, and it is the only place a V6 failure is allowed to
-    # surface.
+    # Snapshot last: every collector above feeds this one list, and this is the
+    # single place a collection failure surfaces. An export used to also carry
+    # a top-level copy taken partway through, which was a strict subset and so
+    # disagreed with this one about how the export had gone.
     if isinstance(metadata, dict):
-        metadata["warnings"] = list(v6_warnings)
+        metadata["warnings"] = list(warnings)
 
     breakdown = {
         "schema_version": schema_version,
@@ -185,7 +195,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "close": v6_close,
         "critic": v6_critic,
         "robustness": v6_robustness,
-        "warnings": warnings,
     }
     return breakdown
 
@@ -242,9 +251,8 @@ def write_breakdown_json(
     Also triggers ``reports/trace/decision_trace.jsonl``, which is not part of
     the breakdown (see
     :func:`hyperloom.orchestrator.trace.decision_trace.write_session_decision_trace`)
-    but is produced from here so that building a breakdown stays a read-only
-    act, and because every caller that flushes Langfuse goes through this
-    function.
+    but is produced from here because every caller that flushes Langfuse goes
+    through this function.
 
     ``output_path`` defaults to ``<session_dir>/session_breakdown.json``.
 
@@ -265,11 +273,15 @@ def write_breakdown_json(
     # session from it. Only the trigger is here, because every path that writes
     # a session's artifacts goes through this function and the file has to land
     # before any flush reads it.
-    with suppress(Exception):
+    try:
         from hyperloom.orchestrator.trace.decision_trace import write_session_decision_trace
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
+    except Exception:  # noqa: BLE001
+        # The trace is a side artifact; losing it must not fail the breakdown
+        # write, but it is scored downstream so a silent loss has to be visible.
+        log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
 
     breakdown = build(sd)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)

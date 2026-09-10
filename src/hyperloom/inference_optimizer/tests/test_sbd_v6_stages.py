@@ -321,7 +321,7 @@ def test_a_raising_close_collector_cannot_disturb_the_v5_payload(tmp_path, monke
     monkeypatch.setattr(exporter.collectors, "collect_v6_close", _boom)
     after = exporter.build(tmp_path)
 
-    assert after["warnings"] == before["warnings"]
+    assert after["timeline"] == before["timeline"]
     assert after["close"] == {}
     assert any("close" in warning for warning in after["metadata"]["warnings"])
 

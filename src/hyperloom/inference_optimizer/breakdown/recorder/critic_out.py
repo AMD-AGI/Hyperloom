@@ -4,10 +4,15 @@
 """Author-time recording of the SBD v6 ``critic`` section.
 
 The critic agent reviews the session as a whole, iteration after iteration,
-and each iteration is complete the moment the review comes back: its topic,
-its verdict, the summary it wrote and the four artifacts it left behind. This
+and each iteration is complete the moment the review comes back: what it spoke
+about, how its rulings fell, and the four artifacts it left behind. This
 records it there. It is the session-level channel and does not compete with the
 per-proposal verdicts, which stay with the proposals they judge.
+
+An iteration has no single verdict -- it rules on every proposal in front of it
+-- so the row carries the distribution of its rulings rather than one string,
+and its prose comes off the ``send_message`` intent in the emitted envelope,
+which is where the agent actually speaks.
 
 Iterations are keyed by a content-derived id rather than the process-local
 iteration number, because that number is reused when a session resumes and
@@ -24,6 +29,7 @@ import hashlib
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -73,6 +79,49 @@ def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _rows(value: Any) -> list[dict[str, Any]]:
+    """The mapping rows of ``value``, ignoring anything else in the list."""
+    if not isinstance(value, list):
+        return []
+    return [dict(row) for row in value if isinstance(row, Mapping)]
+
+
+def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
+    """The ``(topic, body)`` of the first message the iteration spoke.
+
+    The critic's prose does not sit on the emit itself; it travels as a
+    ``send_message`` intent inside the envelope, which is also the only thing a
+    turn with nothing to rule on produces.
+    """
+    intents = _rows(_dict(emit.get("intent_envelope")).get("intents"))
+    for intent in intents:
+        if str(intent.get("intent_type") or "") != "send_message":
+            continue
+        payload = _dict(intent.get("payload"))
+        return str(payload.get("topic") or ""), str(payload.get("body_md") or "")
+    return "", ""
+
+
+def _verdict_counts(review: Mapping[str, Any]) -> dict[str, int]:
+    """How many times each verdict was handed down this iteration.
+
+    An iteration rules on every proposal in front of it, so it has no single
+    verdict; the distribution is the honest scalar. Counted over every ruling,
+    not just the framework ones, because this row describes the whole turn.
+    """
+    counts: dict[str, int] = {}
+    for verdict_row in _rows(review.get("review_verdicts")):
+        verdict = str(verdict_row.get("verdict") or "").strip().lower()
+        if verdict:
+            counts[verdict] = counts.get(verdict, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _verdict_rollup(counts: Mapping[str, int]) -> str:
+    """A one-line reading of ``counts``, e.g. ``2 approve, 1 reject``."""
+    return ", ".join(f"{count} {verdict}" for verdict, count in counts.items())
+
+
 def record_critic_iteration(
     session_dir: Path | str | None,
     *,
@@ -102,12 +151,17 @@ def record_critic_iteration(
         request = _dict(request) or (read_json(wd / "request.json", default={}) if wd else {})
         judge_bundle = _dict(judge_bundle) or (read_json(wd / "judge_bundle.json", default={}) if wd else {})
 
+        topic, body = _spoken_message(emit)
+        counts = _verdict_counts(review)
         row: dict[str, Any] = {
             "iter": int(iter_n),
-            "ts": str(emit.get("ts") or review.get("ts") or ""),
-            "topic": str(emit.get("topic") or review.get("topic") or ""),
-            "verdict": str(review.get("verdict") or emit.get("verdict") or ""),
-            "summary": str(review.get("summary") or emit.get("summary") or "")[:_SUMMARY_LIMIT],
+            # Author time: neither the review nor the emit carries a timestamp,
+            # and this runs the moment the review comes back.
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "topic": topic,
+            "verdict": _verdict_rollup(counts),
+            "verdict_counts": counts,
+            "summary": body[:_SUMMARY_LIMIT],
             "request_path": _rel(wd / "request.json", session_dir) if wd else None,
             "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
             "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
@@ -136,12 +190,13 @@ def record_critic_iteration(
         if _dict(kb_priors):
             row["kb_priors"] = dict(kb_priors or {})
 
+        # Content only: ``ts`` is author time and ``topic`` is read off the
+        # emit, so neither may seed the identity -- a wall clock in the key
+        # would make every re-record a new fragment instead of an overwrite.
         row["iteration_id"] = _stable_id(
             "critic-iteration",
             iter_n,
-            row["ts"],
             [r.get("proposal_msg_id") for r in framework_reviews],
-            row["topic"],
             request,
             judge_bundle,
             review,

@@ -26,6 +26,7 @@ from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
 from .trace import trace_skip
+from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -449,8 +450,8 @@ def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
     try:
         for path in sorted(directory.glob("*.jsonl")):
             rows.extend(read_jsonl(path) or [])
-    except Exception:  # noqa: BLE001 — a findings log we cannot read is not a close-out failure
-        log.debug("close: cannot read robustness findings under %s", directory, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a findings log we cannot read is not a close-out failure
+        note_failure(section="close", error=exc, detail=f"reading the robustness findings under {directory}")
         return {}
     if not rows:
         return {}
@@ -649,8 +650,8 @@ def _any_step_failed(session_dir: Path | str) -> bool:
         from .assembler import close_steps
 
         return any(str(row.get("status") or "") == _FAILED for row in close_steps(session_dir))
-    except Exception:  # noqa: BLE001 — an unreadable spool must not block the close
-        log.debug("close verdict: step readback failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — an unreadable spool must not block the close
+        note_failure(section="close", error=exc, detail="close verdict: step readback failed")
         return False
 
 

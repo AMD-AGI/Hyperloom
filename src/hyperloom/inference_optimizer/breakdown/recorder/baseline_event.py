@@ -166,7 +166,7 @@ def _republish_closed_event(event: str) -> None:
     from ...session.sbd_v6 import timeline_sequence
     from .assembler import baseline_event_parts
 
-    parts = baseline_event_parts()
+    parts = baseline_event_parts(event)
     rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
     header = rows[0] if rows else {}
     action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
@@ -557,7 +557,7 @@ class BaselineEventRecorder:
         )
         from .assembler import baseline_event_parts
 
-        ext, derived = assemble_baseline_ext(baseline_event_parts(), event=self.event_id)
+        ext, derived = assemble_baseline_ext(baseline_event_parts(self.event_id), event=self.event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self.event_id,

@@ -36,6 +36,7 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
+from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -119,8 +120,8 @@ def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
             SECTION_READ,
             _read_row(active.event_id, active.next_read_ordinal(), audit_event),
         )
-    except Exception:  # noqa: BLE001 — a read's record must not cost the read
-        log.debug("record warm_start read failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a read's record must not cost the read
+        note_failure(section="warm_start_event", error=exc, detail="record warm_start read failed")
 
 
 def _read_row(event: str, ordinal: int, audit_event: Mapping[str, Any]) -> dict[str, Any]:
@@ -268,7 +269,7 @@ class WarmStartEventRecorder:
 
         from .assembler import warm_start_event_parts
 
-        ext, derived = assemble_warm_start_ext(warm_start_event_parts(), event=self.event_id)
+        ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -323,8 +324,8 @@ def make_warm_start_recorder(
         )
         recorder.begin()
         return recorder
-    except Exception:  # noqa: BLE001
-        log.debug("open warm_start event failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="warm_start_event", error=exc, detail="open warm_start event failed")
         return None
 
 

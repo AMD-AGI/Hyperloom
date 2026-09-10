@@ -41,6 +41,11 @@ from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import finish_event, open_event
 
+# Every section a phase event assembles from. Named from the leaf module the
+# assembler shares, so :func:`_finish` reads its parts without an import cycle.
+from .sections import PHASE_EVENT_SECTIONS
+from .recorder_warnings import note_failure
+
 log = logging.getLogger(__name__)
 
 EVENT_TYPE = "phase"
@@ -96,8 +101,8 @@ def _sink(event: str) -> EventSink | None:
         if bound_session_or_none() is None:
             return None
         return make_sink(event, producer=PRODUCER)
-    except Exception:  # noqa: BLE001 — the run outranks its own record
-        log.debug("phase event: cannot resolve a sink", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — the run outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve a sink")
         return None
 
 
@@ -161,8 +166,8 @@ def record_entry(
             row_type="segment",
             natural_ids=str(int(sequence or 0)),
         )
-    except Exception:  # noqa: BLE001 — a phase change outranks its own record
-        log.debug("phase event: entry record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a phase change outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: entry record failed")
 
 
 def record_exit(
@@ -215,8 +220,8 @@ def record_exit(
             )
         sink.record(SECTION_EVENT, {"end_time": exited})
         _finish(event, end_time=exited)
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: exit record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: exit record failed")
 
 
 def record_marker(
@@ -247,8 +252,8 @@ def record_marker(
             row_type="marker",
             natural_ids=str(int(sequence or 0)),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: marker record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: marker record failed")
 
 
 #: What a specialist round contributes to the action row that dispatched it.
@@ -307,8 +312,8 @@ def record_specialist_round(
         if ensemble_scores:
             row["ensemble_scores"] = _as_dict(ensemble_scores)
         sink.record(SECTION_ACTION, row, row_type="action", natural_ids=key)
-    except Exception:  # noqa: BLE001 — a round outranks its own record
-        log.debug("phase event: specialist round record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a round outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: specialist round record failed")
 
 
 def record_dispatch(
@@ -349,8 +354,8 @@ def record_dispatch(
             row_type="action",
             natural_ids=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — an action outranks its own record
-        log.debug("phase event: dispatch record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — an action outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: dispatch record failed")
 
 
 def record_proposal(
@@ -397,8 +402,8 @@ def record_proposal(
             row_type="proposal",
             natural_ids=str(proposal_msg_id),
         )
-    except Exception:  # noqa: BLE001 — a proposal outranks its own record
-        log.debug("phase event: proposal record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a proposal outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: proposal record failed")
 
 
 def record_proposal_review(
@@ -462,8 +467,8 @@ def record_proposal_review(
             row_type="proposal",
             natural_ids=str(proposal_msg_id),
         )
-    except Exception:  # noqa: BLE001 — a ruling outranks its own record
-        log.debug("phase event: proposal review record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a ruling outranks its own record
+        note_failure(section="phase_event", error=exc, detail="phase event: proposal review record failed")
 
 
 def record_proposal_outcome(
@@ -505,8 +510,8 @@ def record_proposal_outcome(
             row_type="proposal",
             natural_ids=str(proposal_msg_id),
         )
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: proposal outcome record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: proposal outcome record failed")
 
 
 def record_settle(
@@ -558,8 +563,8 @@ def record_settle(
             "settled_unix": _float_or_none(settled_unix),
         }
         sink.record(SECTION_ACTION, row, row_type="action", natural_ids=str(task_id))
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: settle record failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: settle record failed")
 
 
 def _finish(event: str, *, end_time: str) -> None:
@@ -571,7 +576,7 @@ def _finish(event: str, *, end_time: str) -> None:
 
     parsed = parse_event_id(event)
     sequence = _open(event, phase=parsed.phase, macro_cycle=parsed.macro_cycle)
-    parts = event_parts(PHASE_EVENT_SECTIONS)
+    parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
     ext, status = assemble_phase_ext(parts, event=event)
     finish_event(
         event_type=EVENT_TYPE,
@@ -591,8 +596,8 @@ def _rows(section: str, event: str) -> list[dict[str, Any]]:
         from .assembler import event_parts
 
         return rows_for_event(event_parts((section,)).get(section) or [], event)
-    except Exception:  # noqa: BLE001 — a read-back failure is not a write failure
-        log.debug("phase event: cannot read back %s", section, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a read-back failure is not a write failure
+        note_failure(section=section, error=exc, detail=f"reading back the rows of event {event}")
         return []
 
 
@@ -617,8 +622,8 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
                 best_sequence = sequence
                 best = (event, sequence, _float_or_none(row.get("entered_unix")))
         return best
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: cannot resolve the open segment", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the open segment")
         return None
 
 
@@ -633,8 +638,8 @@ def _action_event(task_id: str) -> str | None:
                 if event:
                     return event
         return None
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: cannot resolve the action's event", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the action's event")
         return None
 
 
@@ -649,20 +654,9 @@ def _proposal_event(proposal_msg_id: str) -> str | None:
                 if event:
                     return event
         return None
-    except Exception:  # noqa: BLE001
-        log.debug("phase event: cannot resolve the proposal's event", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="phase_event", error=exc, detail="phase event: cannot resolve the proposal's event")
         return None
-
-
-#: Every section a phase event assembles from. Declared here as well as in the
-#: assembler so :func:`_finish` reads its parts without closing an import cycle.
-PHASE_EVENT_SECTIONS: tuple[str, ...] = (
-    SECTION_EVENT,
-    SECTION_SEGMENT,
-    SECTION_ACTION,
-    SECTION_MARKER,
-    SECTION_PROPOSAL,
-)
 
 
 def assemble_phase_ext(

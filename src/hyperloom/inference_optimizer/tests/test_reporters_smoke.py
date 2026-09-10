@@ -123,7 +123,56 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             },
         },
         "timeline": [_baseline_event(), _kernel_event(), _framework_event()],
-        "critic_robustness": [],
+        "critic": {
+            "iterations": [
+                {
+                    "iteration_id": "critic-iteration:1:abc",
+                    "iter": 1,
+                    "ts": "2026-05-12T11:20:00Z",
+                    "topic": "backends:vllm_kv_fp8",
+                    "verdict": "1 approve",
+                    "verdict_counts": {"approve": 1},
+                    "summary": "the flag pays for itself",
+                    "phase": "FRAMEWORK_AGENT",
+                    "macro_cycle": 0,
+                    "review_path": "critic-workdir/000001/review.json",
+                    "framework_reviews": [
+                        {
+                            "proposal_msg_id": "p1",
+                            "arm": "config",
+                            "verdict": "approve",
+                            "effective_verdict": "approve",
+                            "reasoning": "cheap to try, easy to revert",
+                        }
+                    ],
+                },
+                # A pass that only spoke: it must still be reported.
+                {
+                    "iteration_id": "critic-iteration:2:def",
+                    "iter": 2,
+                    "ts": "2026-05-12T11:40:00Z",
+                    "topic": "heartbeat",
+                    "verdict": "",
+                    "verdict_counts": {},
+                    "summary": "ok (critic)",
+                    "phase": "SWEEP",
+                },
+            ]
+        },
+        "robustness": {
+            "turns": [
+                {
+                    "turn_idx": 0,
+                    "outcome": "intents",
+                    "tick_index": 1,
+                    "intents": [
+                        {"type": "send_message", "topic": "heartbeat", "payload": {"body_md": "ok (robustness)"}}
+                    ],
+                    "parse_warnings": [],
+                },
+                {"turn_idx": 1, "outcome": "no_envelope", "tick_index": 4, "intents": [], "parse_warnings": ["empty"]},
+            ]
+        },
         "telemetry": {
             "gpu_monitor_aggregate": {
                 "samples": 52,
@@ -159,6 +208,8 @@ def test_all_renderers_register_in_stable_order() -> None:
         "param_search",
         "attribution",
         "optimizations",
+        "critic",
+        "robustness",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 

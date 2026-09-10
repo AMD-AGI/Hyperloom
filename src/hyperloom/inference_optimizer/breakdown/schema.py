@@ -1016,13 +1016,19 @@ class V6CriticReview(TypedDict, total=False):
 
 
 class CriticIteration(TypedDict, total=False):
-    """One critic-agent review pass over a proposed change."""
+    """One critic-agent review pass over a proposed change.
+
+    ``verdict`` reads the iteration's rulings as one line (``2 approve, 1
+    reject``) and ``verdict_counts`` carries the same distribution for callers
+    that need to count. A pass that only spoke -- a heartbeat, a request for
+    context -- rules on nothing and leaves both empty."""
 
     iteration_id: str
     iter: int
     ts: str
     topic: str
     verdict: str
+    verdict_counts: dict[str, int]
     summary: str
     request_path: str
     judge_bundle_path: str
@@ -1030,6 +1036,7 @@ class CriticIteration(TypedDict, total=False):
     review_path: str
     phase: str
     macro_cycle: int
+    kb_priors: dict[str, Any]
     framework_reviews: list[dict[str, Any]]
 
 
@@ -1720,7 +1727,9 @@ class SessionBreakdown(TypedDict, total=False):
 
     The complete contract between the producer (``inference_optimizer``) and
     downstream consumers. Every section is either recorded at author time or
-    projected from what was recorded: the export re-derives nothing."""
+    projected from what was recorded: the export re-derives nothing.
+
+    How the export itself went is reported once, on ``metadata.warnings``."""
 
     schema_version: str
     exported_at_utc: str
@@ -1732,8 +1741,6 @@ class SessionBreakdown(TypedDict, total=False):
     close: V6Close
     critic: V6Critic
     robustness: V6Robustness
-
-    warnings: list[str]
 
 
 __all__ = [

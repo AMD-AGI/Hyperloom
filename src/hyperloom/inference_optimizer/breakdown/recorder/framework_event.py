@@ -44,6 +44,7 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
+from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ def _resume_gate_ordinals(event: str) -> dict[tuple[str, str], int]:
     try:
         from .assembler import framework_event_parts
 
-        parts = framework_event_parts()
+        parts = framework_event_parts(event)
     except Exception:  # noqa: BLE001 — a fresh event has nothing to read
         return {}
 
@@ -767,7 +768,7 @@ class FrameworkEventRecorder:
         )
         from .assembler import framework_event_parts
 
-        ext, derived = assemble_framework_ext(framework_event_parts(), event=self.event_id)
+        ext, derived = assemble_framework_ext(framework_event_parts(self.event_id), event=self.event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -943,8 +944,12 @@ def record_review_evidence(
             row_type=ROW_PROPOSAL,
             natural_ids=_key(key),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change the review
-        log.debug("framework timeline: review evidence record failed for %s", key, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — observability cannot change the review
+        note_failure(
+            section="framework_proposal",
+            error=exc,
+            detail=f"recording the critic review evidence of proposal {key}",
+        )
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
