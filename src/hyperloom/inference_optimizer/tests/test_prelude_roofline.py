@@ -90,8 +90,8 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
         _handoff_dir: Path,
         _output_dir: Path,
         _baseline_pins: dict[str, str] | None = None,
-    ) -> None:
-        return None
+    ) -> dict:
+        return {"status": "no_result"}
 
     monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
     return c
@@ -357,14 +357,19 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 
     fusion_calls = 0
 
-    async def _run_fusion() -> None:
+    async def _run_fusion() -> dict:
         nonlocal fusion_calls
         fusion_calls += 1
+        return {"status": "ok"}
 
     async def _skip_reprofile() -> None:
         return None
 
-    monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
+    async def _skip_rewrite() -> dict:
+        return {"status": "no_result"}
+
+    monkeypatch.setattr(coord.phase_kernel, "_run_fusion_lane", _run_fusion)
+    monkeypatch.setattr(coord.phase_kernel, "_run_rewrite_lane", _skip_rewrite)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
@@ -389,9 +394,10 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         handoff_dir: Path,
         output_dir: Path,
         baseline_pins: dict[str, str] | None = None,
-    ) -> None:
+    ) -> dict:
         handed_off.append((handoff_dir, output_dir))
         pins_seen.append(dict(baseline_pins or {}))
+        return {"status": "no_result"}
 
     # Sealing commits, and it finds its repositories from the interpreter, so it
     # would reach whatever framework this host has installed.
@@ -401,11 +407,10 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         lambda _state, **_kwargs: {"/repo": "a" * 40},
     )
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
 
-    await coord.phase_kernel._finish_kernel_entry()
-    await coord.phase_kernel._finish_kernel_entry()
+    await coord.phase_kernel._run_rewrite_lane()
+    await coord.phase_kernel._run_rewrite_lane()
 
     attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
     # Each entry gets its own attempt directory: the controller refuses an output root it has already initialized, so

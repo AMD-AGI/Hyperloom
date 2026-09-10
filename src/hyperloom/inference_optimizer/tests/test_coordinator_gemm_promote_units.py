@@ -503,7 +503,9 @@ class TestQueueFusionSiblings:
         assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
+    async def test_handle_fusion_result_records_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
+        # Reporting the outcome is the lane's job; this records it and hands a
+        # KEEP to the e2e gate. test_forge_lane_sequence covers the response.
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -524,17 +526,10 @@ class TestQueueFusionSiblings:
 
         assert coord.shared_state.last_fusion == result
         assert integrated == [result]
-        assert coord.bus.messages[0].payload["kind"] == "run_fusion_done"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_tolerates_non_dict_and_bus_failure(self, tmp_path):
+    async def test_handle_fusion_result_tolerates_a_non_dict_result(self, tmp_path):
         coord = _coord(tmp_path)
-
-        class BadBus:
-            async def append_and_seq(self, *_args, **_kwargs):
-                raise RuntimeError("bus down")
-
-        coord.bus = BadBus()
         phase = KernelPhase(coord)
 
         await phase._handle_fusion_result("not-dict")  # type: ignore[arg-type]
@@ -1063,9 +1058,12 @@ class TestBf16DenseFallbackIsInternalToForge:
         async def _noop(*_args, **_kwargs):
             return None
 
+        async def _no_result(*_args, **_kwargs):
+            return {"status": "no_result"}
+
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
         # KERNEL entry ends by handing rewrite control to a controller subprocess.
-        coord.phase_kernel._run_kernel_rewrite_controller = _noop
+        coord.phase_kernel._run_kernel_rewrite_controller = _no_result
 
         calls: list[dict] = []
 
