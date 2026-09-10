@@ -867,6 +867,67 @@ def test_an_unreadable_export_falls_back_rather_than_failing(tmp_path):
     assert payload["sample_count"] == 1
 
 
+def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
+    """aiperf names a counter by its Prometheus family, dropping the ``_total``.
+
+    Observed on a live AgentX round: of 47 families in one record, exactly one
+    ended in ``_total``, and vLLM's preemption counter -- written
+    ``vllm:num_preemptions_total`` in the exposition this module reads everywhere
+    else -- appears as ``vllm:num_preemptions``. Without the alias all three
+    cumulative counters come back empty on this path, and an empty counter looks
+    exactly like a round that never retracted.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+
+    families = families_from_aiperf_record(
+        {
+            "vllm:num_preemptions": [{"labels": {"engine": "0"}, "value": 7.0}],
+            "sglang:num_retracted_requests": [{"labels": {"tp_rank": "0"}, "value": 48.0}],
+            "sglang:cached_tokens": [{"labels": {}, "value": 4600439.0}],
+        }
+    )
+
+    assert families["vllm:num_preemptions_total"] == [({"engine": "0"}, 7.0)]
+    assert families["sglang:num_retracted_requests_total"] == [({"tp_rank": "0"}, 48.0)]
+    assert families["sglang:cached_tokens_total"] == [({}, 4600439.0)]
+    # The name aiperf actually used still resolves too.
+    assert families["vllm:num_preemptions"] == [({"engine": "0"}, 7.0)]
+
+
+def test_a_real_aiperf_record_yields_the_preemption_counter(tmp_path):
+    """End to end through the reader, on the shape a live round produced."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    model = "/shared_nfs/hyperloom/models/Llama-3.1-8B-Instruct"
+    path = _write_server_metrics(
+        tmp_path,
+        [
+            {
+                "endpoint_url": "http://localhost:8000/metrics",
+                "timestamp_ns": 1_789_048_708_183_834_288,
+                "endpoint_latency_ns": 19_658_211,
+                "request_sent_ns": 1_789_048_708_164_234_016,
+                "first_byte_ns": 1_789_048_708_183_834_288,
+                "benchmark_phase": "warmup",
+                "metrics": {
+                    "vllm:kv_cache_usage_perc": [{"labels": {"engine": "0", "model_name": model}, "value": 0.42}],
+                    "vllm:num_preemptions": [{"labels": {"engine": "0", "model_name": model}, "value": 3.0}],
+                },
+            }
+        ],
+    )
+    (sample, timing, phase) = read_aiperf_server_metrics(path)[0]
+
+    assert sample.engine == "vllm"
+    assert sample.active_pool_usage == 0.42
+    assert phase == "warmup"
+    # The counter the whole artifact exists to report.
+    from hyperloom.orchestrator.actions.executors._kv_metrics import aggregate_series
+
+    assert aggregate_series(sample.preempt_total) == 3.0
+    assert timing["scrape_sec"] == 0.0197
+
+
 def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
     """aiperf carries histograms as buckets with no ``value``."""
     from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
@@ -878,7 +939,9 @@ def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
         }
     )
 
-    assert families == {"sglang:token_usage": [({}, 0.5)]}
+    assert families["sglang:token_usage"] == [({}, 0.5)]
+    # Carried no scalar, so it is absent entirely rather than present and empty.
+    assert not any(name.startswith("sglang:e2e_latency_seconds") for name in families)
 
 
 # ---------------------------------------------------------------------------

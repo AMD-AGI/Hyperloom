@@ -226,6 +226,15 @@ def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
             families.setdefault(str(name), []).append(
                 ({str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}, value)
             )
+    # aiperf names a counter by its Prometheus *family*, which drops the ``_total`` the exposition writes on the sample
+    # itself: the text carries ``vllm:num_preemptions_total`` and the export says ``vllm:num_preemptions``. Every
+    # cumulative counter this module reads is spelled the exposition way, so without the alias all three -- preemptions,
+    # SGLang retractions, cached tokens -- come back empty on this path, and an empty counter is indistinguishable from
+    # a round that never retracted. Aliasing here rather than widening every constant keeps one spelling in the lookups
+    # and confines the difference to the source that has it. The lists are shared, not copied.
+    for name, samples in list(families.items()):
+        if not name.endswith("_total"):
+            families.setdefault(f"{name}_total", samples)
     return families
 
 
