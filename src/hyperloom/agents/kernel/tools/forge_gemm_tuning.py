@@ -45,9 +45,6 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "conc", "--conc")
     _add_opt(cmd, args, "mp", "--mp")
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
-    _add_opt(cmd, args, "iters", "--iters")
-    _add_opt(cmd, args, "warmup", "--warmup")
-    _add_opt(cmd, args, "min_improvement_pct", "--min-improvement-pct")
     _add_opt(cmd, args, "timeout", "--timeout")
     _add_opt(cmd, args, "global_timeout", "--global-timeout")
     _add_opt(cmd, args, "tuner", "--tuner")
@@ -57,16 +54,13 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "untuned_csv", "--untuned-csv")
     _add_opt(cmd, args, "moe_untuned_csv", "--moe-untuned-csv")
     _add_opt(cmd, args, "shapes_json", "--shapes-json")
-    # forge calls the manifest its preferred dense-shape source, and Hyperloom has produced one since WP-1 -- but
-    # nothing forwarded it, so the file was written and never read.
+    # gemm-tune ranks the manifest above shapes_json as a dense-shape source. It degrades safely: a path that is not
+    # there is dropped, with a warning.
     _add_opt(cmd, args, "shapes_manifest", "--shapes-manifest")
     _add_opt(cmd, args, "tunableop_input", "--tunableop-input")
     _add_opt(cmd, args, "kernel_signature_log", "--kernel-signature-log")
-    _add_opt(cmd, args, "gpu_ids", "--gpu-ids")
     if bool(args.get("skip_gpu_check", True)):
         cmd.append("--skip-gpu-check")
-    if bool(args.get("verbose", False)):
-        cmd.append("--verbose")
     if bool(args.get("thorough", False)):
         cmd.append("--thorough")
     tokens = str(args.get("tokens") or "").strip()
