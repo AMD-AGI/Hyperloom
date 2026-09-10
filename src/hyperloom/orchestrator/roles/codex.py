@@ -54,12 +54,9 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    heartbeat = json.dumps({"topic": "heartbeat", "body_md": "ok"})
-    has_send_message = _IT.SEND_MESSAGE in set(allowed_intents)
-    heartbeat_line = (
-        f"- ALWAYS emit at least one intent. With nothing to report, emit\n"
-        f'  {{"intent_type": "send_message", "payload": {json.dumps(heartbeat)}}}.'
-        if has_send_message
+    always_emit_line = (
+        "- ALWAYS emit at least one intent."
+        if _IT.SEND_MESSAGE in set(allowed_intents)
         else "- ALWAYS emit exactly one intent; the schema requires it."
     )
     return f"""
@@ -76,7 +73,7 @@ output schema — no prose, no code fences, nothing around it:
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
   substance.
-{heartbeat_line}
+{always_emit_line}
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -121,8 +118,8 @@ class CodexBackend:
     writable_roots: tuple[Path, ...] = ()
     sandbox_mode: str = ""
     codex_bin: str = ""
-    # An agent turn carries a tool loop, so it needs the conversational budget the Claude orchestration path also
-    # floors at, not a completion's 120s.
+    # An agent turn carries a tool loop, so it needs the orchestration budget,
+    # not a completion's 120s.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -137,16 +134,14 @@ class CodexBackend:
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    # Every turn runs on one held SDK thread, so the Coordinator's delta gating and checkpoint compaction both apply.
-    conversational = True
-    # Which prompt modules describe a surface this backend actually has.
+    # Which prompt modules describe a surface this backend actually has. Read
+    # by the prompt builder, which cannot infer it from the role: the
+    # orchestration role is Claude on paper and Codex in an OpenAI-only run.
     transport = TRANSPORT_STRUCTURED_OUTPUT
 
     _session: CodexSession | None = field(default=None, init=False, repr=False)
     # Developer instructions the open thread was started with.
     _thread_instructions: str = field(default="", init=False, repr=False)
-    # Whether the open thread has carried a turn.
-    _thread_seeded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""
@@ -206,7 +201,6 @@ class CodexBackend:
             raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
         if sdk_result.error:
             raise LLMCallFailed("Codex Agent SDK turn failed: " + redact_secret_values(sdk_result.error))
-        self._thread_seeded = True
 
         usage = dict(sdk_result.usage or {})
         input_tokens = safe_int(usage.get("input_tokens"))
@@ -255,34 +249,15 @@ class CodexBackend:
             raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
         return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
-    # ------------------------------------------------------------------
-    @property
-    def needs_seed(self) -> bool:
-        """True when the open conversation has no history to build a delta on."""
-        return not self._thread_seeded
-
-    def needs_seed_for(self, system_prompt: str | None) -> bool:
-        """True when the turn about to run will start on an empty thread."""
-        if not self._thread_seeded:
-            return True
-        return self._instructions_for(system_prompt) != self._thread_instructions
-
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
             part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
 
-    def reset_conversation(self) -> None:
-        """Start the next turn on a fresh conversation."""
-        self._thread_seeded = False
-        if self._session is not None:
-            self._session.reset_thread()
-
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""
         session, self._session = self._session, None
-        self._thread_seeded = False
         if session is not None:
             await session.aclose()
 
@@ -301,7 +276,6 @@ class CodexBackend:
                 component="orchestration",
                 operation="orchestrate_turn",
             )
-            self._thread_seeded = False
             try:
                 await self._session.start()
             except CodexSessionUnavailableError as exc:
@@ -315,7 +289,6 @@ class CodexBackend:
         elif instructions != self._thread_instructions:
             self._session.developer_instructions = instructions
             self._session.reset_thread()
-            self._thread_seeded = False
         self._thread_instructions = instructions
         return self._session
 

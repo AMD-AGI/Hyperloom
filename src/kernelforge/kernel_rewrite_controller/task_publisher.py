@@ -31,6 +31,20 @@ log = logging.getLogger(__name__)
 #: atomic, so the pair existing does not mean the pair is finished.
 PUBLISH_QUIESCENT_SEC = 5.0
 
+#: What an agent writes into ``task.json`` to take a draft back. It has no tool
+#: that can delete a directory -- the analysis session runs without a shell, and
+#: Write cannot remove -- so withdrawing has to be something it can write. Any
+#: draft whose task.json carries this key is neither published nor counted as
+#: refused, and the Stop hook stops holding the session open for it.
+WITHDRAWN_KEY = "withdrawn"
+
+#: Where a refusal is left for the agent to read, inside the draft it refused.
+#: Validation runs out of process on a timer, so there is no tool result to
+#: return the reason on; without a file the agent finishes the session believing
+#: it published, which is the failure this whole path exists to prevent. The
+#: name is stable so the prompt can point at it.
+REJECTION_FILENAME = "rejection.json"
+
 
 @dataclass(frozen=True)
 class TaskPublicationResult:
@@ -52,8 +66,13 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
             value = identity.get(field)
             if not isinstance(value, str):
                 continue
-            stripped = value.strip()
-            identity[field] = normalize_operator_name(stripped) if field == "kernel_name" else stripped.lower()
+            identity[field] = value.strip().lower()
+        # Host-owned, like base_commit and driver_path below: the parser derives
+        # it too, and writing it here is what makes the published task.json state
+        # the identity the controller went on to use rather than the draft's.
+        operator_name = normalized.get("operator_name")
+        if isinstance(operator_name, str) and operator_name.strip():
+            identity["kernel_name"] = normalize_operator_name(operator_name)
         normalized["identity"] = identity
     repo_root = normalized.get("repo_root")
     if isinstance(repo_root, str):
@@ -62,17 +81,33 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
 
 
 def _repo_head(repo_root: Path) -> str:
+    """Pin the repository's live HEAD, refusing anything but its top level.
+
+    A refusal here names the path to use rather than only the rule, because the
+    agent revises from the reason alone: it has no shell to resolve a top level
+    with, and the answer is already in hand by the time the rule can fail.
+    """
     try:
         top = Path(git("rev-parse", "--show-toplevel", cwd=repo_root).stdout.strip()).resolve()
         head = git("rev-parse", "HEAD", cwd=repo_root).stdout.strip().lower()
     except GitError as error:
-        raise ValueError(f"repo_root is not a Git checkout: {repo_root}: {error}") from error
+        raise ValueError(
+            f"repo_root is not a Git checkout: {repo_root}: {error}. "
+            "Pass the Git top-level of the repository that holds kernel_path."
+        ) from error
     if top != repo_root.resolve():
-        raise ValueError(f"repo_root must be the Git top-level directory: {repo_root}")
+        raise ValueError(f"repo_root must be the Git top-level directory: {repo_root} sits inside {top}; use {top}")
     return head
 
 
 def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
+    """Require every declared source to exist in this repository at the base.
+
+    The common way to fail this is to name a file from the repository on the
+    other side of a call chain, which reads here as an ordinary missing path, so
+    the refusal says which repository was searched and where a cross-repository
+    reference belongs instead.
+    """
     for relative in dict.fromkeys((task.kernel_path, *task.source_files)):
         try:
             git(
@@ -82,7 +117,11 @@ def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
                 cwd=task.repo_root,
             )
         except GitError as error:
-            raise ValueError(f"source path is not tracked in repo_root at base_commit: {relative}") from error
+            raise ValueError(
+                f"source path is not tracked in {task.repo_root} at {task.base_commit[:12]}: {relative}. "
+                "One task edits one repository: a file that lives in another repo, or one Git does "
+                "not track here, belongs in evidence rather than source_files."
+            ) from error
 
 
 def publish_staged_task(
@@ -130,7 +169,10 @@ def publish_staged_task(
         return TaskPublicationResult(
             source_dir=source,
             operator_id=task.operator_id,
-            reason="operator task is already published",
+            reason=(
+                f"an operator task for {task.operator_id} is already published; "
+                "drop this draft or point it at a different operator"
+            ),
         )
 
     layout.tasks_root.mkdir(parents=True, exist_ok=True)
@@ -171,6 +213,54 @@ def _newest_mtime(root: Path) -> float:
     return newest
 
 
+def _write_rejection(staged: Path, reason: str) -> None:
+    """Leave the refusal beside the draft that earned it.
+
+    Best-effort: a staging directory that cannot be written to is one the agent
+    cannot revise either, and losing the note must not stop the scan from
+    reporting the refusal through its ordinary return value.
+    """
+    try:
+        atomic_write_text(
+            staged / REJECTION_FILENAME,
+            json.dumps({"draft": staged.name, "reason": reason}, indent=2, sort_keys=True) + "\n",
+        )
+    except OSError:
+        log.warning("could not record the refusal of staged task %s", staged.name)
+
+
+def _is_withdrawn(staged: Path) -> bool:
+    """True when the agent has taken this draft back rather than fixed it."""
+    try:
+        payload = json.loads((staged / "task.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get(WITHDRAWN_KEY))
+
+
+def pending_rejections(staging_root: Path) -> dict[str, str]:
+    """Return the refusal still standing against each staged draft.
+
+    A published draft is deleted whole and a re-refused one is overwritten, so
+    the note's presence is what says the draft is currently refused -- unless
+    the agent has withdrawn it, which is the one way out it can actually take.
+    """
+    root = Path(staging_root)
+    if not root.is_dir():
+        return {}
+    pending: dict[str, str] = {}
+    for entry in sorted(root.iterdir(), key=lambda path: path.name):
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        try:
+            payload = json.loads((entry / REJECTION_FILENAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and not _is_withdrawn(entry):
+            pending[entry.name] = str(payload.get("reason") or "")
+    return pending
+
+
 def publish_complete_staged_tasks(
     layout: ControllerLayout,
     *,
@@ -196,22 +286,33 @@ def publish_complete_staged_tasks(
             continue
         if refused is not None and refused.get(entry.name) == newest:
             continue
+        if _is_withdrawn(entry):
+            # Taken back by the agent. Left in place as the record of a
+            # candidate it examined and rejected, and not offered again.
+            if refused is not None:
+                refused[entry.name] = newest
+            continue
         result = publish_staged_task(layout, entry)
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
         else:
-            # The agent gets no feedback channel, so a rejected draft is otherwise invisible: it stays in staging and
-            # the run just reports one fewer task than the agent believes it wrote.
             log.warning("rejected staged task %s: %s", entry.name, result.reason)
+            # Written before the mtime is remembered, so the note itself is part
+            # of what "unchanged" means; a draft the agent then revises reads as
+            # changed and is offered again.
+            _write_rejection(entry, result.reason)
             if refused is not None:
-                refused[entry.name] = newest
+                refused[entry.name] = _newest_mtime(entry)
         results.append(result)
     return tuple(results)
 
 
 __all__ = [
     "PUBLISH_QUIESCENT_SEC",
+    "REJECTION_FILENAME",
+    "WITHDRAWN_KEY",
     "TaskPublicationResult",
+    "pending_rejections",
     "publish_complete_staged_tasks",
     "publish_staged_task",
 ]

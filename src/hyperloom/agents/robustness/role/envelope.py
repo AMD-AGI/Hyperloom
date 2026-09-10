@@ -84,7 +84,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "start_ts",
         "resumed_ts",
         "max_minutes",
-        "deadline_unix",
+        "elapsed_charged_sec",
+        "leg_anchor_unix",
+        "budget_extensions",
         "closing_grace_sec",
         "optimization_stack",
         "gain_per_stack_entry",
@@ -176,9 +178,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
-        "last_collective",
-        "collective_attempts",
-        "collective_only_mode",
         # kept in lock-step with upstream policy.CORE_STATE_FIELDS (see tests/test_role_contract.py).
         "closing_phase",
         "baseline_config_path",
@@ -219,14 +218,6 @@ class PolicyViolation(ValueError):
 
 
 # Intent builders
-
-
-def build_heartbeat(body_md: str = "ok (robustness-agent)") -> Intent:
-    """Default tick-end fallback when no symptom warrants an emit."""
-    return Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": body_md},
-    )
 
 
 def build_send_message(
@@ -491,7 +482,6 @@ _REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
         "gap_canonical_id",
         "domain",
         "proposal_set",
-        "empty",
         "summary",
     ),
 }

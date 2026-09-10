@@ -26,26 +26,9 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
+from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from .v6_stages import project_conc_sweep_event
 
-
-_SUCCESS_STOP_REASONS = frozenset(
-    {
-        "target_reached",
-        "global_converged",
-        "time_exhausted",
-        "max_ticks",
-        "sweep_done",
-    }
-)
-_ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
-_MODEL_GATE_STOP_REASONS = frozenset(
-    {
-        "model_context_window_too_small",
-        "model_config_incompatible",
-        "unsupported_model_arch",
-    }
-)
 _FRAMEWORK_EXIT_REASON_MAP = {
     "explore_no_more_leverage": "optimize_no_more_leverage",
     "plateau_explore": "optimize_no_more_leverage",
@@ -606,7 +589,7 @@ def _specialist_status(row: dict[str, Any]) -> str:
     if raw in {"failed", "error", "timed_out", "timeout"} or row.get("error"):
         return "failed"
     proposals = row.get("proposal_set")
-    if bool(row.get("empty")) or isinstance(proposals, list) and not proposals:
+    if not row.get("proposals_total") or (isinstance(proposals, list) and not proposals):
         return "empty"
     if raw in {"empty", "skipped"}:
         return "empty"
@@ -1401,9 +1384,7 @@ def _source_attempt(
         "framework_levers": _dict_rows(outputs.get("framework_levers")),
         "config_delta": {
             "extra_server_args": str(outputs.get("extra_server_args_applied") or ""),
-            "extra_envs": dict(
-                _mapping(_first(outputs.get("extra_envs_applied"), outputs.get("config_changes_applied")))
-            ),
+            "extra_envs": dict(_mapping(outputs.get("extra_envs_applied"))),
         },
         "artifacts": {
             "patches_applied": _string_list(outputs.get("patches_applied")),
@@ -1976,20 +1957,12 @@ def collect_v6_timeline(
     return [event for _, event in indexed]
 
 
-def _outcome_status(stop_reason: str) -> str:
-    if stop_reason in _SUCCESS_STOP_REASONS:
-        return "completed"
-    if stop_reason in _ABORTED_STOP_REASONS or not stop_reason:
-        return "aborted"
-    return "failed"
-
-
 def _stage_reached(
     state: dict[str, Any],
     stop_reason: str,
     timeline: list[dict[str, Any]],
 ) -> str:
-    if stop_reason in _MODEL_GATE_STOP_REASONS:
+    if stop_reason in MODEL_GATE_STOP_REASONS:
         return "model_gate"
     phase = str(state.get("phase") or "").strip().upper()
     history = state.get("phase_history")
@@ -2008,12 +1981,10 @@ def _stage_reached(
         enablement = state.get("enablement")
         if isinstance(enablement, dict) and any(
             (
-                int(enablement.get("attempts") or 0) > 0,
                 bool(enablement.get("pending")),
                 bool(enablement.get("validation_pending")),
                 bool(enablement.get("succeeded")),
                 bool(enablement.get("launch_log")),
-                bool(enablement.get("inflight_task_id")),
             )
         ):
             return "enablement"
@@ -2039,7 +2010,7 @@ def _stage_reached(
         "EXPLORE": "framework_agent",
         "KERNEL_AGENT": (
             "kernel"
-            if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning", "last_collective"))
+            if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning"))
             else "kernel_agent"
         ),
         "SWEEP": "conc_sweep",

@@ -5,15 +5,16 @@
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import zipfile
 from contextlib import suppress
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from ..session.paths import is_path_within
@@ -33,7 +34,20 @@ PACKAGE_SUBDIR = "hyperloom-session-packages"
 
 MANIFEST_JSON_NAME = "PACKAGE_MANIFEST.json"
 MANIFEST_TXT_NAME = "PACKAGE_MANIFEST.txt"
-PACKAGE_SCHEMA_VERSION = 2
+PACKAGE_SCHEMA_VERSION = 3
+
+# The must-ship partition: durable coordinator state, the terminal verdicts,
+# and the source trees every bring-up observation was normalised against.
+# Literal relative paths, never globs.
+RESERVED_PATHS: tuple[str, ...] = (
+    "storage/coordinator.db",
+    "state.json",
+    "manifest.json",
+    "session_breakdown.json",
+    "reports/final.json",
+    "reports/session_terminal.json",
+    "reports/bringup/trees.json",
+)
 
 # Curated artifact selection, relative to session_dir.
 PACKAGE_GLOBS: tuple[str, ...] = (
@@ -42,9 +56,14 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
+    # ── terminal verdicts ─────────────────────────────────────────────
+    "reports/final.json",
+    "reports/session_terminal.json",
+    "reports/session_terminal.pre.json",
+    # ── bring-up ladder: pinned source trees, one JSON per attempt ────
+    "reports/bringup/**",
     # ── reports/ ──────────────────────────────────────────────────────
     "reports/enablement/**",
-    "reports/final.json",
     "reports/final.md",
     "reports/optimization_journal.json",
     "reports/kernel_optimization_summary.json",
@@ -76,11 +95,16 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "runs/gemm_tuning/**/best_results.json",
     "runs/specialist/**/specialist_done.json",
     "runs/recover/**/result.json",
+    # ── per-attempt server logs, gzipped by the run slot. Bulky, so last ──
+    "runs/**/attempts/*/server.log.gz",
 )
 
 # Hard safety caps so a pathological session can't blow up the bundle.
 _MAX_FILES = 5000
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
+# Ceiling for the reserved partition, which the caps above do not apply to.
+# Exceeding it is flagged in the manifest.
+_MAX_RESERVED_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
 def _dest_root() -> Path:
@@ -145,47 +169,119 @@ def _iter_session_files(session_dir: Path) -> list[Path]:
 
 
 def _select(session_dir: Path) -> tuple[list[Path], list[str], list[str]]:
-    """Return (matched absolute paths, unmatched globs, refused paths)."""
-    all_files = _iter_session_files(session_dir)
-    rels = {p: p.relative_to(session_dir).as_posix() for p in all_files}
+    """Return (matched absolute paths, unmatched globs, refused paths).
+
+    The returned paths are in packing priority order: :data:`RESERVED_PATHS`
+    first in its own order, then every other match in :data:`PACKAGE_GLOBS`
+    order, sorted by relative path within a single pattern.
+
+    A glob is reported "unmatched" only when it selected zero files; one
+    whose matches all failed the session boundary, or were already taken by
+    :data:`RESERVED_PATHS`, still counts as a hit.
+
+    Args:
+        session_dir: Session directory whose files are matched against the
+            reserved paths and the package globs.
+
+    Returns:
+        A tuple of the matched absolute paths in priority order, the
+        patterns that matched nothing, and the relative paths refused by
+        the boundary check.
+    """
+    by_rel = {p.relative_to(session_dir).as_posix(): p for p in _iter_session_files(session_dir)}
 
     matched: list[Path] = []
     seen: set[Path] = set()
-    unmatched_globs: list[str] = []
     refused: set[str] = set()
+
+    def _admit(path: Path, rel: str) -> None:
+        """Take ``path`` unless it fails the boundary check or is a dup."""
+        if not _is_packageable(path, session_dir):
+            refused.add(rel)
+            log.warning(
+                "session package: refusing %s (not a regular file inside the session)",
+                rel,
+            )
+            return
+        if path not in seen:
+            seen.add(path)
+            matched.append(path)
+
+    for rel in RESERVED_PATHS:
+        path = by_rel.get(rel)
+        if path is not None:
+            _admit(path, rel)
+
+    unmatched_globs: list[str] = []
     for pattern in PACKAGE_GLOBS:
-        hit = False
-        for p, rel in rels.items():
-            if not _glob_match(rel, pattern):
-                continue
-            hit = True
-            if not _is_packageable(p, session_dir):
-                refused.add(rel)
-                log.warning(
-                    "session package: refusing %s (not a regular file inside the session)",
-                    rel,
-                )
-                continue
-            if p not in seen:
-                seen.add(p)
-                matched.append(p)
-        if not hit:
+        hits = sorted(rel for rel in by_rel if _glob_match(rel, pattern))
+        if not hits:
             unmatched_globs.append(pattern)
-    matched.sort(key=lambda p: rels[p])
+            continue
+        for rel in hits:
+            _admit(by_rel[rel], rel)
     return matched, unmatched_globs, sorted(refused)
 
 
+def _segment_regex(segment: str) -> str:
+    """Translate one glob segment to a regex that cannot cross ``/``.
+
+    Args:
+        segment: A single ``/``-delimited component of a glob pattern.
+
+    Returns:
+        A regex source string matching that component and nothing else.
+    """
+    out: list[str] = []
+    for ch in segment:
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(ch))
+    return "".join(out)
+
+
+@lru_cache(maxsize=256)
+def _compile_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a package glob into an anchored regex.
+
+    ``*`` and ``?`` stay inside one path segment; ``**`` spans zero or more
+    whole directories, which is neither of the things ``fnmatch`` does.
+
+    Args:
+        pattern: Glob pattern relative to the session dir.
+
+    Returns:
+        A compiled, fully anchored regex for that pattern.
+    """
+    parts = pattern.split("/")
+    out: list[str] = []
+    for i, seg in enumerate(parts):
+        last = i == len(parts) - 1
+        if seg == "**":
+            # Trailing ``**`` takes the whole remaining path; an interior one
+            # takes zero or more whole directories.
+            out.append(".*" if last else "(?:[^/]+/)*")
+        else:
+            out.append(_segment_regex(seg))
+            if not last:
+                out.append("/")
+    return re.compile("".join(out) + r"\Z")
+
+
 def _glob_match(rel: str, pattern: str) -> bool:
-    """fnmatch with ``**`` spanning ``/``."""
-    if "**" in pattern:
-        # fnmatch's '*' already spans '/', so '**' == '*' for our purpose.
-        collapsed = pattern.replace("**/", "*/").replace("**", "*")
-        return fnmatch.fnmatch(rel, collapsed) or fnmatch.fnmatch(rel, pattern.replace("**", "*"))
-    pat_parts = pattern.split("/")
-    rel_parts = rel.split("/")
-    if len(pat_parts) != len(rel_parts):
-        return False
-    return all(fnmatch.fnmatch(rp, pp) for rp, pp in zip(rel_parts, pat_parts))
+    """Whether ``rel`` matches ``pattern``, with ``**`` spanning ``/``.
+
+    Args:
+        rel: POSIX-style relative path to test.
+        pattern: Glob pattern, possibly containing ``**``.
+
+    Returns:
+        ``True`` when ``rel`` matches ``pattern``.
+    """
+    return _compile_glob(pattern).match(rel) is not None
 
 
 def _build_manifest(
@@ -198,6 +294,7 @@ def _build_manifest(
     dropped_files: list[str] | None = None,
     failed_files: list[str] | None = None,
     refused_files: list[str] | None = None,
+    reserved_overflow: bool = False,
 ) -> dict:
     """Build the manifest dict describing a session package."""
     total = sum(sz for _, sz in included)
@@ -214,8 +311,12 @@ def _build_manifest(
         "included_files": [{"path": rel, "bytes": sz} for rel, sz in included],
         "unmatched_globs": missing_globs,
         "selection_globs": list(PACKAGE_GLOBS),
-        # True when a size/count cap stopped the bundle short (consult dropped_files).
+        "reserved_paths": list(RESERVED_PATHS),
+        # True when a cap dropped something selected (consult dropped_files);
+        # the caps skip a file and keep packing.
         "truncated": truncated,
+        # True only when the must-ship partition exceeded its own ceiling.
+        "reserved_overflow": reserved_overflow,
         "dropped_files": dropped,
         # Selected but absent: writes that failed, and entries refused for resolving outside the session or not being
         # regular files.
@@ -240,6 +341,11 @@ def _manifest_text(manifest: dict) -> str:
         "",
         "Included files (verified written):",
     ]
+    if manifest.get("reserved_overflow"):
+        lines.insert(
+            1,
+            "  !! RESERVED PARTITION OVERFLOWED — a must-ship artifact is MISSING",
+        )
     for entry in manifest.get("included_files") or []:
         lines.append(f"  + {entry['path']}  ({entry['bytes']} B)")
     dropped = manifest.get("dropped_files") or []
@@ -270,6 +376,81 @@ def _manifest_text(manifest: dict) -> str:
     return "\n".join(lines)
 
 
+def _pack(
+    session_dir: Path,
+    matched: list[Path],
+) -> tuple[list[tuple[Path, str, int]], bool, bool, list[str], int]:
+    """Apply the safety caps to a priority-ordered selection.
+
+    The reserved set is packed against its own ceiling; everything else
+    against the bundle caps. A file that does not fit is skipped rather
+    than ending the pack.
+
+    Args:
+        session_dir: Resolved session root, used to derive relative paths.
+        matched: Selected absolute paths in packing priority order.
+
+    Returns:
+        A tuple of the ``(path, relative path, size)`` triples to write,
+        whether a cap dropped anything, whether the reserved partition
+        blew its own ceiling, the dropped relative paths, and the total
+        byte size of the triples.
+    """
+    reserved = set(RESERVED_PATHS)
+    selected: list[tuple[Path, str, int]] = []
+    reserved_bytes = 0
+    optional_bytes = 0
+    optional_count = 0
+    truncated = False
+    reserved_overflow = False
+    dropped: list[str] = []
+
+    for path in matched:
+        rel = path.relative_to(session_dir).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            # Vanished between the walk and here; the write would fail anyway.
+            log.warning("session package: cannot stat %s, skipping", rel)
+            continue
+
+        if rel in reserved:
+            if reserved_bytes + size > _MAX_RESERVED_BYTES:
+                reserved_overflow = True
+                truncated = True
+                dropped.append(rel)
+                log.error(
+                    "session package: MUST-SHIP artifact %s (%d bytes) does not fit "
+                    "the reserved ceiling of %d bytes — the bundle is missing an "
+                    "artifact a post-mortem needs.",
+                    rel,
+                    size,
+                    _MAX_RESERVED_BYTES,
+                )
+                continue
+            selected.append((path, rel, size))
+            reserved_bytes += size
+            continue
+
+        if optional_count >= _MAX_FILES or optional_bytes + size > _MAX_TOTAL_BYTES:
+            truncated = True
+            dropped.append(rel)
+            continue
+        selected.append((path, rel, size))
+        optional_bytes += size
+        optional_count += 1
+
+    if dropped:
+        log.warning(
+            "session package: hit size/count cap, dropped %d file(s) "
+            "(included=%d, bytes=%d). Manifest flagged truncated=true.",
+            len(dropped),
+            len(selected),
+            reserved_bytes + optional_bytes,
+        )
+    return selected, truncated, reserved_overflow, dropped, reserved_bytes + optional_bytes
+
+
 def package_session_artifacts(
     session_dir: Path | str,
     *,
@@ -289,30 +470,7 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        # Apply safety caps.
-        included: list[tuple[Path, str, int]] = []
-        total = 0
-        truncated = False
-        dropped: list[str] = []
-        for i, p in enumerate(matched):
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
-                truncated = True
-                dropped = [q.relative_to(sd).as_posix() for q in matched[i:]]
-                log.warning(
-                    "session package: hit size/count cap, TRUNCATING bundle "
-                    "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
-                    "truncated=true.",
-                    len(included),
-                    total,
-                    len(dropped),
-                )
-                break
-            included.append((p, p.relative_to(sd).as_posix(), sz))
-            total += sz
+        selected, truncated, reserved_overflow, dropped, total = _pack(sd, matched)
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
         out_dir = root / PACKAGE_SUBDIR
@@ -327,7 +485,7 @@ def package_session_artifacts(
             with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 written: list[tuple[str, int]] = []
                 write_failures: list[str] = []
-                for p, rel, sz in included:
+                for p, rel, sz in selected:
                     try:
                         zf.write(p, arcname=rel)
                         written.append((rel, sz))
@@ -344,6 +502,7 @@ def package_session_artifacts(
                     dropped_files=dropped,
                     failed_files=write_failures,
                     refused_files=refused,
+                    reserved_overflow=reserved_overflow,
                 )
                 zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
                 zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
@@ -365,7 +524,7 @@ def package_session_artifacts(
         # can grab one file without unzip.
         if _loose_enabled():
             try:
-                copied, loose_failures = _copy_loose_tree(included, root)
+                copied, loose_failures = _copy_loose_tree(selected, root)
                 _write_loose_manifest(
                     root,
                     _build_manifest(
@@ -377,6 +536,7 @@ def package_session_artifacts(
                         dropped_files=dropped,
                         failed_files=loose_failures,
                         refused_files=refused,
+                        reserved_overflow=reserved_overflow,
                     ),
                 )
                 log.info(

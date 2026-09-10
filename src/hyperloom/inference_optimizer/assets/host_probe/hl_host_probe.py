@@ -55,6 +55,51 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+#: Launcher variables naming this process's rank, most specific first.
+_RANK_ENVS = ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK")
+
+#: Launcher variables naming the size of the job.
+_WORLD_SIZE_ENVS = ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE")
+
+
+def _env_first_int(names: "tuple[str, ...]", default: int) -> int:
+    """Return the first of ``names`` holding an int, else ``default``."""
+    for name in names:
+        try:
+            return int(str(os.environ.get(name, "")).strip())
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _rank() -> int:
+    """Return this process's distributed rank, 0 when the launcher named none."""
+    return _env_first_int(_RANK_ENVS, 0)
+
+
+def _world_size() -> int:
+    """Return the size of the distributed job, 1 when the launcher named none."""
+    return _env_first_int(_WORLD_SIZE_ENVS, 1)
+
+
+def _under_roots(filename: str, roots: "tuple[str, ...]") -> bool:
+    """Return whether ``filename`` sits under one of ``roots``."""
+    return any(filename.startswith(root) for root in roots)
+
+
+def _write_json_report(out_dir: str, name: str, payload: dict) -> str:
+    """Write ``payload`` as JSON to ``out_dir/name`` and return that path.
+
+    Raises:
+        OSError: If the directory or the file cannot be written.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    return path
+
+
 class _SiteStats:
     """Accumulator for one wrapped host-side API call site."""
 
@@ -153,10 +198,17 @@ class HostProbe:
     # -- attribution ------------------------------------------------------
 
     def _under_roots(self, filename: str) -> bool:
-        """Return True when ``filename`` lives under one of the framework roots."""
-        if not self.roots:
-            return True
-        return any(filename.startswith(root) for root in self.roots)
+        """Return True when ``filename`` lives under one of the framework roots.
+
+        Args:
+            filename: Absolute or relative source path from a code object.
+
+        Returns:
+            True when the path is inside a configured root. With no roots
+            configured every path qualifies, so the probe still reports
+            something rather than silently producing an empty file.
+        """
+        return not self.roots or _under_roots(filename, self.roots)
 
     def _label_code(self, code: object) -> str:
         """Return the cached ``file:line:name`` label for ``code``, or ``\"\"``."""
@@ -527,24 +579,6 @@ class HostProbe:
                 pass
         self._installed = False
 
-    def _rank(self) -> int:
-        """Return this process's distributed rank from the launcher env."""
-        for name in ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 0
-
-    def _world_size(self) -> int:
-        """Return the distributed world size from the launcher env."""
-        for name in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 1
-
     def report(self) -> dict:
         """Build this process's evidence report."""
         host_calls = [
@@ -586,8 +620,8 @@ class HostProbe:
 
         return {
             "schema": SCHEMA,
-            "rank": self._rank(),
-            "world_size": self._world_size(),
+            "rank": _rank(),
+            "world_size": _world_size(),
             "pid": os.getpid(),
             "wall_seconds": round(time.time() - self._started, 3),
             "roots": list(self.roots),
@@ -614,14 +648,11 @@ class HostProbe:
             sys.setprofile(None)
             self._deep_installed = False
         try:
-            os.makedirs(self.out_dir, exist_ok=True)
-            path = os.path.join(
+            return _write_json_report(
                 self.out_dir,
-                f"hl_host_probe_rank{self._rank()}_pid{os.getpid()}.json",
+                f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
+                self.report(),
             )
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.report(), handle, indent=2, sort_keys=True)
-            return path
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             sys.stderr.write(f"[hl_host_probe] could not write report: {exc!r}\n")
             return ""
@@ -672,4 +703,9 @@ def install_from_env() -> "HostProbe | None":
     return probe
 
 
-__all__ = ["SCHEMA", "HostProbe", "active", "install_from_env"]
+__all__ = [
+    "SCHEMA",
+    "HostProbe",
+    "active",
+    "install_from_env",
+]

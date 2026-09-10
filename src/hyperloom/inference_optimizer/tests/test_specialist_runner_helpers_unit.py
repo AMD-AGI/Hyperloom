@@ -105,7 +105,7 @@ def test_classify_unknown():
 
 def test_build_empty_specialist_done():
     out = build_empty_specialist_done(gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0)
-    assert out["empty"] is True
+    assert out["proposal_set"] == []
     assert out["proposal_set"] == []
     assert out["confidence"] == 1.0
     assert out["summary"] == "no idea"
@@ -208,17 +208,17 @@ def test_write_heartbeat(tmp_path):
 
 def test_write_specialist_done(tmp_path):
     r = _runner()
-    r._write_specialist_done(tmp_path, {"empty": True})
+    r._write_specialist_done(tmp_path, {"proposal_set": []})
     payload = json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
-    assert payload["empty"] is True and "ts" in payload
+    assert payload["proposal_set"] == [] and "ts" in payload
 
 
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
     r = _runner()
-    r._write_specialist_done(tmp_path, {"empty": True})
+    r._write_specialist_done(tmp_path, {"proposal_set": []})
     assert not list(tmp_path.glob("*.tmp"))
-    assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["empty"] is True
+    assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["proposal_set"] == []
 
 
 def test_write_specialist_done_partial(tmp_path):

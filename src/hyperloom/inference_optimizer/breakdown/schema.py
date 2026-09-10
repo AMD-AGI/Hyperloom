@@ -18,6 +18,8 @@ SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 #: Current breakdown schema version. V6 stamps the document once the timeline
 #: is recorded by the actions themselves rather than projected out of their
 #: artefacts afterwards, which is what makes an event's start time its real one.
+#: ``enablement`` gained its ledger-sourced round fields inside this version:
+#: they add a section to the block rather than reshape the document.
 SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
@@ -610,16 +612,13 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop."""
+    """Orchestration turn count for this session.
 
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
+    Attributes:
+        tick_count (int): Coordinator ticks executed.
+    """
+
     tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
 
 
 class Telemetry(TypedDict, total=False):
@@ -633,7 +632,6 @@ class Telemetry(TypedDict, total=False):
     gpu_monitor_aggregate: GpuMonitorAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
-    # SEED/DELTA census + compaction rate for the orchestration conversation.
     orchestration_context: OrchestrationContext
 
 
@@ -1147,60 +1145,6 @@ class GemmTuning(TypedDict, total=False):
     total_gain_pct: float
 
 
-# Collective — multi-rank communication campaigns run at KERNEL entry.
-class CollectiveAttempt(TypedDict, total=False):
-    """One collective campaign, from candidate selection through the E2E gate."""
-
-    collective_attempt_id: str
-    experiment_id: str
-    kernel_id: str
-    kernel_name: str
-    collective_op: str
-    world_size: int | None
-    engine: str
-    status: str
-    decision: str
-    kept: bool
-    salvaged: bool
-    requires_e2e_validation: bool
-    iterations: int | None
-    kernel_speedup: float | None
-    gpu_pct: float | None
-    duration_sec: float | None
-    ts: str
-    source_file: str
-    kernel_repo: str
-    workspace: str
-    patch_path: str
-    error_class: str
-    error: str
-    integration_id: str
-    integration_decision: str
-    patch_cleanup_status: str
-    integration_result_status: str
-    integration_revert_status: str
-    integration_finalize_status: str
-    integration_recovery_action: str
-    integration_error_class: str
-    integration_error: str
-    integration_report_path: str
-    integration_workspace: str
-    integration_ts: str
-    integration_gain_pct: float | None
-    integration_base_tput: float | None
-    integration_new_tput: float | None
-    bandwidth: dict[str, Any]
-    artifact_files: list[str]
-
-
-class Collective(TypedDict, total=False):
-    """Top-level collective-lane section envelope."""
-
-    only_mode: bool
-    attempts: list[CollectiveAttempt]
-    last: CollectiveAttempt
-
-
 # Kernel Roofline — hot-kernel table mirroring reports/kernel_roofline.json.
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim)."""
@@ -1259,7 +1203,8 @@ class ConcSweepSummary(TypedDict, total=False):
     tp: int
     benchmark_mode: str  # "agentx" / "synthetic"; names the axis pair the points carry
     concs_requested: list[int]
-    # {extra_server_args, extra_envs, points[]}.
+    # {extra_server_args, extra_envs, points[]}. A point carries the pair its mode is plotted on:
+    # output_throughput + e2el_mean_ms synthetic, total_token_throughput + e2e_norm_intvty_p90 agentic.
     baseline: dict[str, Any]
     optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
@@ -1413,6 +1358,29 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementRoundSummary(TypedDict, total=False):
+    """One bring-up round, as the durable round ledger recorded it.
+
+    Attributes:
+        round_id: Identity of the round.
+        state: ``open`` while a holder has it, ``settled`` once it ended.
+        outcome: How it ended -- booted / failed / abandoned, or one of the two
+            expiries. Empty while it is open.
+        holder_task_id: The task holding it.
+        fence: The holder's token; only a handoff advances it.
+        opened_unix: When the round was acquired.
+        settled_unix: When it ended, or ``None`` while it is open.
+    """
+
+    round_id: str
+    state: str
+    outcome: str
+    holder_task_id: str
+    fence: int
+    opened_unix: float
+    settled_unix: float | None
+
+
 class EnablementStackActionSummary(TypedDict, total=False):
     """One attempt-runtime stack action considered/applied."""
 
@@ -1463,8 +1431,11 @@ class EnablementBreakdown(TypedDict, total=False):
     succeeded: bool
     pending: bool
     validation_pending: bool
-    stall_streak: int
-    inflight_task_id: str
+    round_id: str
+    round_holder_task_id: str
+    rounds: list[EnablementRoundSummary]
+    round_count: int
+    round_outcomes: dict[str, int]
     last_specialist_task_id: str
     revalidation_task_id: str
     revalidation_generation: int
@@ -2113,25 +2084,12 @@ class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
     tuner: str | None
 
 
-class V6KernelCollectiveRun(V6KernelLaneRun, total=False):
-    """One collective-tuning run."""
-
-    op: str | None
-    algo: str | None
-    size_bytes: int | None
-    world_size: int | None
-    gain_pct: float | None
-    withheld: bool
-    withhold_reason: str | None
-
-
 class V6KernelForgeLanes(TypedDict, total=False):
-    """The four forge candidate lanes, split back out at assembly."""
+    """The forge candidate lanes, split back out at assembly."""
 
     kernel_rewrites: list[V6KernelRewriteRun]
     fusion_runs: list[V6KernelFusionRun]
     gemm_tuning_runs: list[V6KernelGemmTuningRun]
-    collective_runs: list[V6KernelCollectiveRun]
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2467,7 +2425,6 @@ class SessionBreakdown(TypedDict, total=False):
     capability_summary: CapabilitySummary
     geak: Geak
     kernel_lifecycle: KernelLifecycle
-    collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
@@ -2531,6 +2488,7 @@ __all__ = [
     "DiscoveredHotKernel",
     "EnablementAttemptRuntime",
     "EnablementBreakdown",
+    "EnablementRoundSummary",
     "EnablementStackActionSummary",
     "ExecutorClass",
     "KernelBackendAttempt",
@@ -2609,7 +2567,6 @@ __all__ = [
     "V6KernelAdoptedRow",
     "V6KernelAnalysisArtifacts",
     "V6KernelAnalysisDetail",
-    "V6KernelCollectiveRun",
     "V6KernelEntry",
     "V6KernelEvent",
     "V6KernelExt",

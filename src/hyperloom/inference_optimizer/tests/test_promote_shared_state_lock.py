@@ -1232,7 +1232,6 @@ async def test_integrate_keep_preserves_prior_explore_envs(session_dir):
             "status": "kept",
             "output_throughput": 4700.0,
             "specialist_task_id": "spec-keep",
-            "config_changes_applied": {},
         },
         task=_task("integrate_patch", task_id="t-keep"),
     )

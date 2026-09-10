@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.config import Config
+from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.experience_reader import sanitize_read_error
 from kernelforge.knowledge.experience_store import knowledge_config_from_runtime
 from kernelforge.loop.validation import run_validation_pipeline
@@ -32,6 +33,22 @@ _SCHEMA_VERSION = 1
 _REWRITE_KIND = "standalone_flydsl"
 _KERNEL_ARTIFACT = "kernel.py"
 _REFERENCE_CONTENT_CAP = 12_000
+
+# Ceiling on the benchmark that times one candidate, when nothing tighter bounds it.
+_BENCH_TIMEOUT_SEC = 600
+
+
+def _stage_timeout(cap_sec: int, search_deadline: float, run_deadline_sec: float | None) -> int:
+    """Seconds one measurement stage may take without outliving the search or the run.
+
+    The search budget bounds the field, not each trial, so a stage allowed to run to its own ceiling could spend the
+    whole budget on the first candidate and leave the rest of the field unmeasured -- which is the opposite of what
+    reading a wide field is for.
+    """
+    allowance = search_deadline - time.monotonic()
+    if run_deadline_sec is not None:
+        allowance = min(allowance, run_deadline_sec)
+    return max(1, min(cap_sec, int(allowance)))
 
 
 @dataclass
@@ -200,17 +217,22 @@ async def try_flydsl_kb_warmstart(
     *,
     source_ms: float | None,
     framework: str = "",
-    top_k: int = 3,
+    top_k: int | None = None,
     validation_timeout_sec: int = 1800,
     stop_at_unix: float | None = None,
 ) -> RewriteKbReadResult:
-    """Try top-3 candidates; correctness alone permits skipping PORT."""
-    del source_ms  # Performance is measured for context, not used as the PORT gate.
+    """Measure the admissible candidates and skip PORT with the fastest.
+
+    Correctness admits a candidate; a measurement on this task's own driver chooses between the admitted ones, since a
+    claim was computed over whatever cases its producing task scored and so cannot order candidates for *this* task.
+    ``warmstart_policy`` bounds the search on both the claim floor and wall time.
+    """
+    del source_ms  # The claim is not the gate; this task's own timing is.
     plan = _read_top_candidates(
         spec,
         config,
         framework=framework,
-        top_k=top_k,
+        top_k=warmstart_policy.top_k() if top_k is None else top_k,
     )
     result = RewriteKbReadResult(
         read_reason=plan.read_reason,
@@ -221,10 +243,38 @@ async def try_flydsl_kb_warmstart(
     driver_hash = _sha256(driver_path)
     references: list[dict] = []
 
-    for candidate in plan.candidates:
+    # Survivors of the whole gauntlet, with what this task's driver timed them
+    # at. The winner is chosen after the field closes, not on the way through.
+    measured: list[dict] = []
+    search_deadline = time.monotonic() + warmstart_policy.budget_sec()
+
+    for index, candidate in enumerate(plan.candidates):
         remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
         if remaining is not None and remaining <= 0:
             result.read_reason = "deadline"
+            break
+        # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
+        # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
+        # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
+        if warmstart_policy.below_floor(candidate["speedup"]):
+            result.attempts.append(
+                {
+                    "solution_slug": candidate["solution_slug"],
+                    "speedup": candidate["speedup"],
+                    "reason": "below_claim_floor",
+                }
+            )
+            continue
+        # The candidate count does not bound wall time: one trial is minutes on the heaviest kernels. Whatever has been
+        # measured already still wins below.
+        if time.monotonic() >= search_deadline:
+            result.attempts.append(
+                {
+                    "solution_slug": candidate["solution_slug"],
+                    "speedup": candidate["speedup"],
+                    "reason": "search_budget_spent",
+                }
+            )
             break
         attrs = candidate["attrs"]
         attempt = {
@@ -256,13 +306,10 @@ async def try_flydsl_kb_warmstart(
                     validation = await run_validation_pipeline(
                         driver_script=driver_path,
                         snr_threshold=spec.snr_threshold,
-                        timeout_per_stage=(
-                            validation_timeout_sec
-                            if remaining is None
-                            else max(
-                                1,
-                                min(validation_timeout_sec, int(remaining)),
-                            )
+                        timeout_per_stage=_stage_timeout(
+                            validation_timeout_sec,
+                            search_deadline,
+                            remaining,
                         ),
                     )
                     if not validation.all_passed:
@@ -274,22 +321,23 @@ async def try_flydsl_kb_warmstart(
                             benched = driver_contract.preflight_candidate(
                                 spec,
                                 driver_path,
-                                timeout_sec=(600 if remaining is None else max(1, min(600, int(remaining)))),
+                                timeout_sec=_stage_timeout(_BENCH_TIMEOUT_SEC, search_deadline, remaining),
                             )
                             candidate_ms = benched.timing_ms if benched.ok else None
                         snr = validation.results[-1].snr_db if validation.results else None
-                        attempt.update(
-                            reason="applied",
-                            best_ms=candidate_ms,
-                        )
+                        attempt.update(reason="measured", best_ms=candidate_ms)
                         result.attempts.append(attempt)
-                        result.applied = True
-                        result.read_reason = "applied"
-                        result.solution_slug = candidate["solution_slug"]
-                        result.best_ms = candidate_ms
-                        result.snr_db = snr
-                        result.reference_context = _reference_context(references)
-                        return result
+                        measured.append(
+                            {
+                                "index": index,
+                                "candidate": candidate,
+                                "content": content,
+                                "ms": candidate_ms,
+                                "snr_db": snr,
+                                "attempt": attempt,
+                            }
+                        )
+                        continue
             except Exception as error:  # noqa: BLE001 - candidate becomes reference
                 reason = f"validation_error:{type(error).__name__}"
 
@@ -303,6 +351,28 @@ async def try_flydsl_kb_warmstart(
                 "content": content,
             }
         )
+
+    if measured:
+        # Fastest on this task's own driver. A survivor whose benchmark failed is still adoptable -- it passed
+        # correctness -- but it ranks behind every timed one, because nothing is known about its speed.
+        winner = min(
+            measured,
+            key=lambda item: (
+                item["ms"] is None,
+                item["ms"] if item["ms"] is not None else 0.0,
+                item["index"],
+            ),
+        )
+        Path(spec.flydsl_kernel).write_bytes(winner["content"])
+        for item in measured:
+            item["attempt"]["reason"] = "applied" if item is winner else f"outperformed_by_rank_{winner['index'] + 1}"
+        result.applied = True
+        result.read_reason = "applied"
+        result.solution_slug = winner["candidate"]["solution_slug"]
+        result.best_ms = winner["ms"]
+        result.snr_db = winner["snr_db"]
+        result.reference_context = _reference_context(references)
+        return result
 
     if original is None:
         Path(spec.flydsl_kernel).unlink(missing_ok=True)
@@ -324,9 +394,18 @@ def write_flydsl_kb_solution(
     best_commit: str = "",
     framework: str = "",
     snr_db: float | None = None,
-    allow_non_improving: bool = False,
+    session_key: str = "",
+    content_override: bytes | None = None,
 ) -> dict:
-    """Record a validated FlyDSL port as a candidate under its identity."""
+    """Record a validated FlyDSL port as a candidate under its identity.
+
+    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``session_key`` names the
+    session this record belongs to, so a caller publishing repeatedly through one session replaces its own record
+    rather than burying the identity's history under a sibling per publication. ``content_override`` supplies the
+    kernel bytes for a caller publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy
+    measured for *this* artifact; a caller that did not measure it passes ``None``, because a reading taken from
+    another kernel is not a substitute.
+    """
     store = create_rewrite_record_store(config)
     if store is None:
         return {"written": False, "reason": "not_configured"}
@@ -334,10 +413,8 @@ def write_flydsl_kb_solution(
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
     speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
-    if not allow_non_improving and (speedup is None or speedup <= 1.0):
-        return {"written": False, "reason": "no_improvement"}
     try:
-        content = Path(spec.flydsl_kernel).read_bytes()
+        content = content_override if content_override is not None else Path(spec.flydsl_kernel).read_bytes()
         identity, canonical_id, signature, implementation = resolve_identity(
             spec,
             framework=framework,
@@ -345,11 +422,10 @@ def write_flydsl_kb_solution(
             source_text=_source_text(spec),
         )
         content_hash = hashlib.sha256(content).hexdigest()
-        session_id = candidate_session_id(
-            canonical_id,
-            identity.kernel_name,
-            best_commit or content_hash,
-        )
+        # Only when the caller has no session identity at all does the artifact name the record, and then every
+        # publication is a sibling. ``best_commit`` is metadata here, never a name: a caller that wants its commit to
+        # name the record says so through ``session_key``.
+        session_id = candidate_session_id(canonical_id, identity.kernel_name, session_key or content_hash)
         knowledge = {
             "producer": identity.producer,
             "speedup": round(speedup, 4) if speedup is not None else None,

@@ -248,13 +248,37 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_config_incompatible",
         # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive rounds made no forward progress.
+        # Enablement gave up without a booting baseline: a revalidation the
+        # round depended on never promoted.
         "enablement_stalled",
-        # The baseline could not produce an accuracy result even though the accuracy test was expected to run (broken
-        # eval / missing quality gate).
+        # Enablement attempt cap: too many consecutive rounds bought no ground.
+        # A bring-up that is still advancing is bounded by the run's wall clock.
+        "enablement_attempts_exhausted",
+        # The baseline could not produce an accuracy result even though the
+        # accuracy test was expected to run (broken eval / missing quality
+        # gate). Optimizing against an unvalidated baseline is unsafe, so the
+        # run halts. Post-baseline accuracy failures REVERT the offending
+        # change instead of stopping.
         "baseline_accuracy_failed",
-        # AgentX is on but its benchmark client (aiperf) is missing or is not the pinned build, and the runtime
-        # install could not supply it.
+        # Bring-up terminals: the host cannot run the combo, or the harness
+        # composed an argument the installed parser does not have. Classified as
+        # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
+        "environment_fault",
+        "server_argv_invalid",
+        # A bring-up round expired with nothing confirming its holder dead, so
+        # it keeps excluding the machine.
+        # The out-of-band supervisor found the coordinator's process gone; it
+        # reaches a report through the terminal artifact the supervisor writes.
+        "supervisor_coordinator_died",
+        # The out-of-band supervisor found the tick not advancing and the
+        # coordinator did not answer the stop it was sent; it reaches a report
+        # through the terminal artifact the supervisor writes.
+        "supervisor_tick_stalled",
+        # AgentX is on but its benchmark client (aiperf) is missing or is not
+        # the pinned build, and the runtime install could not supply it. An
+        # environment/supply gap, not a code gap: nothing downstream can author
+        # its way out of it, so the run halts on the FIRST occurrence instead of
+        # spending the budget in the enablement lane.
         AGENTX_PREFLIGHT_STOP_REASON,
     }
 )
@@ -933,36 +957,42 @@ def session_remaining_seconds(
     *,
     now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session (``None`` when unbounded)."""
-    try:
-        deadline = float(getattr(state, "deadline_unix", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        deadline = 0.0
-    if deadline > 0.0:
-        now = float(now_unix) if now_unix is not None else time.time()
-        return max(0.0, deadline - now)
+    """Total wall-clock seconds remaining for the session (``None`` when unbounded).
+
+    Derived from the same forward-summed elapsed total the Coordinator loop and
+    admission read, so the three cannot disagree about what a multi-leg session
+    has already spent. An unarmed leg anchor means no leg is charging through
+    this view; the charged total answers for a state reloaded between legs, and
+    wall time since ``start_ts`` for one that never charged.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``,
+            ``elapsed_charged_sec``, ``leg_anchor_unix`` and ``start_ts``.
+        now_unix (float | None): Override for the current time, kept in the same
+            time source as ``phase_elapsed_seconds(now_unix=...)``.
+
+    Returns:
+        float | None: Non-negative seconds left in the session, ``None`` when
+        unbounded (``max_minutes`` is 0), and ``None`` when nothing on the state
+        dates the session -- no charge, no anchor, no parseable ``start_ts``.
+    """
     mm = _max_minutes(state)
     if mm <= 0:
         return None
-    start_ts = str(getattr(state, "start_ts", "") or "").strip()
-    if not start_ts:
-        return None
     try:
-        from datetime import datetime, timezone
-
-        start = datetime.fromisoformat(start_ts)
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        # Honor an injected now_unix so this stays in the same time source as phase_elapsed_seconds(now_unix=...) for
-        # pure/testable budget math.
-        if now_unix is not None:
-            now_dt = datetime.fromtimestamp(float(now_unix), tz=timezone.utc)
-        else:
-            now_dt = datetime.now(timezone.utc)
-        elapsed_sec = max(0.0, (now_dt - start).total_seconds())
-    except (ValueError, TypeError):
+        charged = max(0.0, float(getattr(state, "elapsed_charged_sec", 0.0) or 0.0))
+        anchor = float(getattr(state, "leg_anchor_unix", 0.0) or 0.0)
+    except (TypeError, ValueError):
         return None
-    return max(0.0, mm * 60.0 - elapsed_sec)
+    now = float(now_unix) if now_unix is not None else time.time()
+    if anchor > 0.0:
+        return max(0.0, mm * 60.0 - (charged + max(0.0, now - anchor)))
+    if charged > 0.0:
+        return max(0.0, mm * 60.0 - charged)
+    started = to_unix(str(getattr(state, "start_ts", "") or "").strip())
+    if started is None:
+        return None
+    return max(0.0, mm * 60.0 - max(0.0, now - started))
 
 
 # plateau pure functions
@@ -1313,11 +1343,6 @@ def compute_kernel_progress_fingerprint(
     last_opt = last_opt if isinstance(last_opt, dict) else {}
     stack = getattr(state, "optimization_stack", None)
     pending = getattr(state, "pending_kernel_integrations", None)
-    last_collective = getattr(state, "last_collective", None)
-    if last_collective is None:
-        last_collective = {}
-    if not isinstance(last_collective, dict):
-        raise ValueError("last_collective must be a mapping")
     controller = getattr(state, "kernel_rewrite_controller_result", None)
     controller = controller if isinstance(controller, dict) else {}
     payload = {
@@ -1327,19 +1352,6 @@ def compute_kernel_progress_fingerprint(
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
         "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
-        "last_collective": [
-            str(last_collective.get(field, ""))
-            for field in (
-                "collective_attempt_id",
-                "status",
-                "decision",
-                "patch_cleanup_status",
-                "integration_decision",
-                "patch_cleanup_action",
-                "integration_revert_status",
-                "integration_finalize_status",
-            )
-        ],
         "rewrite_controller": [
             str(controller.get("macro_cycle", "")),
             str(controller.get("status", "")),
@@ -1351,31 +1363,8 @@ def compute_kernel_progress_fingerprint(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
-def collective_integration_pending(state: Any) -> bool:
-    """Return whether a kept collective still requires terminal E2E handling."""
-    last = getattr(state, "last_collective", None)
-    if last in (None, {}):
-        return False
-    if not isinstance(last, dict):
-        raise ValueError("last_collective must be a mapping")
-    kept = last.get("kept", False)
-    requires_e2e = last.get("requires_e2e_validation", False)
-    if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
-        raise ValueError("collective E2E flags must be boolean")
-    if kept != requires_e2e:
-        raise ValueError("collective E2E flags are inconsistent")
-    # Fall back to legacy field name for --resume compat.
-    cleanup = str(last.get("patch_cleanup_status") or last.get("integration_status") or "")
-    return kept and cleanup != "complete"
-
-
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if collective_integration_pending(state):
-        return True
-    if bool(getattr(state, "collective_only_mode", False)):
-        return False
-
     try:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
             return True
@@ -1412,7 +1401,7 @@ def kernel_work_pending(state: Any) -> bool:
     for entry in getattr(state, "optimization_stack", None) or []:
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("action") or "") in {"integrate", "collective"}:
+        if str(entry.get("action") or "") == "integrate":
             integrated_entries.append(entry)
             source_file = str(entry.get("target_file") or entry.get("source_file") or "")
             if source_file:
@@ -1468,19 +1457,6 @@ def kernel_work_pending(state: Any) -> bool:
         if decision in ("", "PARTIAL", "NEEDS_REVIEW"):
             return True
     return False
-
-
-def enablement_engaged(state: Any) -> bool:
-    """Whether an enablement round has started and is still making progress."""
-    from ..actions.executors._accuracy_gate import ENABLEMENT_MODE_OFF, resolve_enablement_mode
-
-    if resolve_enablement_mode(state) == ENABLEMENT_MODE_OFF:
-        return False
-    return bool(
-        (getattr(state.enablement, "kept_patches", None) or [])
-        or getattr(state.enablement, "inflight_task_id", "")
-        or int(getattr(state.enablement, "attempts", 0) or 0) > 0
-    )
 
 
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
@@ -1672,7 +1648,7 @@ def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Decide the PRELUDE terminal exit on repeated baseline failures."""
     streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak >= 3 and not enablement_engaged(state):
+    if streak >= 3:
         return "prelude_baseline_failed", {"baseline_failure_streak": streak}
     return None
 
@@ -1684,8 +1660,8 @@ def exit_normal_kernel(
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """KERNEL normal exit."""
-    # ``kernel_work_pending`` answers for both outstanding integrations before it short-circuits on a terminal
-    # Controller, so asking it here keeps this exit from stepping over a pending collective or an unintegrated KEEP.
+    # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
+    # so asking it here keeps this exit from stepping over an unintegrated KEEP.
     if _controller_phase_terminal(state) and not kernel_work_pending(state):
         result = getattr(state, "kernel_rewrite_controller_result", None) or {}
         return "kernel_controller_done", {
@@ -2104,7 +2080,6 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "trace_analyze": "TraceLens",
     "run_gemm_tuning": "GEMM tuning",
     "run_optimization": "GEAK",
-    "run_collective": "Collective optimization",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
     "explore": "Validate (bench on the stack)",
@@ -2414,7 +2389,6 @@ __all__ = [
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
     "compute_kernel_progress_fingerprint",
-    "collective_integration_pending",
     "kernel_work_pending",
     "make_history_row",
     "explore_elapsed_seconds",

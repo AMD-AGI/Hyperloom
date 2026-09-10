@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from kernelforge.llm.workspace_policy import (
     tracked_editable_paths,
 )
 from kernelforge.llm.git import git
+from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )
@@ -40,14 +42,8 @@ from kernelforge.mcp_server.tools.bench import (
     calculate_measurement_case_speedups,
 )
 
-# How many best-ranked prior solutions to read for warm-start.
-_WARMSTART_TOP_K = 3
-
-# How many candidates one warm start may fully evaluate.
-_WARMSTART_MAX_MEASURED_CANDIDATES = 3
-
 # How much of the speedup a candidate was ranked on its own measurement has to reproduce for that ranking to count as
-# honest.
+# honest. The regression this answers measured 32% below the claim that had won the ranking.
 _WARMSTART_CLAIM_CONFIRMED_RATIO = 0.9
 
 # Ceiling on the task's declared correctness suite when a warm start runs it, used when no caller passes the loop's
@@ -1047,7 +1043,11 @@ def kb_warmstart(
     bench_repeat=1,
     canonical_timeout_cap_sec=_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC,
 ) -> dict:
-    """Look up + apply the best prior solution as the loop's starting point."""
+    """Look up + apply the best prior solution as the loop's starting point.
+
+    Candidates are measured on this machine and the fastest is adopted, because the speedup a record claims is not
+    evidence this consumer can reproduce it. ``warmstart_policy`` bounds that search and is read at call time.
+    """
     if resume:
         pointer = kb_reference_program_md(workspace_dir)
         result = {
@@ -1079,7 +1079,7 @@ def kb_warmstart(
                 "kernel_backend": kernel_backend,
                 "target_functions": target_functions,
                 "framework": framework,
-                "top_k": _WARMSTART_TOP_K,
+                "top_k": warmstart_policy.top_k(),
                 "source_files": source_files,
                 "workspace": workspace_dir,
                 "operator_name": operator_name,
@@ -1093,6 +1093,17 @@ def kb_warmstart(
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
+        # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
+        # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
+        # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
+        admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
+        if len(admissible) != len(sols):
+            print(
+                f"  [kb] warm-start ignoring {len(sols) - len(admissible)} candidate(s) "
+                f"claiming under {warmstart_policy.min_claimed_speedup():.2f}x",
+                flush=True,
+            )
+        sols = admissible
         if not sols:
             _clear_kb_references(workspace_dir)
             return {
@@ -1165,10 +1176,21 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
+            # ``top_k()`` caps the field, but a count does not bound wall time: one candidate is a compile plus a
+            # correctness suite plus a benchmark, minutes on the heaviest kernels. On expiry the field closes and the
+            # best already measured is adopted below.
+            search_deadline = time.monotonic() + warmstart_policy.budget_sec()
             for idx, sol in enumerate(sols):
-                if len(measurements) >= _WARMSTART_MAX_MEASURED_CANDIDATES:
-                    statuses[idx] = "not_attempted_after_apply"
-                    continue
+                if time.monotonic() >= search_deadline:
+                    for later_index in range(idx, len(statuses)):
+                        statuses[later_index] = "not_attempted_search_budget"
+                    print(
+                        "  [kb] warm-start search budget spent after "
+                        f"{len(measurements)} measured candidate(s); "
+                        "adopting the best of them",
+                        flush=True,
+                    )
+                    break
                 pre_untracked = _untracked_files(workspace_dir)
                 trial = _try_apply_candidate(
                     sol,

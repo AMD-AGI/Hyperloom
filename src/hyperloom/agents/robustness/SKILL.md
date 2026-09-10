@@ -164,7 +164,6 @@ listed below.
 | `budget_burn_no_gain` | medium | `alert(medium)` | `budget` |
 | `budget_strategy_drift` | medium | `alert(medium)` | `budget` |
 | `phase_budget_nearly_exhausted` | medium | `alert(medium)` | `phase_budget` |
-| `conversation_no_progress` | high | `alert(high)` | `conversation_progress` |
 | `aiter_jit_regressed` | high | `alert(high)` | `aiter_jit` |
 | `aiter_jit_build_stuck` | medium | `alert(medium)` | `aiter_jit` |
 | `gain_plateau` | medium | `alert(medium)` | `progress` |
@@ -193,7 +192,7 @@ listed below.
 | `gateway_auth_outage` | high | `alert(high)` | `external_deps` |
 | `wekafs_degraded` (unreachable, or ≥ warn / ≥ critical latency) | medium / high | `alert(medium)` / `alert(high)` | `external_deps` |
 | `tracelens_cli_missing` | high (once per session) | `alert(high)` | `external_deps` |
-| (no symptoms) | — | `send_message(heartbeat)` | — |
+| (no symptoms) | — | `send_message(observation)` | — |
 
 Every other HIGH symptom is strategic: the recommendation rides the
 alert's `detail.suggestion` field and the ladder never auto-emits
@@ -203,13 +202,13 @@ explicit drives, but Orchestration owns the phase-advance decision.
 allowlist (`recover` only); all other policing intents ride alerts.
 
 Cooldown: identical `(symptom_name, subject)` keys are silenced for
-`config.cooldown_ticks` ticks (default 5) to avoid inbox flooding.
+`config.cooldown_sec` seconds (default 300) to avoid inbox flooding.
 
 ## Data sources
 
 Two of the rule families need no source at all: everything driven by the
-rendered Coordinator prompt (`budget`, `phase_budget`,
-`conversation_progress`, `progress`, `crash`) and everything driven by the
+rendered Coordinator prompt (`budget`, `phase_budget`, `progress`,
+`crash`) and everything driven by the
 inbox (`event`, `repeated_payload`, and part of `stall` / `critic_health`).
 Those keep working when the probe is off, which is what multi-node relies on.
 
@@ -262,7 +261,7 @@ ActionLadder swallows the error and emits the intent without
 
 ## Findings on disk
 
-Each tick that emits a non-heartbeat intent writes one
+Each tick that emits a non-idle intent writes one
 `Finding` JSON line to:
 
 ```

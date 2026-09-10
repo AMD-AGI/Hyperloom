@@ -581,9 +581,12 @@ def _write_run_experience_impl(
     this_speedup = float(mean_case_speedup)
     if not math.isfinite(this_speedup) or this_speedup <= 0.0:
         return {"written": False, "reason": "invalid_mean_case_speedup"}
-    if this_speedup <= 1.0:
-        return {"written": False, "reason": "no_improvement"}
-    # A warm-started run begins already holding a recorded solution.
+    # Losing to the source baseline is deliberately not a refusal: an operator whose best port is still slower than
+    # what ships is the one that most needs its progress carried forward, and withholding it made every later run read
+    # the same losing seed. Only the champion pointer stays gated on speedup.
+    #
+    # A warm-started run begins already holding a recorded solution, so recording it again under this run's id would
+    # file a second copy of the one it started from rather than progress.
     if (
         isinstance(reused_speedup, (int, float))
         and math.isfinite(float(reused_speedup))

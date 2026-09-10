@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.inference_optimizer.agentx.mapping import map_aiperf, pct, stat
 
 
@@ -27,7 +29,8 @@ def _sample():
         "benchmark_duration": {"unit": "s", "avg": 14.0},
         "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
-        "e2e_output_token_throughput": _metric(209.9, p50=55.0, p90=447.2, p99=2028.5),
+        # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
+        "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
         # 1/ITL, deliberately far from the e2e figure so reading the wrong axis cannot pass.
         "output_token_throughput_per_user": _metric(686.1, p50=84.1, p90=1092.6),
         "request_latency": _metric(900.0, p50=850.0, p99=1500.0, std=120.0),
@@ -73,7 +76,8 @@ def test_map_latency_fields():
     # tpot mirrors inter_token_latency in the aiperf schema
     assert r["mean_tpot_ms"] == 20.0
     assert r["p90_tpot_ms"] == 34.3
-    assert r["intvty_p90_tok_s_user"] == 447.2
+    # e2e_norm_intvty_p90 is the slow-tail (P10 of the per-request rate = 22.6).
+    assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)
     assert r["mean_e2el_ms"] == 900.0
     assert r["p99_e2el_ms"] == 1500.0
 
@@ -90,13 +94,19 @@ def test_map_total_tput_fallback_from_in_plus_out():
     assert r["total_token_throughput"] == 2000.0  # 1500 in + 500 out
 
 
-def test_intvty_p90_is_zero_when_export_has_only_avg():
-    """An export where e2e_output_token_throughput carries no p90 must not silently produce the mean as the graded interactivity value."""
+def test_e2e_norm_intvty_p90_reads_p10_slow_tail():
+    """Must read P10 (slow tail) not P90: P10 of OSL/E2EL_s is 1/P90(E2EL/OSL), upstream's definition."""
     s = _sample()
-    # Replace the full metric with avg-only (as a throughput metric may appear).
+    r = map_aiperf(s)
+    assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)  # p10, not p90=447.2
+
+
+def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
+    """An export where e2e_output_token_throughput carries no p10 must emit 0.0, not the mean."""
+    s = _sample()
     s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
     r = map_aiperf(s)
-    assert r["intvty_p90_tok_s_user"] == 0.0, f"expected 0.0 (no p90 present), got {r['intvty_p90_tok_s_user']!r}"
+    assert r["e2e_norm_intvty_p90"] == 0.0, f"expected 0.0 (no p10 present), got {r['e2e_norm_intvty_p90']!r}"
 
 
 def test_map_accepts_metrics_wrapped():
@@ -173,3 +183,50 @@ def test_vendored_asset_fallback_matches_package(monkeypatch):
     spec.loader.exec_module(mod)
 
     assert mod.map_aiperf(_sample()) == map_aiperf(_sample())
+
+
+def test_map_corpus_shape_projects_the_measured_distributions():
+    """The shape the prompts render comes from the export, not from constants."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf(_sample()))
+    assert shape["corpus_loader"] == ""  # _sample() carries no dataset metadata
+    assert shape["isl"] == {"avg": 100}  # only avg present in the sample
+    assert shape["completed_requests"] == 42
+    assert shape["duration_s"] == pytest.approx(14.0)
+    assert shape["prefix_cache_hit"] == pytest.approx(0.73)
+    assert shape["source"] == "measured"
+
+
+def test_map_corpus_shape_carries_the_loader_and_the_percentiles():
+    s = _sample()
+    s["metadata"] = {"dataset": {"loader": "semianalysis_cc_traces_weka_062126"}}
+    s["input_sequence_length"] = {"avg": 113814.0, "p50": 94821.0, "p90": 163328.0, "p99": 506158.0}
+    s["output_sequence_length"] = {"avg": 806.0, "p50": 333.0, "p90": 1874.0, "p99": 6386.0}
+    s["request_error_rate"] = {"unit": "ratio", "avg": 0.007}
+
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf(s))
+    assert shape["corpus_loader"] == "semianalysis_cc_traces_weka_062126"
+    assert shape["isl"] == {"avg": 113814, "p50": 94821, "p90": 163328, "p99": 506158}
+    assert shape["osl"] == {"avg": 806, "p50": 333, "p90": 1874, "p99": 6386}
+    assert shape["request_error_rate"] == pytest.approx(0.007)
+
+
+def test_an_export_with_no_sequence_metrics_yields_empty_distributions():
+    """A synthetic result carries none of this; the record must not invent it."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(map_aiperf({"output_token_throughput": {"avg": 10.0}}))
+    assert shape["isl"] == {} and shape["osl"] == {}
+    assert shape["completed_requests"] == 0
+
+
+def test_a_non_list_invalid_reason_is_coerced_to_one():
+    """aiperf may stamp a bare string; the schema field is a list."""
+    export = {
+        "output_token_throughput": {"avg": 10.0},
+        "metadata": {"submission_valid": False, "submission_invalid_reasons": "unsafe_override"},
+    }
+    assert map_aiperf(export)["submission_invalid_reasons"] == ["unsafe_override"]

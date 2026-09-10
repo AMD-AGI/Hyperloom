@@ -43,6 +43,17 @@ when its artefacts were written, and the KERNEL and BASELINE projections are no
 longer emitted. Consumers that ordered events around the old collapsed windows
 see a different ordering.
 
+The round ledger arrives inside v6, as an added section of `enablement` rather
+than a new version: the round lifecycle is read from the durable round ledger
+in `storage/coordinator.db` — the only record that outlives the process that
+took a round — and is reported through `rounds[]` and its counters. The three
+state-sourced fields that ledger replaces are no longer emitted; each one's
+disposition is under
+[`enablement`](#enablement--admission-round-lifecycle-builds--attempt-runtimes).
+That block reports on the runtime a session built rather than on its results,
+and is emitted as `{}` on every session that ran no enablement, so it has never
+carried a field a consumer could gate on.
+
 V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
 Forge invocation, and GEMM-tuning result projections are no longer emitted.
@@ -56,9 +67,10 @@ Compatibility rules:
   revision of V6 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
-* **Renamed, removed, or semantically changed** fields require a major
-  bump. Only one version is written per session; there is no parallel
-  write of the previous version's file.
+* **Renamed, removed, or semantically changed** fields of a result section
+  require a major bump; `enablement` is outside that rule, as the stability
+  guarantee below records. Only one version is written per session; there is
+  no parallel write of the previous version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -117,7 +129,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "token_usage":                 { /* LLM token spend rollup (see below) */ },
   "langfuse":                    { /* Langfuse push receipt */ },
   "kernel_journey":              { /* kernel lifecycle journey */ },
-  "collective":                  { /* §11a collective-lane campaigns */ },
   "versions":                    { /* component/version stamps */ },
   "enablement":                  { /* enablement / targeted-build subsystem summary */ }
 }
@@ -199,8 +210,8 @@ entries join back to their attempt through `entries[].adopted_attempt_id`.
 | Numbers | `local_gain_pct`, `local_gain_source`, `throughput_before`, `throughput_before_source`, `throughput_after`, `throughput_after_source`, `alias_conflicts` |
 | Evidence | `gates[]`, `backend_attempts[]`, `measurements[]`, `measurement_source`, `measurement_occurrences`, `artifacts[]` |
 
-`kind` is one of `kernel_optimization`, `kernel_collective`, `gemm_tuning`,
-`integrate_patch`, `framework_agent`, `explore`, or `replay_warm_recipe`.
+`kind` is one of `kernel_optimization`, `gemm_tuning`, `integrate_patch`,
+`framework_agent`, `explore`, or `replay_warm_recipe`.
 
 Several fields exist to say where a contested value came from, because the
 value alone cannot:
@@ -261,10 +272,7 @@ through `adopted_attempt_id`.
 * `missing` — no gain figure could be established.
 
 A `kernel_agent` entry's `optimization_kind` records which lane produced it:
-`gemm_tuning`, `kernel_collective`, or `kernel_optimization` for a generic
-source-level rewrite. `kernel_collective` comes from the collective lane,
-which records its promotion as an operation of that kind with the integrate
-that settled it; it attributes to `kernel_agent` like any other kernel work.
+`gemm_tuning`, or `kernel_optimization` for a generic source-level rewrite.
 
 Only adopted entries contribute to `summary_by_source`, `summary_by_agent`,
 and `summary_by_kind`. The first answers which agent produced the gain, the
@@ -516,30 +524,6 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 ---
 
-## `collective` — `Collective`
-
-Multi-rank communication campaigns run at KERNEL entry, mirroring the
-`collective_only_mode`, `collective_attempts` and `last_collective` SharedState
-fields. Absent (`{}`) when the lane never ran.
-
-* `only_mode`: mirrors `HYPERLOOM_COLLECTIVE_ONLY`, so a reader can tell a
-  collective-only session from one where the lane merely happened to run.
-* `attempts`: one `CollectiveAttempt` per logical campaign, deduplicated by
-  `collective_attempt_id` so a resumed or salvaged run is not double-counted.
-* `last`: the most recent campaign record, which additionally carries the
-  measurement evidence the ledger rows omit — `bandwidth` (per case: `bytes`,
-  `algbw_gbps`, `busbw_gbps`) and `artifact_files`.
-
-This section is deliberately separate from `optimizations`. Adoption is decided
-by `integration_decision` (the E2E gate), not by `decision` (the
-microbenchmark), so a campaign that wins its micro run and then loses the gate
-never reaches `optimizations` — and without this section would leave no trace
-in the breakdown at all. Read `integration_gain_pct` against
-`integration_base_tput` / `integration_new_tput` for the throughput delta that
-actually decided the outcome; `kernel_speedup` is microbenchmark-only.
-
----
-
 ## `param_search`
 
 The canonical field is `explore_search` (the native merged ledger), with
@@ -586,19 +570,12 @@ Terminal Recipe publication is reported alongside the artifact paths:
 
 ### `telemetry.orchestration_context`
 
-Health of the orchestration conversation's compaction loop (`OrchestrationContext`).
-All fields are `total=False`; sessions predating this field report zeroes.
+Orchestration turn accounting (`OrchestrationContext`). All fields are
+`total=False`; sessions predating this field report zeroes.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `seed_prompts` | int | Full-state SEED pushes to the orchestration backend |
-| `delta_prompts` | int | Thin DELTA pushes (verbose state omitted) |
-| `compactions` | int | `orchestration_checkpoint` events recorded |
-| `degenerate_compactions` | int | Compactions skipped on an unusable summary |
-| `tick_count` | int | Ticks executed; denominator for the rates below |
-| `compactions_per_tick` | float | `compactions / tick_count`; near 1.0 means every tick re-seeds the conversation |
-| `delta_ratio` | float | `delta_prompts / (seed + delta)`; near 0 means the DELTA path is not being reached |
-| `context_tokens_at_compaction` | dict[str, int] | `min` / `median` / `max` token water level at each compaction; a `min` above the soft budget means the token trigger cannot be un-tripped by compacting |
+| `tick_count` | int | Coordinator ticks executed; one full state projection each |
 
 ---
 
@@ -630,15 +607,17 @@ Admission and lifecycle (always present when the block is emitted):
 | `succeeded`                 | bool   | A round was KEPT. Eval-origin additionally requires the revalidation baseline to promote at or above the floor. |
 | `pending`                   | bool   | A trigger is captured but unconsumed.                                                        |
 | `validation_pending`        | bool   | An eval-origin KEEP awaits baseline revalidation.                                            |
-| `stall_streak`              | int    | Consecutive no-progress rounds toward `enablement_stalled`.                                  |
 
 Round detail (present when set):
 
 | Field                       | Type                             | Description                                                        |
 |-----------------------------|----------------------------------|------------------------------------------------------------------------|
-| `inflight_task_id`          | string                           | Specialist task id of the in-flight round.                             |
+| `round_id`                  | string                           | Bring-up round still open in the round store.                          |
+| `round_holder_task_id`      | string                           | Task holding that round (specialist, or the integrate that took it).   |
+| `rounds`                    | `EnablementRoundSummary[]`       | Every round in the ledger, newest first (bounded tail; see below).     |
+| `round_count`               | int                              | Rounds the ledger holds, before that bound.                            |
+| `round_outcomes`            | object (str → int)               | Settled rounds counted by outcome.                                     |
 | `last_specialist_task_id`   | string                           | Specialist task id of the most recent round.                           |
-| `dispatch_tick`             | int                              | Coordinator tick the in-flight round was dispatched on.                |
 | `revalidation_task_id`      | string                           | TaskRegistry id of the tracked revalidation task.                      |
 | `revalidation_generation`   | int                              | Revalidation window counter (idempotency).                             |
 | `launch_log_excerpt`        | string                           | Tail (2000 chars) of the boot failure text that triggered the round.    |
@@ -650,6 +629,34 @@ Round detail (present when set):
 | `build_novelty`             | string[]                         | Novelty keys of the targeted builds requested.                         |
 | `human_review_count`        | int                              | Logs parked for human review.                                          |
 | `accepted_config_path`      | string                           | Effective config from the KEPT candidate bench.                        |
+
+
+### `rounds[]` — `EnablementRoundSummary`
+
+One bring-up round as the ledger recorded it. The ledger is the only record of
+a round: a round has to outlive the process that took it, so no field in
+`state.json` can answer for one.
+
+| Field                  | Type          | Description                                                                                       |
+|------------------------|---------------|---------------------------------------------------------------------------------------------------|
+| `round_id`             | string        | Identity of the round.                                                                              |
+| `state`                | string        | `open` while a holder has it, `settled` once it ended.                                              |
+| `outcome`              | string        | `booted` / `advanced` / `failed` / `abandoned` / `expired_reaped` / `expired_unreaped`; empty while open. `advanced` means the round cleared a new boot failure but the model did not yet boot cleanly.  |
+| `holder_task_id`       | string        | Task holding it (specialist, or the integrate that took it over).                                   |
+| `fence`                | int           | The holder's token; only a handoff advances it.                                                     |
+| `opened_unix`          | float         | When the round was acquired.                                                                        |
+| `settled_unix`         | float \| null | When it ended, `null` while open.                                                                   |
+
+### Fields the round ledger replaced
+
+These three stopped being emitted in the v6 export that added `rounds[]`.
+
+| Field              | Disposition                                                                                                                          |
+|--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `attempts`         | **Removed.** A dispatch counter on session state duplicated the ledger's `round_count`. The ledger is the authoritative source; `rounds[].round_count` replaces it. |
+| `stall_streak`     | **Removed.** A counter on session state could be resurrected by a crash between the round and the write. What bounds a session whose rounds stop clearing boot failures is now the attempt cap, reported as the `enablement_attempts_exhausted` stop reason; a session still advancing is bounded by the run's wall clock. |
+| `inflight_task_id` | **Renamed** to `round_holder_task_id`, and re-sourced. It named the authoring specialist; the round it stood for also covers the integrate that consumes the specialist's deliverable, and the holder is whichever of the two currently has it. |
+| `dispatch_tick`    | **Removed.** It dated a round by a coordinator tick counter that no consumer could convert to a time. `rounds[].opened_unix` dates the same event in wall-clock seconds. |
 
 Eval-origin trigger (present when `origin` is `eval`):
 
@@ -881,9 +888,14 @@ regardless of producer.
 
 The Hyperloom team commits to the following compatibility guarantees.
 
-1. Never removing or renaming a documented field within a
-   major `schema_version`. Such changes require a major bump, as the
-   `v5.0` optimization cutover did.
+1. Never removing or renaming a documented field of a result section within
+   a major `schema_version`. Such changes require a major bump, as the `v5.0`
+   optimization cutover did, and every removed or renamed field is given a
+   disposition in the section it left. `enablement` is outside this guarantee:
+   it reports on the runtime a session built rather than on its results, is
+   emitted as `{}` whenever no enablement ran, and its fields move with the
+   runtime they describe — every field the round ledger replaced is still given
+   a disposition in that section.
 2. Never fabricating values for fields the runtime did not
    actually measure. Missing → null / `[]` / `{}`.
 3. Adding new optional fields freely. Consumers must tolerate

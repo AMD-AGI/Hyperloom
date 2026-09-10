@@ -11,8 +11,9 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -34,9 +35,11 @@ from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.scheduler import ANALYSIS_BUDGET_SEC
 from kernelforge.kernel_rewrite_controller.task_publisher import (
     TaskPublicationResult,
+    pending_rejections,
     publish_complete_staged_tasks,
 )
 from kernelforge.llm.git import git
+from kernelforge.tracker.usage import UsageAccumulator
 
 ANALYSIS_STATUS_COMPLETED = "completed"
 ANALYSIS_STATUS_FAILED = "failed"
@@ -48,6 +51,12 @@ _PUBLISH_POLL_SEC = 0.5
 # Caps on what one investigation tool call may return.
 _MAX_GREP_MATCHES = 200
 _MAX_READ_LINES = 2000
+
+# How many times the session may be held open over a refused draft. One round
+# is what an ordinary contract slip needs; a draft that still fails after this
+# many is one the agent cannot fix from the reason it was given, and spending
+# the rest of the analysis budget on it buys nothing.
+_MAX_STOP_DENIALS = 3
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,14 @@ class OpportunityAnalysisResult:
     #: the count alone cannot say which rule it broke. Durable because Hyperloom
     #: discards this process's streams when it hard-kills the controller.
     rejected_tasks: tuple[dict[str, str], ...] = ()
+    #: What this session spent on the model, in ``UsageAccumulator.totals()``
+    #: shape, or ``{}`` when no provider call was counted. Recorded because the
+    #: analysis is the one part of a campaign whose spend nothing else observes:
+    #: it runs in the controller's own process, and a run that publishes no task
+    #: publishes no forge-loop to account for it either.
+    llm_usage: dict[str, Any] = field(default_factory=dict)
+    #: Model the analysis ran on, for the ledger row.
+    agent_model: str = ""
     started_at_unix: float = 0.0
     finished_at_unix: float = 0.0
 
@@ -100,8 +117,10 @@ async def _cap_investigation_result(input_data, _tool_use_id, _context) -> dict:
 class _AnalysisToolGuard:
     """Confine Agent writes to staging and bound what its reads may return."""
 
-    def __init__(self, staging_root: Path) -> None:
+    def __init__(self, staging_root: Path, *, max_stop_denials: int = _MAX_STOP_DENIALS) -> None:
         self.staging_root = staging_root.resolve()
+        self.max_stop_denials = max(0, int(max_stop_denials))
+        self.stop_denials = 0
 
     def hooks(self) -> AgentHooks:
         return AgentHooks(
@@ -118,8 +137,42 @@ class _AnalysisToolGuard:
                     matcher="Read|Grep",
                     callback=_cap_investigation_result,
                 ),
-            ]
+            ],
+            # Stop is a lifecycle event rather than a tool, so it carries no
+            # matcher; ``_hook_matcher`` forwards one only when it is set.
+            stop=[AgentHook(matcher="", callback=self._on_stop)],
         )
+
+    async def _on_stop(self, _input_data, _tool_use_id, _context) -> dict:
+        """Refuse to end the session while a draft stands refused.
+
+        The host validates out of process on a timer, so an agent that writes a
+        malformed draft and stops hears nothing: the run reports fewer tasks than
+        the agent believes it published, and a whole analysis budget buys zero
+        operators over a field it could have corrected in one turn. Denials are
+        capped because a draft breaking a rule the agent cannot satisfy would
+        otherwise spend the rest of the budget failing in place.
+        """
+        pending = pending_rejections(self.staging_root)
+        if not pending or self.stop_denials >= self.max_stop_denials:
+            return {}
+        self.stop_denials += 1
+        refusals = "\n".join(f"- {draft}: {reason}" for draft, reason in sorted(pending.items()))
+        return {
+            "decision": "block",
+            "reason": (
+                "The host refused these staged tasks, so they were never published:\n"
+                f"{refusals}\n"
+                "Each refusal is also written to rejection.json inside the draft's own "
+                "directory. Correct the task.json the reason names and the host will "
+                "revalidate it within a few seconds. If the operator should not be "
+                "published at all, withdraw the draft by rewriting its task.json as "
+                '{"withdrawn": "<why>"} -- you have no tool that can delete a '
+                "directory, so that is how a draft is taken back. Do not stop with a "
+                f"draft neither fixed nor withdrawn (attempt {self.stop_denials} of "
+                f"{self.max_stop_denials})."
+            ),
+        }
 
     async def _on_pre_disallowed_tool(self, _input_data, _tool_use_id, _context) -> dict:
         return {
@@ -219,7 +272,12 @@ Apply these non-negotiable opportunity rules:
 2. Publish only operators with editable implementation source in one supplied
    Git repository. If the active implementation is available only as a binary,
    shared library, HSACO, or other generated artifact without a tracked editable
-   generator source, skip it.
+   generator source, skip it. Read this rule carefully before applying it to a
+   collective: its kernel usually does ship inside a vendor comms library, and
+   that alone does not disqualify it. What drives the collective is editable
+   here -- which algorithm is chosen, the size thresholds that choose it, buffer
+   and IPC registration, the quantized path, how it is captured into a graph --
+   and rewriting that layer is a real optimization, not a workaround.
 3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
    priority values to higher-share operators. When exact percentages are
    unavailable, rank only from clearly labeled corroborated evidence and never
@@ -231,6 +289,36 @@ Apply these non-negotiable opportunity rules:
    with the same shapes, dtypes, layouts, and semantic inputs. Performance must
    time CUDA/HIP graph replays over preallocated inputs; do not use eager timing
    or silently fall back to eager execution.
+6. Set world_size to the current serving TP width only when the operator is a
+   true collective that needs multiple ranks to compute the correct result.
+   Otherwise keep world_size at 1.
+7. When world_size > 1, operator_name must end in the rank count (for example
+   custom_all_reduce_tp8). This is validated, not advisory: world_size is not
+   part of the identity that keys the experience store, so without the suffix
+   two rank counts of one collective become the same operator and only one
+   task survives. Choose backend aiter for editable all_reduce /
+   reduce_scatter / all_gather sources in aiter.
+8. A communication operator is a first-class target, not a special case to be
+   avoided. Publish it when its own source is editable, or when the dispatch
+   layer that selects and configures it is. A candidate row whose
+   candidate_source is nccl_summary has already resolved a mangled comms symbol
+   to the editable device source that launched it. Skip a collective only after
+   establishing that neither its kernel nor anything that chooses, configures or
+   registers it can be edited in a supplied repository.
+9. Rank a collective on the communication total, not on one kernel row. One
+   logical collective is split across several rows whose durations are prorated
+   from a sample, so every row understates it and comparing those rows against a
+   single fused GEMM is not a like-for-like comparison. Use
+   nccl_summary_total_ms, which those rows carry, as the share to rank on.
+10. Expect a communication candidate to arrive with no shapes. A comms summary
+    row carries no tensor metadata, so an empty shapes list is normal and is not
+    a reason to skip the candidate or to call its evidence weak. Derive the cases
+    from the serving state instead: the TP width, the hidden size, the dtype and
+    the batch and sequence extents this workload actually runs.
+11. Do not author distributed launch or cross-rank measurement logic in driver.py.
+    Write the same single-process driver contract; forge-loop task preparer adds
+    torchrun launch, process-group setup, and cross-rank reductions when
+    world_size > 1.
 
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
@@ -243,10 +331,8 @@ subdirectory containing exactly:
 
 task.json must use this exact top-level structure:
 {
-  "schema_version": 1,
   "identity": {
     "producer": "forge-loop",
-    "kernel_name": "<normalized operator name>",
     "framework": "<framework>",
     "framework_version": "<version>",
     "backend": "<backend>",
@@ -255,7 +341,7 @@ task.json must use this exact top-level structure:
   "base_commit": "",
   "repo_root": "<absolute Git top-level>",
   "kernel_path": "<repo-relative source path>",
-  "operator_name": "<name that normalizes to identity.kernel_name>",
+  "operator_name": "<entry point spelled as its source spells it>",
   "driver_path": "driver.py",
   "source_files": ["<repo-relative path>"],
   "target_functions": ["<function>"],
@@ -266,6 +352,8 @@ task.json must use this exact top-level structure:
     "dtype": "<runtime dtype>"
   }],
   "priority": 0,
+  "world_size": 1,
+  "gpu_pct": 15.3,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
     "level": "<measured|corroborated|inferred>",
@@ -276,6 +364,16 @@ task.json must use this exact top-level structure:
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
 to the current repo HEAD before publication.
+gpu_pct is this operator's share of end-to-end GPU time, the measured number
+your ranking already rests on. It is recorded and reported, never checked and
+never acted on, so no task is refused over it; omit it when you have only
+corroborated evidence rather than trade it for a figure you did not measure.
+identity carries no kernel_name: the host derives that dimension from
+operator_name, so supplying one of your own decides nothing. Give operator_name
+the entry point as the source writes it, keeping camel case and any namespace
+prefix -- `aiter::fusedAddRmsNorm`, not `fused_add_rms_norm`. Upstream
+pull-request search splits that spelling into terms, and a name normalized
+before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
 `"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
 kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
@@ -291,14 +389,32 @@ the forge-loop contract: `python3 driver.py` prints a correctness line such as
 --iters 20 --bench-mode` measures CUDA/HIP graph replays and prints
 `case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`;
 `python3 driver.py --profile-run` selects one representative case, runs only
-the target kernel for 1-3 synchronized iterations without reference work or
-timing output, and exits zero. Do not search other Hyperloom or KernelForge
-trees for task or driver examples; this prompt is the authoritative contract.
+   the target kernel for 1-3 synchronized iterations without reference work or
+   timing output, and exits zero. Do not search other Hyperloom or KernelForge
+   trees for task or driver examples; this prompt is the authoritative contract.
+
+The host copies driver.py into the repository under optimization before running
+it, one directory below the repository root. Resolve anything you need from the
+tree — a source file to hash, a config to read — as
+`Path(__file__).resolve().parents[1] / "<repo-relative path>"`. Do not derive
+that root from the current working directory, which is not the repository, nor
+from an environment variable, which the loop repoints at its build cache.
 
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
 trying to prove an implementation. Do not write state.json and do not modify
 source repositories or handoff files.
+
+The host validates each draft a few seconds after you stop writing to it, and
+takes the directory away once it passes. A draft still sitting in staging with
+a `rejection.json` beside it was refused and was never published: read that
+file, fix what its reason names, and the host will try again on its own.
+
+When the reason shows the operator should not be published at all, withdraw the
+draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
+delete a directory, so this is how a draft is taken back, and a withdrawn one
+is neither published nor held against you. You cannot end the session while a
+refused draft is neither fixed nor withdrawn.
 """
 
 
@@ -359,6 +475,7 @@ class OpportunityAnalysisAgent:
         layout.agent_staging_root.mkdir(parents=True, exist_ok=True)
         _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
+        usage = UsageAccumulator()
         spec = AgentRunSpec(
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(handoff, layout.agent_staging_root),
@@ -392,6 +509,7 @@ class OpportunityAnalysisAgent:
             run_session_with_api_resume(
                 self.backend,
                 spec,
+                usage=usage,
                 deadline_sec=self.timeout_sec,
             )
         )
@@ -452,12 +570,19 @@ class OpportunityAnalysisAgent:
             for name, result in sorted(publications.items())
             if not result.published
         )
+        # Read off the accumulator rather than off the run result: the session
+        # may have been resumed or cancelled, and the accumulator counted every
+        # provider call either way. ``calls == 0`` means nothing was observed,
+        # which is not the same claim as zero spend.
+        totals = usage.totals()
         outcome = OpportunityAnalysisResult(
             status=status,
             reason=reason,
             published_task_count=published,
             rejected_task_count=len(rejected),
             rejected_tasks=rejected,
+            llm_usage=totals if int(totals.get("calls") or 0) > 0 else {},
+            agent_model=str(self.backend.runtime.model or ""),
             started_at_unix=started,
             finished_at_unix=time.time(),
         )

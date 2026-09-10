@@ -76,7 +76,6 @@ class _TaskAgentBackend:
             (draft / "task.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "identity": identity,
                         "base_commit": "",
                         "repo_root": str(self.repo),

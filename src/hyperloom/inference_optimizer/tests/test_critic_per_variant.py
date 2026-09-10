@@ -159,7 +159,6 @@ def _write_specialist_workspace_with_patch(
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": ["patches/001_test.patch"],
-                "empty": False,
                 "summary": "PR-A7 executor defense-in-depth fixture",
             }
         )
@@ -236,7 +235,6 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path, monkeyp
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": ["patches/001.patch"],
-                "empty": False,
                 "summary": "approved",
             }
         )

@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller._collective_names import (
+    carries_parallelism_suffix,
+    looks_like_multi_rank_operator,
+)
 from kernelforge.kernel_rewrite_controller.contracts import (
-    TASK_SCHEMA_VERSION,
     KernelRewriteTask,
     TaskContractError,
     TaskParseResult,
@@ -23,7 +27,6 @@ from kernelforge.kernel_rewrite_controller.paths import (
     operator_directory_name,
     safe_relative_path,
 )
-from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.implementation_identity import normalize_operator_name
 from kernelforge.knowledge.kernel_identity import (
     KERNEL_CANONICAL_DIMENSIONS,
@@ -32,10 +35,11 @@ from kernelforge.knowledge.kernel_identity import (
 )
 from kernelforge.knowledge.loop_identity import LOOP_PRODUCER
 
+log = logging.getLogger(__name__)
+
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REQUIRED_TASK_FIELDS = frozenset(
     {
-        "schema_version",
         "identity",
         "base_commit",
         "repo_root",
@@ -52,10 +56,23 @@ _OPTIONAL_TASK_FIELDS = frozenset(
         "shape_cases",
         "reason",
         "evidence",
+        "world_size",
+        "gpu_pct",
     }
 )
 _TASK_FIELDS = _REQUIRED_TASK_FIELDS | _OPTIONAL_TASK_FIELDS
 _IDENTITY_FIELDS = frozenset(KERNEL_CANONICAL_DIMENSIONS)
+#: ``kernel_name`` is the address form of ``operator_name`` rather than a
+#: dimension of its own, so the host derives it and the agent does not supply
+#: it. A draft that still carries one is accepted and the value replaced: the
+#: agent has no channel to hear a refusal on, so a rule it can only learn by
+#: breaking costs the whole analysis budget.
+_AGENT_IDENTITY_FIELDS = _IDENTITY_FIELDS - {"kernel_name"}
+#: What ``normalize_operator_name`` answers when no usable name survives. Read
+#: from the normalizer rather than spelled out so the two cannot drift. Every
+#: unnameable operator would otherwise share one canonical id, and with it one
+#: task directory, one patch pointer and one knowledge-base page.
+_UNNAMEABLE_OPERATOR = normalize_operator_name("")
 
 
 def _required_string(payload: dict[str, Any], field_name: str) -> str:
@@ -74,26 +91,47 @@ def _string_list(payload: dict[str, Any], field_name: str, *, paths: bool = Fals
     return tuple(item.strip() for item in value)
 
 
-def _identity(payload: Any) -> tuple[KernelRecipeIdentity, str]:
+def _log_ignored(unknown: set[str], where: str) -> None:
+    """Note the fields this contract does not read, without refusing the task.
+
+    An extra key decides nothing: every field the run acts on is required, and
+    the optional ones are read by name. Refusing over one would cost the whole
+    operator, so it is dropped and recorded instead.
+    """
+    if unknown:
+        log.info("ignoring unknown %s field(s): %s", where, ", ".join(sorted(unknown)))
+
+
+def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity, str]:
+    """Build the six-tuple, deriving ``kernel_name`` from ``operator_name``.
+
+    Deriving rather than checking is what keeps the controller's canonical id
+    and the knowledge-base page forge-loop writes to at one address. The loop
+    resolves its page from ``--operator-name`` alone, so a ``kernel_name`` the
+    agent chose independently could disagree with it, and the disagreement is
+    silent: reads land on a page no write reached, and one operator accumulates
+    two half-filled histories.
+    """
     if not isinstance(payload, dict):
         raise TaskContractError("identity must be a JSON object")
-    missing = _IDENTITY_FIELDS - set(payload)
-    unknown = set(payload) - _IDENTITY_FIELDS
+    missing = _AGENT_IDENTITY_FIELDS - set(payload)
     if missing:
         raise TaskContractError(f"identity is missing fields: {', '.join(sorted(missing))}")
-    if unknown:
-        raise TaskContractError(f"identity has unknown fields: {', '.join(sorted(unknown))}")
+    _log_ignored(set(payload) - _IDENTITY_FIELDS, "identity")
+    kernel_name = normalize_operator_name(operator_name)
+    if kernel_name == _UNNAMEABLE_OPERATOR:
+        raise TaskContractError(f"operator_name normalizes to no usable kernel name: {operator_name!r}")
     try:
-        identity = KernelRecipeIdentity.from_mapping(payload)
+        identity = KernelRecipeIdentity.from_mapping({**payload, "kernel_name": kernel_name})
         operator_id = kernel_recipe_canonical_id(identity)
     except ValueError as error:
         raise TaskContractError(str(error)) from error
     if identity.producer != LOOP_PRODUCER:
         raise TaskContractError(f"identity.producer must be {LOOP_PRODUCER!r}")
-    if identity.backend not in KERNEL_BACKENDS:
-        raise TaskContractError(
-            f"identity.backend must be one of the registered kernel backends: {', '.join(KERNEL_BACKENDS)}"
-        )
+    # ``backend`` is not checked against the registered set. It selects a prompt
+    # layer, and forge-loop already answers an unregistered one with no layer
+    # rather than an error, so refusing here would cost a whole operator over a
+    # naming choice the loop is willing to live with.
     return identity, operator_id
 
 
@@ -108,17 +146,14 @@ def parse_task_payload(
     if not isinstance(payload, dict):
         raise TaskContractError("task.json must contain a JSON object")
     missing = _REQUIRED_TASK_FIELDS - set(payload)
-    unknown = set(payload) - _TASK_FIELDS
     if missing:
         raise TaskContractError(f"task.json is missing fields: {', '.join(sorted(missing))}")
-    if unknown:
-        raise TaskContractError(f"task.json has unknown fields: {', '.join(sorted(unknown))}")
+    _log_ignored(set(payload) - _TASK_FIELDS, "task.json")
 
-    version = payload.get("schema_version")
-    if isinstance(version, bool) or version != TASK_SCHEMA_VERSION:
-        raise TaskContractError(f"unsupported task schema {version!r}; expected {TASK_SCHEMA_VERSION}")
-
-    identity, operator_id = _identity(payload.get("identity"))
+    # Read ahead of the identity: ``identity.kernel_name`` is this name's
+    # address form, so the six-tuple cannot be built before it.
+    operator_name = _required_string(payload, "operator_name")
+    identity, operator_id = _identity(payload.get("identity"), operator_name=operator_name)
     root = Path(task_dir).expanduser().resolve()
     if enforce_directory_identity and root.name != operator_directory_name(operator_id):
         raise TaskContractError(f"task directory {root.name!r} does not match canonical operator id {operator_id!r}")
@@ -151,26 +186,48 @@ def parse_task_payload(
     if not driver_file.is_file():
         raise TaskContractError(f"driver_path is not a file: {driver_path!r}")
 
-    operator_name = _required_string(payload, "operator_name")
-    if normalize_operator_name(operator_name) != identity.kernel_name:
-        raise TaskContractError(
-            "operator_name does not normalize to identity.kernel_name: "
-            f"{normalize_operator_name(operator_name)!r} != {identity.kernel_name!r}"
-        )
-
     priority = payload.get("priority")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         raise TaskContractError("priority must be a non-negative integer")
 
+    # Carried verbatim rather than validated: no code reads a case, so a shape
+    # the contract disagrees with is still worth more to the driver author than
+    # a refused task -- and by the same argument, not reshaped either.
     shape_cases = payload.get("shape_cases", [])
-    if not isinstance(shape_cases, list) or any(not isinstance(case, dict) for case in shape_cases):
-        raise TaskContractError("shape_cases must be a list of JSON objects")
     evidence = payload.get("evidence", [])
     if not isinstance(evidence, list):
         raise TaskContractError("evidence must be a JSON list")
     reason = payload.get("reason", "")
     if not isinstance(reason, str):
         raise TaskContractError("reason must be a string")
+
+    world_size_raw = payload.get("world_size", 1)
+    if isinstance(world_size_raw, bool) or not isinstance(world_size_raw, int) or world_size_raw < 1:
+        raise TaskContractError("world_size must be an integer >= 1")
+    if world_size_raw > 1 and not carries_parallelism_suffix(operator_name, identity.kernel_name):
+        # world_size is deliberately outside the identity six-tuple, which is
+        # the experience KB's primary key, so the suffix is the only thing
+        # telling one rank count's recipe from another's. Left as prose, two
+        # rank counts of the same collective land on one operator_id: the
+        # scheduler keeps one task per id and silently drops the other, and
+        # both write the same KB entry.
+        raise TaskContractError(
+            f"world_size {world_size_raw} needs the rank count in the operator name, because world_size is "
+            f"not part of the identity that keys the experience store. Neither operator_name "
+            f"{operator_name!r} nor identity.kernel_name {identity.kernel_name!r} carries a parallelism "
+            f"suffix; name it something like '{identity.kernel_name}_tp{world_size_raw}'."
+        )
+    if world_size_raw > 1 and not looks_like_multi_rank_operator(operator_name, identity.kernel_name):
+        # A rank count on an operator that reads as ordinary single-GPU work is
+        # almost always a mistake, and an expensive one: the campaign runs to
+        # its budget before the measurement is found to describe nothing.
+        raise TaskContractError(
+            f"world_size {world_size_raw} declares a multi-rank operator, but neither "
+            f"operator_name {operator_name!r} nor identity.kernel_name {identity.kernel_name!r} "
+            "names one. Name the collective it performs (all_reduce, all_gather, "
+            "reduce_scatter, all_to_all, broadcast, send/recv, an EP dispatch/combine, or a "
+            "vendor comms symbol), or carry the parallelism as a suffix such as '_tp8'."
+        )
 
     return KernelRewriteTask(
         identity=identity,
@@ -183,9 +240,13 @@ def parse_task_payload(
         priority=priority,
         source_files=_string_list(payload, "source_files", paths=True),
         target_functions=_string_list(payload, "target_functions"),
-        shape_cases=tuple(copy.deepcopy(shape_cases)),
+        shape_cases=copy.deepcopy(shape_cases),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
+        world_size=world_size_raw,
+        # Unchecked by contract: it is read by people, not by the run, and a
+        # refusal here would trade an operator for a number's formatting.
+        gpu_pct=copy.deepcopy(payload.get("gpu_pct")),
     )
 
 

@@ -33,7 +33,7 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
-# -- WS1: explicit specialist wall-clock budget ----------------------------
+# -- The specialist wall-clock deadline ------------------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
     # macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
     coord.shared_state.macro_cycle = 0
@@ -65,22 +65,40 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
     )
 
     assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
-    assert coord._gpu_lease_ttl_sec(params=params) == int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
+    assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 
-def test_specialist_budget_does_not_outlast_session(coord: Coordinator, monkeypatch) -> None:
-    """A profile floor cannot extend a finite session's wall-clock budget."""
-    monkeypatch.setattr(coord.shared_state, "remaining_minutes", lambda: 30.0)
+def test_specialist_deadline_does_not_outlast_the_session(coord: Coordinator) -> None:
+    """A profile floor cannot extend a finite session past its own budget."""
+    coord.shared_state.max_minutes = 30
+    coord.shared_state.begin_leg()
 
-    budget = coord._specialist_wall_budget_sec(
+    deadline = coord._specialist_deadline(
         needs_gpu=True,
         params={"scope": "domain", "mode": "patch", "bench": True},
     )
 
-    assert budget == 30 * 60
+    assert deadline.remaining() == pytest.approx(30 * 60, abs=2)
 
 
-# -- WS2: GPU lease TTL re-source + structured-finally release --------------
+def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinator) -> None:
+    """An exhausted budget must tighten the specialist bound, never remove it."""
+    import time as _time
+
+    coord.shared_state.max_minutes = 30
+    coord.shared_state.begin_leg(now_unix=_time.time() - 3_600.0)
+
+    ample = coord._specialist_deadline(needs_gpu=True)
+    coord.shared_state.max_minutes = 240
+    coord.shared_state.begin_leg()
+    fresh = coord._specialist_deadline(needs_gpu=True)
+
+    assert ample.expired()
+    assert not fresh.expired()
+    assert ample.remaining() < fresh.remaining()
+
+
+# -- GPU lease TTL re-source + structured-finally release -------------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); lease must outlive the kill.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
@@ -90,6 +108,7 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
     assert ttl >= budget
+    assert coord._gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
@@ -378,6 +397,63 @@ def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
     assert coord._target_gap_advisory_block() == ""
     assert coord._current_primary_gap() is None
     assert coord._priors_match_advisory_block() == ""
+
+
+# -- specialist findings block --------------------------------------------
+def _round(domain: str, finding: str, confidence, questions=()) -> dict:
+    return {
+        "domain": domain,
+        "confidence": confidence,
+        "new_findings": [finding],
+        "residual_questions": list(questions),
+    }
+
+
+def _findings(coord: Coordinator) -> str:
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+
+    return ConversationCollaborator(coord)._specialist_findings_block()
+
+
+def test_specialist_findings_survive_a_non_numeric_confidence(coord: Coordinator) -> None:
+    """``confidence`` is an audit field, so no value of it can drop the section.
+
+    It reaches the row straight from the specialist's own JSON, and the schema
+    invites a free-form self-assessment, so a string or a dict there must not
+    cost every domain its findings.
+    """
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", "kv cache is the bottleneck", "high"),
+        _round("comm_specialist", "all_reduce dominates", {"level": "high"}),
+        _round("kernel_specialist", "gemm is fine", 0.7, questions=["what about fp8?"]),
+    ]
+
+    block = _findings(coord)
+
+    assert "kv cache is the bottleneck" in block
+    assert "all_reduce dominates" in block
+    assert "gemm is fine" in block
+    assert "[kernel_specialist] what about fp8?" in block
+
+
+def test_specialist_findings_are_ordered_newest_first(coord: Coordinator) -> None:
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", "older finding", 0.9),
+        _round("comm_specialist", "newer finding", 0.1),
+    ]
+
+    block = _findings(coord)
+
+    assert block.index("newer finding") < block.index("older finding")
+
+
+def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(coord: Coordinator) -> None:
+    coord.shared_state.specialist_rounds = [
+        {"domain": "serving_specialist", "new_findings": [], "residual_questions": []},
+        "not a dict",
+    ]
+
+    assert _findings(coord) == ""
     assert coord._recent_proposed_variants() == []
 
 

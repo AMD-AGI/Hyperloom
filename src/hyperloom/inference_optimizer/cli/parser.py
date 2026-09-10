@@ -451,6 +451,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
     opt.add_argument(
+        "--extend-hours",
+        dest="extend_hours",
+        type=float,
+        default=0.0,
+        help="On --resume-from, grant this many additional hours to the "
+        "session budget. Elapsed time is summed forward across every leg and "
+        "never reset, so this is the only way to lengthen a run that has "
+        "already spent its budget. The grant is recorded in the session state "
+        "with its reason.",
+    )
+    opt.add_argument(
         "--closing-grace-sec",
         type=float,
         default=None,
@@ -733,7 +744,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="mock",
         default=None,
-        help="Force the heartbeat-only mock Robustness backend.",
+        help="Force the observation-only mock Robustness backend.",
     )
     opt.add_argument(
         "--robustness-agent",
@@ -973,9 +984,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_per_turn_max_seconds",
         type=float,
         default=600.0,
-        help="Wall-clock fallback ceiling per specialist task when no "
-        "explicit wall_budget_sec is provided (legacy backstop, default "
-        "600s; production dispatches use the WS1 wall-clock budget).",
+        help="Per-LLM-call timeout for an in-process specialist backend "
+        "(default 600s). It bounds one call, never the task: the task is "
+        "bounded by the absolute deadline the dispatcher hands down.",
     )
     # specialist dispatch shape
     opt.add_argument(

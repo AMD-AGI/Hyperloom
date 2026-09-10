@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
 
 from __future__ import annotations
-import time
 from typing import Any
 from ..state.shared_state import SharedState
 
@@ -19,12 +18,28 @@ async def run_lease_and_db_reclaim(
     *,
     reason: str,
 ) -> None:
-    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB."""
+    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
+
+    Shared by the periodic maintenance tick and the cycle soft-restart. The
+    task reclaim is the R6 watchdog: a running task whose execution lease
+    expired is failed so a dead worker never wedges a lane indefinitely. Every
+    step is individually best-effort — maintenance never aborts the run loop.
+
+    The serving-lease sweep is not one of the steps: it runs in the reconciler,
+    at the top of every tick, because an open bring-up round holds one of those
+    leases and can only be settled there. This pass reports what that sweep did
+    rather than running a second one behind its back.
+
+    Args:
+        host: Anything exposing the Coordinator's ``reconciler``,
+            ``gpu_specialist_pool``, ``tasks`` and ``db``.
+        summary: Mutated in place with the per-step counts.
+        reason: Reclaim reason recorded on the tasks and used as the log prefix.
+    """
     try:
-        reaped = await host.locks.reap_expired()
-        summary["leases_reaped"] = len(reaped or [])
+        summary["leases_reaped"] = host.reconciler.last_report.leases_reaped
     except Exception:  # noqa: BLE001
-        log.exception("%s: serving-lease reap failed", reason)
+        log.exception("%s: reading the reconciler's lease sweep failed", reason)
     try:
         summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
     except Exception:  # noqa: BLE001
@@ -53,15 +68,12 @@ class MaintenanceCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    async def _maybe_run_maintenance_tick(
+    async def _run_maintenance(
         self,
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Periodic in-process maintenance (R5 reaper + R4 DB retention)."""
-        every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
-        if every <= 0 or tick <= 0 or (tick % every) != 0:
-            return None
+        """Reap expired leases, prune the DB, and trim ``runs/`` when disk is low; the Coordinator's wall-clock gate owns the cadence."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
         try:
@@ -131,148 +143,3 @@ class MaintenanceCollaborator:
                 removed,
             )
         return summary
-
-    async def _maybe_checkpoint_orchestration(
-        self,
-        *,
-        tick: int,
-        phase_changed: bool = False,
-        force: bool = False,
-    ) -> bool:
-        """Compact the orchestration conversation into durable memory."""
-        if not self._checkpoint_enabled:
-            return False
-        if not self._orchestration_conversational():
-            return False
-        backend = self.backends.get("orchestration")
-        if backend is None or not getattr(backend, "conversational", False):
-            return False
-        # Nothing to compact before the first real turn seeded the session.
-        if not self._orchestration_seeded:
-            return False
-
-        from ..state import orchestration_memory as _orch_mem
-
-        now_min = 0.0
-        if self._run_started_monotonic is not None:
-            now_min = (time.monotonic() - self._run_started_monotonic) / 60.0
-        tracker = self._checkpoint_tracker
-        ticks_since = max(0, tick - tracker.last_tick)
-        minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Growth signal is the context-token water level; char count is the fallback for backends that don't report
-        # token usage.
-        if not force and not self._checkpoint_policy.should_checkpoint(
-            ticks_since_last=ticks_since,
-            minutes_since_last=minutes_since,
-            chars_since_last=tracker.chars_since_last,
-            phase_changed=phase_changed,
-            context_tokens_now=tracker.context_tokens_now,
-        ):
-            return False
-
-        try:
-            sys_prompt = await self._load_system_prompt("orchestration")
-            result = await backend.run(
-                prompt=_orch_mem.CHECKPOINT_REQUEST_PROMPT,
-                system_prompt=sys_prompt,
-                tools=[],
-                max_turns=0,
-                # Checkpoint summary is plain-text, not emit_intent; relax no-intent guard.
-                allow_no_intent=True,
-            )
-            raw_text = getattr(result, "raw_text", "") or ""
-            parsed = _orch_mem.parse_checkpoint_reply(raw_text)
-            degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
-            cur_phase = str(getattr(self.shared_state, "phase", "") or "")
-            # Degenerate reply: skip compaction, preserve the live conversation + prior memory, but reset the tracker
-            # to avoid a checkpoint storm.
-            if degenerate:
-                self._coord._consec_degenerate_ckpt += 1
-                tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
-                await self._record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "orchestration_checkpoint_degraded",
-                        "tick": tick,
-                        "consecutive": self._consec_degenerate_ckpt,
-                        "parse_error": str(parsed.get("parse_error", "") or ""),
-                    },
-                )
-                # Repeated degeneracy: raise the observation's severity (advisory only).
-                if self._consec_degenerate_ckpt >= 3:
-                    await self._record_observation(
-                        "coordinator",
-                        "observation",
-                        {
-                            "kind": "orchestration_checkpoint_degraded",
-                            "severity": "medium",
-                            "tick": tick,
-                            "consecutive": self._consec_degenerate_ckpt,
-                            "detail": "orchestration checkpoint summaries repeatedly degenerate",
-                        },
-                    )
-                return False
-            # Usable summary — compact for real.
-            self._coord._consec_degenerate_ckpt = 0
-            seq = 0
-            try:
-                row = self.bus.db.fetchone_sync("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
-                seq = int(row["s"]) if row else 0
-            except Exception:  # noqa: BLE001
-                seq = 0
-            record = _orch_mem.build_memory_record(
-                parsed,
-                seq=seq,
-                tick=tick,
-                previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
-            )
-            self.shared_state.orchestration_memory = record
-            # Append to the bounded rollback ring so a later bad compaction can be recovered from a prior good
-            # snapshot.
-            try:
-                hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
-                hist.append(record)
-                self.shared_state.orchestration_memory_history = hist[-10:]
-            except Exception:  # noqa: BLE001 — history is best-effort
-                log.exception("Coordinator: failed to append orchestration_memory_history")
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
-                log.exception("Coordinator: failed to persist orchestration_memory")
-            # Reset so the next turn re-seeds from the compacted memory.
-            self._coord._orchestration_seed_memory = _orch_mem.render_memory_for_seed(record)
-            self._reset_orchestration_conversation()
-            # The level that decided this compaction; the reset clears it.
-            level_at_trigger = int(tracker.context_tokens_now)
-            tracker.reset(
-                tick=tick,
-                minute_mark=now_min,
-                phase=cur_phase,
-            )
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "orchestration_checkpoint",
-                    "tick": tick,
-                    "seq": seq,
-                    "checkpoint_count": record.get("checkpoint_count", 0),
-                    "phase_changed": bool(phase_changed),
-                    "context_tokens": level_at_trigger,
-                },
-            )
-            return True
-        except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
-            log.exception("Coordinator: orchestration checkpoint failed")
-            # Reset the tracker even on failure so a transient backend error (e.g. gateway 401) can't trigger a
-            # checkpoint storm next tick.
-            try:
-                tracker.reset(
-                    tick=tick,
-                    minute_mark=now_min,
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return False

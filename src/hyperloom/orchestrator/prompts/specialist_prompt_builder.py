@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -108,6 +110,18 @@ def _is_atom(inp: SpecialistPromptInputs) -> bool:
         True when the framework is ``atom``.
     """
     return (inp.framework or "").strip().lower() == "atom"
+
+
+def _is_agentx(inp: SpecialistPromptInputs) -> bool:
+    """True when the session replays the AgentX agentic trace corpus.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when ``benchmark_mode`` names the agentic workload.
+    """
+    return is_agentx_mode(inp.benchmark_mode)
 
 
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
@@ -242,7 +256,7 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
             + "`atom/model_ops/` + shared `aiter/` instead.",
             "- Mixing aiter overrides with `--enforce-eager` invalidates " + "atom's cudagraph captures silently.",
         ]
-    return [
+    base = [
         "You target **aiter / SGLang kernels / triton** code (attention,",
         "MoE, GEMM, fused-attention paths).",
         "",
@@ -271,6 +285,16 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  cuda graphs silently.",
         "- Trying triton fp4 paths on CDNA3 without `AMDGCN_USE_BUFFER_OPS=1`.",
     ]
+    if _is_agentx(inp):
+        base += [
+            "",
+            "**The short-OSL advice above does not apply to this workload.** See the",
+            "corpus shape in Section 2: outputs run long and the prefill is mostly a",
+            "cache hit, so tile-size shrink and MLA-overhead avoidance target the",
+            "wrong regime. Aim at long-KV decode GEMMs, MoE expert dispatch, and",
+            "attention backends that amortise TTFT over a long output.",
+        ]
+    return base
 
 
 def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
@@ -857,6 +881,12 @@ class SpecialistPromptInputs:
     # ``framework_version`` is the precise install version (empty => no note).
     framework: str = ""
     framework_version: str = ""
+    # ``"agentx"`` for agentic trace replay, else synthetic; selects the
+    # workload and grading blocks. ``agentx_corpus_shape`` supplies their
+    # numbers, mirrored from SharedState so the prompt describes the corpus the
+    # session actually replayed.
+    benchmark_mode: str = ""
+    agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -1004,7 +1034,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "are discouraged when a real bottleneck is on the table — but stop once",
         "rounds stop yielding new findings; the wall clock is not the only stop",
         "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
-        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
+        "cap**. One real beats two padded; an empty ``proposal_set`` with a",
+        "clear ``summary`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1329,10 +1360,15 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         workload_rows.append(f"- precision: {inp.precision}")
     if inp.conc > 0:
         workload_rows.append(f"- concurrency: {inp.conc}")
-    if inp.isl > 0:
-        workload_rows.append(f"- ISL (input seq len): {inp.isl}")
-    if inp.osl > 0:
-        workload_rows.append(f"- OSL (output seq len): {inp.osl}")
+    if _is_agentx(inp):
+        # The corpus fixes the request shape, so ISL/OSL carry no information.
+        workload_rows += corpus_lines(inp.agentx_corpus_shape)
+        workload_rows += grading_lines()
+    else:
+        if inp.isl > 0:
+            workload_rows.append(f"- ISL (input seq len): {inp.isl}")
+        if inp.osl > 0:
+            workload_rows.append(f"- OSL (output seq len): {inp.osl}")
     if inp.max_model_len > 0:
         workload_rows.append(f"- max_model_len: {inp.max_model_len}")
     if workload_rows:
@@ -1352,9 +1388,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
 def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
     """Render the wall-clock budget block so the specialist can self-throttle.
 
-    Renders the concrete WS1 budget (seconds + minutes) and the dispatch start
-    timestamp. Returns ``[]`` when no budget was supplied (legacy turn-bounded
-    path), so the section is omitted entirely rather than emitting a placeholder.
+    Renders the time left on the dispatch deadline (seconds + minutes) and the
+    dispatch start timestamp. Returns ``[]`` when no budget was supplied, so the
+    section is omitted entirely rather than emitting a placeholder.
 
     Args:
         inp: The specialist prompt inputs (reads ``wall_budget_sec`` /
@@ -1490,7 +1526,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "(Section 3); flag each ``provenance: "
                     + "domain_focus_default`` and call it an unvalidated "
                     + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
                     + "which you considered and why each was rejected — a "
                     + "bare empty exit with no rationale reads as a tool "
                     + "failure. Do NOT add a ``confidence`` field: "
@@ -2052,7 +2088,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     if authors_patches:
         patch_fields = [
-            "- ``patches_written`` (PR-A2) lists paths (relative to your",
+            "- ``deliverable`` declares what the round produced and is",
+            "  REQUIRED whenever you changed anything: ``{tree_id, targets,",
+            "  patches, artifacts, envs, server_args, setup_commands}``.",
+            "  ``targets`` lists every file you edited, relative to your",
+            "  worktree — the harvest is scoped to it, so a file you changed",
+            "  and did not declare is not shipped. Do NOT put hashes in it;",
+            "  the harness computes them where your work was validated.",
+            "- ``patches_written`` lists paths (relative to your",
             "  workspace or worktree) of any unified-diff patch files you",
             "  authored this round. Empty list = no patches; downstream",
             "  ``integrate_patch`` action skips when empty.",
@@ -2063,17 +2106,17 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  path is accepted only if it resolves inside an allowlisted framework",
             "  root. ``integrate_patch`` backs up the target, installs the artifact,",
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
-            "  tuned artifact is a FULL result — set ``empty=false`` when",
-            "  ``artifacts_written`` is non-empty.",
+            "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
+            "  list the artifact in ``artifacts_written``.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
         patch_fields = []
         no_output = "  and no findings; in that case"
-    empty_rule = [
-        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+    no_proposal_rule = [
+        "- An empty ``proposal_set`` is legitimate ONLY when you have no actionable proposals",
         no_output,
-        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+        "  and you must put the reason in ``summary``.",
     ]
 
     return [
@@ -2130,7 +2173,6 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                         }
                     ],
                     **({"patches_written": []} if authors_patches else {}),
-                    "empty": False,
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2174,7 +2216,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "of the first two. Padding is a failure, not thoroughness: each "
             "weak entry costs a Critic reject and a slot on the serial "
             "benchmark queue. One real proposal is a better round than two "
-            "padded ones, and ``empty=true`` is better than one."
+            "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
+            "is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -2183,7 +2226,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             + "off the same dead-end)."
         ),
         *patch_fields,
-        *empty_rule,
+        *no_proposal_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
@@ -2261,7 +2304,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   only directories the dispatcher hands you to write; the source trees",
         "   are yours to read.",
         "6. On tool error or no useful action left, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        "   ``specialist_done{proposal_set=[], summary='<why>'}``.",
         f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
@@ -2368,8 +2411,8 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         "decode MoE a2a backend.",
         f"- **KV transfer** (`{tb}`): watch bootstrap / transfer stalls; RDMA/IB "
         "device selection affects decode start latency.",
-        "- **Balance**: tune the prefill:decode node/TP ratio to the ISL:OSL "
-        "shape — a saturated role caps end-to-end throughput.",
+        "- **Balance**: tune the prefill:decode node/TP ratio to the workload shape "
+        + "— a saturated role caps end-to-end throughput.",
         "",
         "Per-role GPU telemetry is in the benchmark report's "
         "`gpu_monitor_by_role` (prefill vs decode util / power / VRAM); use it to "

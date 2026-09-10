@@ -71,7 +71,7 @@ Special cases:
   for every proposal with `source = "critic_unavailable"` and list the
   missing keys in `notes`.
 - `proposals` is empty → emit nothing; the runtime will fall back to a
-  heartbeat in Step 3.
+  an idle intent in Step 3.
 
 Write the result to `$CRITIC_WORKDIR/review.json`:
 
@@ -131,7 +131,7 @@ python -m runtime.cli commit-review \
 ## Failure modes
 
 - **Schema validation error** — runtime exits with code 2; the host
-  should treat it as a Critic outage and fall back to a heartbeat
+  should treat it as a Critic outage and fall back to an idle intent
   envelope.
 - **KB write dead-lettered** — `kb_writes[*].result.status` is
   `dead_lettered`. The verdict is still emitted; cron will replay later.

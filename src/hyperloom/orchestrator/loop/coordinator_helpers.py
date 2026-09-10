@@ -84,28 +84,39 @@ def _infer_model_class_from_config(model_path: str) -> str:
         except Exception:  # noqa: BLE001 - best effort only.
             log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
 
+    # A multimodal checkpoint keeps the language model one level down, so the
+    # expert counts and the LM architecture live there rather than at the top.
+    # Read both, outer first: a VL wrapper would otherwise classify as dense.
+    payloads: list[dict[str, Any]] = [payload]
+    for nested_key in ("text_config", "llm_config", "language_config"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            payloads.append(nested)
+
     text_parts: list[str] = [raw_path.lower()]
-    arch = payload.get("architectures")
-    if isinstance(arch, list):
-        text_parts.extend(str(x).lower() for x in arch if x)
-    elif arch:
-        text_parts.append(str(arch).lower())
-    for key in ("model_type", "attention_type", "attn_type"):
-        if payload.get(key):
-            text_parts.append(str(payload[key]).lower())
+    for scope in payloads:
+        arch = scope.get("architectures")
+        if isinstance(arch, list):
+            text_parts.extend(str(x).lower() for x in arch if x)
+        elif arch:
+            text_parts.append(str(arch).lower())
+        for key in ("model_type", "attention_type", "attn_type"):
+            if scope.get(key):
+                text_parts.append(str(scope[key]).lower())
     text = " ".join(text_parts)
 
     def _positive_int(*keys: str) -> bool:
-        """Whether any of the given payload keys holds a positive integer."""
-        for key in keys:
-            val = payload.get(key)
-            if isinstance(val, bool):
-                continue
-            try:
-                if val is not None and int(val) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
+        """Whether any of the given keys holds a positive integer, in the top-level config or a nested LM config."""
+        for scope in payloads:
+            for key in keys:
+                val = scope.get(key)
+                if isinstance(val, bool):
+                    continue
+                try:
+                    if val is not None and int(val) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
         return False
 
     is_moe = _positive_int(

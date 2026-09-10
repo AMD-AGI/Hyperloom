@@ -83,6 +83,28 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
+def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
+    """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.inference_optimizer.agentx.mapping import (
+        CANONICAL_CORPUS_DURATION_S,
+        CANONICAL_CORPUS_ENTRIES,
+        CANONICAL_CORPUS_LOADER,
+        CANONICAL_ISL,
+        CANONICAL_OSL,
+        CANONICAL_PREFIX_CACHE_HIT,
+    )
+
+    return {
+        "corpus_loader": CANONICAL_CORPUS_LOADER,
+        "corpus_entries": CANONICAL_CORPUS_ENTRIES,
+        "duration_s": float(CANONICAL_CORPUS_DURATION_S),
+        "isl": dict(CANONICAL_ISL),
+        "osl": dict(CANONICAL_OSL),
+        "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
+        "source": "canonical",
+    }
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -250,6 +272,9 @@ def _seed_shared_state(
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         target_summary=args.target_summary or _default_target_summary(args),
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
+        # overwritten by the measured shape after every aiperf run.
+        agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
@@ -283,8 +308,7 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        # AgentX is a DELIBERATE eval opt-out, not an incidental one.
-        eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
+        eval_disabled=bool(getattr(args, "no_eval", False)),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
@@ -292,8 +316,10 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase concurrency sweep flags (on by default, both workloads).
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
+        # rung is a 3600s window and the session grades at a fixed CONC.
+        # Pass --enable-conc-sweep explicitly to override.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
@@ -388,53 +414,63 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     bank_phase_segment(state, until_unix=stop_unix)
 
 
-def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
-    """Mark the start of a resumed run leg on ``state`` (caller persists)."""
+def _begin_resume_leg(state: SharedState) -> str:
+    """Mark the start of a resumed run leg on ``state`` (caller persists).
+
+    Stamps :attr:`SharedState.resumed_ts`, which dates the previous leg's CLOSE
+    transition in ``phase_history`` as a previous leg's and stops the phase
+    clock charging the gap between the two legs to the phase it stopped in.
+    Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
+    makes Orchestration heartbeats think the work is done, and a stale closing
+    flag resumes straight into a wind-down already finished.
+
+    The wall-clock budget is untouched. Elapsed time is summed forward across
+    legs, so this leg starts from whatever the session has already spent;
+    :meth:`SharedState.extend_budget_minutes` is the only way to lengthen it.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+
+    Returns:
+        str: The timestamp stamped as this leg's boundary.
+    """
     _bank_previous_leg_phase_segment(state)
     state.resumed_ts = now_iso()
-    if reanchor_budget:
-        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats forever think the work is done.
-        state.stop_reason = ""
-        state.stop_ts = ""
-        state.closing_phase = False
-        state.closing_started_unix = 0.0
-        state.closing_report_task_id = ""
-        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
-        state.crash_count = 0
-        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
-        state.start_ts = state.resumed_ts
-        # The stamp is the loop's budget.
-        state.deadline_unix = 0.0
-        state.teardown_timings_sec = {}
+    state.stop_reason = ""
+    state.stop_ts = ""
+    state.closing_phase = False
+    state.closing_started_unix = 0.0
+    state.closing_report_task_id = ""
+    state.crash_count = 0
+    state.teardown_timings_sec = {}
+    state.begin_leg()
     return state.resumed_ts
 
 
-def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
-    """Operator-facing resume notes when the wall-clock stamp is kept."""
+def _resume_budget_lines(state: SharedState, *, extend_hours: float) -> list[str]:
+    """Operator-facing notes about what budget the resumed leg actually has.
+
+    Args:
+        state: Loaded session state after :func:`_begin_resume_leg`.
+        extend_hours: Hours this invocation granted via ``--extend-hours``.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
     elapsed_h = state.elapsed_minutes() / 60.0
     remaining_min = state.remaining_minutes()
-    lines = [
-        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): the persisted deadline is kept",
-    ]
+    lines = [f"  → {elapsed_h:.2f}h charged to this session across every leg so far"]
     if remaining_min is None:
-        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        lines.append("  → budget: unbounded")
         return lines
-    remaining_h = remaining_min / 60.0
-    lines.append(f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp")
-    cli_hours = float(max_hours or 0.0)
+    lines.append(f"  → budget: {float(state.max_minutes) / 60.0:.2f}h total, {remaining_min / 60.0:.2f}h left")
+    if extend_hours > 0.0:
+        lines.append(f"  → --extend-hours added {extend_hours:.2f}h to the session budget")
     if remaining_min <= 0.0:
         lines.append(
-            "  → WARNING: the stamped deadline is already spent; start a fresh "
-            "session, or the run stops almost immediately"
+            "  → WARNING: the budget is spent; this leg will close almost "
+            "immediately. Pass --extend-hours to grant more, or start a fresh session"
         )
-        lines.append(
-            "  → raising --max-hours on a clean-stop resume does not extend the "
-            "stamp; a recorded stop_reason re-anchors the budget"
-        )
-    elif cli_hours > 0.0:
-        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
-        if abs(cli_left_min - remaining_min) > 1.0:
-            lines.append(f"  → this invocation's --max-hours {cli_hours:.2f} does not extend or shrink that stamp")
     return lines
 
 

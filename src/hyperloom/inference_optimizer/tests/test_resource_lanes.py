@@ -48,9 +48,9 @@ def locks(conn):
     return ResourceLockManager(SqliteLeaseBackend(conn))
 
 
-def test_schema_version_is_v4():
-    """v3 added the specialist GPU pool leases table; v4 drops ``tasks.allowed_tools``."""
-    assert SCHEMA_VERSION == 4
+def test_schema_version_is_v5():
+    """v4 dropped ``tasks.allowed_tools``; v5 adds the bring-up round store."""
+    assert SCHEMA_VERSION == 5
 
 
 def test_fresh_db_has_composite_pk(conn):
