@@ -64,8 +64,8 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
         coord.shared_state.max_minutes = 180
         coord.shared_state.save(session_dir)
 
-        for tick in range(1, 25):
-            await coord.tick(tick)
+        for _ in range(24):
+            await coord.tick(1)
 
         state = coord.shared_state
         assert state.phase == ps.PHASE_FRAMEWORK_AGENT
