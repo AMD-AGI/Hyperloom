@@ -198,7 +198,7 @@ jobs:
           # full collection-error traceback that the one-line summary elides).
           export COVERAGE_FILE=".coverage.shard${SHARD}"
           set +e
-          python -m pytest -p scripts.ci_durations "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
+          python -m pytest -p scripts.ci_durations -p scripts.ci_walkthrough_probe "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --clean-durations --durations-path ".test_durations.shard${SHARD}" \
             --junitxml="pytest-junit.shard${SHARD}.xml" \
             --cov-fail-under=0 -rfE "${EXTRA[@]}" 2>&1 | tee pytest-output.log
@@ -368,6 +368,15 @@ jobs:
             pytest-junit.shard${{ matrix.shard }}.xml
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Upload walkthrough timing probe
+        if: always() && hashFiles('walkthrough-probe-*.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: walkthrough-probe-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          path: walkthrough-probe-*.json
+          retention-days: 7
+          if-no-files-found: error
 
       # Upload this shard's timing slice so update-durations (push-to-main only)
       # can merge a full fresh .test_durations. Only the 3.10 leg is uploaded to
