@@ -1182,7 +1182,7 @@ def forge_loop(
         aggregate_regression_detail,
         warm_start_improvement_flags,
     )
-    from kernelforge.tracker import ExperimentTracker, UsageAccumulator
+    from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
     iter_config = IterationConfig(
@@ -1215,7 +1215,11 @@ def forge_loop(
         commit_new_paths=commit_new_paths,
     )
     tracker = ExperimentTracker(config.experiments_dir)
-    usage = UsageAccumulator()
+    # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
+    # loses this process outright, can still read what the run spent.
+    usage_ledger = UsageLedgerFile(config.experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
 
     # The caller-owned experiment ID is an EXTERNAL recovery channel, deliberately independent of the internal
     # per-segment experiment identity (each resume segment gets a fresh ID so the campaign parent/child chain stays

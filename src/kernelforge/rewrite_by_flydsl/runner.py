@@ -38,7 +38,7 @@ from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.tracker import UsageAccumulator, combine_usage_totals
+from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
 log = logging.getLogger(__name__)
 
@@ -140,8 +140,15 @@ def run_rewrite(
     rewrite_kb_enabled: bool = True,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
+    # The nested forge-loop runs from the workspace and resolves this path against its own working directory, so a
+    # relative one would send the two processes to different directories for the artifacts they share.
+    experiments_dir = str(Path(experiments_dir).resolve())
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
-    usage = UsageAccumulator()
+    # Only this process's own stages feed the shared ledger: the nested forge-loop publishes its own share to the same
+    # file, so folding the combined total in here would count that share twice.
+    usage_ledger = UsageLedgerFile(experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
