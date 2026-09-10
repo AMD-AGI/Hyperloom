@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+from collections.abc import Callable
 from typing import Any
 
 # Canonical four-counter set, mirroring the keys the claude-agent-sdk puts on ``ResultMessage.usage`` (and what
@@ -22,7 +23,7 @@ _TOKEN_KEYS: tuple[str, ...] = (
 class UsageAccumulator:
     """Sum normalized LLM token usage and cost across backend calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_update: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_creation_input_tokens = 0
@@ -30,6 +31,9 @@ class UsageAccumulator:
         self.total_cost_usd = 0.0
         self.calls = 0
         self._priced_calls = 0
+        # Called with the new totals after every counted call, so an external ledger survives a hard kill between one
+        # call and the next instead of stopping at the run's last coarse checkpoint.
+        self._on_update = on_update
 
     def add_from_message(self, message: Any) -> bool:
         """Fold one SDK message's usage into the running totals."""
@@ -57,6 +61,9 @@ class UsageAccumulator:
                     self.total_cost_usd += cost
                     self._priced_calls += 1
         self.calls += 1
+        if self._on_update is not None:
+            with contextlib.suppress(Exception):
+                self._on_update(self.totals())
         return True
 
     def totals(self) -> dict[str, Any]:
