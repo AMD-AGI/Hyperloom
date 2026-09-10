@@ -92,6 +92,49 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
     assert elapsed < 5.0, f"kill_my_spawned_server hung for {elapsed:.2f}s"
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process groups")
+def test_completed_warmup_keeps_its_persistent_server(tmp_path):
+    """The lifecycle owner, not a completed warmup wrapper, decides when to stop the server."""
+    pidfile = tmp_path / "server.pid"
+    server_code = "import time; time.sleep(60)"
+    wrapper_code = (
+        "import pathlib, subprocess, sys\n"
+        "server = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "published = False\n"
+        "try:\n"
+        "    pidfile = pathlib.Path(sys.argv[1])\n"
+        "    pending = pidfile.with_suffix('.tmp')\n"
+        "    pending.write_text(str(server.pid))\n"
+        "    pending.replace(pidfile)\n"
+        "    published = True\n"
+        "finally:\n"
+        "    if not published:\n"
+        "        server.kill()\n"
+        "        server.wait()\n"
+    )
+    server_pid = None
+    try:
+        result = run_with_session_kill([sys.executable, "-c", wrapper_code, str(pidfile), server_code], timeout=10)
+        assert result.returncode == 0
+        server_pid = int(pidfile.read_text())
+        assert os.getpgid(server_pid) == server_pid
+        os.kill(server_pid, 0)
+    finally:
+        if server_pid is None:
+            try:
+                server_pid = int(pidfile.read_text())
+            except (OSError, ValueError):
+                # Failed publication is cleaned up by the wrapper itself.
+                pass
+        if server_pid is not None:
+            try:
+                os.killpg(server_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # The test server may have exited before cleanup reached its group.
+                pass
+
+
 def test_kill_my_spawned_server_reaps_grandchildren():
     """A child that spawns a grandchild leaves no surviving descendant after the helper returns."""
     proc = subprocess.Popen(

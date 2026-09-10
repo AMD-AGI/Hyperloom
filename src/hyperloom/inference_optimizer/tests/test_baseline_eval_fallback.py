@@ -342,6 +342,59 @@ def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     assert result["baseline_eval_contract_fingerprint"]
 
 
+def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_path, monkeypatch):
+    """An eval that failed because the server was gone says nothing about the framework's capabilities.
+
+    The run_eval marker is present either way, so the existing eval-rooted test alone routes this to enablement --
+    where rounds of specialists then look for a capability gap that does not exist. Connection-refused evidence is
+    what separates "the measurement apparatus broke" from "accuracy is unattainable", so it must not be stamped as
+    an eval-failure contract.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        # Verbatim shape of the real failure: the server was torn down mid-eval, so the client's next request is
+        # refused, and only then does run_eval report a non-zero exit.
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            "",
+            "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099 "
+            "ssl:default [Connect call failed ('0.0.0.0', 41099)]\n"
+            "ERROR: run_eval failed with exit code 1\n",
+        )
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/path/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+        enablement_mode="eval",
+    )
+    ctx.task.kind = "baseline"
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    # Still a failed baseline -- the throughput number is not salvaged and the accuracy gate is not relaxed.
+    assert result["status"] == "failed"
+    # But not an eval-failure contract: nothing here is evidence about accuracy or a missing framework capability.
+    assert result.get("baseline_eval_failed") is not True
+    assert result.get("baseline_eval_failure_kind") != "eval_runtime_failure"
+    assert "eval_failed_server_unreachable" in result.get("nonfatal_warnings", [])
+
+
 def test_non_eval_failure_does_not_retry(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)

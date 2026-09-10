@@ -738,6 +738,20 @@ for the user-facing summary.
 
 ### Fixed
 
+- **An accuracy eval that failed because the server was gone was read as a
+  missing framework capability.** `run_eval` reports a vanished server and a
+  model that scored badly the same way -- a non-zero exit -- so the eval-rooted
+  branch stamped both as an eval-failure contract and handed them to the
+  enablement lane. Measured: a baseline whose throughput pass had already
+  completed lost its server mid-eval, the client's next request was refused,
+  and the run then spent five specialist rounds hunting a capability gap the
+  evidence never supported before stopping on the stall cap with a terminal
+  reason that named enablement rather than the server. A refused connection is
+  now separated out: the baseline still fails, nothing is salvaged and the
+  accuracy gate is untouched, but it counts as an ordinary baseline failure so
+  the existing total-failure backstop ends the run on the cause it actually
+  had. Framework-agnostic; the eval path is shared by vLLM, SGLang and ATOM.
+
 - **The Codex default named a deployment the gateway does not serve.**
   `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
   points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
@@ -751,6 +765,18 @@ for the user-facing summary.
   `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
   a context-window suffix -- bracketed ids remain rejected by this gateway,
   which is why no window suffix is applied at all.
+
+- **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
+  The serving-process checks now accept `atom.entrypoints`. Recovery records
+  the members of a recognized ATOM process group before sending TERM, then
+  checks each recorded PID, group and start time before sending KILL. This
+  allows anonymous workers to be reaped after their leader exits without
+  treating a reused PID or a newly discovered process as an owned worker.
+  Recovery retains the pidfile while the group is still alive and reports the
+  worker PIDs actually signalled. Normal warmup/measure reuse and the existing
+  vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
+  anonymous workers whose leader had already exited before recovery began;
+  the generic subprocess teardown and third-party benchmark scripts are unchanged.
 
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its

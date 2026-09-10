@@ -9,6 +9,8 @@ import json
 import os
 import signal
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -704,6 +706,40 @@ class TestKillStaleOwnersNoneSignalled:
         assert sent == [(222, signal.SIGTERM)]
         assert out[0]["signal"] == "TERM"
 
+    def test_an_atom_server_group_is_signalled(self, monkeypatch):
+        """A recorded ATOM server passes the owner check and receives group TERM."""
+        exe = RecoverExecutor()
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [
+                {
+                    "pid": 111,
+                    "pgid": 222,
+                    "cmd": "python3 -m atom.entrypoints.openai_server --model /m -tp 8",
+                    "pattern": "session_pidfile",
+                }
+            ],
+        )
+        sent: list[tuple[int, signal.Signals]] = []
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {111: 10})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "python3 -m atom.entrypoints.openai_server")
+        monkeypatch.setattr(exe, "_process_identity", lambda _pid: (222, 10))
+
+        def send_term(pgid, sig):
+            sent.append((pgid, sig))
+            monkeypatch.setattr(exe, "_process_identity", lambda _pid: None)
+            return True
+
+        monkeypatch.setattr(exe, "_send_group_signal", send_term)
+        monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
+        monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
+
+        out = exe._kill_stale_owners()
+
+        assert sent == [(222, signal.SIGTERM)]
+        assert out[0]["signal"] == "TERM"
+
     def test_unrecognized_pidfile_owner_is_not_signalled(self, monkeypatch):
         """A recycled PID with an unrelated cmdline is ignored."""
         exe = RecoverExecutor()
@@ -770,6 +806,281 @@ class TestDiscoverStalePidsBranches:
 
         assert ex._kill_stale_owners() == []
         assert not pid_file.exists()
+
+
+class TestAtomRecoveryIdentities:
+    def _recovery(self, monkeypatch, tmp_path, identity, *, framework="atom", owner_after_term="", command=None):
+        pidfile = tmp_path / f"{framework}_8888.pid"
+        pidfile.write_text("111 222\n", encoding="utf-8")
+        commands = {
+            "atom": "python3 -m atom.entrypoints.openai_server",
+            "vllm": "python3 -m vllm.entrypoints.openai.api_server",
+            "sglang": "python3 -m sglang.launch_server",
+        }
+        command = command or commands[framework]
+        exe = RecoverExecutor()
+        phase = {"after_term": False}
+        sent = []
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [{"pid": 111, "pgid": 222, "cmd": command, "pid_file": str(pidfile)}],
+        )
+        monkeypatch.setattr(recmod.os, "getpgrp", lambda: 999, raising=False)
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {111: 10, 112: 20})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "" if phase["after_term"] else command)
+        monkeypatch.setattr(
+            exe,
+            "_process_identity",
+            lambda pid: (222, 10) if not phase["after_term"] and pid == 111 else identity.get(pid),
+        )
+        monkeypatch.setattr(exe, "_process_group_owner_cmd", lambda _pgid: owner_after_term)
+        monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: True)
+        monkeypatch.setattr(exe, "_pid_alive", lambda _pid: False)
+        monkeypatch.setattr(exe, "_send_group_signal", lambda pgid, sig: sent.append(("group", pgid, sig)) or True)
+        monkeypatch.setattr(exe, "_send_signal", lambda pid, sig: sent.append(("pid", pid, sig)) or True)
+        monkeypatch.setattr(recmod.time, "sleep", lambda _s: phase.update(after_term=True))
+        return exe, sent, pidfile
+
+    def test_kills_only_a_recorded_survivor_and_keeps_the_live_group_handle(self, monkeypatch, tmp_path):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20), 113: (222, 30)})
+        result = exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("pid", 112, signal.SIGKILL)]
+        assert [(entry["pid"], entry["signal"]) for entry in result] == [(111, "TERM"), (112, "KILL")]
+        assert pidfile.exists(), "sending KILL is not proof that the group exited"
+
+    @pytest.mark.parametrize("identity", [None, (222, 21), (333, 20)])
+    def test_does_not_kill_a_missing_reused_or_moved_worker(self, monkeypatch, tmp_path, identity):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: identity})
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM)]
+        assert pidfile.exists()
+
+    def test_a_new_owner_marker_does_not_override_the_recorded_identity(self, monkeypatch, tmp_path):
+        exe, sent, pidfile = self._recovery(
+            monkeypatch, tmp_path, {111: (222, 99)}, owner_after_term="python3 -m atom.entrypoints.openai_server"
+        )
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM)]
+        assert pidfile.exists()
+
+    def test_dead_group_does_not_fall_back_to_a_reused_leader_pid(self, monkeypatch, tmp_path):
+        exe, sent, _ = self._recovery(monkeypatch, tmp_path, {111: (333, 99)})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "python3 -m atom.entrypoints.openai_server")
+        monkeypatch.setattr(exe, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM)]
+
+    def test_no_signals_without_a_live_recorded_atom_leader(self, monkeypatch, tmp_path):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {112: 20})
+        assert exe._kill_stale_owners() == []
+        assert sent == []
+        assert pidfile.exists()
+
+    @pytest.mark.parametrize("leader_identity", [None, (222, 99), (333, 10)])
+    def test_changed_leader_identity_cannot_authorize_signals(self, monkeypatch, tmp_path, leader_identity):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
+        monkeypatch.setattr(exe, "_process_identity", lambda pid: leader_identity if pid == 111 else (222, 20))
+        assert exe._kill_stale_owners() == []
+        assert sent == []
+        assert pidfile.exists()
+
+    @pytest.mark.parametrize("command", ["", "python3 unrelated.py", "python3 -m vllm.entrypoints.openai.api_server"])
+    def test_replaced_leader_command_cannot_authorize_signals(self, monkeypatch, tmp_path, command):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: command)
+        assert exe._kill_stale_owners() == []
+        assert sent == []
+        assert pidfile.exists()
+
+    @pytest.mark.parametrize("path_marker", ["vllm.entrypoints", "sglang.srt", "sglang.launch_server"])
+    def test_atom_model_path_cannot_select_another_framework(self, monkeypatch, tmp_path, path_marker):
+        exe, sent, _ = self._recovery(
+            monkeypatch,
+            tmp_path,
+            {112: (222, 20)},
+            command=f"python3 -m atom.entrypoints.openai_server --model /models/{path_marker}.export/model",
+        )
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("pid", 112, signal.SIGKILL)]
+
+    @pytest.mark.parametrize("framework", ["vllm", "sglang"])
+    def test_atom_marker_in_another_frameworks_model_path_does_not_snapshot(self, monkeypatch, tmp_path, framework):
+        entrypoint = "vllm.entrypoints.openai.api_server" if framework == "vllm" else "sglang.launch_server"
+        exe, sent, _ = self._recovery(
+            monkeypatch,
+            tmp_path,
+            {},
+            framework=framework,
+            command=f"python3 -m {entrypoint} --model /models/atom.entrypoints.export/model",
+            owner_after_term=entrypoint,
+        )
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: pytest.fail("not an ATOM server"))
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
+
+    def test_non_posix_does_not_snapshot_group_members(self, monkeypatch, tmp_path):
+        exe, sent, _ = self._recovery(monkeypatch, tmp_path, {})
+        monkeypatch.setattr(recmod, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: pytest.fail("no Linux process scan on Windows"))
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM)]
+
+    @pytest.mark.parametrize("framework", ["vllm", "sglang"])
+    def test_other_frameworks_keep_the_existing_group_cleanup(self, monkeypatch, tmp_path, framework):
+        exe, sent, _ = self._recovery(
+            monkeypatch,
+            tmp_path,
+            {},
+            framework=framework,
+            owner_after_term="vllm.entrypoints" if framework == "vllm" else "sglang.launch_server",
+        )
+        monkeypatch.setattr(
+            exe, "_atom_group_members", lambda _pgid: pytest.fail("non-ATOM recovery must not snapshot")
+        )
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
+
+
+class TestRecoveryProcessIdentity:
+    @pytest.mark.parametrize("state, expected", [("S", (222, 1234)), ("Z", None)])
+    def test_reads_group_and_starttime_after_a_command_with_parentheses(self, monkeypatch, state, expected):
+        stat = f"111 (worker ) name) {state} 1 222 " + "0 " * 16 + "1234\n"
+        monkeypatch.setattr(Path, "read_text", lambda *_a, **_k: stat)
+        assert RecoverExecutor._process_identity(111) == expected
+
+    @pytest.mark.parametrize("error", [FileNotFoundError(), PermissionError(), ValueError()])
+    def test_unreadable_identity_is_not_authority(self, monkeypatch, error):
+        def unreadable(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+        assert RecoverExecutor._process_identity(111) is None
+
+    def test_malformed_stat_is_not_authority(self, monkeypatch):
+        monkeypatch.setattr(Path, "read_text", lambda *_a, **_k: "invalid")
+        assert RecoverExecutor._process_identity(111) is None
+
+    def test_snapshot_excludes_other_groups_and_unreadable_members(self, monkeypatch):
+        exe = RecoverExecutor()
+        monkeypatch.setattr(Path, "iterdir", lambda _: [Path(name) for name in ("self", "111", "112", "113")])
+        monkeypatch.setattr(exe, "_process_identity", lambda pid: {111: (222, 10), 112: (333, 20), 113: None}[pid])
+        assert exe._atom_group_members(222) == {111: 10}
+
+    def test_unreadable_process_table_is_not_authority(self, monkeypatch):
+        def unreadable(_path):
+            raise PermissionError()
+
+        monkeypatch.setattr(Path, "iterdir", unreadable)
+        assert RecoverExecutor()._atom_group_members(222) == {}
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process identities")
+def test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path):
+    """TERM may stop the ATOM leader while its anonymous worker still needs KILL."""
+    ready = tmp_path / "worker.pid"
+    worker_code = (
+        "import os, pathlib, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    leader_code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+        "time.sleep(60)\n"
+    )
+    atom_package = tmp_path / "atom" / "entrypoints"
+    atom_package.mkdir(parents=True)
+    (atom_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (atom_package / "__init__.py").write_text("", encoding="utf-8")
+    (atom_package / "openai_server.py").write_text(leader_code, encoding="utf-8")
+    leader = subprocess.Popen(
+        [sys.executable, "-m", "atom.entrypoints.openai_server", worker_code, str(ready)],
+        cwd=tmp_path,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    outsider = None
+    worker_pid = None
+
+    def running(pid):
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            return False
+        return fields[0] != "Z"
+
+    try:
+        outsider = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if ready.exists() and ready.read_text().strip():
+                worker_pid = int(ready.read_text())
+                break
+            time.sleep(0.02)
+        assert worker_pid is not None
+        assert os.getpgid(worker_pid) == leader.pid
+        runs = tmp_path / "session" / "runs"
+        runs.mkdir(parents=True)
+        (runs / "atom_8888.pid").write_text(f"{leader.pid} {leader.pid}\n")
+        exe = RecoverExecutor()
+        exe._active_session_dir = runs.parent
+        exe.SERVER_KILL_WAIT_S = 0.2
+
+        exe._kill_stale_owners()
+
+        leader.wait(timeout=5)
+        deadline = time.monotonic() + 3
+        while running(worker_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not running(worker_pid), "anonymous ATOM worker survived recover after its leader exited"
+        assert outsider.poll() is None, "recovery must not signal an unrelated process"
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # Successful recovery can remove the entire group before test cleanup.
+            pass
+        leader.wait(timeout=5)
+        if outsider is not None:
+            outsider.kill()
+            outsider.wait(timeout=5)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process groups")
+def test_atom_recover_test_cleans_up_when_second_launch_fails(tmp_path, monkeypatch):
+    real_popen = subprocess.Popen
+    leaders = []
+
+    def fail_second_launch(*args, **kwargs):
+        if leaders:
+            raise OSError("second test process could not start")
+        proc = real_popen(*args, **kwargs)
+        leaders.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fail_second_launch)
+    try:
+        with pytest.raises(OSError, match="second test process could not start"):
+            test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path)
+        assert leaders[0].poll() is not None, "test setup failure left its first process running"
+    finally:
+        for leader in leaders:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # The tested cleanup may already have reaped this group.
+                pass
+            leader.wait(timeout=5)
 
 
 class TestPidAliveTrue:

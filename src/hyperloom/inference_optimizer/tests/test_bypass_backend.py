@@ -9,6 +9,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
@@ -792,12 +793,12 @@ def test_client_phase_no_server_fails(tmp_path, monkeypatch):
     assert rc == 1
 
 
-def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir):
+def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir, framework="sglang"):
     import yaml
 
     cfg = {
         "benchmark": {
-            "framework": "sglang",
+            "framework": framework,
             "model": "/models/x",
             "precision": "bf16",
             "runner_type": "mi300x",
@@ -833,14 +834,15 @@ def _fake_client_run(monkeypatch, tput=700.0):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
-def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch, framework):
     """server_lifecycle warmup round (cleanup=false, no server yet): start + persist, no teardown."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir, framework=framework)
 
     class _FakeServer:
         pid = 5555
@@ -861,22 +863,23 @@ def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch):
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")  # phase defaults to all
     assert rc == 0
     assert terminated["n"] == 0  # cleanup=false -> persist
-    assert bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+    assert bypass_engine.lifecycle_pid_file(str(pid_dir), framework, 8888).exists()
 
 
-def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch, framework):
     """server_lifecycle measure round (cleanup=true, healthy server present): reuse + teardown."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir, framework=framework)
 
     # A prior round persisted the server: pid/meta exist alongside a healthy port.
     bypass_engine.write_lifecycle_files(
         pid_dir=str(pid_dir),
-        framework="sglang",
+        framework=framework,
         port=8888,
         pid=4321,
         pgid=4321,
