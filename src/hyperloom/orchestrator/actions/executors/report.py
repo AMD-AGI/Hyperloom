@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -364,7 +366,31 @@ def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
 
 
 def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) -> None:
-    """Render the AgentX graded axes when baseline perf data is available."""
+    """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
+    comparison = summary.get("performance_comparison")
+    if comparison is not None:
+        from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, INTVTY_V1
+
+        # The objective is the interactivity axis; total throughput is the guard the verdict also consulted, so it is
+        # rendered as a second axis rather than as the figure the session was scored on.
+        graded_on_intvty = comparison["objective"] == GRADED_INTVTY
+        lines.extend(["## Performance comparison", ""])
+        lines.append(f"- objective           : `{comparison['objective']}`")
+        lines.append(f"- reference           : `{comparison['reference']:.1f}`")
+        lines.append(f"- candidate           : `{comparison['candidate']:.1f}`")
+        gain = comparison["gain_pct"]
+        gain_text = f"{gain:+.2f}%" if gain is not None else "unavailable"
+        lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
+        lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
+        if comparison["degrade_reason"]:
+            lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
+        lines.append(f"- verdict             : `{comparison['verdict']}`")
+        lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
+        if graded_on_intvty:
+            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (guard axis)")
+            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (guard axis)")
+        return
+
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         INTVTY_V1,
@@ -399,6 +425,30 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 
 
+def _cumulative_validation_status(summary: dict[str, Any]) -> str:
+    """Classify a stored validation stamp without turning a diagnostic into a validation."""
+    if not (
+        summary["cumulative_gain_validated_ts"]
+        or summary["cumulative_gain_validated_stack_len"]
+        or summary["cumulative_gain_validated"]
+    ):
+        return "unavailable"
+    if summary["optimization_stack_len"] != summary["cumulative_gain_validated_stack_len"]:
+        return "stale"
+    from hyperloom.common.perf_metric import VERDICT_KEEP
+
+    comparison = summary["performance_comparison"]
+    if not comparison["comparable"] or comparison["gain_pct"] is None:
+        return "unavailable"
+    # Anything short of KEEP -- a REVERT, or a RECORDED point the frontier neither promotes nor discards -- disagrees
+    # with a stamp claiming the stack's gain was validated.
+    if comparison["verdict"] != VERDICT_KEEP or not math.isclose(
+        summary["cumulative_gain_validated"], comparison["gain_pct"], abs_tol=1e-9
+    ):
+        return "inconsistent"
+    return "current"
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -408,6 +458,11 @@ def _build_summary_dict(
     session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
+    from hyperloom.common.gain_math import gain_pct
+
+    from ...state.shared_state import resolve_graded_comparison
+
+    graded = resolve_graded_comparison(state, state.current_best, against_baseline=True)
     # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
     # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
     stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
@@ -428,7 +483,20 @@ def _build_summary_dict(
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
-        # Validated gain (what the run actually delivered).
+        "performance_comparison": {
+            "objective": graded.objective,
+            "reference": graded.reference,
+            "candidate": graded.candidate,
+            "gain_pct": gain_pct(graded.candidate, graded.reference),
+            "comparable": graded.comparable,
+            "degrade_reason": graded.degrade_reason,
+            "verdict": graded.verdict,
+            # The guard axis is snapshotted alongside the objective so a re-rendered report can say what the 2-D
+            # verdict weighed, instead of re-deriving it from a ``current_best`` that has since moved on.
+            "tput_reference": graded.tput_reference,
+            "tput_candidate": graded.tput_candidate,
+        },
+        # Preserve the historical validation stamp, even when it disagrees with today's diagnostic.
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
@@ -464,7 +532,8 @@ def _build_summary_dict(
     failure_summary = _build_failure_summary(state, session_dir)
     if failure_summary:
         summary["failure_summary"] = failure_summary
-    return summary
+    summary["cumulative_validation_status"] = _cumulative_validation_status(summary)
+    return deepcopy(summary)
 
 
 def _format_md(summary: dict[str, Any]) -> str:
@@ -528,6 +597,15 @@ def _format_md(summary: dict[str, Any]) -> str:
         )
     else:
         lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — nothing has promoted in this session")
+    validation_status = summary.get("cumulative_validation_status")
+    if validation_status:
+        explanations = {
+            "current": "stored gain agrees with the current measured comparison",
+            "stale": "stack changed since validation; stored gain does not validate the current stack",
+            "unavailable": "no current comparable validation evidence; comparison is diagnostic only",
+            "inconsistent": "stored gain disagrees with the current grading evidence; retained as historical only",
+        }
+        lines.append(f"- validation status   : `{validation_status}` ({explanations[validation_status]})")
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:

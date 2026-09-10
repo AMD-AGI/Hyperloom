@@ -95,7 +95,7 @@ def _write_baseline_yaml(path: Path) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
+def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, float] | None = None) -> Path:
     workspace = slot / "benchmark_sglang_20260519_001122"
     workspace.mkdir(parents=True)
     (workspace / "benchmark_report.json").write_text(
@@ -107,7 +107,9 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
+                    "total_token_throughput": (
+                        tput * 2 if perf_axes is None else perf_axes.get("total_token_throughput")
+                    ),
                     "completed_requests": 80,
                     "duration_seconds": 25.0,
                 },
@@ -118,6 +120,8 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             }
         )
     )
+    if perf_axes is not None:
+        (workspace / "inferencex_result.json").write_text(json.dumps({"output_throughput": tput, **perf_axes}))
     return workspace
 
 
@@ -519,6 +523,265 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert out["best_gain_pct"] >= 4.0
     rejected_provenance = {r["provenance"] for r in ledger["rejected"]}
     assert rejected_provenance == {"llm_direct"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize("output,expected_outcome", [(20000.0, "KEEP"), (180.0, "REVERT")])
+async def test_explore_missing_axes_grades_both_sides_on_output(
+    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis, output, expected_outcome
+):
+    """Incomplete AgentX evidence degrades the pair, not just one side, to output throughput."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    base_tput = state.baseline_tput
+    if missing_from == "current_best":
+        state.current_best = {
+            "action": "explore",
+            "tput": 250.0,
+            "total_token_throughput": 25000.0,
+            "e2e_norm_intvty_p90": 300.0,
+        }
+        base_tput = 250.0
+    candidate_axes = {
+        "input_throughput": 20000.0,
+        "total_token_throughput": 40000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    incomplete = {
+        "candidate": candidate_axes,
+        "current_best": state.current_best,
+        "baseline": state.baseline_perf,
+    }[missing_from]
+    missing_keys = (
+        ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+    )
+    for key in missing_keys:
+        incomplete.pop(key, None)
+    baseline_before = dict(state.baseline_perf)
+    best_before = dict(state.current_best)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=output, perf_axes=candidate_axes)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-missing-axes"),
+            "base_tput": base_tput,
+            "grid": [{"name": "v_incomplete", "extra_args": "--incomplete-flag"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-missing-axes",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--incomplete-flag", {})]
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["tput"] == output
+    assert tested["base_tput"] == base_tput
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / base_tput - 1.0) * 100.0)
+        assert [winner["name"] for winner in out["winners"]] == ["v_incomplete"]
+        assert out["best_variant"]["name"] == "v_incomplete"
+        assert out["output_throughput"] == output
+        assert out["running_base_tput"] == output
+        assert out["losers"] == []
+    else:
+        assert tested["gain_pct"] is None
+        assert out["winners"] == []
+        assert out["best_variant"] is None
+        assert out["output_throughput"] is None
+        assert out["running_base_tput"] == base_tput
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
+    assert state.baseline_perf == baseline_before
+    assert state.current_best == best_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize("incomplete_output", [170.0, 20000.0], ids=["fallback-revert", "fallback-keep"])
+@pytest.mark.parametrize(
+    "next_intvty,next_total,intvty_outcome",
+    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
+)
+async def test_explore_missing_axes_preserves_running_grading_anchor(
+    sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
+):
+    """A fallback REVERT keeps the measured anchor; a fallback KEEP degrades the next comparison."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    observed_args: dict[str, str] = {}
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        name = slot.parent.name
+        config = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
+        observed_args[name] = config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+        output, total, intvty = {
+            "v00_v_good": (180.0, 22000.0, 330.0),
+            "v01_v_incomplete": (incomplete_output, 40000.0, 360.0),
+            "v02_v_next": (160.0, next_total, next_intvty),
+        }[name]
+        axes = {
+            "input_throughput": total - output,
+            "total_token_throughput": total,
+            "e2e_norm_intvty_p90": intvty,
+        }
+        if name == "v01_v_incomplete":
+            for key in (
+                ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+            ):
+                axes.pop(key)
+        _fake_workspace(slot, tput=output, perf_axes=axes)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-anchor-sequence"),
+            "base_tput": 200.0,
+            "grid": [
+                {"name": "v_good", "extra_args": "--good-flag"},
+                {"name": "v_incomplete", "extra_args": "--incomplete-flag"},
+                {"name": "v_next", "extra_args": "--next-flag"},
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-anchor-sequence",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = {row["name"]: row for row in out["explore_search_update"]["tested"].values()}
+    assert out["status"] == "succeeded"
+    assert len(tested) == 3
+    assert tested["v_good"]["outcome"] == "KEEP"
+    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
+    assert tested["v_good"]["tput"] == 180.0
+    assert tested["v_incomplete"]["status"] == "succeeded"
+    fallback_kept = incomplete_output > 180.0
+    assert tested["v_incomplete"]["outcome"] == ("KEEP" if fallback_kept else "REVERT")
+    assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
+    assert tested["v_incomplete"]["base_tput"] == 180.0
+    expected_base = incomplete_output if fallback_kept else 180.0
+    expected_outcome = "REVERT" if fallback_kept else intvty_outcome
+    assert tested["v_next"]["base_tput"] == expected_base
+    assert tested["v_next"]["graded_objective"] == ("output_throughput" if fallback_kept else "e2e_norm_intvty_p90")
+    if expected_outcome == "REVERT":
+        assert tested["v_next"]["gain_pct"] is None
+    else:
+        assert tested["v_next"]["gain_pct"] == pytest.approx((next_intvty / 330.0 - 1.0) * 100.0)
+    assert tested["v_next"]["outcome"] == expected_outcome
+    assert "--good-flag" in observed_args["v02_v_next"]
+    assert ("--incomplete-flag" in observed_args["v02_v_next"]) is fallback_kept
+    assert "--next-flag" in observed_args["v02_v_next"]
+    expected_winners = ["v_good"] + (["v_incomplete"] if fallback_kept else [])
+    if expected_outcome == "KEEP":
+        expected_winners.append("v_next")
+    assert [row["name"] for row in out["winners"]] == expected_winners
+    assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
+    assert out["running_base_tput"] == (160.0 if expected_outcome == "KEEP" else expected_base)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["explicit-output", "synthetic-legacy"])
+@pytest.mark.parametrize("output,expected_outcome", [(220.0, "KEEP"), (180.0, "REVERT")])
+async def test_explore_required_axes_output_modes_keep_legacy_behavior(
+    sub_agent_runner, tmp_path, monkeypatch, mode, output, expected_outcome
+):
+    """Missing total/interactivity stays irrelevant when output grading is requested."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx" if mode == "explicit-output" else "")
+    state.baseline_tput = 200.0
+    if mode == "explicit-output":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=output, perf_axes={})
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-output-mode"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_output", "extra_args": "--output-flag"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-output-mode",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--output-flag", {})]
+    assert out["status"] == "succeeded"
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    assert tested["graded_objective"] == "output_throughput"
+    if expected_outcome == "KEEP":
+        assert tested["gain_pct"] == pytest.approx((output / 200.0 - 1.0) * 100.0)
+    else:
+        assert tested["gain_pct"] is None
+        assert out["losers"][0]["reason"] == "gain_below_threshold"
+    assert bool(out["winners"]) is (expected_outcome == "KEEP")
+    assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
 
 
 @pytest.mark.asyncio

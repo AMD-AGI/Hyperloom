@@ -90,7 +90,10 @@ def _supports_adaptive_thinking(model: str) -> bool:
     if not normalized:
         return False
     family = re.search(
-        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._]|$)",
+        # ``[`` terminates the family: an operator who spells a windowed id
+        # by hand still names ``claude-opus-5``, and reading the bracket as part
+        # of the version would drop it out of the family it belongs to.
+        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._\[]|$)",
         normalized,
     )
     if family:
@@ -324,7 +327,11 @@ class ClaudeBackend:
             "--model",
             selected_model,
             "--effort",
-            reasoning_effort.strip() or "low",
+            # The probe answers "will the campaign's configuration work", so it
+            # has to ask under that configuration: pinning ``low`` here made the
+            # probe pass on deployments where the configured effort is the thing
+            # the gateway rejects.
+            reasoning_effort.strip() or self.runtime.reasoning_effort.strip() or "low",
             "--permission-mode",
             "dontAsk",
             "--tools",

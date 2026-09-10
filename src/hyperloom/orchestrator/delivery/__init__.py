@@ -8,6 +8,7 @@ from __future__ import annotations
 from hyperloom.orchestrator.delivery.archive import (
     ROLE_LAUNCH_CONFIG,
     ROLE_PATCH,
+    ROLE_PATCH_EVIDENCE,
     ROLE_PROMPT,
     ROLE_SERVER_LOG,
     ROLE_SPECIALIST_RESULT,
@@ -25,6 +26,7 @@ from hyperloom.orchestrator.delivery.ledger import file_digest, load_records
 __all__ = [
     "ROLE_LAUNCH_CONFIG",
     "ROLE_PATCH",
+    "ROLE_PATCH_EVIDENCE",
     "ROLE_PROMPT",
     "ROLE_SERVER_LOG",
     "ROLE_SPECIALIST_RESULT",

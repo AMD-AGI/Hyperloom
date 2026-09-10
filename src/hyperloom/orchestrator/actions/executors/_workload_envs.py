@@ -33,13 +33,21 @@ from typing import Any, Mapping
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import env_int
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import (
+    intvty_grading_enabled,
+    is_agentx_mode,
+    parse_intvty_noise_pct,
+)
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
+)
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
@@ -192,6 +200,175 @@ def agentx_kb_blocked(shared_state: Any = None) -> bool:
     return agentx_active(shared_state)
 
 
+# The 1M-context families that replay the unfiltered corpus; everything else
+# gets the 256k-capped variant. Mirrors ``aiperf_client.sh::_default_loader``,
+# which is the side that actually selects the corpus at runtime -- this one only
+# reports it -- so the two are pinned together by
+# ``test_agentx_corpus_rules_consistency``.
+AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kimik3")
+AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
+AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
+
+
+def _agentx_model_family(model: str) -> str:
+    """Normalize a model path/name to the family slug ``aiperf_client.sh`` uses.
+
+    Character-for-character the shell's ``${1##*/}`` + lowercase + ``tr -d '._-'``:
+    basename, folded, separators dropped. Stripping every non-alphanumeric instead
+    would be tidier but would disagree with the client on names carrying anything
+    else, and the client is the one that picks the corpus.
+    """
+    name = str(model or "").rsplit("/", 1)[-1].lower()
+    return name.translate(str.maketrans("", "", "._-"))
+
+
+def _agentx_default_corpus(model: str) -> str:
+    """Return the canonical SemiAnalysis corpus for a model family."""
+    if _agentx_model_family(model).startswith(AGENTX_FULL_CONTEXT_FAMILIES):
+        return AGENTX_CORPUS_FULL
+    return AGENTX_CORPUS_256K
+
+
+# GEAK's own names for the two throughput axes it can measure: ``E2E_METRIC``
+# selects one and ``bench_summary.json`` records the matching ``metric_basis``.
+# Spelled in GEAK's vocabulary, not Hyperloom's curve-row names, so the handoff
+# and GEAK's summary can be compared as strings on both sides.
+GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
+GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
+
+
+def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
+    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
+
+    The handoff must name the token-throughput axis this session actually reads.
+    An agentic replay is guarded on total token throughput, so publishing the
+    output axis would aim GEAK's search at the ~0.7% of the token budget the
+    session never scores -- and a candidate GEAK measured on one axis cannot be
+    compared against a reference read on the other, which run ~140x apart.
+
+    ``E2E_METRIC`` selects between output and total token throughput, so it
+    cannot name the interactivity axis AgentX is now graded on; total is the
+    throughput axis of that 2-D verdict, and the one a GEAK ratio stays
+    comparable against.
+
+    Args:
+        benchmark_mode: The session's persisted mode, when the caller holds one.
+            Passing it matters for a round driven from a subprocess that did not
+            inherit ``HYPERLOOM_AGENTX``.
+
+    Returns:
+        The ``E2E_METRIC`` value and the ``metric_basis`` name that goes with it.
+    """
+    if intvty_grading_enabled(benchmark_mode=benchmark_mode):
+        return GEAK_METRIC_TOTAL
+    return GEAK_METRIC_OUTPUT
+
+
+def cli_workload_defaults() -> tuple[int, int, int]:
+    """The CLI's ``ISL``/``OSL``/``CONC`` defaults, as one source for fallbacks.
+
+    Every last-resort fallback in this module reads them from here, so a
+    materialized recipe and the workload spec published beside it cannot
+    disagree about what "unset" means. The CLI resolves its own flags from the
+    same ``hyperloom.common`` constants, so the two cannot drift apart.
+    """
+    return DEFAULT_ISL, DEFAULT_OSL, DEFAULT_CONC
+
+
+def build_agentx_workload_spec(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    model_path: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Describe the AgentX trace-replay workload for downstream consumers.
+
+    Written into the materialized recipe and forwarded in the GEAK handoff so
+    GEAK can select the aiperf client and refuse to treat the CLI's synthetic
+    ``isl``/``osl`` placeholders as the served load. Omitted entirely on non-AgentX
+    runs, so the fixed-ISL/OSL path stays byte-identical.
+
+    Call only from :func:`apply_agentx_switch`, and only after it has written its
+    derived values into ``envs`` -- the spec must publish the numbers the client
+    will actually run with, not the operator's raw inputs.
+
+    Args:
+        bench: The benchmark mapping being materialized.
+        envs: That mapping's ``envs``, already carrying the switch's overrides.
+        model_path: The model this round serves, when the caller knows it.
+        env: The resolved process environment, carrying this round's ``CONC``
+            (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
+    """
+    proc_env: Mapping[str, str] = os.environ if env is None else env
+
+    def client_knob(key: str, default: Any) -> str:
+        """A knob the client reads from ``envs``, so ``envs`` wins.
+
+        :func:`apply_agentx_switch` forwards the process env into ``envs`` and
+        then overwrites the entries it derives, so ``envs`` holds the value the
+        benchmark subprocess is actually handed.
+        """
+        return str(envs.get(key) or proc_env.get(key) or default)
+
+    def served_knob(key: str, default: Any) -> str:
+        """A serving knob the process env owns, so the process env wins.
+
+        ``CONC``/``ISL``/``OSL`` carry no ``AGENTX_`` prefix, so the forwarding
+        loop skips them and ``materialize_config_with_envs`` projects them into
+        ``envs`` only after this runs. Reading ``envs`` first publishes the base
+        YAML's stale value -- which is how a spec pinned at the parser default 64
+        shipped to GEAK while the recipe served the operator's 8.
+        """
+        return str(proc_env.get(key) or envs.get(key) or default)
+
+    default_isl, default_osl, default_conc = cli_workload_defaults()
+    model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
+    canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
+    corpus = str(
+        envs.get("AGENTX_DATASET")
+        or envs.get("WEKA_LOADER_OVERRIDE")
+        or proc_env.get("AGENTX_DATASET")
+        or proc_env.get("WEKA_LOADER_OVERRIDE")
+        or canon
+    ).strip()
+    duration = int(client_knob("AGENTX_DURATION", 3600))
+    num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
+    conc = int(served_knob("CONC", default_conc))
+    return {
+        "kind": "agentx_trace_replay",
+        "client": "aiperf",
+        "scenario": "inferencex-agentx-mvp",
+        "corpus": corpus,
+        "canonical_corpus": canon,
+        "num_entries": num_entries,
+        "duration_s": duration,
+        # GEAK's inner A/B loop uses the scenario floor (900s) unless parity/
+        # validation explicitly requests the full canonical window.
+        "geak_loop_duration_s": min(duration, 900),
+        "concurrency": conc,
+        # ``benchmark_mode`` is "agentx" because the caller returned early
+        # otherwise; the resolver still honours an explicit HYPERLOOM_PERF_METRIC
+        # in both directions.
+        "metric_basis": geak_metric_axis(benchmark_mode="agentx")[1],
+        "intvty_p90_veto_pct": parse_intvty_noise_pct(),
+        # Hyperloom's analyzer window is the canonical duration plus grace/drain.
+        "metric_window_s": float(duration) + 40.0,
+        "trajectory_start_ratio": [0.25, 0.75],
+        "warmup_requests_per_lane": int(client_knob("AGENTX_WARMUP_REQUESTS_PER_LANE", 10)),
+        # Reads back the CONC-scaled value apply_agentx_switch wrote into envs,
+        # never the operator's raw AGENTX_WARMUP_GRACE_PERIOD: the client is
+        # bounded by the scaled number, so the handoff must publish that one.
+        "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
+        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+        "isl_osl_placeholder": {
+            "isl": int(served_knob("ISL", default_isl)),
+            "osl": int(served_knob("OSL", default_osl)),
+            "note": "CLI defaults only; trace replay ignores fixed ISL/OSL",
+        },
+    }
+
+
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -201,9 +378,9 @@ def apply_agentx_switch(
 ) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
-    ``conc`` is the concurrency this round will run at; the inner benchmark cap
-    and the client's warmup grace are both derived from it (see
-    :func:`agentx_env_for_conc`).
+    ``conc`` is the concurrency this round will run at; the inner benchmark cap,
+    the client's warmup grace and the published ``workload_spec.concurrency`` are
+    all derived from it (see :func:`agentx_env_for_conc`).
     """
     if active is None:
         active = agentx_enabled()
@@ -296,6 +473,14 @@ def apply_agentx_switch(
             _grace,
             _raw_grace or "unset",
         )
+    # Publish LAST, and only now: the spec is what GEAK replays, so every value
+    # in it must be the one this function settled on. ``warmup_grace_period_s``
+    # reads AGENTX_WARMUP_GRACE_PERIOD back off ``envs`` above, so publishing
+    # before the scaling would record the operator's raw value in the handoff
+    # while the client ran with the scaled one. ``_agentx_env`` carries this
+    # round's CONC, so the spec's concurrency is the served concurrency by
+    # construction rather than by later repair.
+    bench["workload_spec"] = build_agentx_workload_spec(bench, envs, model_path=model_path, env=_agentx_env)
 
 
 def prepare_agentx_runtime(
@@ -887,6 +1072,106 @@ def _finalize_framework_server_args(
         envs[framework_env] = resolved_server_args
 
 
+def _profile_steps_cap(policy_env: Mapping[str, Any]) -> tuple[int, bool]:
+    raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
+    explicit = raw.isdigit() and int(raw) >= 1
+    try:
+        cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
+    except ValueError:
+        cap = _DEFAULT_PROFILE_MAX_STEPS
+    return (cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS), explicit
+
+
+def _profile_capture_window(
+    policy_env: Mapping[str, Any],
+    *,
+    agentx: bool,
+    cap: int,
+    cap_explicit: bool,
+    delay_iters: int = 0,
+    steady_floor: int | None = None,
+) -> tuple[int, int]:
+    """Resolve capture steps and delay without consulting the ambient environment."""
+    max_iters = cap
+    if agentx:
+        delay_iters = 0
+        if max_iters > _AGENTX_PROFILE_MAX_ITERS:
+            if cap_explicit:
+                log.warning(
+                    "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
+                    "being overridden to %d. The cap is calibrated on the "
+                    "synthetic ISL/OSL shape; an agentic step carries orders "
+                    "of magnitude more, and the torch profiler buffers "
+                    "events in host RAM until the OOM killer arrives.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
+            else:
+                log.info(
+                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
+                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
+                    "carries orders of magnitude more, and the torch profiler "
+                    "buffers events in host RAM until the OOM killer arrives.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
+            max_iters = _AGENTX_PROFILE_MAX_ITERS
+            if steady_floor is not None and max_iters < steady_floor:
+                log.warning(
+                    "AgentX: capped profile steps %d is below the steady-state "
+                    "floor of %d; the trace may lack a steady-state window "
+                    "(trace_split_no_steady_state).",
+                    max_iters,
+                    steady_floor,
+                )
+    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
+    if override.isdigit() and int(override) > 0:
+        max_iters = int(override)
+        delay_override = str(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or "").strip()
+        if agentx:
+            if delay_override:
+                log.warning(
+                    "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
+                    "profiling window is wall-clock, so an iteration delay never elapses "
+                    "inside it and the trace comes back empty",
+                    delay_override,
+                )
+        else:
+            try:
+                delay_iters = max(0, int(delay_override or 8))
+            except ValueError:
+                delay_iters = 8
+        if agentx and max_iters > _AGENTX_PROFILE_MAX_ITERS:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
+                "bound of %d. That bound is a host-RAM limit, not a "
+                "serialization one: an agentic step carries orders of "
+                "magnitude more events than the synthetic shape ``cap`` is "
+                "sized against, and at the stock cap a DeepSeek-V4 profile "
+                "round was OOM-killed mid-capture three times in a row. "
+                "Unset it to restore the bound.",
+                max_iters,
+                _AGENTX_PROFILE_MAX_ITERS,
+            )
+        if steady_floor is not None and max_iters < steady_floor:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
+                "floor of %d; the trace may lack a steady-state window "
+                "(trace_split_no_steady_state).",
+                max_iters,
+                steady_floor,
+            )
+        elif max_iters > cap:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
+                "safe cap of %d; the trace may be too large to serialize "
+                "(EngineCore RPC timeout).",
+                max_iters,
+                cap,
+            )
+    return delay_iters, max_iters
+
+
 def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
@@ -932,8 +1217,8 @@ def materialize_config_with_envs(
         extra_envs: Overrides applied last over any computed env values;
             shell/loader hijack names and credentials are dropped.
         remove_args: Inherited framework server args to remove before launch.
-        unset_envs: Inherited env names to remove before applying
-            ``extra_envs``; workload pins are refused.
+        unset_envs: Env names to remove after applying ``extra_envs``;
+            workload pins are refused.
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
@@ -1074,12 +1359,14 @@ def materialize_config_with_envs(
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
-    # Last-resort fallbacks kept in sync with the CLI workload defaults
-    # (parser.DEFAULT_ISL/OSL/CONC); normally the CLI has already projected the
-    # resolved values into these envs before materialization.
-    isl_val = int(envs.get("ISL") or 1024)
-    osl_val = int(envs.get("OSL") or 1024)
-    conc_val = int(envs.get("CONC") or 64)
+    # Last-resort fallbacks, resolved from the CLI workload defaults so the
+    # recipe and the workload spec published beside it cannot disagree about what
+    # "unset" means; normally the CLI has already projected the resolved values
+    # into these envs before materialization.
+    _default_isl, _default_osl, _default_conc = cli_workload_defaults()
+    isl_val = int(envs.get("ISL") or _default_isl)
+    osl_val = int(envs.get("OSL") or _default_osl)
+    conc_val = int(envs.get("CONC") or _default_conc)
 
     # Steady-state window for profiling configs (detected by YAML
     # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
@@ -1116,14 +1403,7 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
-        _cap_raw = os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
-        cap_explicit = _cap_raw.isdigit() and int(_cap_raw) >= 1
-        try:
-            cap = int(_cap_raw or _DEFAULT_PROFILE_MAX_STEPS)
-        except (TypeError, ValueError):
-            cap = _DEFAULT_PROFILE_MAX_STEPS
-        if cap < 1:
-            cap = _DEFAULT_PROFILE_MAX_STEPS
+        cap, cap_explicit = _profile_steps_cap(os.environ)
 
         # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
         # honored as-is; otherwise default to min(served OSL,
@@ -1172,120 +1452,14 @@ def materialize_config_with_envs(
         # Profile server runs at the resolved profile OSL, decoupled from --osl.
         envs["OSL"] = osl_val
 
-        # Capture up to the cap (>= steady_floor in the auto path).
-        max_iters = cap
-        delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
-        if delay_iters < 0:
-            delay_iters = 0
-        # The iteration-based delay assumes the client streams a predictable
-        # number of decode steps before steady state. The AgentX client instead
-        # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
-        # an iteration delay computed from the placeholder OSL (6080 steps at the
-        # 1024/1024 defaults) is never reached inside that window and the trace
-        # comes back empty. Hand the delay to the client and keep only the
-        # capture bound, which is what stops the worker accumulating events in
-        # host RAM until the OOM killer arrives.
-        if agentx_enabled():
-            delay_iters = 0
-            # ...and the bound itself has to come down, because the cap above is
-            # sized in DECODE STEPS against the synthetic OSL. Under AgentX the
-            # captured work per step is agentic: measured ISL p50 was 56k-96k
-            # tokens, two orders of magnitude past the 1024/1024 shape the cap
-            # was calibrated on. At the stock cap a DeepSeek-V4 profile round put
-            # each of the eight vLLM workers at 113-127 GB of HOST RAM -- Ray
-            # reported 1012/1024 GB and killed them mid-capture, three attempts
-            # in a row, so the round produced no trace at all.
-            #
-            # A shorter capture is not a worse trace here: the client already
-            # bounds the window by wall clock (~20s of steady state), so the
-            # extra steps buy nothing and only inflate the in-memory event
-            # buffer. HYPERLOOM_PROFILE_MAX_ITERS still overrides this below.
-            if max_iters > _AGENTX_PROFILE_MAX_ITERS:
-                if cap_explicit:
-                    # The operator asked for this cap explicitly (e.g. to widen
-                    # the steady-state window); silently overriding it with no
-                    # trace of the original value would hide why a deliberate
-                    # HYPERLOOM_PROFILE_MAX_STEPS_CAP setting had no effect.
-                    log.warning(
-                        "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
-                        "being overridden to %d. The cap is calibrated on the "
-                        "synthetic ISL/OSL shape; an agentic step carries orders "
-                        "of magnitude more, and the torch profiler buffers "
-                        "events in host RAM until the OOM killer arrives.",
-                        max_iters,
-                        _AGENTX_PROFILE_MAX_ITERS,
-                    )
-                else:
-                    log.info(
-                        "AgentX: lowering captured profile steps %d -> %d. The cap is "
-                        "calibrated on the synthetic ISL/OSL shape; an agentic step "
-                        "carries orders of magnitude more, and the torch profiler "
-                        "buffers events in host RAM until the OOM killer arrives.",
-                        max_iters,
-                        _AGENTX_PROFILE_MAX_ITERS,
-                    )
-                max_iters = _AGENTX_PROFILE_MAX_ITERS
-                if max_iters < steady_floor:
-                    log.warning(
-                        "AgentX: capped profile steps %d is below the steady-state "
-                        "floor of %d; the trace may lack a steady-state window "
-                        "(trace_split_no_steady_state).",
-                        max_iters,
-                        steady_floor,
-                    )
-        # Operator hard-override of captured steps (e.g. a small eager FlyDSL
-        # profile). Honored verbatim; warn when outside the safe band rather
-        # than silently clamping.
-        _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
-        if _ovr.isdigit() and int(_ovr) > 0:
-            max_iters = int(_ovr)
-            # Raising the capture bound must not revive the delay the AgentX
-            # branch above zeroed; the two knobs are documented together.
-            if agentx_enabled():
-                _delay_ovr = os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "").strip()
-                if _delay_ovr:
-                    log.warning(
-                        "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
-                        "profiling window is wall-clock, so an iteration delay never elapses "
-                        "inside it and the trace comes back empty",
-                        _delay_ovr,
-                    )
-            else:
-                delay_iters = max(0, env_int("HYPERLOOM_PROFILE_DELAY_ITERS", 8))
-            # The AgentX clamp above is a HOST RAM bound, and this override
-            # silently undoes it. Neither check below stands in for saying so:
-            # ``cap`` defaults to _DEFAULT_PROFILE_MAX_STEPS, so the obvious
-            # HYPERLOOM_PROFILE_MAX_ITERS=128 lands exactly on it, trips
-            # neither branch, and restores the very bound that kept the
-            # profiler from being OOM-killed -- without printing anything.
-            if agentx_enabled() and max_iters > _AGENTX_PROFILE_MAX_ITERS:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
-                    "bound of %d. That bound is a host-RAM limit, not a "
-                    "serialization one: an agentic step carries orders of "
-                    "magnitude more events than the synthetic shape ``cap`` is "
-                    "sized against, and at the stock cap a DeepSeek-V4 profile "
-                    "round was OOM-killed mid-capture three times in a row. "
-                    "Unset it to restore the bound.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            if max_iters < steady_floor:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
-                    "floor of %d; the trace may lack a steady-state window "
-                    "(trace_split_no_steady_state).",
-                    max_iters,
-                    steady_floor,
-                )
-            elif max_iters > cap:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
-                    "safe cap of %d; the trace may be too large to serialize "
-                    "(EngineCore RPC timeout).",
-                    max_iters,
-                    cap,
-                )
+        delay_iters, max_iters = _profile_capture_window(
+            os.environ,
+            agentx=agentx_enabled(),
+            cap=cap,
+            cap_explicit=cap_explicit,
+            delay_iters=max(0, int(osl_val * (r_val + 1) * 3 - cap / 2)),
+            steady_floor=steady_floor,
+        )
         # NUM_PROMPTS must let the engine reach ``delay_iters + max_iters``
         # decode steps before running out of prompts (N prompts ≈ N * OSL / CONC
         # iters; invert + 2x buffer). Hyperloom owns this under PROFILE.

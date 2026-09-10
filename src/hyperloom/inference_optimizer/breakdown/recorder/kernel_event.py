@@ -1137,6 +1137,7 @@ class KernelEventRecorder:
         shapes_tuned: Any = None,
         config_path: str = "",
         gain_pct: Any = None,
+        graded_objective: str = "",
         tuner: str = "",
         micro_decision: str = "",
         rebench_ref: str = "",
@@ -1145,7 +1146,13 @@ class KernelEventRecorder:
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one GEMM shape-table tuning run."""
+        """Record one GEMM shape-table tuning run.
+
+        ``graded_objective`` names the axis ``gain_pct`` was measured on, so a
+        run graded on total throughput or interactivity is not later read as an
+        output gain. ``tuner`` names which backend produced the table, which is
+        a separate question from which axis judged it.
+        """
         self._record_lane_run(
             {
                 **_lane_row(
@@ -1163,6 +1170,7 @@ class KernelEventRecorder:
                 "shapes_tuned": _int_or_none(shapes_tuned),
                 "config_path": _text(config_path),
                 "gain_pct": _float_or_none(gain_pct),
+                "graded_objective": _text(graded_objective),
                 "tuner": _text(tuner),
             }
         )

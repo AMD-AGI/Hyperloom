@@ -15,7 +15,7 @@ from typing import Awaitable, Callable
 
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -210,6 +210,10 @@ def make_supervisor_fn(
     if backend and backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             backend,
+            # The model variable is per-provider, so switching provider means
+            # re-reading it. Leaving it out ran the supervisor on the registry
+            # default no matter what ``CODEX_MODEL``/``CLAUDE_MODEL`` said.
+            model=resolve_agent_model(backend),
             executable="",
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
@@ -269,7 +273,6 @@ def make_supervisor_fn(
                             cwd=workspace,
                             writable=False,
                             timeout_sec=session_budget,
-                            reasoning_effort="max",
                             tool_policy=AgentToolPolicy(
                                 read=True,
                                 search=True,

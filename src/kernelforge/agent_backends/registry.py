@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from importlib import metadata, util
 from typing import Callable
 
+from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
     AgentCapabilities,
@@ -211,7 +212,7 @@ def resolve_agent_runtime(
     model: str = "",
     executable: str = "",
     timeout_sec: int = 1800,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     sandbox_mode: str = "bypass",
     precheck: bool = True,
     fallback_provider: str = "",
@@ -229,7 +230,7 @@ def resolve_agent_runtime(
         model=model.strip() or registration.default_model,
         executable=executable.strip(),
         timeout_sec=timeout_sec,
-        reasoning_effort=reasoning_effort.strip() or "high",
+        reasoning_effort=reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,
         sandbox_mode=sandbox_mode.strip() or "bypass",
         precheck=precheck,
         fallback_provider=fallback,
@@ -375,7 +376,7 @@ register_agent_provider(
     AgentProvider(
         name="codex",
         factory=_create_codex_backend,
-        default_model="gpt-5.6",
+        default_model="gpt-5.6-sol",
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,

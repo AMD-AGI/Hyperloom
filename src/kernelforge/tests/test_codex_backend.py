@@ -694,7 +694,7 @@ def test_config_loads_generic_provider_runtime(
 ) -> None:
     """Load provider-neutral model and sandbox settings from environment."""
     monkeypatch.setenv("FORGE_AGENT_BACKEND", "codex")
-    monkeypatch.setenv("FORGE_AGENT_MODEL", "gpt-test-codex")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-test-codex")
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "workspace-write")
 
     config = Config.from_env()
@@ -724,12 +724,19 @@ def test_shared_model_option_is_provider_neutral() -> None:
         "agent_backend": "codex",
     }
     assert resolve_codex_model("provider-model") == "provider-model"
-    assert resolve_codex_model("") == "gpt-5.6"
+    assert resolve_codex_model("") == "gpt-5.6-sol"
     assert resolve_codex_reasoning_effort("") == "high"
-    assert resolve_codex_reasoning_effort("max") == "xhigh"
     assert resolve_codex_reasoning_effort("xhigh") == "xhigh"
-    with pytest.raises(CodexExecutionError, match="reasoning effort"):
-        resolve_codex_reasoning_effort("ultra")
+    assert resolve_codex_reasoning_effort(" MEDIUM ") == "medium"
+    # ``max`` is a level of the shared vocabulary that this protocol 400s on by
+    # name, so it arrives as the deepest level the gateway does have.
+    assert resolve_codex_reasoning_effort("max") == "xhigh"
+    assert resolve_codex_reasoning_effort(" MAX ") == "xhigh"
+    # Off the shared ladder, so refused here rather than 400'd by the gateway
+    # hours into a campaign.
+    for off_ladder in ("ultra", "none", "minimal"):
+        with pytest.raises(CodexExecutionError, match="reasoning effort"):
+            resolve_codex_reasoning_effort(off_ladder)
 
 
 def test_backend_factory_falls_back_only_when_enabled(
@@ -829,7 +836,8 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
 
     assert captured["spec"].model == "gpt-codex-test"
     assert captured["spec"].provider_options == {}
-    assert captured["spec"].reasoning_effort == "max"
+    # The runtime effort outranks anything the dispatch would have written.
+    assert captured["spec"].reasoning_effort == "high"
     assert config.max_turns == 500
     assert captured["spec"].tool_policy.max_turns == config.max_turns
     assert "ONE self-correcting session" in captured["spec"].system_prompt

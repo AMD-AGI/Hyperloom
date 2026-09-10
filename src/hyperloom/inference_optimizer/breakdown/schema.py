@@ -939,6 +939,9 @@ class V6StackValidation(TypedDict, total=False):
     validated_gain_pct: float | None
     source: str
     measurement_basis: str
+    #: The axis the figure was graded on, so a total- or intvty-graded gain is
+    #: not later read as an output gain.
+    graded_objective: str
 
 
 class V6StackExt(TypedDict, total=False):
@@ -1316,6 +1319,9 @@ class V6KernelGemmTuningRun(V6KernelLaneRun, total=False):
     shapes_tuned: int | None
     config_path: str | None
     gain_pct: float | None
+    #: The axis ``gain_pct`` was graded on, so a total- or intvty-graded run is
+    #: not later read as an output gain. Empty when nothing was validated.
+    graded_objective: str | None
     tuner: str | None
 
 

@@ -248,6 +248,7 @@ def record_validation(
     validated_gain_pct: Any,
     source: str = "",
     measurement_basis: str = "",
+    graded_objective: str = "",
     ts: str = "",
     ttft_mean_ms: Any = None,
     e2el_mean_ms: Any = None,
@@ -265,9 +266,11 @@ def record_validation(
     ``stack_len`` keys the row, so a later validation at one length supersedes
     the earlier. ``measurement_basis`` is ``e2e_rebench`` for a full-stack
     revalidation or ``e2e_decision_round`` for the round a variant was graded
-    on. The latency pair and ``server_launch_flags`` are carried here because
-    the run that produced ``validated_tput`` resolves them and they cannot be
-    recovered afterwards.
+    on. ``graded_objective`` names the axis the figure was measured on, so a
+    total- or intvty-graded gain is not later read as an output gain. The
+    latency pair and ``server_launch_flags`` are carried here because the run
+    that produced ``validated_tput`` resolves them and they cannot be recovered
+    afterwards.
     """
     try:
         sink = _sink()
@@ -284,6 +287,7 @@ def record_validation(
                 "validated_gain_pct": _float_or_none(validated_gain_pct),
                 "source": str(source or ""),
                 "measurement_basis": str(measurement_basis or ""),
+                "graded_objective": str(graded_objective or ""),
                 "ttft_mean_ms": _float_or_none(ttft_mean_ms),
                 "e2el_mean_ms": _float_or_none(e2el_mean_ms),
                 "ttft_e2el_source": str(ttft_e2el_source or ""),
