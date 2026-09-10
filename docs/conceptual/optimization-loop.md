@@ -154,7 +154,7 @@ genuinely-new architecture climbs higher.
 
 The full rendered methodology (the advisory "ladder book") is the canonical
 text, built by `build_enablement_ladder_book` in
-`hyperloom.agents.framework.enablement_ops` and injected into the enablement
+`hyperloom.orchestrator.enablement.mandate` and injected into the enablement
 authoring specialist's prompt. The rungs, in increasing complexity:
 
 0. **Rung 0 — diagnose / capability-gap localization.** Read-only:
