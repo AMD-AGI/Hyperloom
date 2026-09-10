@@ -410,22 +410,33 @@ def _register_provider(name: str, **capabilities: bool) -> None:
     )
 
 
-def test_lanes_are_refused_on_a_provider_that_does_not_run_our_hooks():
-    """Without the hooks the lane protection is a promise nothing keeps.
+def test_lanes_warn_but_run_on_a_provider_that_does_not_run_our_hooks(capsys):
+    """The hooks save a lane's work; they are not what makes its result true.
 
-    The gate builds them and the spec carries them, and a provider that ignores
-    ``spec.hooks`` drops them in silence -- leaving a lane exactly where it
-    started, losing whole candidates at the boundary check.
+    This was a refusal, on the ground that a provider ignoring ``spec.hooks``
+    leaves a lane with no in-session protection at all. It buys a real thing --
+    an edit to the driver, harness or oracle is denied while the session can
+    still be saved, and so is a driver run that skips the shared device lock --
+    but nothing a campaign publishes rests on it. A candidate touching the
+    measurement surface is refused on its patch paths by
+    ``IterationRunner._lane_rejection``, the canonical driver is re-checked
+    byte-for-byte once the patch applies, and every candidate is re-measured one
+    at a time in the canonical tree, so a lane's own timings never decide a
+    KEEP. Unlocked concurrent benchmarking is caught by the lane teardown's
+    contention report, which voids the round out loud.
+
+    What is left is wasted budget, reported when it happens. That is a cost to
+    warn about, not a result to refuse -- and refusing it is what shut the whole
+    rewrite OPTIMIZE phase to every hookless provider.
     """
     _register_provider("hooklesscli", session_env=True)
 
-    with pytest.raises(click.ClickException) as refusal:
-        cli._require_lane_provider_capabilities("hooklesscli", 2)
+    assert cli._require_lane_provider_capabilities("hooklesscli", 2) is None
 
-    message = str(refusal.value)
-    assert "hooklesscli" in message
-    assert "stop_hooks" in message
-    assert "session_env" not in message
+    warning = capsys.readouterr().out
+    assert "hooklesscli" in warning
+    assert "stop_hooks" in warning
+    assert "WARNING" in warning
 
 
 def test_lanes_are_refused_on_a_provider_that_ignores_the_session_environment():
@@ -445,18 +456,25 @@ def test_lanes_are_refused_on_a_provider_that_ignores_the_session_environment():
     assert "stop_hooks" not in message
 
 
-def test_a_lane_refusal_names_every_missing_guarantee():
-    """One re-run has to be enough, so the operator is told all of it at once."""
+def test_a_lane_refusal_names_every_missing_guarantee(capsys):
+    """One re-run has to be enough, so the operator is told all of it at once.
+
+    The refusal and the advisory reach the operator together: switching to a
+    provider that clears the refusal must not be the moment they first hear
+    what that provider still will not do for a lane.
+    """
     _register_provider("plaincli")
 
     with pytest.raises(click.ClickException) as refusal:
         cli._require_lane_provider_capabilities("plaincli", 4)
 
     message = str(refusal.value)
-    assert "stop_hooks" in message
     assert "session_env" in message
     assert "--lanes 4" in message
     assert "--lanes 1" in message
+
+    warning = capsys.readouterr().out
+    assert "stop_hooks" in warning
 
 
 def test_lanes_are_refused_rather_than_quietly_reduced():
@@ -489,6 +507,15 @@ def test_lanes_run_on_a_provider_that_declares_both():
     assert cli._require_lane_provider_capabilities("fullcli", 2) is None
 
 
+def test_a_provider_that_declares_both_is_warned_about_nothing(capsys):
+    """The advisory is about a missing guarantee, not a note on every run."""
+    _register_provider("fullcli", stop_hooks=True, session_env=True)
+
+    cli._require_lane_provider_capabilities("fullcli", 2)
+
+    assert capsys.readouterr().out == ""
+
+
 def test_the_builtin_hook_capable_provider_passes_the_lane_check():
     """Tie the built-in declaration to the rule that reads it.
 
@@ -497,6 +524,20 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
     rather than quietly losing a guarantee.
     """
     assert cli._require_lane_provider_capabilities("claude", 2) is None
+
+
+def test_the_builtin_hookless_provider_runs_lanes_and_is_warned(capsys):
+    """Codex applies the session environment and runs none of our hooks.
+
+    It is the provider this distinction exists for: refusing it left the
+    rewrite pipeline's OPTIMIZE phase unreachable on Codex, because that phase
+    never passes ``--lanes`` and so inherits the default above 1.
+    """
+    assert cli._require_lane_provider_capabilities("codex", 2) is None
+
+    warning = capsys.readouterr().out
+    assert "codex" in warning
+    assert "stop_hooks" in warning
 
 
 @pytest.mark.parametrize(
