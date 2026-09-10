@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.framework.stack_actions import (
+from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
     FrameworkRuntime,
     ProvisionResult,

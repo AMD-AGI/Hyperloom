@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import init_git_repo
+from hyperloom.orchestrator.tests._helpers import init_git_repo
 
-from hyperloom.agents.framework.enablement import (
+from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     RESOURCE_CONSTRAINT,
     CapabilityGap,
     FailureSignature,
 )
-from hyperloom.orchestrator.framework import localization as loc
-from hyperloom.orchestrator.framework.adapters import get_adapter
-from hyperloom.orchestrator.framework.stack_actions import EnablementStackAction
+from hyperloom.orchestrator.enablement.runtime import localization as loc
+from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
+from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 from hyperloom.orchestrator.actions.executors._git import _run_git_cp
 
 
