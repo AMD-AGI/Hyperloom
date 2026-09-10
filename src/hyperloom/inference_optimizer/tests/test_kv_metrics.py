@@ -294,7 +294,16 @@ def test_port_resolution_prefers_config_over_env(monkeypatch):
 
 
 def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
-    """Unknown until proven; parked once an engine shows it has metrics off."""
+    """Unknown until proven; parked once an engine shows it has metrics off.
+
+    Parking now needs a clock as well as a count: three misses can happen inside
+    six seconds while a server is still binding, and giving up on that alone cost
+    a real round its whole collection.
+    """
+    import time as _time
+
+    from hyperloom.orchestrator.actions.executors._kv_metrics import _GIVE_UP_GRACE_SEC
+
     poller = KvMetricsPoller(port=1)
     assert poller.available is None
 
@@ -307,6 +316,12 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
     )
     for _ in range(3):
         assert poller.fetch() is None
+
+    # Count reached, grace not: still trying.
+    assert poller.available is None
+
+    poller._first_attempt_mono = _time.monotonic() - (_GIVE_UP_GRACE_SEC + 1)
+    assert poller.fetch() is None
 
     assert poller.available is False
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 import heapq
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -263,12 +264,18 @@ def build_events(
 
 
 def write_timeline(path: Path, events: Iterable[dict[str, Any]]) -> bool:
-    """Write the event stream as JSONL. Returns whether it landed."""
+    """Write the event stream as JSONL. Returns whether it landed.
+
+    Owner-only, matching the KV artifact it sits beside: ``atomic_write_text`` masks every written payload to ``0o700``
+    on purpose, and a sibling artifact from the same collector should not be the one file in the directory that is
+    world-readable.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             for event in events:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
+        os.chmod(path, 0o600)
     except (OSError, TypeError) as exc:
         log.debug("agentx_timeline: could not write %s (%s)", path, exc)
         return False

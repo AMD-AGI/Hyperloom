@@ -87,6 +87,10 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 #: ``--enable-metrics``) would otherwise pay a connection refusal every couple of seconds for the whole round.
 _MAX_CONSECUTIVE_FAILURES = 3
 
+#: ...but not before this much time has passed since the first attempt. The count alone gives up after roughly six
+#: seconds, which an engine can easily still be inside after logging that it is ready.
+_GIVE_UP_GRACE_SEC = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Metric names
@@ -440,22 +444,64 @@ def sample_from_families(
     )
 
 
-def resolve_metrics_port(config_envs: dict[str, Any] | None = None) -> int:
+def _port_value(raw: Any) -> int | None:
+    """One PORT reading as a usable port number, or ``None``."""
+    if raw in (None, ""):
+        return None
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return port if port > 0 else None
+
+
+def port_from_workspace(workspace: Any) -> int | None:
+    """Read ``benchmark.envs.PORT`` out of the round's materialized config.
+
+    This is the only place the port is reliably written. The subprocess environment does not carry it -- the port is
+    pinned in the YAML that Magpie reads, not exported to the parent -- so resolving from the environment alone lands
+    on the default and scrapes a port nothing is listening on. Observed on a real session: two of three rounds bound an
+    ephemeral 34407 while collection sat on 8888 and recorded the engine as unavailable, and the one round that worked
+    did so only because it happened to bind the default.
+    """
+    try:
+        root = Path(workspace)
+        # The round's own config first, then the benchmark's copy, which only exists once the client has started.
+        for pattern in ("*.yaml", "*/config.yaml"):
+            for candidate in sorted(root.glob(pattern)):
+                try:
+                    import yaml
+
+                    payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001 - a config we cannot read is not a reason to fail a round
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                envs = (
+                    (payload.get("benchmark") or {}).get("envs") if isinstance(payload.get("benchmark"), dict) else None
+                )
+                port = _port_value(envs.get("PORT")) if isinstance(envs, dict) else None
+                if port is not None:
+                    return port
+    except OSError:
+        return None
+    return None
+
+
+def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
     The server binds whatever ``benchmark.envs.PORT`` the materialized YAML pins -- an ephemeral port assigned per
-    session, not a constant -- so the caller's config is the authoritative source and the ambient env is only a fallback
-    for paths that never materialize a YAML.
+    session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
+    paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
     """
     for source in (config_envs or {}, os.environ):
-        raw = source.get("PORT")
-        if raw in (None, ""):
-            continue
-        try:
-            port = int(str(raw).strip())
-        except (TypeError, ValueError):
-            continue
-        if port > 0:
+        port = _port_value(source.get("PORT"))
+        if port is not None:
+            return port
+    if workspace is not None:
+        port = port_from_workspace(workspace)
+        if port is not None:
             return port
     return DEFAULT_METRICS_PORT
 
@@ -479,15 +525,17 @@ class KvMetricsPoller:
         host: str = "127.0.0.1",
         config_envs: dict[str, Any] | None = None,
         timeout_sec: float = _SCRAPE_TIMEOUT_SEC,
+        workspace: Any = None,
     ) -> None:
         """Bind the poller to an endpoint without contacting it."""
-        self.port = int(port) if port else resolve_metrics_port(config_envs)
+        self.port = int(port) if port else resolve_metrics_port(config_envs, workspace)
         self.url = f"http://{host}:{self.port}/metrics"
         self.timeout_sec = float(timeout_sec)
         self._failures = 0
         self._succeeded = False
         self._gave_up = False
         self._warned = False
+        self._first_attempt_mono: float | None = None
 
     @property
     def available(self) -> bool | None:
@@ -502,21 +550,30 @@ class KvMetricsPoller:
         """Scrape once."""
         if self._gave_up:
             return None
+        now = time.monotonic()
+        if self._first_attempt_mono is None:
+            self._first_attempt_mono = now
         try:
             with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
                 body = response.read().decode("utf-8", "ignore")
         except (urllib.error.URLError, OSError, ValueError) as exc:
             self._failures += 1
-            if self._failures >= _MAX_CONSECUTIVE_FAILURES and not self._succeeded:
+            # Both a count and a clock. On the count alone, three misses inside six seconds park the poller for the rest
+            # of the round -- and an engine that has logged "ready" can still be a few seconds from accepting a request,
+            # so a round would go dark for the whole of it over a start that was merely slow. The grace makes giving up
+            # mean "nothing answered here for a minute", which is the case the sticky give-up was written for.
+            waited = now - (self._first_attempt_mono or now)
+            if self._failures >= _MAX_CONSECUTIVE_FAILURES and waited >= _GIVE_UP_GRACE_SEC and not self._succeeded:
                 self._gave_up = True
                 if not self._warned:
                     self._warned = True
                     log.info(
-                        "kv_metrics: %s unreachable after %d attempts (%s); KV metrics "
-                        "recorded as unavailable for this round. SGLang needs "
-                        "--enable-metrics; vLLM exposes it by default.",
+                        "kv_metrics: %s unreachable after %d attempts over %.0fs (%s); KV metrics "
+                        "recorded as unavailable for this round. Check the port against the round's "
+                        "benchmark.envs.PORT; SGLang also needs --enable-metrics (vLLM exposes it by default).",
                         self.url,
                         self._failures,
+                        waited,
                         exc,
                     )
             return None

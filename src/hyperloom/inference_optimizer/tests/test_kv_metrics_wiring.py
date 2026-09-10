@@ -638,6 +638,119 @@ def test_artifact_is_in_the_package_globs():
 
 
 # ---------------------------------------------------------------------------
+# port resolution
+# ---------------------------------------------------------------------------
+_ROUND_YAML = """\
+benchmark:
+  framework: vllm
+  model: /models/Qwen3-0.6B
+  envs:
+    TP: 1
+    CONC: 64
+    PORT: 34407
+"""
+
+
+def test_port_comes_from_the_round_config_not_the_default(tmp_path):
+    """The regression that cost a real session its measured round.
+
+    The port is pinned in the materialized ``benchmark.envs.PORT`` and never
+    exported into the subprocess environment, so resolving from the environment
+    alone lands on 8888 and scrapes a port nothing is listening on.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace, resolve_metrics_port
+
+    (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
+
+    assert port_from_workspace(tmp_path) == 34407
+    assert resolve_metrics_port({}, tmp_path) == 34407
+
+
+def test_port_is_read_from_the_benchmark_config_too(tmp_path):
+    """A warm-reuse round carries it here rather than in a lifecycle YAML."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+
+    nested = tmp_path / "benchmark_vllm_1"
+    nested.mkdir()
+    (nested / "config.yaml").write_text(_ROUND_YAML, encoding="utf-8")
+
+    assert port_from_workspace(tmp_path) == 34407
+
+
+def test_explicit_env_still_outranks_the_config(tmp_path):
+    """An operator pin has to win over a file we merely found."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+
+    (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
+
+    assert resolve_metrics_port({"PORT": "9001"}, tmp_path) == 9001
+
+
+def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
+    """Which is what the one round that worked was relying on."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import DEFAULT_METRICS_PORT, resolve_metrics_port
+
+    (tmp_path / "baseline_config.with_envs.yaml").write_text(
+        "benchmark:\n  framework: vllm\n  envs:\n    TP: 1\n", encoding="utf-8"
+    )
+
+    assert resolve_metrics_port({}, tmp_path) == DEFAULT_METRICS_PORT
+
+
+def test_unreadable_config_does_not_raise(tmp_path):
+    """Malformed YAML in a round directory is not a reason to fail a round."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+
+    (tmp_path / "broken.yaml").write_text("benchmark: [unclosed\n", encoding="utf-8")
+
+    assert port_from_workspace(tmp_path) is None
+
+
+def _refuse(monkeypatch):
+    """Make every scrape fail the way a closed port does."""
+    from hyperloom.orchestrator.actions.executors import _kv_metrics as km
+
+    def _boom(*_a, **_k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(km._OPENER, "open", _boom)
+
+
+def test_poller_does_not_give_up_on_a_slow_start(monkeypatch):
+    """Three misses inside six seconds is a slow engine, not an absent endpoint.
+
+    Giving up on the count alone parked collection for the rest of a round over a
+    server that was merely still binding.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+
+    _refuse(monkeypatch)
+    poller = KvMetricsPoller(port=1)
+    for _ in range(5):
+        poller.fetch()
+
+    assert poller.available is None  # still unknown, still trying
+
+
+def test_poller_gives_up_once_the_grace_has_also_passed(monkeypatch):
+    """An endpoint that answered nothing for a minute is not coming back."""
+    import time
+
+    from hyperloom.orchestrator.actions.executors._kv_metrics import _GIVE_UP_GRACE_SEC, KvMetricsPoller
+
+    _refuse(monkeypatch)
+    poller = KvMetricsPoller(port=1)
+    poller.fetch()
+    # Age the first attempt rather than the process clock: patching time.monotonic
+    # globally lets any other caller consume the fake readings.
+    poller._first_attempt_mono = time.monotonic() - (_GIVE_UP_GRACE_SEC + 1)
+    poller.fetch()
+    poller.fetch()
+
+    assert poller.available is False
+
+
+# ---------------------------------------------------------------------------
 # authoritative phase boundaries
 # ---------------------------------------------------------------------------
 class _StubProgress:

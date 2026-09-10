@@ -249,6 +249,11 @@ _AGENTX_MEASURED_BEGIN_MARKERS: tuple[str, ...] = ("(profiling) started",)
 # the way a synthetic one does, so the phase lines are unreachable unless it is scanned explicitly.
 _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
 
+# How long a round may go without any resolvable server log before it is treated as re-attached to a server an earlier
+# round booted. Such a round owns no log and no ready marker will ever appear in its scan set, so KV collection has to
+# start on some other signal or it never starts at all.
+_WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
+
 # Default grace: how long after the server reports ready it may emit no log output before the watchdog declares a hang
 # / detokenizer stall.
 _DETOK_STALL_GRACE_SEC_DEFAULT: float = 1800.0
@@ -668,7 +673,9 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
 
         workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
-            poller=KvMetricsPoller(config_envs=dict(env or {})),
+            # The workspace is where the port actually lives: it is pinned in the round's materialized
+            # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
+            poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
             # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
             # publishes a progress address and the poller then never resolves a URL.
             progress=AiperfProgressPoller(workspace),
@@ -1026,9 +1033,14 @@ def _communicate_with_soft_deadline(
                 # stderr growing.
                 if capture is not None and (scan.saw_progress or scan.child_spoke):
                     capture.note_output()
-            # Held until the engine is actually up: scraping during boot only collects connection refusals, and on a
-            # warm-reuse round there is no boot to wait through.
-            if kv_recorder is not None and (server_ready_since is not None or server_already_ready):
+            # Held until the engine is up, because scraping during boot only collects connection refusals. The third
+            # arm is the warm-reuse round: it re-attaches to a server an earlier round booted, so it owns no log and no
+            # ready marker will ever land in its scan set. Waiting for one there means never collecting at all -- which
+            # is what a real session did, on the measured round, the only phase allowed into a comparison.
+            # The elapsed guard keeps a normal round from scraping through its own boot: a round that owns a server
+            # writes its log within seconds, so still having none this late means nobody is going to write one.
+            warm_reuse_round = scan_active and not scan_offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
+            if kv_recorder is not None and (server_ready_since is not None or server_already_ready or warm_reuse_round):
                 kv_recorder.tick(now)
             # Soft deadline.
             if soft_active and deadline_sec is not None and not soft_deadline_suspended:
