@@ -822,6 +822,14 @@ _MAX_STORED_ROWS = 5000
 _SCRAPE_INTERVAL_ENV = "INFERENCE_OPTIMIZER_KV_SCRAPE_INTERVAL_SEC"
 _DEFAULT_SCRAPE_INTERVAL_SEC = 2.0
 
+#: Interval used while aiperf is scraping the same endpoint. Not zero: a sparse series is what remains if aiperf turns
+#: out to have collected nothing, and an artifact with a coarse trace beats one with no rows at all.
+_SUSPENDED_SCRAPE_INTERVAL_SEC = 60.0
+
+#: Where the AgentX client puts its artifacts. The directory is created before the server boots, so its presence is the
+#: earliest signal that aiperf owns the scraping for this round.
+_AIPERF_ARTIFACT_DIRS = ("aiperf_artifacts", "*/aiperf_artifacts")
+
 
 def resolve_scrape_interval_sec() -> float:
     """Seconds between scrapes, from the environment or the default."""
@@ -885,6 +893,8 @@ class KvMetricsRecorder:
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._progress = progress
         self._phase_timeline: dict[str, dict[str, Any]] = {}
+        # Tri-state: unknown until the round directory is first looked at.
+        self._aiperf_present: bool | None = None
         self._phase = "boot"
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
@@ -922,9 +932,33 @@ class KvMetricsRecorder:
         """Scrape if the interval has elapsed, tagging the sample with the phase."""
         if self._closed:
             return
-        if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < self._min_interval:
+        interval = _SUSPENDED_SCRAPE_INTERVAL_SEC if self._aiperf_owns_scraping() else self._min_interval
+        if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < interval:
             return
         self._scrape(mono)
+
+    def _aiperf_owns_scraping(self) -> bool:
+        """Whether aiperf is scraping this engine, making our own polling redundant.
+
+        On an AgentX round aiperf scrapes the same endpoint on its own schedule and its records replace ours at close,
+        so polling at the full rate only doubles the load on the engine to produce rows that get discarded. Backing off
+        rather than stopping outright keeps a coarse trace: if aiperf turns out to have collected nothing -- disabled,
+        crashed, killed before it flushed -- a sparse series is a far better artifact than an empty one, which is
+        exactly the failure this collector already shipped once.
+
+        The eval phase is excluded because aiperf has exited by then, so that window is ours alone.
+        """
+        if self._phase == "eval":
+            return False
+        if self._aiperf_present is None and self._workspace is not None:
+            try:
+                root = Path(self._workspace)
+                self._aiperf_present = any(
+                    candidate.is_dir() for pattern in _AIPERF_ARTIFACT_DIRS for candidate in root.glob(pattern)
+                )
+            except OSError:
+                self._aiperf_present = False
+        return bool(self._aiperf_present)
 
     def _scrape(self, mono: float) -> KvSample | None:
         """Take one reading unconditionally, timing the round trip.
@@ -1106,9 +1140,11 @@ class KvMetricsRecorder:
         record with the phase from the process that owns the transition -- so there is no boundary lag to correct and
         nothing to re-attribute afterwards.
 
-        The live rows are discarded rather than merged. Two collectors on one endpoint produce interleaved readings of
-        the same counters at slightly different instants, and a window bracketed across both would attribute an
-        increment to whichever happened to be sampled either side of it.
+        Only the window aiperf covers is replaced. It starts after the server is up and exits before the accuracy eval,
+        so readings outside that span -- boot, and the whole eval phase -- are ours and are kept. Inside it, its
+        records replace ours outright rather than merging: two collectors reading the same counters at slightly
+        different instants would let a window bracket across both and credit an increment to whichever was sampled
+        either side of it. Across the boundary there is no such risk, because the two sets are disjoint in time.
         """
         if self._workspace is None:
             return None
@@ -1119,7 +1155,18 @@ class KvMetricsRecorder:
             records = read_aiperf_server_metrics(export)
             if not records:
                 return None
-            # Rebuilt from scratch so no live reading survives into the counter windows below.
+            # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
+            # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
+            # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
+            # timestamp lands mid-window and let it close a counter window it has no business closing.
+            covered_from = records[0][0].ts
+            covered_to = records[-1][0].ts
+            kept = [
+                r
+                for r in self._rows
+                if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
+            ]
+            # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
             self._rows = []
             self._first_counters = {}
             self._last_counters = {}
@@ -1128,6 +1175,9 @@ class KvMetricsRecorder:
                 self._phase = phase or "measured"
                 self._absorb(sample, timing=timing)
             self._phase = previous_phase
+            if kept:
+                # Time order, because the counter windows below are bracketed by walking the rows in sequence.
+                self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
             # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
             # transition, but tags it with the phase that is ending, so without this the next phase's window would open
             # at its first periodic sample and the increment in between would be credited to neither.

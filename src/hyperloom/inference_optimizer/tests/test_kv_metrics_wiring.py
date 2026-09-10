@@ -712,8 +712,9 @@ def test_recorder_prefers_aiperfs_scrapes_over_its_own(tmp_path):
             _slim_record(ts_ns=base + 4_000_000_000, usage=0.80, retracts=9, phase="profiling"),
         ],
     )
+    # A live reading taken inside aiperf's window, which is the redundant case.
     rec = KvMetricsRecorder(
-        poller=_StubPoller([_sample(ts=_now(), active_pool_usage=0.99)]),
+        poller=_StubPoller([_sample(ts=base / 1e9 + 1.0, active_pool_usage=0.99)]),
         output_path=str(tmp_path / KV_ARTIFACT_NAME),
         min_interval_sec=0,
     )
@@ -729,6 +730,108 @@ def test_recorder_prefers_aiperfs_scrapes_over_its_own(tmp_path):
     # Warmup opened at 1 and is closed by the first measured reading; measured runs 5 -> 9.
     assert payload["retract_delta_by_phase"]["warmup"] == 4.0
     assert payload["retract_delta"] == 4.0
+
+
+def test_live_scraping_backs_off_once_aiperf_is_collecting(tmp_path):
+    """The point of reading aiperf's export is to stop scraping the same endpoint twice.
+
+    Adopting its records while still polling at the full rate doubles the load on
+    the engine to produce rows that are then discarded -- worse on the very axis
+    the refactor set out to improve.
+    """
+    (tmp_path / "aiperf_artifacts").mkdir()
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(), _sample(), _sample()]),
+        workspace=tmp_path,
+        min_interval_sec=2.0,
+    )
+    rec.tick(0.0)  # first tick always scrapes
+    rec.tick(10.0)  # ten seconds on: would scrape at the 2s rate, must not here
+    rec.tick(30.0)
+
+    assert rec._poller.calls == 1
+
+
+def test_backoff_still_leaves_a_coarse_trace(tmp_path):
+    """Backing off rather than stopping: if aiperf collected nothing after all, a
+    sparse series is a far better artifact than the empty one this shipped once."""
+    (tmp_path / "aiperf_artifacts").mkdir()
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(), _sample()]),
+        workspace=tmp_path,
+        min_interval_sec=2.0,
+    )
+    rec.tick(0.0)
+    rec.tick(120.0)  # past the suspended interval
+
+    assert rec._poller.calls == 2
+
+
+def test_a_synthetic_round_is_unaffected_by_the_backoff(tmp_path):
+    """No aiperf directory, so nothing else is scraping and the full rate stands."""
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(), _sample(), _sample()]),
+        workspace=tmp_path,
+        min_interval_sec=2.0,
+    )
+    rec.tick(0.0)
+    rec.tick(3.0)
+    rec.tick(6.0)
+
+    assert rec._poller.calls == 3
+
+
+def test_eval_resumes_the_full_rate(tmp_path):
+    """aiperf has exited by the accuracy eval, so that window is ours alone."""
+    (tmp_path / "aiperf_artifacts").mkdir()
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample() for _ in range(5)]),
+        workspace=tmp_path,
+        min_interval_sec=2.0,
+    )
+    rec.tick(0.0)
+    rec.note_phase("eval", 1.0)  # takes a boundary reading of its own
+    before = rec._poller.calls
+    rec.tick(10.0)
+    rec.tick(20.0)
+
+    assert rec._poller.calls == before + 2
+
+
+def test_eval_rows_survive_the_aiperf_adoption(tmp_path):
+    """aiperf covers warmup and profiling and nothing else, so discarding every
+    live row would throw away the only readings the eval phase will ever have."""
+    base = 1_789_000_000_000_000_000
+    _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.10, retracts=1, phase="warmup"),
+            _slim_record(ts_ns=base + 2_000_000_000, usage=0.70, retracts=5, phase="profiling"),
+        ],
+    )
+    rec = KvMetricsRecorder(
+        poller=_StubPoller(
+            [
+                # The boundary reading note_phase takes, still inside aiperf's window.
+                _sample(ts=base / 1e9 + 1.0, active_pool_usage=0.99),
+                # The eval reading proper, after aiperf has exited.
+                _sample(ts=base / 1e9 + 60.0, active_pool_usage=0.33),
+            ]
+        ),
+        workspace=tmp_path,
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.note_phase("eval", 1.0)
+    rec.tick(2.0)
+    payload = rec.summary()
+
+    phases = [r["phase"] for r in payload["samples"]]
+    assert phases == ["warmup", "measured", "eval"]
+    # The eval reading is the live one, kept in time order after aiperf's window;
+    # the redundant one taken inside that window is gone.
+    assert payload["samples"][-1]["active_pool_usage"] == 0.33
+    assert payload["sample_source"] == "aiperf_server_metrics"
 
 
 def test_a_round_without_an_aiperf_export_keeps_the_watchdog_rows(tmp_path):
