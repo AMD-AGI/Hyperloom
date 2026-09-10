@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement failure-signature classifier."""
+"""Enablement failure-signature classifier.
+
+Moved from ``hyperloom.agents.framework.enablement``; the canonical location is
+here so both ``orchestrator.bringup`` and ``orchestrator.framework.adapters`` can
+import it without creating a cross-layer dependency on the agents package.
+"""
 
 from __future__ import annotations
 

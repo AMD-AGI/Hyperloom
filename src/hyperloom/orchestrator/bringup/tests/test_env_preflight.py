@@ -192,7 +192,7 @@ def test_a_boot_failure_the_classifier_placed_is_not_an_environment_fault():
 
 def test_a_host_resource_shortfall_is_not_one_of_the_terminal_faults():
     """A configuration that asks for more than the host has is still the loop's to fix."""
-    from hyperloom.agents.framework.enablement import RESOURCE_CONSTRAINT
+    from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT
     from hyperloom.orchestrator.bringup.ladder import classify
 
     observation = classify(

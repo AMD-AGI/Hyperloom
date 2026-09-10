@@ -705,7 +705,7 @@ def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
 
 def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
     """A config-validation-stage failure (brand-new checkpoint ``model_type`` unknown to the installed transformers/vLLM) dies BEFORE the engine starts and must still be surfaced as a fatal excerpt."""
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     log_path = tmp_path / "server.log"
     # A healthy INFO banner naming architectures must NOT trip the markers.

@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from hyperloom.agents.framework import enablement as rules
+from hyperloom.common import failure_signature as rules
 from hyperloom.common.bringup import (
     BootObservation,
     Excerpt,
