@@ -10,6 +10,11 @@ from pathlib import Path
 
 from ..protocol.action_surfaces import ACTION_CATALOGUE
 
+# Segment-name constants — single source of truth for the two report sub-trees that
+# are also referenced as glob literals in session_package.py.
+BRINGUP_SEGMENT: str = "bringup"
+ENABLEMENT_SEGMENT: str = "enablement"
+
 
 # Top-level files
 def manifest_path(session_dir: Path) -> Path:
@@ -213,13 +218,29 @@ def sbd_v6_write_warnings_path(session_dir: Path) -> Path:
 
 def enablement_dir(session_dir: Path) -> Path:
     """``<sd>/reports/enablement/`` — enablement round artifacts."""
-    return reports_dir(session_dir) / "enablement"
+    return reports_dir(session_dir) / ENABLEMENT_SEGMENT
 
 
 def enablement_round_dir(session_dir: Path, task_id: str) -> Path:
     """``<sd>/reports/enablement/<task_id>/`` — one directory per round."""
     tid = _validate_id_component(task_id, field="enablement_round_dir.task_id")
     return enablement_dir(session_dir) / tid
+
+
+def bringup_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/bringup/`` — bring-up observation artifacts."""
+    return reports_dir(session_dir) / BRINGUP_SEGMENT
+
+
+def enablement_builds_dir(session_dir: Path, task_id: str) -> Path:
+    """``<sd>/enablement/builds/<task_id>/`` — targeted-build workspace for one task."""
+    tid = _validate_id_component(task_id, field="enablement_builds_dir.task_id")
+    return Path(session_dir) / ENABLEMENT_SEGMENT / "builds" / tid
+
+
+def enablement_stacks_dir(session_dir: Path) -> Path:
+    """``<sd>/enablement/stacks/`` — venv roots for enablement launch attempts."""
+    return Path(session_dir) / ENABLEMENT_SEGMENT / "stacks"
 
 
 # Full-trace artefacts (token + decision timeline) under reports/trace/.
@@ -499,8 +520,13 @@ __all__ = [
     "failure_evidence_path",
     "forge_cycle_dir",
     "forge_handoff_dir",
+    "BRINGUP_SEGMENT",
+    "ENABLEMENT_SEGMENT",
+    "bringup_dir",
+    "enablement_builds_dir",
     "enablement_dir",
     "enablement_round_dir",
+    "enablement_stacks_dir",
     "reports_dir",
     "research_hints_json",
     "session_failures_dir",
