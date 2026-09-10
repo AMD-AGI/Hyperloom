@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import builtins
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -158,6 +159,22 @@ def test_cycle_reloop_floor_covers_one_variant_grant():
     st = _framework_state(max_minutes=180)
     # 15% of a 3h budget is 1620s, below the 1800s a variant round is granted.
     assert ps._cycle_reloop_min_remaining_sec(st) == float(st.conc_sweep_variant_timeout_sec)
+
+
+def test_one_variant_grant_prices_agentx_without_grid_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def block_grid_runner(name, *args, **kwargs):
+        if name == "hyperloom.orchestrator.actions.executors._grid_runner":
+            raise ImportError("simulated partial initialization")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_grid_runner)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "10800")
+    st = _framework_state(max_minutes=180)
+
+    assert ps._one_variant_grant_sec(st) == 10800.0
 
 
 def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():

@@ -141,6 +141,18 @@ publish_state_for_poll() {
   chmod a+X "$sdir" "$session" 2>/dev/null || true
 }
 
+verify_framework_help_probe() {
+  python3 - "$1" <<'PY'
+import sys
+
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import _probe_server_help_text
+
+framework = sys.argv[1]
+if "--" not in _probe_server_help_text(framework):
+    raise SystemExit(f"{framework} help probe failed against the installed framework")
+PY
+}
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -388,6 +400,12 @@ run_leg() {
     log "WARN: leg $leg -- setup turn $turn ended early (install still progressing, idle ${sidle}s); resuming the conversation"
     sleep "${LEG_TURN_GAP_S:-30}"
   done
+  if [ "$run_mode" = baremetal ]; then
+    set -a
+    . "$envf"
+    set +a
+    verify_framework_help_probe "$backend"
+  fi
   log "claude --print (demo ${hours}h, resuming session $uuid)"
   # Same conversation as setup: the agent already knows this workspace, which framework
   # got installed and where its logs are, exactly like a human continuing the same chat.

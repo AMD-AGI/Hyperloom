@@ -54,8 +54,9 @@ These govern the optimizer, not the launcher; the full contract lives in
   tick and rendered as advisory in the orchestration prompt. One arm dry is not
   a plateau; the prompt says so. They do NOT drive phase advance — the LLM may
   emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. The per-phase budget and the
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}` when it
+  judges the current phase exhausted. `skip_to_close` is reserved for genuine
+  early abandonment and is not a phase advance. The per-phase budget and the
   absolute cap remain the only hard advance gates.
 
 ## Retired modules and rules (do not re-introduce)

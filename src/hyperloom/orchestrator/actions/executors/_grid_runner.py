@@ -38,6 +38,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
+from ._agentx_variant_timeout import agentx_variant_timeout_sec
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -1014,19 +1015,6 @@ def variant_conc(variant: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return conc if conc > 0 else None
-
-
-def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
-    """Raise a variant's hard cap to what an AgentX round actually needs."""
-    # Local import: baseline imports from this module, and the rest of the file already resolves _workload_envs this
-    # way.
-    from ._workload_envs import agentx_active, agentx_env_for_conc
-
-    if not agentx_active(shared_state):
-        return cap
-    from .baseline import agentx_baseline_timeout_sec
-
-    return max(cap, agentx_baseline_timeout_sec(agentx_env_for_conc(conc)))
 
 
 def session_clamped_timeout_sec(

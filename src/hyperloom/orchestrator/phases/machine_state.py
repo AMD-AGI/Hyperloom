@@ -430,10 +430,8 @@ def _one_variant_grant_sec(state: Any) -> float:
         return 0.0
     if declared_sec <= 0:
         return 0.0
-    try:
-        from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
-    except ImportError:  # grid runner unavailable; price at the declared timeout
-        return float(declared_sec)
+    from hyperloom.orchestrator.actions.executors._agentx_variant_timeout import agentx_variant_timeout_sec
+
     return float(agentx_variant_timeout_sec(declared_sec, shared_state=state))
 
 

@@ -219,6 +219,19 @@ def test_nested_container_memory_fits_the_host_pod(dispatch_script: str, bootstr
     )
 
 
+def test_baremetal_legs_require_the_real_framework_help_probe(bootstrap_script: str) -> None:
+    probe = bootstrap_script.index("verify_framework_help_probe")
+    pythonpath = bootstrap_script.index('export PYTHONPATH="${root}:${PYTHONPATH:-}"')
+    setup_done = bootstrap_script.index('log "leg $leg setup reported complete on turn $turn"')
+    refresh_env = bootstrap_script.index('. "$envf"', setup_done)
+    probe_call = bootstrap_script.index('verify_framework_help_probe "$backend"', setup_done)
+    demo = bootstrap_script.index('log "claude --print (demo ${hours}h, resuming session $uuid)"')
+
+    assert "_probe_server_help_text" in bootstrap_script[probe:setup_done]
+    assert 'if "--" not in _probe_server_help_text(framework):' in bootstrap_script[probe:setup_done]
+    assert pythonpath < setup_done < refresh_env < probe_call < demo
+
+
 def test_every_leg_name_resolves_through_the_glob_helpers(dispatch_script: str, tmp_path: Path) -> None:
     """The leg helpers parse by suffix glob, so a new name can silently resolve to nothing.
 

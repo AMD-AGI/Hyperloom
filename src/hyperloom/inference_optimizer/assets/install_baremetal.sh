@@ -557,8 +557,7 @@ install_sglang_from_source() {
   else
     git -C "$sglang_root" fetch --depth 1 origin "$SGLANG_REF" \
       || git -C "$sglang_root" fetch --all --tags --prune
-    git -C "$sglang_root" checkout -q FETCH_HEAD 2>/dev/null \
-      || git -C "$sglang_root" checkout "$SGLANG_REF"
+    git -C "$sglang_root" checkout -q "$SGLANG_REF"
     git -C "$sglang_root" submodule sync
     git -C "$sglang_root" submodule update --init --recursive
   fi
