@@ -903,6 +903,81 @@ def test_run_rewrite_happy_path_reports_speedup(tmp_path, monkeypatch, capsys):
     assert rj.exists()
 
 
+def test_run_rewrite_reports_total_usage_across_local_and_forge_loop_agents(
+    tmp_path,
+    monkeypatch,
+):
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen_usage = []
+
+    async def counted_port(spec, driver_path, config, **kwargs):
+        del spec, driver_path, config
+        usage = kwargs["usage"]
+        seen_usage.append(usage)
+        usage.add_usage(
+            {"input_tokens": 10, "output_tokens": 2},
+            total_cost_usd=0.1,
+        )
+        return port_loop.PortResult(ok=True, attempts=1, snr_db=143.0)
+
+    def counted_applyback(*args, **kwargs):
+        del args
+        usage = kwargs["usage"]
+        seen_usage.append(usage)
+        usage.add_usage(
+            {"input_tokens": 20, "output_tokens": 4},
+            total_cost_usd=0.2,
+        )
+        return ApplybackResult(ok=True)
+
+    monkeypatch.setattr(runner, "run_port_loop", counted_port)
+    monkeypatch.setattr(
+        runner,
+        "run_optimize",
+        lambda *args, **kwargs: {
+            "best_ms": 0.5,
+            "experiment_id": "E",
+            "llm_usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "cache_creation_input_tokens": 8,
+                "cache_read_input_tokens": 40,
+                "total_cost_usd": 1.0,
+                "cost_available": True,
+                "cost_source": "provider",
+                "calls": 3,
+            },
+        },
+    )
+    monkeypatch.setattr(runner, "generate_applyback_patch", counted_applyback)
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert seen_usage[0] is seen_usage[1]
+    assert out["llm_usage"] == {
+        "input_tokens": 130,
+        "output_tokens": 36,
+        "cache_creation_input_tokens": 8,
+        "cache_read_input_tokens": 40,
+        "total_cost_usd": 1.3,
+        "cost_available": True,
+        "cost_source": "provider",
+        "calls": 5,
+    }
+
+
 def test_run_rewrite_keeps_the_candidate_out_of_the_workspace_root(
     tmp_path,
     monkeypatch,

@@ -38,6 +38,7 @@ from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tracker import UsageAccumulator, combine_usage_totals
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ def run_rewrite(
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
+    usage = UsageAccumulator()
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
@@ -163,6 +165,13 @@ def run_rewrite(
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
 
+    def _total_usage(optimize_result: dict | None = None) -> dict:
+        nested = (optimize_result or {}).get("llm_usage")
+        return combine_usage_totals(
+            usage.totals(),
+            nested if isinstance(nested, dict) else None,
+        )
+
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
     def _setup_failed(reason: str, failure_class: str) -> dict:
@@ -173,6 +182,7 @@ def run_rewrite(
             port_attempts=0,
             source_ms=None,
             optimize_result={},
+            llm_usage=_total_usage(),
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
@@ -253,6 +263,7 @@ def run_rewrite(
                 deadline_unix=search_stop_unix,
                 invocation_spec_file=invocation_spec_file,
                 initial_preflight=preflight,
+                usage=usage,
             )
         )
         if not prepared.ok or prepared.preflight is None:
@@ -342,6 +353,7 @@ def run_rewrite(
                 permission_mode=permission_mode,
                 stop_at_unix=search_stop_unix,
                 pre_task_context=kb_read.reference_context,
+                usage=usage,
             )
         )
     if not port.ok:
@@ -352,6 +364,7 @@ def run_rewrite(
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result={},
+            llm_usage=_total_usage(),
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -433,6 +446,7 @@ def run_rewrite(
         optimize_result={"best_ms": flydsl_baseline_ms},
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
@@ -552,6 +566,7 @@ def run_rewrite(
         deadline_unix=deadline_unix,
         import_modules=applyback_import_modules,
         max_attempts=max_applyback_attempts,
+        usage=usage,
     )
     if applyback.ok:
         print(
@@ -571,6 +586,7 @@ def run_rewrite(
         optimize_result=opt,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(opt),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,
