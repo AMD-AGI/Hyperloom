@@ -202,6 +202,78 @@ def test_warm_recipe_proven_items_empty_without_recipe(tmp_path):
     assert coord._warm_recipe_proven_items() == []
 
 
+def test_experience_rows_survive_the_kb_round_trip(tmp_path):
+    """The seam between the writeback shape and the prelude reader.
+
+    ``test_recipe_sedimentation`` already proves writeback stamps ``name`` /
+    ``source`` onto ``what_worked``, and ``test_warm_recipe_proven_items``
+    proves prelude reads them — but that test hand-injects the rows, so nothing
+    covered the persistence step between the two. The store normalised every
+    experience row down to ``{description, measured_impact}``, a vocabulary the
+    Coordinator never writes, so each row came back as empty strings and the
+    scout's cross-session skip list was always empty.
+    """
+    store = LocalRecipeStore(root=tmp_path / "kb2")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        # Exactly what writeback._build_recipe_payload emits.
+        what_worked=[
+            {
+                "name": "mtp_on",
+                "extra_server_args": "--speculative-num-steps 3",
+                "extra_envs": {"VLLM_MTP": "1"},
+                "gain_pct": 4.2,
+                "source": "https://pr/123",
+            }
+        ],
+        what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+    )
+    row = store.get_recipe(canonical_id=cid) or {}
+
+    worked = row.get("what_worked") or []
+    assert len(worked) == 1
+    assert worked[0].get("name") == "mtp_on"
+    assert worked[0].get("source") == "https://pr/123"
+    assert worked[0].get("extra_server_args") == "--speculative-num-steps 3"
+    assert worked[0].get("extra_envs") == {"VLLM_MTP": "1"}
+    # description carries operator-readable text for arbor rather than "".
+    assert worked[0].get("description")
+
+    failed = row.get("what_failed") or []
+    assert failed[0].get("name") == "bad_flag"
+    assert failed[0].get("reason") == "reverted"
+
+
+def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
+    """End-to-end: a recipe written to the KB feeds prelude's ``already_proven``."""
+    coord = _make_coordinator(tmp_path)
+    store = LocalRecipeStore(root=tmp_path / "kb3")
+    cid = "inference:m:h:f:text:a:1:fp4"
+    store.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="h",
+        framework_name="f",
+        what_worked=[
+            {"name": "mtp_on", "source": "https://pr/123"},
+            {"name": "fp8_kv"},
+        ],
+    )
+    # The shape recipe_kb_t0 hands to SharedState on a hit.
+    coord.shared_state.warm_start_recipe = {
+        "workload": "m",
+        "hw": "h",
+        "recipe": store.get_recipe(canonical_id=cid) or {},
+    }
+    proven = coord._warm_recipe_proven_items()
+    assert {p["name"] for p in proven} == {"mtp_on", "fp8_kv"}
+    assert next(p for p in proven if p["name"] == "mtp_on")["source"] == "https://pr/123"
+
+
 def test_gap_provenance_round_trips_through_serialization(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
