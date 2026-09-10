@@ -165,11 +165,18 @@ def run_rewrite(
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
 
-    def _total_usage(optimize_result: dict | None = None) -> dict:
-        nested = (optimize_result or {}).get("llm_usage")
+    def _total_usage(optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
+        """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
+
+        A forge-loop that was cut off or killed reports a ledger that stops at its last checkpoint, so the totals are
+        published as partial rather than as a complete provider-priced answer.
+        """
+        opt_result = optimize_result or {}
+        nested = opt_result.get("llm_usage")
         return combine_usage_totals(
             usage.totals(),
             nested if isinstance(nested, dict) else None,
+            incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
         )
 
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
@@ -504,7 +511,9 @@ def run_rewrite(
         )
 
     opt: dict = {}
+    optimize_ran = False
     if time.time() < search_stop_unix:
+        optimize_ran = True
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
         opt = run_optimize(
             spec,
@@ -523,6 +532,12 @@ def run_rewrite(
     else:
         print(
             "  [forge-rewrite] 20-minute finalization reserve reached after PORT; skipping forge-loop",
+            flush=True,
+        )
+    if optimize_ran and not opt.get("llm_usage_complete"):
+        print(
+            "  [forge-rewrite] WARNING: forge-loop did not report a final token ledger; the reported llm_usage covers "
+            "only what it checkpointed and is published as partial",
             flush=True,
         )
 
@@ -586,7 +601,7 @@ def run_rewrite(
         optimize_result=opt,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
-        llm_usage=_total_usage(opt),
+        llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,

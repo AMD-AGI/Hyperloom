@@ -172,6 +172,37 @@ def test_combine_usage_totals_marks_mixed_provider_cost_partial():
     assert combined["cost_source"] == "partial"
 
 
+def test_combine_usage_totals_degrades_to_partial_when_a_ledger_is_missing():
+    """A run that could not recover a contributor's spend must not be billed as a complete provider total."""
+    combined = combine_usage_totals(
+        {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_cost_usd": 0.1,
+            "cost_available": True,
+            "cost_source": "provider",
+            "calls": 1,
+        },
+        incomplete=True,
+    )
+
+    assert combined["input_tokens"] == 10
+    assert combined["calls"] == 1
+    assert combined["total_cost_usd"] == 0.1
+    assert combined["cost_available"] is False
+    assert combined["cost_source"] == "partial"
+
+
+def test_combine_usage_totals_reports_unavailable_when_nothing_was_priced():
+    combined = combine_usage_totals(
+        {"input_tokens": 10, "calls": 1},
+        incomplete=True,
+    )
+
+    assert combined["cost_available"] is False
+    assert combined["cost_source"] == "unavailable"
+
+
 def test_set_llm_usage_persists_to_experiment():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)

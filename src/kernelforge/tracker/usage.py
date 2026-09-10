@@ -79,8 +79,16 @@ class UsageAccumulator:
         return self.calls > 0
 
 
-def combine_usage_totals(*records: dict[str, Any] | None) -> dict[str, Any]:
-    """Combine independently accumulated usage records without losing cost provenance."""
+def combine_usage_totals(
+    *records: dict[str, Any] | None,
+    incomplete: bool = False,
+) -> dict[str, Any]:
+    """Combine independently accumulated usage records without losing cost provenance.
+
+    ``incomplete`` states that a contributor's ledger is known to be missing from ``records``. The counters below then
+    describe only part of the run, so the combination reports itself as ``partial`` rather than claiming the complete
+    provider-priced answer a reader would otherwise bill against.
+    """
     combined: dict[str, Any] = {key: 0 for key in _TOKEN_KEYS}
     combined["total_cost_usd"] = 0.0
     combined["calls"] = 0
@@ -116,7 +124,7 @@ def combine_usage_totals(*records: dict[str, Any] | None) -> dict[str, Any]:
                 )
 
     combined["total_cost_usd"] = round(combined["total_cost_usd"], 6)
-    combined["cost_available"] = combined["calls"] > 0 and all_cost_available
+    combined["cost_available"] = combined["calls"] > 0 and all_cost_available and not incomplete
     combined["cost_source"] = (
         "provider" if combined["cost_available"] else "partial" if any_priced_usage else "unavailable"
     )
