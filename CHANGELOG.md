@@ -206,6 +206,137 @@ for the user-facing summary.
 
 ### Changed
 
+- **One reasoning-effort vocabulary, and it is the one both surfaces accept.**
+  Three tables disagreed: Hyperloom took `minimal | low | medium | high`, Forge
+  ranked `none | low | medium | high | xhigh | max`, and the Codex backend
+  accepted a third list while folding `max` onto `xhigh`. The disagreement was
+  not cosmetic -- `HYPERLOOM_REASONING_EFFORT=minimal` passed Hyperloom's own
+  filter and then raised inside the Codex backend, so a box configured once
+  crashed the component doing most of the spending.
+  `hyperloom.common.reasoning_effort` now holds the single ladder
+  `low | medium | high | xhigh | max`, measured against both surfaces:
+  `claude --effort` takes `low..xhigh` plus `max`, the OpenAI-compatible
+  gateway takes `none`/`minimal`/`low..xhigh` and returns 400 on `max`.
+  `low`–`xhigh` are levels as written. `max` is a real Claude level, so it is
+  one here too, and `gateway_reasoning_effort` projects it onto `xhigh` -- the
+  gateway's deepest -- for the Codex backend *and* for Hyperloom's own
+  chat.completions: the fold used to live inside the Codex backend only, so the
+  identical value reaching Hyperloom's own calls was a 400. `minimal` and
+  `none` go the other way -- the gateway takes them, the Claude CLI does not
+  know them, and there is no Claude level below `low` to project them onto --
+  so neither is a level.<br/>
+  **A bad value is refused at startup, by name.** `resolve_agent_reasoning_effort`
+  and `Config.__post_init__` raise on an unrecognized effort and say which
+  variable carried it, rather than passing it through for the provider to
+  reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
+  keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
+  non-reasoning models and gateways that reject the field.<br/>
+  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
+  reaches the gateway.** Hyperloom's own chat.completions used to forward
+  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
+  drops it and the call runs at the gateway's default -- deeper and more
+  expensive, with no error to notice. Forge's side of the same variable is loud
+  (it refuses to start), but Hyperloom's cannot be without breaking
+  non-reasoning models, so **a deployment sitting on `minimal` has to move to
+  `low` by hand.**
+
+- **Forge reads Hyperloom's environment contract instead of its own.** Forge
+  does not ship next to Hyperloom any more, it ships inside it, and an operator
+  configuring one box was being asked to learn two vocabularies for the same
+  decision. `Config.from_env` now walks the ladder
+  `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
+  written out separately because they answer different questions -- Hyperloom's
+  picks the model for its own calls into a campaign, Forge's picks the model an
+  agent session runs -- and the part worth sharing is the variable names, which
+  this change makes identical. Reasoning effort falls back to
+  the project-wide `HYPERLOOM_REASONING_EFFORT` when
+  `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
+  is not silently contradicted by the component doing most of the spending.<br/>
+  **Three surfaces were reading a different ladder than the one they
+  documented.** `forge-fusion`'s `_resolve_agent_choice` and Hyperloom's own
+  `_run_vendor_playbook_loop_via_cli` each read one model variable directly
+  rather than the shared resolver, so a request-level `llm_model` and the
+  environment were ranked differently depending on which surface launched the
+  run. Both now go through the resolver. And
+  `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
+  a subscription token was told it had no Anthropic credentials while the Claude
+  CLI on it would have authenticated fine -- Hyperloom's own credential
+  preflight has always counted that token as a complete Anthropic side.<br/>
+  **BREAKING -- removed, with no deprecation window: `FORGE_CLAUDE_MODEL`,
+  `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL`, and `KERNEL_AGENTS_MODEL`. Forge no
+  longer has a model variable of its own; set `CLAUDE_MODEL` / `CODEX_MODEL`.**
+  The per-provider pair dated from when Forge was a separate project that had
+  to name its own settings; inside Hyperloom it was one component's second
+  spelling of a platform setting, and a deployment that set one and not the
+  other silently ran Forge on a different model than everything else.
+  `FORGE_AGENT_MODEL` was the provider-neutral rung above them, and it has the
+  same problem for the same reason: the Hyperloom-side resolver
+  (`resolve_forge_llm_model`) never read it, so as long as it existed the two
+  ladders agreed only by coincidence. Deleting it is what makes them one
+  ladder. `KERNEL_AGENTS_MODEL` was never set by anything in either repository
+  -- only read -- so it was a rung to explain with nothing to configure. All
+  four are dropped from the resolver on both sides, from the Ray and Slurm
+  environment allowlists, and from both env templates. A box that had been
+  relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
+  through to the provider default rather than failing, so **check your
+  deployment's env rather than waiting for an error.**
+
+- **`auto` resolves the model after the provider, not before.** The model
+  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
+  backend of `auto` answered before the question was settled: `auto` prefers
+  the Claude CLI but falls to codex when it is not installed, and the runtime
+  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
+  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
+  and `Config.agent_runtime` reads the pair once the provider is known. Two
+  further sites built their own runtime and so read neither switch:
+  `fusion/command.py` pinned every fusion session to the default depth
+  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
+  took the provider default model and the default effort. Both now read the
+  same pair and the same effort ladder as `forge-loop`, and a new test asserts
+  the set of modules that build a runtime is closed -- a fresh bypass fails the
+  suite rather than going unnoticed, which is how these two did.<br/>
+  The two provider-*switch* branches had the same defect on their far side.
+  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
+  provider other than the implementer's -- which is the ordinary case, since
+  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
+  all, so the supervisor ran the registry default however `CODEX_MODEL` was
+  set. `make_agent_fn` did the opposite, carrying the already-resolved
+  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
+  defect again one level up. Both now read the pair for the provider they are
+  about to build, and a second test asserts every construction site does.
+
+- **An agent session's reasoning effort is now the operator's decision, not the
+  call site's.** `AgentRunSpec.resolved()` used to let a spec's own
+  `reasoning_effort` outrank the runtime's, and two thirds of the sessions in
+  this repository wrote one -- so an operator who set
+  `FORGE_AGENT_REASONING_EFFORT` watched most of the campaign ignore it and
+  then read the result as evidence about a setting it never ran under. The
+  ranking is inverted and every call-site literal is deleted rather than left
+  in place looking live; the spec's value survives only for a runtime that
+  names no effort, which no provider here builds. Nine sessions that hardcoded
+  `max` now run at the campaign effort (`high` by default), which is also the
+  cheaper direction.<br/>
+  **Context window: not ported.** Upstream appends `[1m]` to every Claude
+  model id. Measured against the gateway Hyperloom points Forge at
+  (`.../api/v1/llm-proxy`), `claude-opus-5` answers 200 while
+  `claude-opus-5[1m]` -- and every other bracketed form, `[200k]` included --
+  answers `400 Invalid model name`; `/v1/models` publishes 23 ids of which none
+  is windowed. So the suffix would fail every Hyperloom-launched session at the
+  startup probe rather than shrink it. Nor is the window something Forge needs
+  for its own sake: it runs no compaction and no token budget, so the suffix
+  was the only thing a window could have driven, and Hyperloom's own
+  `MODEL_CONTEXT_WINDOWS` answers a different question (when to compact the
+  orchestrator's conversation) and never reaches the wire. The whole mechanism
+  is therefore absent -- no `model_context.py`, no `context_window` on the
+  runtime, no environment variable. A test pins that, so a future re-port of
+  upstream fails the suite instead of every session.<br/>
+  **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
+  so it answered "some configuration works" rather than "this one does"; it now
+  asks under the configuration the campaign will run. `[` terminates the model
+  family regex, so an operator who hand-writes `claude-opus-5[1m]` into
+  `CLAUDE_MODEL` is still recognised as running `claude-opus-5`.
+
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
   dependency and `install.sh` already owned that install, but it was gated on a
@@ -606,6 +737,20 @@ for the user-facing summary.
   wrapper's own input JSON is unchanged.
 
 ### Fixed
+
+- **The Codex default named a deployment the gateway does not serve.**
+  `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
+  points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
+  found!` on both ChatCompletions and Responses, while `gpt-5.6-sol` answers
+  200 on both. Both appear in `/v1/models`, so the catalog alone does not
+  separate them -- only a request does. Hyperloom's own install guide already
+  names `gpt-5.6-sol` and states that it is a deployment name rather than a
+  suffixed variant of a bare `gpt-5.6`, so this default disagreed with the
+  documentation shipped beside it: a box that named no model started every
+  Codex session on a rejected id and survived only by falling back to
+  `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
+  a context-window suffix -- bracketed ids remain rejected by this gateway,
+  which is why no window suffix is applied at all.
 
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its

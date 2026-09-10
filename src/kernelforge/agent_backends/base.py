@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+
 
 #: Environment overlay applied to every session started inside the current
 #: context. Held in a ``ContextVar`` rather than in ``os.environ`` because
@@ -32,6 +34,23 @@ def session_environment(overlay: Mapping[str, str]) -> Iterator[None]:
         yield
     finally:
         _session_environment.reset(token)
+
+
+def _clamped_effort(effort: str, ceiling: str) -> str:
+    """Return ``effort``, lowered to ``ceiling`` when it outranks it.
+
+    Ranked by :data:`REASONING_EFFORT_RANK`, the vocabulary both Hyperloom and
+    Forge speak. A name outside the ladder is not ranked and therefore never
+    clamped -- an unknown effort is the provider's to reject, not this
+    function's to silently rewrite into something the caller did not ask for.
+    """
+    if not ceiling:
+        return effort
+    asked = REASONING_EFFORT_RANK.get(effort.strip().lower())
+    limit = REASONING_EFFORT_RANK.get(ceiling.strip().lower())
+    if asked is None or limit is None or asked <= limit:
+        return effort
+    return ceiling.strip().lower()
 
 
 #: Attribute a provider sets to ``True`` on an error that is a VERDICT about
@@ -79,7 +98,7 @@ class AgentRuntimeConfig:
     model: str
     executable: str = ""
     timeout_sec: int = 1800
-    reasoning_effort: str = "high"
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
     sandbox_mode: str = "bypass"
     precheck: bool = True
     fallback_provider: str = ""
@@ -198,14 +217,47 @@ class AgentRunSpec:
     # Untracked paths a tool is known to drop in the workspace on its own, as fnmatch patterns relative to the
     # workspace root.
     ignored_untracked_globs: list[str] = field(default_factory=list)
+    # Ceiling on the effort this session may run at, in the generic vocabulary
+    # ranked by :data:`REASONING_EFFORT_RANK`. Empty for every ordinary session: the
+    # deployment's effort is the one that runs, and a call site that thinks it
+    # knows better is exactly what ``resolved`` stopped honouring.
+    #
+    # It exists for the calls that are structurally not reasoning work -- the
+    # width repair below restates a decision that was already made, with no
+    # tools and two turns -- where the deployment's ``high`` (or ``max``) buys
+    # nothing and is billed anyway. A ceiling only ever lowers: an operator who
+    # runs the campaign at ``low`` still gets ``low`` here.
+    # Appended, like the field above, to keep the positional contract.
+    max_reasoning_effort: str = ""
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
-        """Fill omitted per-run values from the runtime and the session scope."""
+        """Settle this session's model, effort and environment.
+
+        The runtime's reasoning effort wins over the spec's, which is the
+        reverse of how these two used to rank. Under the old order every call
+        site that wrote an effort of its own -- most of them -- was immune to
+        ``FORGE_AGENT_REASONING_EFFORT``, so an operator who set it watched two
+        thirds of the sessions ignore them and then read the campaign as
+        evidence about a setting it never ran under. An effort written in code
+        is this repository's opinion; one written in the environment is the
+        operator's decision about the run in front of them, and the operator has
+        to win or the variable is decorative. The spec's own value survives only
+        for a runtime that names none, which no provider in this repository
+        builds.
+
+        ``max_reasoning_effort`` is the one thing a call site may still say
+        about effort, and it can only lower: a session that is structurally not
+        reasoning work is capped there, while an operator running the campaign
+        below the cap keeps their own value.
+        """
         return replace(
             self,
             model=self.model.strip() or runtime.model,
             timeout_sec=(self.timeout_sec if self.timeout_sec is not None else runtime.timeout_sec),
-            reasoning_effort=(self.reasoning_effort.strip() or runtime.reasoning_effort),
+            reasoning_effort=_clamped_effort(
+                runtime.reasoning_effort.strip() or self.reasoning_effort.strip(),
+                self.max_reasoning_effort,
+            ),
             env={**_session_environment.get(), **self.env},
         )
 

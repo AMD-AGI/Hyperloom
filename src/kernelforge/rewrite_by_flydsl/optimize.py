@@ -239,7 +239,8 @@ def run_optimize(
     if deadline_unix and deadline_unix > 0:
         cmd += ["--deadline-unix", str(deadline_unix)]
     # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
-    # default from the environment (KERNEL_AGENTS_MODEL).
+    # default from the environment (CLAUDE_MODEL / CODEX_MODEL). ``Config`` exposes the model as ``agent_model`` --
+    # there is no ``config.model``.
     if config.agent_model:
         cmd += ["--model", config.agent_model]
     if permission_mode:
