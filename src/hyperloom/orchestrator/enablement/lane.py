@@ -627,10 +627,21 @@ class EnablementLane(CoordinatorCollaborator):
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
             state.enablement.framework_root = res_fw_root
+        # The ordinal the dispatch filed this round under, read before the
+        # settle scores it, so every row of this round meets on the same number.
+        attempt = await self.rounds.consecutive_stalled() + 1
         setting_script = ""
         archive = RoundArchive(self.session_dir)
         try:
             archive = snapshot_round(self.session_dir, res)
+            # Where the copies come into being, and from the archive rather
+            # than from ``res``. Inside the try so that a snapshot which raised
+            # leaves the row silent instead of claiming nothing landed.
+            enablement_event.record_archive(
+                task_id=_round_task_id(state, res),
+                attempt=attempt,
+                files=archive.to_list(),
+            )
             if status in ("kept", "advanced"):
                 setting_script = write_setting_script(
                     self.session_dir,
@@ -650,9 +661,6 @@ class EnablementLane(CoordinatorCollaborator):
         archived_config = archive.path_for(ROLE_LAUNCH_CONFIG)
         if status == "kept" and archived_config:
             state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
-        # The ordinal the dispatch filed this round under, read before the
-        # settle scores it, so the two rows meet on the same number.
-        attempt = await self.rounds.consecutive_stalled() + 1
         # A rearm always ends the round; only a KEEP booted and was graded, and
         # an advance is the ledger's record that the cap must not charge it.
         is_advanced = status == "advanced" or bool(res.get("advanced"))
@@ -705,6 +713,15 @@ class EnablementLane(CoordinatorCollaborator):
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
 
 
+def _round_task_id(state: Any, res: dict[str, Any]) -> str:
+    """The specialist task id every row of one round is keyed by.
+
+    A phase-synthesised rearm carries no id of its own, so the in-flight one
+    the dispatch filed stands in.
+    """
+    return str(res.get("specialist_task_id") or "").strip() or str(state.enablement.last_specialist_task_id or "")
+
+
 def _record_enablement_round(
     state: Any,
     res: dict[str, Any],
@@ -723,10 +740,9 @@ def _record_enablement_round(
     dispatch filed it under.
     """
     lane = state.enablement
-    round_tid = str(res.get("specialist_task_id") or "").strip() or str(lane.last_specialist_task_id or "")
     succeeded = bool(lane.succeeded)
     enablement_event.record_round(
-        task_id=round_tid,
+        task_id=_round_task_id(state, res),
         attempt=int(attempt or 0),
         result=res,
         stall_streak=int(stall_streak or 0),

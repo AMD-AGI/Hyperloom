@@ -500,6 +500,7 @@ def test_nothing_recorded_outside_a_session_raises(tmp_path, monkeypatch):
     )
     _boot_trigger()
     enablement_event.record_dispatch(task_id="spec-1", attempt=1)
+    enablement_event.record_archive(task_id="spec-1", attempt=1, files=[{"path": "p", "role": "patch"}])
     enablement_event.record_round(task_id="spec-1", attempt=1, result={}, stall_streak=0, succeeded=False)
     enablement_event.record_build(task_id="build-1", entry={"ok": True})
     enablement_event.record_revalidation(generation=1)
@@ -513,3 +514,52 @@ def test_a_malformed_result_does_not_cost_the_round_its_row(_bound_session):
     enablement_event.record_round(task_id="spec-1", attempt=1, result=None, stall_streak=0, succeeded=False)
 
     assert _ext(_bound_session)["attempts"]["count"] == 1
+
+
+def test_the_archive_merges_onto_the_round_the_dispatch_opened(_bound_session):
+    _boot_trigger()
+    enablement_event.record_dispatch(task_id="spec-1", attempt=1)
+    enablement_event.record_archive(
+        task_id="spec-1",
+        attempt=1,
+        files=[
+            {"path": "reports/enablement/spec-1/patches/moe.diff", "role": "patch"},
+            {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"},
+            {"path": "reports/enablement/spec-1/server.log", "role": "server_log"},
+        ],
+    )
+    enablement_event.record_round(
+        task_id="spec-1",
+        attempt=1,
+        result=_kept(enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"),
+        stall_streak=0,
+        succeeded=True,
+    )
+
+    rows = _ext(_bound_session)["attempts"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["files"] == [
+        {"path": "reports/enablement/spec-1/patches/moe.diff", "role": "patch"},
+        {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"},
+        {"path": "reports/enablement/spec-1/server.log", "role": "server_log"},
+    ]
+    # Read out of the manifest, so it cannot name a copy the manifest lacks.
+    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
+    # The round's own paths stay, as identity rather than as a way to fetch.
+    assert rows[0]["patches_applied"] == ["/s/patches/moe.diff"]
+
+
+def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
+    _boot_trigger()
+    enablement_event.record_archive(task_id="spec-1", attempt=1, files=[])
+    enablement_event.record_round(
+        task_id="spec-1",
+        attempt=1,
+        result=_kept(enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"),
+        stall_streak=0,
+        succeeded=True,
+    )
+
+    row = _ext(_bound_session)["attempts"]["rows"][0]
+    assert row["files"] == []
+    assert row["accepted_config_path"] is None
