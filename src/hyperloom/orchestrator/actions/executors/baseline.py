@@ -145,6 +145,15 @@ _EVAL_FAILURE_MARKERS = (
     "ERROR: run_eval failed",
     "Unknown parameter: --concurrent-requests",
 )
+# Markers showing the eval failed because the server was not reachable, rather than because the model scored badly or
+# the framework lacks a capability. The eval harness reports both the same way -- a non-zero ``run_eval`` -- so without
+# this distinction a torn-down server is indistinguishable from an accuracy gap, and gets routed to the enablement lane
+# to hunt for a capability that was never missing.
+_EVAL_SERVER_UNREACHABLE_MARKERS = (
+    "ClientConnectorError",
+    "Cannot connect to host",
+    "Connect call failed",
+)
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
 # The measured pass ran as the first traffic against a freshly restarted server, because the warmup that exists to
@@ -2178,6 +2187,15 @@ class BaselineExecutor:
         return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
+    def _is_server_unreachable_eval_failure(result: dict[str, Any]) -> bool:
+        """Whether an eval-rooted failure happened because the server had gone away.
+
+        Evidence of a refused connection says the eval never reached a verdict, so the run carries no information
+        about accuracy or about a missing framework capability -- the two things the enablement lane exists to chase.
+        """
+        return BaselineExecutor._failure_carries_markers(result, _EVAL_SERVER_UNREACHABLE_MARKERS)
+
+    @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline died on the MoE runner backend in use."""
         return BaselineExecutor._failure_carries_markers(
@@ -2296,7 +2314,25 @@ class BaselineExecutor:
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
-        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+        # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
+        # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
+        # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
+        # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
+        # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
+        # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
+        if (
+            result.get("status") != "succeeded"
+            and not eval_already_off
+            and self._is_eval_rooted_failure(result)
+            and self._is_server_unreachable_eval_failure(result)
+        ):
+            log.warning(
+                "baseline_executor: the accuracy eval failed because the server was unreachable, not because the "
+                "eval reached a verdict; recording an ordinary baseline failure rather than an enablement gap."
+            )
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("eval_failed_server_unreachable")
+        elif result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
             _, evidence = self._eval_failure_evidence(result)
             if self._eval_enablement_active(ctx):
                 from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
