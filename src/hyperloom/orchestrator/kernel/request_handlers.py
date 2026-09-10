@@ -41,11 +41,10 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
-from .kernel_context import resolve_precision_and_quant
+from .kernel_context import build_kernel_context, resolve_precision_and_quant
 from .kernel_evidence import (
     resolve_forge_server_log,
     resolve_forge_untuned_csv,
-    resolve_fusion_decode_trace,
     resolve_trace_shape_manifest,
     tokens_from_serving_log,
 )
@@ -55,6 +54,7 @@ from .lane_budget import (
     allocate as _allocate_lane_budgets,
     gemm_per_tuner_timeout_sec,
 )
+from .lane_inputs import FusionAgent, FusionExecution, fusion_input
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -1665,31 +1665,20 @@ def _positive_int(value: object) -> int:
     return parsed if parsed > 0 else 0
 
 
-def _fusion_session_serve_args(
-    state: object,
-    payload: dict,
-    *,
-    framework: str,
-    model_path: str,
-) -> dict[str, int]:
-    """TP / KV block size / max-model-len the serving smoke must match."""
-    tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
-    max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
-    block_size = _positive_int(payload.get("block_size"))
-    if block_size <= 0 and "vllm" in (framework or "").strip().lower():
-        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
-            _sparse_kv_block_size,
-        )
+def _fusion_kv_block_size(payload: dict, *, framework: str, model_path: str) -> int:
+    """The KV block size the serving smoke must match, or 0 to let forge decide.
 
-        block_size = _positive_int(_sparse_kv_block_size(model_path))
-    args: dict[str, int] = {}
-    if tp:
-        args["tp"] = tp
-    if block_size:
-        args["block_size"] = block_size
-    if max_model_len:
-        args["max_model_len"] = max_model_len
-    return args
+    Not a context fact: only vLLM's serving smoke needs one, and it comes from
+    the model config rather than from anything the session recorded.
+    """
+    block_size = _positive_int(payload.get("block_size"))
+    if block_size > 0 or "vllm" not in (framework or "").strip().lower():
+        return block_size
+    from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+        _sparse_kv_block_size,
+    )
+
+    return _positive_int(_sparse_kv_block_size(model_path))
 
 
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
@@ -4225,7 +4214,8 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    context = build_kernel_context(state, session_dir, overrides=payload)
+    model_path = context.workload.model_path
     if not model_path:
         return {
             "status": "failed",
@@ -4237,8 +4227,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = resolve_fusion_decode_trace(state, payload)
-    if not trace_path:
+    if not context.evidence.decode_trace.usable:
         return {
             "status": "skipped",
             "backend": "forge",
@@ -4252,8 +4241,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    gpu = str(payload.get("gpu") or "0").strip()
+    framework = context.serving.framework or "sglang"
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
     except (RuntimeError, ValueError) as exc:
@@ -4296,27 +4284,26 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
 
-    input_payload = {
-        "trace_path": trace_path,
-        "model_path": model_path,
-        "framework": framework,
-        "output_dir": str(workspace),
-        "discover_mode": str(payload.get("discover_mode") or "llm"),
-        "agent_backend": agent_backend,
-        "llm_model": llm_model,
-        "agent_sandbox_mode": agent_sandbox_mode,
-        "max_turns": max_turns,
-        "gpu": gpu,
-        "timeout": timeout,
-        # Multi-patch (one independent sibling per recipe) is the default; the
-        # combine escape hatch (a single merged patch) must be requested explicitly.
-        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
-        # How many recipes the lane's share pays for. Omitted when none could be
-        # derived, which leaves forge-fuse on every discovered recipe.
-        **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
-        "verbose": bool(payload.get("verbose", False)),
-        **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
-    }
+    input_payload = fusion_input(
+        context,
+        workspace=workspace,
+        agent=FusionAgent(
+            backend=agent_backend,
+            model=llm_model,
+            sandbox_mode=agent_sandbox_mode,
+            max_turns=max_turns,
+        ),
+        execution=FusionExecution(
+            framework=framework,
+            timeout=timeout,
+            max_recipes=fusion_recipe_ceiling,
+            discover_mode=str(payload.get("discover_mode") or "llm"),
+            gpu=str(payload.get("gpu") or "0").strip(),
+            block_size=_fusion_kv_block_size(payload, framework=framework, model_path=model_path),
+            fuse_all_confirmed=bool(payload.get("fuse_all_confirmed", False)),
+            verbose=bool(payload.get("verbose", False)),
+        ),
+    )
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 

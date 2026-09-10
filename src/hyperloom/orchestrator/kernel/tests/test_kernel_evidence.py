@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -215,6 +216,127 @@ class TestShapeManifestResolution:
 
     def test_a_missing_session_dir_is_survivable(self, tmp_path):
         assert ke.resolve_trace_shape_manifest(_State(), tmp_path / "gone") == ""
+
+
+class TestCampaignRepositoryDiscovery:
+    """Which repositories a rewrite could name, before anything is sealed."""
+
+    _GIT_IDENTITY = {
+        "GIT_AUTHOR_NAME": "evidence-test",
+        "GIT_AUTHOR_EMAIL": "evidence-test@local",
+        "GIT_COMMITTER_NAME": "evidence-test",
+        "GIT_COMMITTER_EMAIL": "evidence-test@local",
+    }
+
+    @classmethod
+    def _git(cls, repo: Path, *args: str) -> str:
+        import os
+        import subprocess
+
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            env={**os.environ, **cls._GIT_IDENTITY},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return completed.stdout.strip()
+
+    @classmethod
+    def _repo(cls, tmp_path: Path, name: str = "framework") -> Path:
+        repo = tmp_path / name
+        repo.mkdir()
+        cls._git(repo, "init")
+        (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+        cls._git(repo, "add", ".")
+        cls._git(repo, "commit", "-m", "upstream")
+        return repo
+
+    @pytest.fixture(autouse=True)
+    def _no_runtime_discovery(self, monkeypatch):
+        """Keep these tests off whatever framework the host has installed.
+
+        Stubbed at ``find_spec`` rather than at ``_package_repository`` so the
+        resolver itself still runs for the tests that are about it.
+        """
+        import importlib.util
+
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+
+    def test_the_framework_being_served_is_found_without_configuration(self, tmp_path, monkeypatch):
+        """All three configured sources were empty in the GLM-5.2 session."""
+        repo = self._repo(tmp_path, "sglang-checkout")
+        package = repo / "python" / "sglang"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            ke,
+            "_package_repository",
+            lambda name: repo.resolve() if name == "sglang" else None,
+        )
+
+        assert ke.campaign_repositories(SimpleNamespace(framework_repo_path="")) == (repo.resolve(),)
+
+    def test_a_configured_root_is_added_to_what_the_runtime_found(self, tmp_path, monkeypatch):
+        """An operator pointing at a fourth checkout is honoured, not overridden."""
+        served = self._repo(tmp_path, "served")
+        extra = self._repo(tmp_path, "extra")
+        monkeypatch.setattr(
+            ke,
+            "_package_repository",
+            lambda name: served.resolve() if name == "aiter" else None,
+        )
+
+        roots = ke.campaign_repositories(SimpleNamespace(framework_repo_path=str(extra)))
+
+        assert set(roots) == {served.resolve(), extra.resolve()}
+
+    def test_a_wheel_installed_framework_is_no_repository(self, monkeypatch):
+        """A wheel carries no source to rewrite, so it has no base to pin."""
+        import importlib.util
+
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: SimpleNamespace(origin="/opt/venv/lib/python3.10/site-packages/vllm/__init__.py"),
+        )
+
+        assert ke._package_repository("vllm") is None
+
+    def test_a_configured_file_resolves_to_the_repository_holding_it(self, tmp_path):
+        """A launch recipe or a source file names its repository just as well."""
+        repo = self._repo(tmp_path)
+        inside = repo / "nested" / "config.yaml"
+        inside.parent.mkdir()
+        inside.write_text("{}\n", encoding="utf-8")
+
+        assert ke.campaign_repositories(SimpleNamespace(framework_repo_path=str(inside))) == (repo.resolve(),)
+
+    def test_a_configured_path_in_no_repository_is_dropped(self, tmp_path):
+        loose = tmp_path / "loose"
+        loose.mkdir()
+
+        assert ke.campaign_repositories(SimpleNamespace(framework_repo_path=str(loose))) == ()
+
+    def test_a_package_that_cannot_be_imported_names_no_repository(self, monkeypatch):
+        """A broken install is not a repository, and must not raise on the way out."""
+        import importlib.util
+
+        def _raise(_name):
+            raise ImportError("boom")
+
+        monkeypatch.setattr(importlib.util, "find_spec", _raise)
+        assert ke._package_repository("sglang") is None
+
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+        assert ke._package_repository("sglang") is None
+
+    def test_a_namespace_package_with_no_origin_names_no_repository(self, monkeypatch):
+        import importlib.util
+
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: SimpleNamespace(origin=None))
+
+        assert ke._package_repository("sglang") is None
 
 
 class TestFusionDecodeTraceResolution:

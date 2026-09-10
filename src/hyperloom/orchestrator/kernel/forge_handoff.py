@@ -12,7 +12,7 @@ from typing import Any
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
-from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
+from hyperloom.orchestrator.kernel.kernel_evidence import campaign_repositories
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"

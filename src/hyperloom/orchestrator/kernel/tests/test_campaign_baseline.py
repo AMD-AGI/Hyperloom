@@ -11,10 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 from hyperloom.orchestrator.kernel.campaign_baseline import (
     RepoBaseline,
-    campaign_repositories,
     reclaim_campaign_repositories,
     seal_campaign_baseline,
     session_branch_name,
@@ -154,57 +152,6 @@ def test_a_repository_that_cannot_be_sealed_does_not_stop_the_others(tmp_path: P
     assert str(broken) not in pins
 
 
-def test_the_framework_being_served_is_found_without_configuration(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """All three configured sources were empty in the GLM-5.2 session."""
-    repo = _repo(tmp_path, "sglang-checkout")
-    package = repo / "python" / "sglang"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(
-        campaign_baseline,
-        "_package_repository",
-        lambda name: repo.resolve() if name == "sglang" else None,
-    )
-
-    roots = campaign_repositories(SimpleNamespace(framework_repo_path=""))
-
-    assert roots == (repo.resolve(),)
-
-
-def test_a_configured_root_is_added_to_what_the_runtime_found(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """An operator pointing at a fourth checkout is honoured, not overridden."""
-    served = _repo(tmp_path, "served")
-    extra = _repo(tmp_path, "extra")
-    monkeypatch.setattr(
-        campaign_baseline,
-        "_package_repository",
-        lambda name: served.resolve() if name == "aiter" else None,
-    )
-
-    roots = campaign_repositories(SimpleNamespace(framework_repo_path=str(extra)))
-
-    assert set(roots) == {served.resolve(), extra.resolve()}
-
-
-def test_a_wheel_installed_framework_is_not_a_repository_to_seal(monkeypatch) -> None:
-    """A wheel carries no source to rewrite, so it has no base to pin."""
-    from types import SimpleNamespace as Spec
-
-    monkeypatch.setattr(
-        importlib.util,
-        "find_spec",
-        lambda name: Spec(origin="/opt/venv/lib/python3.10/site-packages/vllm/__init__.py"),
-    )
-
-    assert campaign_baseline._package_repository("vllm") is None
-
-
 def test_a_repository_a_killed_controller_left_on_a_branch_is_reclaimed(tmp_path: Path) -> None:
     """Integration refuses a HEAD that is not the base commit it was promised."""
     repo = _repo(tmp_path)
@@ -317,46 +264,6 @@ def test_an_ordinary_tree_is_sealed_without_the_repository_lock(tmp_path: Path) 
         release_repo_lock(held)
 
     assert _git(repo, "show", f"{pins[str(repo)].commit}:kernel.py") == "VALUE = 2"
-
-
-def test_a_configured_file_resolves_to_the_repository_holding_it(tmp_path: Path) -> None:
-    """A launch recipe or a source file names its repository just as well."""
-    repo = _repo(tmp_path)
-    inside = repo / "nested" / "config.yaml"
-    inside.parent.mkdir()
-    inside.write_text("{}\n", encoding="utf-8")
-
-    roots = campaign_repositories(SimpleNamespace(framework_repo_path=str(inside)))
-
-    assert roots == (repo.resolve(),)
-
-
-def test_a_configured_path_in_no_repository_is_dropped(tmp_path: Path) -> None:
-    loose = tmp_path / "loose"
-    loose.mkdir()
-
-    assert campaign_repositories(SimpleNamespace(framework_repo_path=str(loose))) == ()
-
-
-def test_a_package_that_cannot_be_imported_names_no_repository(monkeypatch) -> None:
-    """A broken install is not a repository, and must not raise on the way out."""
-
-    def _raise(_name):
-        raise ImportError("boom")
-
-    monkeypatch.setattr(importlib.util, "find_spec", _raise)
-    assert campaign_baseline._package_repository("sglang") is None
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    assert campaign_baseline._package_repository("sglang") is None
-
-
-def test_a_namespace_package_with_no_origin_names_no_repository(monkeypatch) -> None:
-    from types import SimpleNamespace as Spec
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: Spec(origin=None))
-
-    assert campaign_baseline._package_repository("sglang") is None
 
 
 def test_reclaiming_a_repository_that_is_gone_is_reported_not_raised(tmp_path: Path) -> None:

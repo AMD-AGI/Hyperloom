@@ -15,13 +15,26 @@ a shape table -- is not discovery and stays in the lane that needs it.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
+
+_GIT_TIMEOUT_SEC = 120
+
+#: Packages that can hold a rewritable kernel and are installed from source.
+#: Probed by name rather than read from configuration: a container serving one
+#: framework has that one importable and the others absent, so the interpreter
+#: already knows the answer, while the configured roots are routinely unset --
+#: in the GLM-5.2 session all three sources were empty and the handoff reported
+#: no source repository at all.
+_FRAMEWORK_PACKAGES: tuple[str, ...] = ("vllm", "sglang", "aiter")
 
 #: An aiter dispatch line, hit or miss. Either one proves the process actually
 #: routed a GEMM through aiter, which is what makes a server log usable as a
@@ -77,6 +90,75 @@ _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
 }
 
 _GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
+
+
+def _configured_repository_roots(state: Any) -> set[Path]:
+    """Resolve explicitly configured source paths to distinct Git repository roots."""
+    raw_paths = [
+        getattr(state, "framework_repo_path", ""),
+        os.environ.get("FRAMEWORK_REPO_PATH", ""),
+    ]
+    raw_paths.extend(
+        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
+    )
+    roots: set[Path] = set()
+    for raw in raw_paths:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser().resolve(strict=False)
+        if path.is_file():
+            path = path.parent
+        for candidate in (path, *path.parents):
+            if (candidate / ".git").exists():
+                roots.add(candidate)
+                break
+    return roots
+
+
+def _package_repository(name: str) -> Path | None:
+    """Return the Git top level one framework package is imported from.
+
+    ``None`` when the package is absent, or present as a wheel. A wheel carries
+    no source to rewrite, so it is not a repository any campaign can name.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    package_dir = Path(spec.origin).resolve().parent
+    completed = subprocess.run(
+        ["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT_SEC,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return Path(completed.stdout.strip()).resolve()
+
+
+def campaign_repositories(state: Any) -> tuple[Path, ...]:
+    """Every repository a rewrite could name, from the runtime and the config.
+
+    The runtime is the authority and the configuration is an addition, not the
+    other way round: an operator who points at a fourth checkout should be
+    honoured, but nobody should have to configure the framework they are
+    already serving.
+
+    Discovery, so it lives here rather than beside the sealing that consumes
+    it: asking which repositories exist must not require the locking machinery
+    that borrowing one does.
+    """
+    roots = _configured_repository_roots(state)
+    for name in _FRAMEWORK_PACKAGES:
+        repo = _package_repository(name)
+        if repo is not None:
+            roots.add(repo)
+    return tuple(sorted(roots, key=str))
 
 
 def _scan_serving_log_m(path) -> dict[int, int]:
@@ -568,6 +650,7 @@ def resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str
 
 
 __all__ = [
+    "campaign_repositories",
     "resolve_forge_server_log",
     "resolve_forge_untuned_csv",
     "resolve_fp8_quant_type",

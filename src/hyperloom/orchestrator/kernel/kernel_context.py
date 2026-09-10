@@ -33,6 +33,7 @@ from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret
 from hyperloom.common.io import atomic_write_text
 
 from .kernel_evidence import (
+    campaign_repositories,
     resolve_forge_server_log,
     resolve_forge_untuned_csv,
     resolve_fp8_quant_type,
@@ -131,6 +132,11 @@ class ServingFacts:
     #: framework packages resolved from where they are imported. Plural because
     #: a session serves more than one -- sglang and aiter at once is ordinary.
     repository_roots: tuple[str, ...] = ()
+    #: The framework checkout the operator configured, or "" when they named
+    #: none. A separate question from ``repository_roots``: a tool that can
+    #: auto-detect the installed package only wants to hear about an explicit
+    #: one, so an empty string is the instruction to go and look.
+    framework_repo_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -192,6 +198,20 @@ def _pick(overrides: Mapping[str, Any], context: Mapping[str, Any], state: Any, 
 
 def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _git_root(value: Any) -> str:
+    """Walk up to the Git top level owning ``value``, or "" when there is none."""
+    text = _text(value)
+    if not text:
+        return ""
+    path = Path(text).expanduser().resolve(strict=False)
+    if path.is_file():
+        path = path.parent
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return str(candidate)
+    return ""
 
 
 def _fp8_quant_type(state: Any, payload: Mapping[str, Any], framework: str) -> str:
@@ -298,8 +318,6 @@ def build_serving_facts(
     overrides: Mapping[str, Any] | None = None,
 ) -> ServingFacts:
     """Resolve the launch surface ``current_best`` was measured on."""
-    from .campaign_baseline import campaign_repositories
-
     incoming = dict(overrides or {})
     context = _workload_context(state)
     spec = dict(env_spec or {})
@@ -325,6 +343,7 @@ def build_serving_facts(
         extra_envs=_redacted_envs(context, config),
         unset_envs=tuple(_text(value) for value in unset if _text(value)) if isinstance(unset, list) else (),
         repository_roots=tuple(str(root) for root in campaign_repositories(state)),
+        framework_repo_root=_git_root(getattr(state, "framework_repo_path", "")),
     )
 
 
