@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.phases.kernel import MAX_FUSION_INFRA_RETRIES, KernelPhase
+from hyperloom.orchestrator.phases.kernel import (
+    FORGE_LANES,
+    MAX_FUSION_INFRA_RETRIES,
+    KernelPhase,
+)
 
 REQUIRED = KernelPhase._fusion_required_before_kernel_opt
 RECORD = KernelPhase._handle_fusion_result
@@ -109,14 +114,36 @@ async def test_repeated_unreadable_envelopes_stop_being_retried(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_bus_and_the_record_agree_on_the_failure(tmp_path):
-    """Both are written from this result, so a skew must not leave them disagreeing."""
-    phase = _phase(session_dir=tmp_path)
+    """The lane posts what the record settled on, so a downgrade reaches both.
 
-    await RECORD(phase, _kept())
+    ``_handle_fusion_result`` rewrites the status in place when the nomination
+    envelope cannot be read, and the lane reports afterwards from the same
+    object -- reporting from the producer's own answer would tell orchestration
+    a KEEP succeeded while the session recorded that it failed.
+    """
+    phase = _phase(session_dir=tmp_path)
+    phase.reprofiles = 0
+    phase.evidence = {}
+
+    async def _maybe_reprofile_for_kernel():
+        phase.reprofiles += 1
+
+    phase._maybe_reprofile_for_kernel = _maybe_reprofile_for_kernel
+    phase._record_phase_entry_evidence = lambda **kvs: phase.evidence.update(kvs)
+
+    async def _run(_phase):
+        result = _kept()
+        await RECORD(phase, result)
+        return result
+
+    fusion_lane = next(lane for lane in FORGE_LANES if lane.name == "fusion")
+    await KernelPhase._run_forge_lane(phase, replace(fusion_lane, gate=lambda _p: True, run=_run))
 
     (message,) = phase.bus.posted
+    assert message.payload["kind"] == "run_fusion_done"
     assert message.payload["status"] == "failed"
     assert message.payload["status"] == phase.shared_state.last_fusion["status"]
+    assert phase.evidence["fusion"]["status"] == "failed"
 
 
 @pytest.mark.asyncio

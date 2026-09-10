@@ -14,6 +14,7 @@ import pytest
 
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.actions.executors.explore as explore_mod
+import hyperloom.orchestrator.kernel.kernel_context as kc_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -502,7 +503,9 @@ class TestQueueFusionSiblings:
         assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
+    async def test_handle_fusion_result_records_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
+        # Reporting the outcome is the lane's job; this records it and hands a
+        # KEEP to the e2e gate. test_forge_lane_sequence covers the response.
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -523,17 +526,10 @@ class TestQueueFusionSiblings:
 
         assert coord.shared_state.last_fusion == result
         assert integrated == [result]
-        assert coord.bus.messages[0].payload["kind"] == "run_fusion_done"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_tolerates_non_dict_and_bus_failure(self, tmp_path):
+    async def test_handle_fusion_result_tolerates_a_non_dict_result(self, tmp_path):
         coord = _coord(tmp_path)
-
-        class BadBus:
-            async def append_and_seq(self, *_args, **_kwargs):
-                raise RuntimeError("bus down")
-
-        coord.bus = BadBus()
         phase = KernelPhase(coord)
 
         await phase._handle_fusion_result("not-dict")  # type: ignore[arg-type]
@@ -551,7 +547,7 @@ class TestQueueFusionSiblings:
 
         monkeypatch.setattr(krh_mod, "run_fusion_handler", _raise)
 
-        await phase._run_forge_fusion()
+        await phase._run_fusion_lane()
 
         assert coord.shared_state.last_fusion["decision"] == "REVERT"
         assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"
@@ -1062,9 +1058,12 @@ class TestBf16DenseFallbackIsInternalToForge:
         async def _noop(*_args, **_kwargs):
             return None
 
+        async def _no_result(*_args, **_kwargs):
+            return {"status": "no_result"}
+
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
         # KERNEL entry ends by handing rewrite control to a controller subprocess.
-        coord.phase_kernel._run_kernel_rewrite_controller = _noop
+        coord.phase_kernel._run_kernel_rewrite_controller = _no_result
 
         calls: list[dict] = []
 
@@ -1140,7 +1139,7 @@ class TestCkBlockscaleSwitchEligible:
     def test_not_eligible_non_fp8(self, tmp_path, monkeypatch):
         # Non-fp8 session precision and no runtime fp8 signal -> not eligible.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
+        monkeypatch.setattr(kc_mod, "resolve_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_gfx942_gpu(self, tmp_path, monkeypatch):
@@ -1157,13 +1156,13 @@ class TestCkBlockscaleSwitchEligible:
     def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
         # Session precision is bf16, but the forge result stamps runtime precision fp8.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
+        monkeypatch.setattr(kc_mod, "resolve_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"}) is True
 
     def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
         # Runtime --quantization fp8 is resolved from server args.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
+        monkeypatch.setattr(kc_mod, "resolve_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is True
 
     def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):

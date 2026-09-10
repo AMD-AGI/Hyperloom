@@ -2079,7 +2079,6 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "roofline": "TraceLens",
     "trace_analyze": "TraceLens",
     "run_gemm_tuning": "GEMM tuning",
-    "run_optimization": "GEAK",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
     "explore": "Validate (bench on the stack)",

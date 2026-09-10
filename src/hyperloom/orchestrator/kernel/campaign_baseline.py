@@ -26,15 +26,13 @@ campaign, in the process that died holding it.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
+from .kernel_evidence import campaign_repositories
 from kernelforge.kernel_rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,
@@ -63,13 +61,6 @@ log = logging.getLogger(__name__)
 
 _GIT_TIMEOUT_SEC = 120
 
-#: Packages that can hold a rewritable kernel and are installed from source.
-#: Probed by name rather than read from configuration: a container serving one
-#: framework has that one importable and the others absent, so the interpreter
-#: already knows the answer, while the configured roots are routinely unset --
-#: in the GLM-5.2 session all three sources were empty and the handoff reported
-#: no source repository at all.
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("vllm", "sglang", "aiter")
 #: A commit nobody authored needs an author anyway, and the container's Git has
 #: no global identity to fall back on.
 _COMMIT_IDENTITY = (
@@ -88,65 +79,6 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         timeout=_GIT_TIMEOUT_SEC,
         check=check,
     )
-
-
-def _configured_repository_roots(state: Any) -> set[Path]:
-    """Resolve explicitly configured source paths to distinct Git repository roots."""
-    raw_paths = [
-        getattr(state, "framework_repo_path", ""),
-        os.environ.get("FRAMEWORK_REPO_PATH", ""),
-    ]
-    raw_paths.extend(
-        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
-    )
-    roots: set[Path] = set()
-    for raw in raw_paths:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        path = Path(text).expanduser().resolve(strict=False)
-        if path.is_file():
-            path = path.parent
-        for candidate in (path, *path.parents):
-            if (candidate / ".git").exists():
-                roots.add(candidate)
-                break
-    return roots
-
-
-def _package_repository(name: str) -> Path | None:
-    """Return the Git top level one framework package is imported from.
-
-    ``None`` when the package is absent, or present as a wheel. A wheel carries
-    no source to rewrite, so it is not a repository any campaign can name.
-    """
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, ValueError):
-        return None
-    if spec is None or not spec.origin:
-        return None
-    package_dir = Path(spec.origin).resolve().parent
-    completed = _git(package_dir, "rev-parse", "--show-toplevel", check=False)
-    if completed.returncode != 0:
-        return None
-    return Path(completed.stdout.strip()).resolve()
-
-
-def campaign_repositories(state: Any) -> tuple[Path, ...]:
-    """Every repository a rewrite could name, from the runtime and the config.
-
-    The runtime is the authority and the configuration is an addition, not the
-    other way round: an operator who points at a fourth checkout should be
-    honoured, but nobody should have to configure the framework they are
-    already serving.
-    """
-    roots = _configured_repository_roots(state)
-    for name in _FRAMEWORK_PACKAGES:
-        repo = _package_repository(name)
-        if repo is not None:
-            roots.add(repo)
-    return tuple(sorted(roots, key=str))
 
 
 def session_branch_name(session_id: str, macro_cycle: int) -> str:
@@ -307,7 +239,6 @@ def reclaim_campaign_repositories(baselines: Mapping[str, RepoBaseline]) -> dict
 
 __all__ = [
     "RepoBaseline",
-    "campaign_repositories",
     "reclaim_campaign_repositories",
     "seal_campaign_baseline",
     "session_branch_name",
