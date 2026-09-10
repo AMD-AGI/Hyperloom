@@ -453,3 +453,87 @@ def test_cascade_l2_skips_same_cid_and_nonactionable():
     point, tier, conf = _cascade(kb)
     assert tier == "same_arch_class"
     assert point["canonical_id"] == "CID:l2"
+
+
+# ---------------------------------------------------------------------------
+# warm_start event wiring
+# ---------------------------------------------------------------------------
+
+
+def _warm_start_events(session_dir: Path) -> list[dict[str, Any]]:
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_start"]
+
+
+def test_t0_anchor_records_its_own_lookup_as_a_timeline_event(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """A cold KB is a completed lookup, not a failure.
+
+    What it matches is its own freshly-stamped anchor row, which demotes to
+    ``seed_only`` -- so this is also the case that pins the status apart from
+    the finding: every first-ever session lands here.
+    """
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    state = _FakeSharedState()
+    with session_scope(session_dir):
+        run_t0_anchor(
+            kb,
+            state,
+            workload="DeepSeek-R1",
+            hw="MI300X",
+            extra_attrs={"framework_name": "sglang"},
+            session_dir=session_dir,
+        )
+
+    events = _warm_start_events(session_dir)
+    assert len(events) == 1
+    event = events[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"]["match_status"] == "seed_only"
+    # The identity is recorded as T0 queries it, not rebuilt afterwards.
+    assert event["ext"]["request"]["canonical_id"] == _expected_cid(state, "DeepSeek-R1", "mi300x")
+
+
+def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """``_kb_amend_recipe`` reads the same store later through the same hook."""
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    kb.audit_hook = lambda event: warm_start_event.record_read(session_dir, event)
+    state = _FakeSharedState()
+    with session_scope(session_dir):
+        run_t0_anchor(
+            kb,
+            state,
+            workload="DeepSeek-R1",
+            hw="MI300X",
+            extra_attrs={"framework_name": "sglang"},
+            session_dir=session_dir,
+        )
+        cid = _expected_cid(state, "DeepSeek-R1", "mi300x")
+        # A mid-session amendment read, after the anchor settled.
+        kb.get_authoritative_recipe(canonical_id=cid)
+
+    reads = _warm_start_events(session_dir)[0]["ext"]["reads"]
+    assert reads is not None
+    # T0's exact-identity probe, then the degradation cascade behind it.
+    assert reads["by_method"]["get_recipe"] == 1
+    assert reads["by_method"]["search"] > 1
+    # The row T0 stamps is a write. The audit log carries a successful write
+    # with ``hit: True``, which is what let the projection count it twice over.
+    assert "put_recipe" not in reads["by_method"]
+    # T0 makes exactly one authority read, at the top of the anchor; the
+    # amendment read issued after the event settled is not this one.
+    assert reads["by_method"]["get_authoritative_recipe"] == 1
+    assert reads["count"] == len(reads["rows"]) == sum(reads["by_method"].values())
+    # Every read lands in the same second, so service order is carried
+    # explicitly: the exact probe has to be readable as having missed before
+    # the ladder was walked.
+    assert [row["method"] for row in reads["rows"]][:2] == ["get_authoritative_recipe", "get_recipe"]

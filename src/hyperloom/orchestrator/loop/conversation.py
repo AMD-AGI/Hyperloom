@@ -554,6 +554,15 @@ class ConversationCollaborator:
                 ),
             )
             source_dry, source_ev = _phase_state.source_arm_plateaued(state)
+            try:
+                self._record_advisory_plateau(
+                    config=(config_dry, config_ev),
+                    source=(source_dry, source_ev),
+                )
+            except AttributeError:
+                # A stand-in that borrowed this method without the recorder
+                # plumbing; the advisory itself does not depend on it.
+                pass
             if config_dry:
                 lines.append("OPTIMIZE config arm plateaued: low recent KEEP gain plus specialist empty streak.")
                 lines.append(
@@ -625,6 +634,69 @@ class ConversationCollaborator:
                 "hints; this block is informational."
             )
         return "\n".join(lines)
+
+    def _record_advisory_plateau(
+        self,
+        *,
+        config: tuple[bool, dict],
+        source: tuple[bool, dict],
+    ) -> None:
+        """Snapshot the plateau reading this advisory was composed from.
+
+        Recorded here rather than derived at export because the inputs are
+        counts over a history that keeps growing: a later re-derivation reads
+        winners and candidates that landed after the advisory fired, and
+        returns a number the agent never saw. Both arms are recorded whether or
+        not either fired -- "evaluated and did not trip" is the reading that
+        explains a phase staying open.
+
+        Best-effort: the advisory must render whether or not it is recorded.
+        The recorder is reached defensively because this method's caller gets
+        borrowed onto lightweight stand-ins by tests, which carry none of the
+        phase-handler machinery -- and an advisory that raised because its
+        observability was absent would be a worse bug than a missing row.
+        """
+        getter = getattr(self, "_framework_timeline", None)
+        recorder = getter() if callable(getter) else None
+        if recorder is None:
+            return
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+            ARM_CONFIG,
+            ARM_SOURCE,
+            PLATEAU_PATH_ADVISORY,
+        )
+
+        config_dry, config_ev = config
+        source_dry, source_ev = source
+        try:
+            recorder.record_plateau(
+                arm=ARM_CONFIG,
+                path=PLATEAU_PATH_ADVISORY,
+                triggered=config_dry,
+                inputs={
+                    "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
+                    "empty_streak": config_ev.get("empty_streak"),
+                    "winners_seen": config_ev.get("winners_seen"),
+                    "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
+                },
+                thresholds={
+                    "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
+                    "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
+                    "lookback": config_ev.get("lookback"),
+                },
+            )
+            recorder.record_plateau(
+                arm=ARM_SOURCE,
+                path=PLATEAU_PATH_ADVISORY,
+                triggered=source_dry,
+                inputs={
+                    "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
+                    "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
+                },
+                thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the advisory
+            log.debug("framework timeline: advisory plateau record failed", exc_info=True)
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""

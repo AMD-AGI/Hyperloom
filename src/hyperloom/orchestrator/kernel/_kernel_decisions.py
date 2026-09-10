@@ -13,7 +13,6 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
-from ._recorder_trace import trace_recording_skipped
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
     VERDICT_STATUSES,
@@ -36,15 +35,11 @@ from ..trace.trace_env import env_flag
 
 log = logging.getLogger(__name__)
 
-#: Collective primitives the dedicated lane can measure. Each needs an
-#: independent reference implementation in the generated driver.
-SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
-
 #: Stack labels whose KEEP overwrote a whole kernel source file, so a queued
 #: patch on that file can no longer be measured on its own. Every reader of the
 #: same-source exclusion draws from here: writeback labels a lane's KEEP by its
 #: own name, and a label missing from this set silently re-drains a spent patch.
-INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "collective", "fusion"})
+INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "fusion"})
 
 #: A hot kernel whose source file trace analysis could not resolve. It retires
 #: like a rejection because nothing can dispatch it, but no backend judged it.
@@ -432,16 +427,6 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     return fit
 
 
-def _vendor_playbook_id_from_result(result: dict[str, Any]) -> str:
-    """Return the vendor-playbook group id a ``kernel_opt`` result belongs to."""
-    for attempt in result.get("attempts") or []:
-        if isinstance(attempt, dict):
-            vid = str(attempt.get("vendor_playbook_id") or "").strip()
-            if vid:
-                return vid
-    return ""
-
-
 def _resolve_kernel_patch_identity(
     state,
     payload: dict[str, Any] | None,
@@ -610,45 +595,6 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # Record the integrate outcome into the breakdown recorder (idempotent per kernel_id, best-effort).
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        sdir = getattr(state, "_session_dir", None)
-        if not sdir or not kernel_id:
-            # Checked before the recorder is reached, so the recorder's own guard never rules on it.
-            trace_recording_skipped(
-                "kernel_e2e",
-                reason="no session_dir" if not sdir else "no kernel_id",
-                entity=kernel_id,
-            )
-        else:
-            _dec = str(result.get("decision") or "").upper()
-            instrument.record_kernel_e2e(
-                sdir,
-                kernel_id=kernel_id,
-                integrated=(_dec == "KEEP"),
-                e2e_gain_pct=result.get("gain_pct"),
-                validated=True if _dec == "KEEP" else None,
-                decision=_dec,
-                patch_path=patch_path,
-                target_file=target_file,
-                extra_server_args=extra_args,
-                result=result,
-                # The id recovered above, not the one on the result: a result that reached us without one still
-                # belongs to the pending integrate we matched it to, and that is the integrate whose readings must not
-                # be written over by a later one.
-                occurrence=integration_id or None,
-                validation_tier=(str(result.get("validation_tier") or "integrate_e2e") if _dec == "KEEP" else ""),
-            )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "kernel_e2e",
-            reason="caller raised before the recorder",
-            entity=kernel_id,
-            error=exc,
-        )
-
     if result.get("decision") == "KEEP":
         validation_tier = str(result.get("validation_tier") or "")
         integration_status = str(result.get("integration_validation_status") or "")
@@ -736,35 +682,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     attempts = list(state.gemm_tuning_attempts or [])
     attempts.append(entry)
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            getattr(state, "_session_dir", None),
-            payload={"task_id": str(entry.get("task_id") or "kernel_entry_gemm_tuning")},
-            result=entry,
-        )
-    except Exception as exc:  # noqa: BLE001
-        trace_recording_skipped(
-            "gemm_tuning",
-            reason="caller raised before the recorder",
-            entity=str(entry.get("task_id") or ""),
-            error=exc,
-        )
-
-
-def is_collective_candidate(candidate: dict[str, Any]) -> bool:
-    """Return whether a trace row requires the dedicated collective lane."""
-    contract = candidate.get("kernel_contract")
-    if not isinstance(contract, dict):
-        return False
-    if str(contract.get("kind") or "") != "collective":
-        return False
-    if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
-        return False
-    if str(candidate.get("candidate_source") or "").strip() != "nccl_summary":
-        return False
-    return candidate.get("is_multigpu") is True
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
@@ -985,8 +902,6 @@ def untried_hot_reusable_kernels(
         if not isinstance(k, dict):
             continue
         if k.get("reusable_native_kernel") is not True:
-            continue
-        if is_collective_candidate(k):
             continue
         # Bypass path tags a kernel non-dispatchable when its shape is geometry-only (launch_grid/tile_name) and would
         # fail the kernel-opt gate.

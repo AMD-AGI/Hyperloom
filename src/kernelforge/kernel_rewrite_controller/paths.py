@@ -115,6 +115,16 @@ class ControllerLayout:
     def patch_dir(self, operator_id: str) -> Path:
         return self.patches_root / operator_directory_name(operator_id)
 
+    def preparation_audit_dir(self, operator_id: str) -> Path:
+        """Where one task's driver-preparation record is kept.
+
+        Outside the workspace on purpose. The agent's own audit is written
+        under the workspace, which is deleted when a borrowed repository is
+        handed back, so a task that failed because its driver could not be
+        prepared would otherwise leave nothing to read.
+        """
+        return self.controller_root / "preparation" / operator_directory_name(operator_id)
+
     @staticmethod
     def is_published_task_dir(path: Path) -> bool:
         """Return whether an entry is a complete, non-temporary task directory."""

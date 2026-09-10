@@ -3258,8 +3258,8 @@ class IntegratePatchExecutor:
         # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-        if graded.degrade_reason:
-            log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
+        if not graded.comparable:
+            log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
         if not graded.graded_on_intvty:
             delta_pct = gain_pct(new_tput, base_tput)
         elif graded.verdict == VERDICT_KEEP:
@@ -3296,7 +3296,7 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        gate_pass = graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3438,7 +3438,9 @@ class IntegratePatchExecutor:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
-            if delta_pct is None:
+            if not graded.comparable:
+                reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+            elif delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
@@ -4459,7 +4461,7 @@ class IntegratePatchExecutor:
             r = results[0]
             bench.update(
                 {
-                    "name": r.name,
+                    **r.to_dict(),
                     "status": r.status,
                     "output_throughput": r.output_throughput,
                     # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;

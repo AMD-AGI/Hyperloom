@@ -8,9 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-#: A unified diff the round authored -- applied, or attempted and left behind.
-#: The one repeating role: a round applies any number of patches.
+#: A unified diff the round applied. The one repeating role: a round applies
+#: any number of patches.
 ROLE_PATCH = "patch"
+
+#: A diff found in the specialist's workspace that the round did NOT apply --
+#: vet-rejected or superseded. Kept as evidence of what was tried, and held
+#: apart from :data:`ROLE_PATCH` so replay never reinstalls a refused patch.
+ROLE_PATCH_EVIDENCE = "patch_evidence"
 
 #: The ``specialist_done`` payload the round's specialist handed back.
 ROLE_SPECIALIST_RESULT = "specialist_result"
@@ -102,6 +107,7 @@ __all__ = [
     "ROLE_ARTIFACT_SOURCE",
     "ROLE_LAUNCH_CONFIG",
     "ROLE_PATCH",
+    "ROLE_PATCH_EVIDENCE",
     "ROLE_PROMPT",
     "ROLE_SERVER_LOG",
     "ROLE_SPECIALIST_RESULT",

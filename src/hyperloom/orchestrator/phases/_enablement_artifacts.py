@@ -19,6 +19,7 @@ from hyperloom.orchestrator.delivery.archive import (
     ROLE_ARTIFACT_SOURCE,
     ROLE_LAUNCH_CONFIG,
     ROLE_PATCH,
+    ROLE_PATCH_EVIDENCE,
     ROLE_PROMPT,
     ROLE_SERVER_LOG,
     ROLE_SPECIALIST_RESULT,
@@ -87,7 +88,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     Returns:
         RoundArchive: One record per deliverable that landed. A copy the size
         ceiling refused leaves no record, so no consumer is handed a path that
-        resolves to nothing.
+        resolves to nothing. Patches the round never applied are recorded under
+        :data:`ROLE_PATCH_EVIDENCE`, never :data:`ROLE_PATCH`.
     """
     task_id = str(res.get("specialist_task_id") or "").strip()
     root = Path(session_dir)
@@ -113,15 +115,15 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
         if _copy(workspace / name, dest):
             archive.record(role, dest)
 
-    # Patches the round did not apply still explain what was attempted.
+    # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
         for pattern in ("*.patch", "*.diff"):
             for src in sorted((base / "patches").glob(pattern)):
                 if src.name in copied:
                     continue
-                dest = patches_dir / src.name
+                dest = round_dir / "attempted_patches" / src.name
                 if _copy(src, dest):
-                    archive.record(ROLE_PATCH, dest)
+                    archive.record(ROLE_PATCH_EVIDENCE, dest)
                 copied.add(src.name)
 
     artifacts_dir = round_dir / "artifacts"

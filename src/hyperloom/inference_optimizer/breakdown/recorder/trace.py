@@ -59,7 +59,12 @@ _CHANGED_LIMIT = 8
 
 
 def enable_trace(enabled: bool = True) -> None:
-    """Turn the write trace on or off for this process."""
+    """Turn the write trace on or off for this process.
+
+    The level is set on this logger rather than the root so the trace can be
+    read without lowering everything else, and so it survives a ``basicConfig``
+    that floors the root level above it.
+    """
     global _enabled
     _enabled = bool(enabled)
     if _enabled:

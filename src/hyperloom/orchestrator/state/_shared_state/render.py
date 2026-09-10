@@ -587,14 +587,12 @@ class _RenderMixin:
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
-            f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"discovered_flags={self._format_discovered_flags()}",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
@@ -705,19 +703,6 @@ class _RenderMixin:
             for r in self.rejected_kernel_patches[-5:]
             if isinstance(r, dict)
         ] or "(none)"
-
-    def _format_discovered_flags(self) -> str:
-        """Render the per-framework discovered-flag counts for the prompt."""
-        if not self.discovered_flags:
-            return "(none — first backends/params round will populate)"
-        parts: list[str] = []
-        for fw, entry in sorted(self.discovered_flags.items()):
-            if not isinstance(entry, dict):
-                continue
-            n_b = len(entry.get("backend_flags") or [])
-            n_p = len(entry.get("param_flags") or [])
-            parts.append(f"{fw}:backend={n_b}/param={n_p}")
-        return ", ".join(parts) or "(none)"
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:

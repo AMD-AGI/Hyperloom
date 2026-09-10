@@ -22,9 +22,42 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one event per phase and macro cycle that
-# dispatched the work.
-_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
+# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
+# event per phase and macro cycle that dispatched the work. Their sub-steps are
+# nested in ``ext`` rather than emitted as sibling events, because none of them
+# is dispatchable on its own: roofline's profile / analysis are atomic halves of
+# one action, a kernel event's lanes only exist inside a phase entry, and a
+# baseline's rounds only exist inside a measurement.
+#
+# ``warm_replay`` recurs on the same terms, and its gate rows nest for the same
+# reason: a gate is a step inside the replay's own arc, not something the
+# coordinator can dispatch.
+#
+# ``framework_agent`` nests the most: its runs, proposals and attempts are all
+# dispatched, but only within the phase entry that owns them, and the reason to
+# read them is the chain they form. Emitted as sibling events they would be the
+# session's most numerous type and the chain would have to be rebuilt from
+# cross-references.
+#
+# ``phase`` is the one event that is about the run rather than about work: it is
+# the span every other event's id is scoped by. Its ``actions`` rows are
+# deliberately thin, naming the stage event that holds each dispatch's detail
+# rather than restating it, so the phase answers "when, and what was ordered
+# here" without becoming a second copy of the stage events.
+_EVENT_TYPES = (
+    "install",
+    "model_gate",
+    "roofline",
+    "kernel",
+    "baseline",
+    "conc_sweep",
+    "enablement",
+    "phase",
+    "stack",
+    "warm_start",
+    "warm_replay",
+    "framework_agent",
+)
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
     forge_steps_path,
@@ -655,7 +656,7 @@ class LangfuseEmitter:
                 metadata={
                     "schema_version": breakdown.get("schema_version"),
                     "exporter_version": breakdown.get("exporter_version"),
-                    "stop_reason": (breakdown.get("session") or {}).get("stop_reason"),
+                    "stop_reason": (breakdown.get("outcome") or {}).get("stop_reason"),
                 },
             )
             # Stamp trace name/session_id so a breakdown-only session is still grouped.
@@ -1042,11 +1043,28 @@ class LangfuseEmitter:
         return True
 
     def _write_receipt(self) -> None:
-        """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``."""
+        """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
+
+        The file doubles as the cross-process idempotency record for
+        ``session_start`` / breakdown pushes, so a torn receipt would either
+        replay a push or suppress one forever. It is written atomically (temp
+        file + rename, both the file and the parent directory fsynced) and
+        stamped with a ``payload_sha256`` that :func:`read_receipt` verifies, so
+        a truncated or corrupted file is ignored rather than trusted.
+
+        Best-effort: a failed write must never break shutdown. The breakdown
+        collector prefers this file over a live read of the singleton.
+
+        Every persistence point funnels through here, so recording the
+        breakdown's ``metadata.langfuse`` block alongside the receipt keeps the
+        two from ever disagreeing -- including on the disabled path, where the
+        receipt exists only to explain why nothing was pushed.
+        """
+        receipt = self.receipt()
         try:
             atomic_write_json(
                 _receipt_path(self.session_dir),
-                _stamp_receipt_hash(self.receipt()),
+                _stamp_receipt_hash(receipt),
                 indent=2,
                 sort_keys=True,
                 make_parents=True,
@@ -1055,6 +1073,7 @@ class LangfuseEmitter:
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: receipt write failed", exc_info=True)
+        record_metadata_langfuse(self.session_dir, receipt)
 
 
 # Process-wide singleton registry (one emitter per session_dir).

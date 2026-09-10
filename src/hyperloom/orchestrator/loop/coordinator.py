@@ -792,7 +792,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_auto_enqueue_pending_integrations": "phase_kernel_stack",
         "_maybe_reprofile_for_kernel": "phase_kernel",
         "_geak_enabled": "phase_kernel",
-        "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
         "_open_kernel_timeline": "phase_kernel",
         "_close_kernel_timeline": "phase_kernel",
@@ -846,6 +845,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_autosubmit_framework_config": "phase_explore",
         "_build_specialist_round_entry": "phase_explore",
         "_on_enter_framework": "phase_framework",
+        "_open_framework_timeline": "phase_framework",
+        "_close_framework_timeline": "phase_framework",
+        "_framework_timeline": "phase_framework",
+        "_framework_policy_fields": "phase_framework",
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
@@ -1370,7 +1373,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1."""

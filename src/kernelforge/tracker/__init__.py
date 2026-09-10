@@ -5,6 +5,12 @@
 
 from kernelforge.tracker.experiment import ExperimentTracker
 from kernelforge.tracker.schema import Experiment, Iteration
-from kernelforge.tracker.usage import UsageAccumulator
+from kernelforge.tracker.usage import UsageAccumulator, combine_usage_totals
 
-__all__ = ["ExperimentTracker", "Experiment", "Iteration", "UsageAccumulator"]
+__all__ = [
+    "ExperimentTracker",
+    "Experiment",
+    "Iteration",
+    "UsageAccumulator",
+    "combine_usage_totals",
+]

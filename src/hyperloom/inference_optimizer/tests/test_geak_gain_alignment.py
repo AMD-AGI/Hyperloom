@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.collectors.attribution import _geak_contribution
-from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_helpers import (
@@ -18,6 +17,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_revalidation_decision,
     _normalize_geak_overlay_dir,
 )
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -205,101 +205,182 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
     assert not ss.geak_pending  # candidate cleared on promote
 
 
+def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
+    state = coord.shared_state
+    state.benchmark_mode = "agentx"
+    state.framework = "vllm"
+    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 500.0, "e2e_norm_intvty_p90": 5.0}
+    state.current_best.update({"input_throughput": 450.0, "total_throughput": 600.0, "e2e_norm_intvty_p90": 6.0})
+    state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
+    state.cumulative_gain = 20.0
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+    state.cumulative_gain_validated_ts = "2026-09-08T00:00:00Z"
+    state.resume_pending_revalidation = True
+    state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+    state.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 2.0,
+        "accepted_config": {"flags": "--max-num-batched-tokens 4096", "env": ""},
+        "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
+        # Proposal measurements must never fill missing canonical rebench axes.
+        "input_throughput": 9999.0,
+        "total_throughput": 10000.0,
+        "e2e_norm_intvty_p90": 99.0,
+    }
+    return coord
+
+
 @pytest.mark.asyncio
-async def test_geak_harness_fallback_no_promote_below_current_best(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("persisted_mode,ambient", [("agentx", ""), ("agentx", "0"), ("", "1")])
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_agentx_2a_refuses_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persisted_mode: str, ambient: str, bench_client: str
 ) -> None:
-    """2a: a GEAK-harness replay measured below current_best must NOT overwrite it."""
-    base = 7380.7
-    current_best = 10067.9
-    measured = 9623.0  # beats baseline but loses to current_best
-    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.optimization_stack = [
-        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
-    ]
+    monkeypatch.setenv("HYPERLOOM_AGENTX", ambient)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
+    coord = _agentx_rebench_coord(tmp_path)
+    state = coord.shared_state
+    state.benchmark_mode = persisted_mode
+    state.geak_result["bench_client"] = bench_client
+    before_best = dict(state.current_best)
+    before_pending = dict(state.geak_pending)
+
+    async def _must_not_launch(**_kwargs):
+        raise AssertionError("GEAK cannot replay the canonical AgentX workload")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
+    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
+
+    assert outcome == {
+        "validated": False,
+        "status": "incomparable",
+        "reason": "geak_harness_unsupported_canonical_workload",
+    }
+    assert state.current_best == before_best
+    assert state.geak_pending == before_pending
+    assert state.resume_pending_revalidation is True
+    assert state.cumulative_gain_validated == 20.0
+    assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_persisted_legacy_mode_allows_existing_geak_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_client: str
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
+    coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
+    coord.shared_state.benchmark_mode = "synthetic"
     coord.shared_state.geak_result = {
         "status": "ok",
-        "throughput_speedup": 1.088,
-        "final_throughput_basis": "cold",
-        "accepted_config": {"flags": "--kv-cache-dtype fp8", "env": "TP=1"},
-        "final_overlay": "",
-        "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
-        "alignment_metrics": {"cold_geak_speedup": 1.088, "final_basis": "cold"},
+        "bench_client": bench_client,
+        "throughput_speedup": 2.0,
+        "accepted_config": {"flags": "--candidate", "env": ""},
     }
-    journey_path = tmp_path / "kernel_journey.json"
-    journey_path.write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {
-                        "kernel_id": "candidate-kernel",
-                        "e2e": {
-                            "integrated": True,
-                            "e2e_gain_pct": 1.686,
-                            "validated": True,
-                            "decision": "KEEP",
-                        },
-                    },
-                    {
-                        "kernel_id": "already-reverted",
-                        "e2e": {
-                            "integrated": False,
-                            "e2e_gain_pct": -1.0,
-                            "validated": False,
-                            "decision": "REVERT",
-                        },
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    coord.shared_state.geak_result["kernel_journey_path"] = str(journey_path)
-    coord._record_geak_kernel_journey(coord.shared_state.geak_result)
-    provisional_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
-    provisional = provisional_rows["candidate-kernel"]["e2e"]
-    assert provisional["decision"] == "KEEP"
-    assert provisional["validated"] is True
+    calls = []
 
-    async def _fake_sweep(**_kwargs):
-        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
+    async def _replay(**kwargs):
+        calls.append(kwargs)
+        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 200.0}}
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
-        _fake_sweep,
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
+    outcome = await coord._validate_geak_via_geak_harness(reason="unit")
 
-    await coord._validate_geak_via_geak_harness(reason="unit")
+    assert outcome["validated"] is True
+    assert len(calls) == 1
+    assert calls[0]["result"]["bench_client"] == bench_client
 
-    ss = coord.shared_state
-    assert ss.current_best["tput"] == pytest.approx(current_best)
-    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert not ss.geak_pending
-    rejected = assemble_parts(tmp_path)
-    rejected_rows = {row["kernel_id"]: row for row in rejected["kernel_journey"]["kernels"]}
-    e2e = rejected_rows["candidate-kernel"]["e2e"]
-    assert e2e["decision"] == "REVERT"
-    assert e2e["validated"] is False
-    assert e2e["integrated"] is False
-    assert e2e["e2e_gain_pct"] is None
-    assert e2e["self_reported_e2e_gain_pct"] == pytest.approx(1.686)
-    assert e2e["revalidation_measured_tput"] == pytest.approx(measured)
-    assert e2e["revalidation_current_best_tput"] == pytest.approx(current_best)
-    assert e2e["rejection_reason"] == "rebench_did_not_beat_current_best"
-    untouched = rejected_rows["already-reverted"]["e2e"]
-    assert untouched["decision"] == "REVERT"
-    assert untouched["e2e_gain_pct"] == pytest.approx(-1.0)
-    assert "rejection_reason" not in untouched
 
-    coord.phase_kernel._reject_geak_kernel_journey(
-        coord.shared_state.geak_result,
-        measured_tput=measured,
-        current_best_tput=current_best,
-        provenance="geak_same_harness_geak",
-    )
-    repeated = assemble_parts(tmp_path)["kernel_journey"]["kernels"]
-    assert len(repeated) == 2
+@pytest.mark.asyncio
+@pytest.mark.parametrize("measurement_location", ["flat", "bench_result", "measurement"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "positive",
+        "output_drop",
+        "missing_axes",
+        "missing_output",
+        "identity_mismatch",
+        "total_regression",
+        "lift_refused",
+    ],
+)
+async def test_agentx_2b_uses_current_canonical_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, measurement_location: str
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    coord = _agentx_rebench_coord(tmp_path)
+    state = coord.shared_state
+    before_best = dict(state.current_best)
+    before_stack = list(state.optimization_stack)
+    before_proposal = dict(state.geak_result)
+    measured = 140.0 if case == "output_drop" else 200.0
+    measurement = {
+        "fingerprint": "drifted" if case == "identity_mismatch" else "accepted",
+        "tput": measured,
+        "input_throughput": 800.0 - measured,
+        "total_throughput": 800.0,
+        "e2e_norm_intvty_p90": 8.0,
+    }
+    if case == "missing_axes":
+        measurement.pop("e2e_norm_intvty_p90")
+    elif case == "missing_output":
+        measured = None
+        measurement.pop("tput")
+    elif case == "total_regression":
+        measurement.update(input_throughput=350.0, total_throughput=550.0)
+    elif case == "lift_refused":
+        monkeypatch.setattr(coord, "_promote_geak_from_candidate", lambda *_args, **_kwargs: False)
+
+    async def _must_not_launch(**_kwargs):
+        raise AssertionError("Inconclusive AgentX 2b must not launch GEAK 2a")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
+    variant = measurement
+    if measurement_location != "flat":
+        variant = {
+            "fingerprint": measurement.pop("fingerprint"),
+            measurement_location: measurement,
+            "total_throughput": 10000.0,
+            "e2e_norm_intvty_p90": 99.0,
+        }
+    result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
+
+    assert not state.geak_pending
+    attempt = state.explore_attempts[-1]
+    if case in {"positive", "output_drop"}:
+        assert attempt["decision"] == "promoted"
+        assert state.current_best["tput"] == measured
+        assert state.current_best["input_throughput"] == 800.0 - measured
+        assert state.current_best["total_throughput"] == 800.0
+        assert state.current_best["e2e_norm_intvty_p90"] == 8.0
+        assert state.cumulative_gain_validated == pytest.approx(60.0)
+        assert state.cumulative_gain_validated_stack_len == 2
+        assert state.resume_pending_revalidation is False
+    else:
+        assert state.current_best == before_best
+        assert state.optimization_stack == before_stack
+        assert state.cumulative_gain == 20.0
+        assert state.cumulative_gain_validated == 20.0
+        assert state.cumulative_gain_validated_stack_len == 1
+        assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
+        assert state.resume_pending_revalidation is True
+        if case in {"total_regression", "lift_refused"}:
+            assert attempt["decision"] == "no_promote"
+            assert attempt["status"] == "no_promote"
+            assert state.geak_result["revalidation_status"] == "no_promote"
+            assert result["status"] == "no_promote"
+        else:
+            assert attempt["status"] == "incomparable"
+            assert state.geak_result["revalidation_status"] == "fallback_failed"
+            assert state.geak_result["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
+            assert result["status"] == "incomparable"
+    assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
@@ -308,15 +389,18 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
 def _final_breakdown(*, pending: bool, gain_v: float) -> dict:
     return {
         "session": {"image": ""},
-        "baseline": {"throughput_tok_s_per_gpu": 2844.2},
-        "final": {
-            "throughput_tok_s_per_gpu": 3236.5,
-            "cumulative_gain_pct_validated": gain_v,
-            "revalidation_pending": pending,
-            "validated_at_stack_len": 2,
-            "validated_ts": "",
-            "action_path": ["geak_e2e"],
+        "outcome": {
+            "baseline": {"throughput_tok_s_per_gpu": 2844.2},
+            "final": {
+                "throughput_tok_s_per_gpu": 3236.5,
+                "gain_pct": gain_v,
+                "action_path": ["geak_e2e"],
+            },
+            "validation": {"validated_at_stack_len": 2, "validated_ts": ""},
         },
+        # The candidate's standing is settled at close, after every kernel event
+        # has already closed, so the close event is the only place it can live.
+        "close": {"geak_candidate": {"revalidation_pending": pending}},
     }
 
 
@@ -442,7 +526,7 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
-    assert ss.resume_pending_revalidation is False
+    assert ss.resume_pending_revalidation is True
     assert ss.geak_result["revalidation_status"] == "fallback_failed"
 
 
@@ -473,7 +557,7 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert ss.resume_pending_revalidation is False
+    assert ss.resume_pending_revalidation is True
     assert not ss.geak_pending
     assert ss.geak_result["revalidation_status"] == "no_promote"
 
@@ -539,7 +623,9 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.resume_pending_revalidation is False
     geak_entry = next(e for e in ss.optimization_stack if e.get("action") == "geak_e2e")
-    # A flags/env win with no proven overlay moved the CONFIG lever.
+    # A flags/env win with no proven overlay moved the CONFIG lever. Stamping
+    # ``kernel`` from the task kind alone would credit a lever the measurement
+    # never proved.
     assert geak_entry["lever_kind"] == "config"
     assert not ss.geak_pending
 
@@ -558,7 +644,12 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
 
 
 def _journey_with_validated_keeps(tmp_path: Path, ratios: list[float]) -> str:
-    """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair."""
+    """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair.
+
+    Those KEEPs land in the per-KERNEL ledger, which feeds ``by_kernel`` and
+    ``kernel_lifecycle``. They are deliberately NOT part of the attribution
+    total, which is summed from the stack ledger alone.
+    """
     path = tmp_path / "kernel_journey.json"
     path.write_text(
         json.dumps(
@@ -585,103 +676,54 @@ def _journey_with_validated_keeps(tmp_path: Path, ratios: list[float]) -> str:
     return str(path)
 
 
-def _e2e_attempt_pair(session_dir: Path) -> tuple[float, float] | None:
-    """Return the ``(before, after)`` the route-level attempt recorded."""
-    parts = assemble_parts(session_dir)
-    ops = {
-        r.get("operation_id"): r
-        for r in parts.get("operations") or []
-        if isinstance(r, dict)
-        and r.get("name") == "geak_e2e"
-        and r.get("kind") in {"kernel_optimization", "gemm_tuning"}
-    }
-    if not ops:
-        return None
-    by_name = {
-        (m.get("name"), m.get("operation_id")): m.get("value")
-        for m in parts.get("measurements") or []
-        if isinstance(m, dict)
-    }
-    op_id = next(iter(ops))
-    return float(by_name[("baseline_throughput", op_id)]), float(by_name[("final_throughput", op_id)])
+def test_the_route_level_lift_is_claimed_once_from_the_anchor_it_beat(tmp_path: Path) -> None:
+    """The route-level lift is recorded once, anchored on the figure it beat.
 
-
-def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) -> None:
-    """The residual, not the whole route delta, is what the attempt records."""
-    base = 2844.209
-    pre_geak = 3042.941
-    measured = 3400.0
-    coord = _coord(tmp_path, baseline=base, best_tput=pre_geak)
-    result = _ok_result(final=3236.489)
-    result["accepted_kernels"] = ["k0", "k1"]
-    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05, 1.02])
-
-    coord._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=True)
-
-    from hyperloom.orchestrator.phases.kernel import KernelPhase
-
-    claimed = KernelPhase._geak_journey_attributed_delta(result)
-    assert claimed == pytest.approx(50.0 + 20.0)
-    before, after = _e2e_attempt_pair(tmp_path)
-    assert before == pytest.approx(pre_geak + claimed)
-    assert after == pytest.approx(measured)
-
-    # The point of holding back an ABSOLUTE tok/s rather than a speedup ratio: both records divide by the same session
-    # baseline, so the per-kernel credits and the route credit telescope to exactly the measured route lift, leaving
-    # nothing for ``unattributed_gain_pct`` to absorb.
-    ledger_pct = claimed / base * 100.0
-    route_pct = (after - before) / base * 100.0
-    assert ledger_pct + route_pct == pytest.approx((measured - pre_geak) / base * 100.0)
-
-
-def test_route_attempt_survives_when_only_the_config_remainder_is_left(tmp_path: Path) -> None:
-    """A journey KEEP must not suppress the whole attempt."""
+    The per-kernel KEEPs in the journey do not shrink that claim: in V6 the
+    attribution total is summed from the stack ledger alone, so the route row
+    owns the whole measured delta and the per-kernel ledger is a disjoint
+    account of WHICH kernels rode in on it.
+    """
     coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
     result = _ok_result(final=3236.489)
+    result["accepted_kernels"] = ["fused_moe"]
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
 
-    coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+    with session_scope(tmp_path):
+        coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+        rows = [
+            r
+            for r in stack_event_parts().get("stack_adoption") or []
+            if isinstance(r, dict) and str(r.get("action") or "") == "geak_e2e"
+        ]
 
-    before, after = _e2e_attempt_pair(tmp_path)
-    assert before == pytest.approx(3000.0 + 50.0)
-    assert after == pytest.approx(3400.0)
-
-
-def test_noise_sized_residual_is_not_recorded_as_an_attempt(tmp_path: Path) -> None:
-    """A keep worth 0.05% is measurement noise, not an optimization."""
-    coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
-    result = _ok_result(final=3236.489)
-    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
-
-    # 3050.0 is the claimed share; the promotion measured barely above it.
-    coord._promote_geak_from_candidate(result, measured_tput=3050.0 * 1.0005, overlay_loaded=True)
-
-    assert _e2e_attempt_pair(tmp_path) is None
-
-
-def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> None:
-    """Without overlay proof the per-kernel ledger claims nothing."""
-    coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
-    result = _ok_result(final=3236.489)
-    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
-
-    coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=False)
-
-    before, _ = _e2e_attempt_pair(tmp_path)
-    assert before == pytest.approx(3000.0)
+    # Once, not once per kernel that rode in on it.
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["throughput_after"] == pytest.approx(3400.0)
+    # The anchor is current_best, the figure the promotion had to beat.
+    assert row["throughput_before"] == pytest.approx(3000.0)
+    assert row["local_gain_pct"] == pytest.approx((3400.0 - 3000.0) / 3000.0 * 100.0)
+    # ...while the contribution every bucket sums shares the session baseline
+    # as its denominator, which is what makes the parts add up to the chain.
+    assert row["contribution_pct"] == pytest.approx((3400.0 - 3000.0) / 2844.209 * 100.0)
 
 
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:
     """A pending GEAK candidate renders as an audit note + warning and is NOT presented as a validated headline gain."""
     bd = {
         "session": {"image": ""},
-        "baseline": {"throughput_tok_s_per_gpu": 2844.2},
-        "final": {
-            "throughput_tok_s_per_gpu": 2844.2,
-            "cumulative_gain_pct_validated": 0.0,
-            "revalidation_pending": False,
-            "action_path": [],
-            "geak_pending": {"status": "awaiting_rebench", "self_reported_gain_pct": 13.79},
+        "outcome": {
+            "baseline": {"throughput_tok_s_per_gpu": 2844.2},
+            "final": {"throughput_tok_s_per_gpu": 2844.2, "gain_pct": 0.0, "action_path": []},
+            "validation": {},
+        },
+        "close": {
+            "geak_candidate": {
+                "status": "awaiting_rebench",
+                "self_reported_gain_pct": 13.79,
+                "revalidation_pending": False,
+            }
         },
     }
     sec = render_final(bd)
@@ -889,75 +931,6 @@ def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expe
 
 
 @pytest.mark.asyncio
-async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -> None:
-    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and tag it with the no-material reason (not the beat-current_best reason)."""
-    base, current_best, measured = 8668.5946, 8900.0, 9025.191
-    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
-    coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
-    coord.shared_state.optimization_stack = [
-        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
-    ]
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
-    journey_path = tmp_path / "kernel_journey.json"
-    journey_path.write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {
-                        "kernel_id": "provisional-kernel",
-                        "e2e": {
-                            "integrated": True,
-                            "e2e_gain_pct": 2.0,
-                            "validated": True,
-                            "decision": "KEEP",
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    # No material product; accepted_config is the pre-KERNEL best verbatim.
-    geak_result = {
-        "status": "ok",
-        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=1"},
-        "accepted_kernels": [],
-        "accepted_heads": [],
-        "final_overlay": "",
-        "final_patch": "",
-        "kernel_journey_path": str(journey_path),
-    }
-    coord.shared_state.geak_result = geak_result
-    coord._record_geak_kernel_journey(geak_result)
-    provisional_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
-    assert provisional_rows["provisional-kernel"]["e2e"]["decision"] == "KEEP"
-
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("2a fallback must not run for a no-material drop")
-
-    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
-
-    result = {
-        "output_throughput": measured,
-        "best_variant": {"fingerprint": "abc"},
-        "winners": [],
-    }
-    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
-
-    ss = coord.shared_state
-    assert ss.current_best["tput"] == pytest.approx(current_best)
-    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert ss.geak_result["revalidation_status"] == "no_material"
-    rejected_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
-    e2e = rejected_rows["provisional-kernel"]["e2e"]
-    assert e2e["decision"] == "REVERT"
-    assert e2e["validated"] is False
-    assert e2e["rejection_reason"] == "geak_no_material_product"
-
-
-@pytest.mark.asyncio
 async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path) -> None:
     """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack entry already recorded the win."""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
@@ -1034,7 +1007,13 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
 
 
 def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_path: Path) -> None:
-    """A promote whose overlay was proven NOT loaded is a config gain."""
+    """A promote whose overlay was proven NOT loaded is a config gain.
+
+    GEAK self-reports ``accepted_kernels`` / ``accepted_heads`` whether or not the
+    overlay carrying them survived to the measurement. The per-kernel ledger
+    refuses to credit them without proof, and the stack entry must agree: a
+    rebench that stripped a dead overlay cannot be filed under ``kernel``.
+    """
     base = 2844.209
     measured = 3270.0
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -1050,8 +1029,6 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     assert not entry.get("accepted_kernels")
     assert not entry.get("accepted_heads")
     assert entry["overlay_loaded"] is False
-    # The config lane is untouched, so the row is still a real gain — just not a kernel one.
-    assert _geak_contribution(entry) == "config"
 
 
 def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path: Path) -> None:
@@ -1065,5 +1042,3 @@ def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path:
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["accepted_kernels"] == ["c0_triton"]
     assert entry["overlay_loaded"] is True
-    # Config gain rode along in the same measurement, so it cannot be decomposed.
-    assert _geak_contribution(entry) == "joint"

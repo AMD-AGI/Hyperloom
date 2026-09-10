@@ -47,12 +47,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "can warn the operator that it is ignored; renaming it silences the warning.",
     ),
     (
-        "*",
-        r"KERNEL_AGENTS_MODEL",
-        "Legacy alias for FORGE_AGENT_MODEL, kept working on purpose. A "
-        "back-compat alias that gets renamed is not a back-compat alias.",
-    ),
-    (
         "src/kernelforge/agent_backends/registry.py",
         r"kernel_agents\.agent_providers",
         "Pre-rename entry-point group, still read so third-party provider plugins "
@@ -69,8 +63,13 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
+        "src/kernelforge/tests/test_agent_env_contract.py",
+        r"KERNEL_AGENTS_MODEL",
+        "The test that asserts the alias is no longer read has to name it.",
+    ),
+    (
         "CHANGELOG.md",
-        r"kernel_agents|kernel-agents",
+        r"kernel_agents|kernel-agents|KERNEL_AGENTS_MODEL",
         "Historical release notes.",
     ),
 )
@@ -94,20 +93,6 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "options at the time, so those runs did not fail -- they silently ran an "
         "inferred backend instead of the intended one. That tolerance is gone: an "
         "undeclared option is now an exit code, which is what makes this scope safe.",
-    ),
-    (
-        # The retired-name detector, and the test that pins it.
-        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
-        "Detects the pre-rename opt-out variable so it fails loudly instead of "
-        "being forwarded and ignored. Honouring it would keep the retired "
-        "vocabulary alive; not naming it at all would make the silent "
-        "re-enablement undetectable.",
-    ),
-    (
-        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
-        "The test that pins the detector above. It must spell the retired name to assert on it.",
     ),
     (
         "src/kernelforge/tests/test_rename_completeness.py",

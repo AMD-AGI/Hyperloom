@@ -79,4 +79,56 @@ class UsageAccumulator:
         return self.calls > 0
 
 
-__all__ = ["UsageAccumulator"]
+def combine_usage_totals(
+    *records: dict[str, Any] | None,
+    incomplete: bool = False,
+) -> dict[str, Any]:
+    """Combine independently accumulated usage records without losing cost provenance.
+
+    ``incomplete`` states that a contributor's ledger is known to be missing from ``records``. The counters below then
+    describe only part of the run, so the combination reports itself as ``partial`` rather than claiming the complete
+    provider-priced answer a reader would otherwise bill against.
+    """
+    combined: dict[str, Any] = {key: 0 for key in _TOKEN_KEYS}
+    combined["total_cost_usd"] = 0.0
+    combined["calls"] = 0
+    all_cost_available = True
+    any_priced_usage = False
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key in (*_TOKEN_KEYS, "calls"):
+            with contextlib.suppress(TypeError, ValueError):
+                value = int(record.get(key) or 0)
+                if value >= 0:
+                    combined[key] += value
+        with contextlib.suppress(TypeError, ValueError):
+            cost = float(record.get("total_cost_usd") or 0.0)
+            if math.isfinite(cost) and cost >= 0:
+                combined["total_cost_usd"] += cost
+
+        calls = record.get("calls")
+        with contextlib.suppress(TypeError, ValueError):
+            if int(calls or 0) > 0:
+                available = record.get("cost_available") is True
+                all_cost_available = all_cost_available and available
+                any_priced_usage = (
+                    any_priced_usage
+                    or available
+                    or record.get("cost_source")
+                    in {
+                        "provider",
+                        "partial",
+                    }
+                )
+
+    combined["total_cost_usd"] = round(combined["total_cost_usd"], 6)
+    combined["cost_available"] = combined["calls"] > 0 and all_cost_available and not incomplete
+    combined["cost_source"] = (
+        "provider" if combined["cost_available"] else "partial" if any_priced_usage else "unavailable"
+    )
+    return combined
+
+
+__all__ = ["UsageAccumulator", "combine_usage_totals"]

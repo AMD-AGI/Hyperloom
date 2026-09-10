@@ -57,6 +57,29 @@ class TestApplyVerdict:
         rep = ev.parse_log(_BF16_MISS)
         assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
 
+    def test_misses_with_hit_logging_on_is_a_real_zero(self):
+        # A caller that set the flag itself resolves the ambiguity, and the
+        # distinction matters: an op with genuinely zero shipped coverage is the
+        # strongest reason to tune it, while "not recorded" is no reason at all.
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        av = rep["apply_verdict"]
+        assert av["hit"] == 0 and av["miss"] == 1
+        assert av["verdict"] == "zero_hit"
+
+    def test_hit_logging_unknown_stays_inconclusive(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=None)
+        assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
+
+    def test_hit_logging_flag_cannot_manufacture_a_hit(self):
+        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
+        assert rep["apply_verdict"]["hit"] == 0
+        assert rep["apply_verdict"]["hit_ratio"] == 0.0
+
+    def test_hit_logging_flag_is_irrelevant_once_something_hit(self):
+        for flag in (None, True, False):
+            rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]), hit_logging=flag)
+            assert rep["apply_verdict"]["verdict"] == "served"
+
     def test_any_hit_means_served(self):
         rep = ev.parse_log("\n".join([_HIT, _BF16_MISS]))
         av = rep["apply_verdict"]

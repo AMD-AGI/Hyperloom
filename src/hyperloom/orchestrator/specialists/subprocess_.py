@@ -448,7 +448,7 @@ def _build_specialist_env() -> dict[str, str]:
     env = scrub_child_process_env(env)
     # claude's bypassPermissions/--dangerously-skip-permissions refuses to start
     # under root unless IS_SANDBOX=1 (SWSPLAT-42390). Mirror the kernel-agent
-    # forge tools (forge_fusion / forge_submit) so specialist authoring
+    # forge tools (forge_fusion) so specialist authoring
     # subprocesses run on bare-root pods (non-Claw hosts) instead of crashing
     # immediately. setdefault only under root keeps the guard intact elsewhere.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -650,7 +650,7 @@ class SpecialistSubprocessResult:
 
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
-_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", "scratch", ".hyperloom")
+_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
 
 
 def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -1612,12 +1612,21 @@ class SpecialistSubprocessDispatcher:
 
         With no target declared the whole worktree is in scope, minus
         :data:`_SPECIALIST_SCRATCH_DIRS`, whose whole-file copies would
-        otherwise be harvested as file creations.
+        otherwise be harvested as file creations, and minus the work artifacts
+        ``vet_patches`` refuses -- task-owned done files and bytecode caches.
+        Excluding exactly what vetting rejects keeps the harvest from authoring
+        a patch that is guaranteed to be dropped downstream.
         """
+        from .patch_safety import SPECIALIST_WORK_ARTIFACT_PATHSPECS
+
         declared = [str(t).strip().lstrip("/") for t in targets if str(t).strip()]
         if declared:
             return declared
-        return [".", *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS)]
+        return [
+            ".",
+            *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS),
+            *SPECIALIST_WORK_ARTIFACT_PATHSPECS,
+        ]
 
     @staticmethod
     def _harvest_worktree_diff(worktree: Path, *, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
@@ -1625,7 +1634,10 @@ class SpecialistSubprocessDispatcher:
 
         The comparison is ``base``-against-working-tree, since a specialist is
         not required to commit. Intent-to-add stages untracked paths so they
-        render as creations, ``git diff`` being blind to them otherwise.
+        render as creations, ``git diff`` being blind to them otherwise, which
+        is what keeps "edited a file and added one" from harvesting a patch
+        that silently omits the addition. Proven Python comment-only edits
+        produce no installable patch at all.
 
         Args:
             worktree: Per-task worktree holding a ``.git`` marker.
@@ -1650,12 +1662,16 @@ class SpecialistSubprocessDispatcher:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
 
+        from .patch_safety import patch_is_annotation_only
+
         pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
         _git("add", "-A", "-N", "--", *pathspec)
         diff = _git("diff", base, "--", *pathspec)
-        if diff is None or diff.returncode != 0:
+        if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
-        return diff.stdout if diff.stdout.strip() else ""
+        if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
+            return ""
+        return diff.stdout
 
     @staticmethod
     def _collect_patches(
@@ -1710,7 +1726,8 @@ class SpecialistSubprocessDispatcher:
                 continue
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
-                    out.append(str(p))
+                    if p.name != "_worktree_diff.patch":
+                        out.append(str(p))
         return out, {}
 
     @staticmethod

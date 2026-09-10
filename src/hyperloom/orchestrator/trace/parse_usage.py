@@ -532,54 +532,6 @@ def parse_codex_jsonl_tool_calls(
     return calls
 
 
-def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
-    """Extract the run's LLM usage from a Kernel-Forge backend's stdout log."""
-    if not stdout or "FORGE_LLM_USAGE" not in stdout:
-        return None
-    last_usage: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        marker = line.partition("FORGE_LLM_USAGE")
-        if not marker[1]:
-            continue
-        blob = marker[2].strip()
-        if not blob:
-            continue
-        try:
-            obj = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and obj:
-            last_usage = obj
-    canonical = normalize_usage(last_usage)
-    if canonical is None:
-        return None
-    reasoning = reasoning_output_tokens(last_usage)
-    if reasoning is not None:
-        canonical["reasoning_output_tokens"] = reasoning
-    return canonical
-
-
-def parse_forge_steps(stdout: str) -> dict[str, Any] | None:
-    """Extract the Kernel-Forge loop's key-step timeline from its stdout log."""
-    if not stdout or "FORGE_STEPS" not in stdout:
-        return None
-    last: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        marker = line.partition("FORGE_STEPS")
-        if not marker[1]:
-            continue
-        blob = marker[2].strip()
-        if not blob:
-            continue
-        try:
-            obj = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("steps"), list):
-            last = obj
-    return last
-
-
 __all__ = [
     "normalize_usage",
     "parse_claude_stream_json_response",
@@ -591,7 +543,5 @@ __all__ = [
     "parse_codex_jsonl_tool_calls",
     "parse_codex_jsonl_turn_usages",
     "parse_codex_jsonl_usage",
-    "parse_forge_steps",
-    "parse_forge_usage",
     "reasoning_output_tokens",
 ]

@@ -112,6 +112,7 @@ def generate_tuner(
             resolve_agent_runtime,
             select_default_agent_provider,
         )
+        from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
     except ImportError as exc:
         return GeneratedTuner(
             False,
@@ -124,7 +125,14 @@ def generate_tuner(
         # ``resolve_agent_runtime`` needs a provider name; picking one is a separate step that also checks the CLI is
         # actually installed.
         chosen = select_default_agent_provider(model)
-        runtime = resolve_agent_runtime(chosen.name, model=model, timeout_sec=timeout_s)
+        runtime = resolve_agent_runtime(
+            chosen.name,
+            # The model variable is per-provider, so it is only readable once
+            # the provider is settled.
+            model=model or resolve_agent_model(chosen.name),
+            timeout_sec=timeout_s,
+            reasoning_effort=resolve_agent_reasoning_effort(),
+        )
         backend = create_registered_backend(runtime)
     except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")

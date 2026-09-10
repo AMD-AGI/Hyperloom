@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,31 @@ from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
 
-# The only op whose production dispatch the per-shape split-K trial validates: aiter_splitk_validate hardcodes
-# gemm_a8w8_blockscale_ck, so the trial is correct only for this script_key.
+# The only op whose production dispatch the per-shape split-K trial validates:
+# aiter_splitk_validate can only build a trial for ops it has a registered
+# production callable for, so the trial is correct only for this script_key.
 SPLITK_TRIAL_SCRIPT_KEY = "a8w8_blockscale"
+
+# Which (op, libtype) pairs reach a production wrapper that actually forwards
+# the tuned row's ``splitK``. A tuned row is a measurement plus a set of kernel
+# parameters, and the measurement is only honoured if every parameter survives
+# the trip to the serving call -- a dropped ``splitK`` deploys a config that was
+# benchmarked with split-K and runs without it, i.e. slower than measured while
+# every engagement gate still reports the artifact as served. Read off
+# ``aiter/ops/gemm_op_a8w8.py``:
+#
+#   gemm_a8w8_blockscale               ck -> splitK=splitK   cktile -> splitK=splitK
+#   gemm_a8w8_blockscale_bpreshuffle   ck -> kernelName only  cktile -> kernelName only
+#                                      asm -> splitK=splitK   opus/flydsl -> no splitK
+#
+# Fail closed: an op absent from this table is treated as forwarding nothing, so
+# adding a tuner (or a new libtype) can only under-claim, never silently ship a
+# row whose splitK the runtime discards. Verified against aiter
+# d9e5ef7ce08ee7045d583aed768cff41aa9210fe; re-check on an aiter bump.
+_SPLITK_FORWARDING_LIBTYPES: dict[str, frozenset[str]] = {
+    "a8w8_blockscale": frozenset({"ck", "cktile"}),
+    "a8w8_blockscale_bpreshuffle": frozenset({"asm"}),
+}
 
 
 class AiterDtypeUnavailable(RuntimeError):
@@ -182,6 +205,14 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
 
 
 def _demand_budget(ctx: TuneContext) -> int:
+    """Total shapes the time budget affords, decode band included.
+
+    The caller splits this: the decode band is mandatory and is reserved first,
+    the request-ranked prefill tail claims what is left. Overrunning is not a
+    soft failure -- ``ctx.timeout_s`` is the subprocess deadline, and a dense
+    tuner killed at that deadline returns no candidate at all, so an
+    unaffordable shape list costs the prefill rows too.
+    """
     raw = os.environ.get(_DEMAND_MAX_SHAPES_ENV, "").strip()
     try:
         override = int(raw)
@@ -201,10 +232,18 @@ def _demand_input_csv(
     *,
     needs_q_dtype_w: bool = False,
 ) -> Path | None:
-    """Untuned CSV built from the keys the runtime actually missed."""
+    """Untuned CSV built from the keys the runtime actually missed.
+
+    The ranking is sound for the prefill tail but structurally cannot see the
+    decode band (see :func:`..evidence.demand_shapes`), so the band comes from
+    the concurrency contract via :func:`_ensure_decode_m_coverage` and is paid
+    for first: the prefill tail claims only the shapes still affordable once
+    the band's rows are reserved.
+    """
     path = getattr(ctx, "demand_json", None)
     if not path:
         return None
+    from ..dense_shapes import compute_decode_m_values
     from ..evidence import demand_for_tuner, demand_shapes, load_demand
 
     report = load_demand(path)
@@ -213,12 +252,13 @@ def _demand_input_csv(
     entry = demand_for_tuner(report, tuner_name)
     if entry is None:
         return None
-    budget = _demand_budget(ctx)
     # The a8w8 blockscale, a8w8 quant-type, and a4w4 lookup paths all retry the exact M followed by get_padded_m(...,
     # gl=0) and gl=1, using the same gemm_op_common implementation as a16w16.
-    shapes = demand_shapes(entry, limit=budget)
-    if not shapes:
+    ranked = demand_shapes(entry)
+    if not ranked:
         return None
+    budget = _demand_budget(ctx)
+    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc), budget)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -231,14 +271,54 @@ def _demand_input_csv(
                 row += f",{q_dtype_w}"
             fh.write(row + "\n")
     log.info(
-        "%s: %d padded-M demand shapes (of %d distinct keys, budget %d) -> %s",
+        "%s: %d of %d ranked padded-M demand shapes (of %d distinct keys), leaving the decode band its share of "
+        "the %d-shape budget -> %s",
         tuner_name,
         len(shapes),
+        len(ranked),
         entry.get("distinct_keys", 0),
         budget,
         out,
     )
-    return out
+    return _ensure_decode_m_coverage(out, ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w)
+
+
+def _demand_shapes_within_budget(
+    ranked: list[dict[str, Any]],
+    decode_m: Sequence[int],
+    budget: int,
+) -> list[dict[str, Any]]:
+    """The highest-ranked demand shapes whose decode band ``budget`` can also pay for.
+
+    Walks the ranking and takes a shape while the total -- shapes taken plus
+    the band rows their dispatch groups still lack -- stays inside ``budget``.
+    A shape opening a new group carries that group's whole band with it, so it
+    can be passed over in favour of a lower-ranked shape in a group already
+    paid for.
+
+    Trimming groups rather than the band inside a group is deliberate: a group
+    holding part of its band serves the uncovered decode M with a prefill tile,
+    which is the regression the band exists to prevent, while a group left out
+    entirely keeps whatever the shipped tables already give it.
+    """
+    group_m: dict[tuple[int, int], set[int]] = {}
+    taken: list[dict[str, Any]] = []
+    for shape in ranked:
+        key = (int(shape["N"]), int(shape["K"]))
+        trial = dict(group_m)
+        trial[key] = group_m.get(key, set()) | {int(shape["M"])}
+        band = sum(len(b) for b in _decode_band_buckets([(n, ms) for (n, _k), ms in trial.items()], decode_m))
+        if len(taken) + 1 + band <= budget:
+            group_m = trial
+            taken.append(shape)
+    if taken:
+        return taken
+    log.warning(
+        "the top-ranked dispatch group's decode band alone exceeds the %d-shape budget; tuning it anyway and "
+        "accepting the overrun, because a band with holes is the regression this guarantee exists to prevent",
+        budget,
+    )
+    return ranked[:1]
 
 
 def _resolve_input_csv(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
@@ -299,13 +379,38 @@ def _dispatch_lookup_ms(m: int, n: int) -> set[int]:
     return {int(m), _padded_m_gl0(m), _padded_m_gl1(m, n)}
 
 
+def _decode_band_buckets(
+    groups: Sequence[tuple[int, set[int]]],
+    decode_m: Sequence[int],
+) -> list[list[int]]:
+    """Per group, the padded-M buckets it still needs to cover the decode band.
+
+    ``groups`` is ``(N, tuned M)`` per dispatch group; N alone decides which
+    tuned M a runtime batch can reach, through ``get_padded_m(..., gl=1)``.
+    Sizing the reservation and appending the rows both read this, so the two
+    cannot drift.
+    """
+    plan: list[list[int]] = []
+    for n, tuned in groups:
+        reachable = set(tuned)
+        buckets: list[int] = []
+        for m in decode_m:
+            if reachable & _dispatch_lookup_ms(m, n):
+                continue
+            bucket = _padded_m_gl0(m)
+            reachable.add(bucket)  # also serves the other grid M padding into it
+            buckets.append(bucket)
+        plan.append(buckets)
+    return plan
+
+
 def _ensure_decode_m_coverage(
     csv: Path,
     ctx: TuneContext,
     work_dir: Path,
     needs_q_dtype_w: bool = False,
 ) -> Path:
-    """Guarantee every tuned dispatch group covers the decode-band M (fast mode)."""
+    """Guarantee every tuned dispatch group covers the decode-band M."""
     from ..dense_shapes import compute_decode_m_values
 
     try:
@@ -346,25 +451,19 @@ def _ensure_decode_m_coverage(
         return csv
 
     decode_m = compute_decode_m_values(ctx.conc)
+    plan = _decode_band_buckets([(key[0], group_m[key]) for key in group_order], decode_m)
     additions: list[str] = []
-    uncovered: list[tuple[int, int, str]] = []
-    for key in group_order:
-        n, k, q = key
-        tuned_m = set(group_m[key])
-        added_here = False
-        for m in decode_m:
-            if tuned_m & _dispatch_lookup_ms(m, n):
-                continue  # some tuned row is already reachable from this M
-            bucket = _padded_m_gl0(m)
-            tuned_m.add(bucket)  # also serves the other grid M padding into it
-            added_here = True
+    uncovered = 0
+    for (n, k, q), buckets in zip(group_order, plan):
+        if not buckets:
+            continue
+        uncovered += 1
+        for bucket in buckets:
             row = [""] * len(header)
             row[idx["M"]], row[idx["N"]], row[idx["K"]] = str(bucket), str(n), str(k)
             if q_idx is not None:
                 row[q_idx] = q
             additions.append(",".join(row))
-        if added_here:
-            uncovered.append(key)
 
     if not additions:
         return csv
@@ -373,9 +472,9 @@ def _ensure_decode_m_coverage(
     work_dir.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join([lines[0], *body, *additions]) + "\n", encoding="utf-8")
     log.info(
-        "Fast-mode decode coverage: %d of %d dispatch group(s) lacked a decode-band "
+        "Decode coverage: %d of %d dispatch group(s) lacked a decode-band "
         "M (grid %s for conc=%s); appended %d row(s), original %d row(s) untouched",
-        len(uncovered),
+        uncovered,
         len(group_order),
         decode_m,
         ctx.conc,
@@ -877,31 +976,39 @@ def run_aiter_dense_tuner(
         shutil.copy2(candidate, dest)
         artifact = str(dest)
 
-    # When split-K search is enabled the aiter *tuner* can pick a splitK the production dispatch cannot run (serving
-    # it raises "This GEMM is not supported!" and crashes engine init).
-    force_candidate = False
-    if "--splitK" in (extra_args or []):
-        max_splitk = int(os.environ.get("FORGE_MAX_SPLITK", "2"))
-        # Prefer the REAL per-shape production split-K limit (trial-dispatch) over the static FORGE_MAX_SPLITK: it
-        # keeps splitK>cap where the kernel actually supports it and tightens below cap where it does not.
-        support_fn = None
-        if script_key == SPLITK_TRIAL_SCRIPT_KEY and os.environ.get("FORGE_SPLITK_TRIAL", "1") != "0":
-            try:
-                from ..aiter_splitk_validate import make_support_fn
+    # The aiter *tuner* can pick a splitK the production dispatch cannot run (serving it raises "This GEMM is not
+    # supported!" and crashes engine init), and some (op, libtype) pairs reach a wrapper that takes no splitK at all,
+    # which deploys a config benchmarked with split-K and serves it without. Run unconditionally rather than only when
+    # this tuner asked for --splitK: the cap also enforces that forwarding contract, and a caller-supplied CSV can
+    # carry splitK>0 on its own. Rows at splitK=0 take a fast path inside the cap, so a table without split-K pays
+    # nothing.
+    max_splitk = int(os.environ.get("FORGE_MAX_SPLITK", "2"))
+    # Prefer the REAL per-shape production split-K limit (trial-dispatch) over the static FORGE_MAX_SPLITK: it
+    # keeps splitK>cap where the kernel actually supports it and tightens below cap where it does not. Falls back to
+    # the static cap for any op the trial has no registered production callable for -- validating against the wrong
+    # kernel is worse than not validating.
+    support_fn = None
+    if os.environ.get("FORGE_SPLITK_TRIAL", "1") != "0":
+        try:
+            from ..aiter_splitk_validate import make_support_fn
 
-                # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-                # may not be device 0.
-                support_fn = make_support_fn(gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-            except Exception:  # noqa: BLE001 — fall back to the static cap
-                support_fn = None
-        n_capped, force_candidate = _cap_splitk_to_serve_safe(
-            Path(artifact), profile_csv, max_splitk, support_fn=support_fn
+            # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+            # may not be device 0.
+            support_fn = make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
+        except Exception:  # noqa: BLE001 — fall back to the static cap
+            support_fn = None
+    n_capped, force_candidate = _cap_splitk_to_serve_safe(
+        Path(artifact),
+        profile_csv,
+        max_splitk,
+        support_fn=support_fn,
+        forwarding_libtypes=_SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset()),
+    )
+    if n_capped:
+        log.info(
+            "serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support",
+            n_capped,
         )
-        if n_capped:
-            log.info(
-                "serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support",
-                n_capped,
-            )
 
     shape_results = _parse_tuner_stdout(stdout, stderr)
     if not shape_results:
@@ -1072,9 +1179,26 @@ def _filter_unimproved_rows(
 
 
 def _cap_splitk_to_serve_safe(
-    artifact_csv: Path, profile_csv: Path, max_splitk: int, support_fn=None
+    artifact_csv: Path,
+    profile_csv: Path,
+    max_splitk: int,
+    support_fn=None,
+    forwarding_libtypes: frozenset[str] | None = None,
 ) -> tuple[int, bool]:
-    """Rewrite deployed rows whose splitK exceeds production-dispatch support."""
+    """Rewrite deployed rows whose splitK production cannot dispatch or forward.
+
+    Two hazards, same remedy: a splitK the production kernel cannot dispatch
+    (crashes engine init), and a splitK on a libtype whose wrapper takes no such
+    argument (no crash, just a kernel slower than the one that won the
+    benchmark, with every engagement gate still green). Either way the row is
+    replaced by the fastest serve-safe candidate from the profile, and a shape
+    with no safe candidate is dropped.
+
+    ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
+    for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
+    libtype is capped at 0 regardless of dispatch support, and ``None`` disables
+    the check.
+    """
     try:
         with artifact_csv.open() as f:
             rows = list(csv.reader(f))
@@ -1120,6 +1244,17 @@ def _cap_splitk_to_serve_safe(
             profile_csv,
         )
 
+    lti = _col.get("libtype")
+
+    def _forwards(row: list[str]) -> bool:
+        if forwarding_libtypes is None:
+            return True
+        if lti is None or lti >= len(row):
+            # No libtype column to check against a contract that is keyed on it;
+            # treat as non-forwarding, matching the fail-closed default.
+            return False
+        return str(row[lti]).strip().lower() in forwarding_libtypes
+
     def _shape_max(m: int, n: int, k: int) -> int:
         if support_fn is None:
             return max_splitk
@@ -1130,6 +1265,7 @@ def _cap_splitk_to_serve_safe(
         return max_splitk if v is None else int(v)
 
     out, changed, has_splitk = [hdr], 0, False
+    dropped_unforwarded = 0
     for row in rows[1:]:
         try:
             sk = int(row[ski])
@@ -1140,6 +1276,27 @@ def _cap_splitk_to_serve_safe(
             # splitK=0 is the default dispatch: always serve-safe, and its keep decision never depends on the
             # per-shape max, so skip the (GPU-dispatching) trial entirely for these rows.
             out.append(row)
+            continue
+        if not _forwards(row):
+            # The wrapper for this libtype takes no splitK, so the only
+            # honourable value is 0 -- fall through to candidate replacement
+            # with maxsk=0 rather than shipping a measurement production cannot
+            # reproduce.
+            maxsk = 0
+            dropped_unforwarded += 1
+            try:
+                key = (row[mi], row[ni], row[ki])
+            except IndexError:
+                out.append(row)
+                continue
+            safe = min(
+                (c for c in by_shape.get(key, ()) if c[1] <= maxsk),
+                key=lambda c: c[0],
+                default=None,
+            )
+            if safe is not None:
+                out.append(safe[2])
+            changed += 1
             continue
         try:
             key = (row[mi], row[ni], row[ki])
@@ -1164,6 +1321,15 @@ def _cap_splitk_to_serve_safe(
     if changed:
         with artifact_csv.open("w", newline="") as f:
             csv.writer(f).writerows(out)
+    if dropped_unforwarded:
+        log.warning(
+            "splitK forwarding: %d row(s) carried splitK>0 on a libtype whose "
+            "production wrapper takes no splitK (forwarding set: %s); replaced "
+            "with a splitK=0 candidate or dropped, because serving them would "
+            "have run a config slower than the one benchmarked",
+            dropped_unforwarded,
+            sorted(forwarding_libtypes or ()),
+        )
     return changed, has_splitk
 
 

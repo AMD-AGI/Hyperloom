@@ -138,10 +138,13 @@ def test_builtin_model_ownership_predicates() -> None:
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
     assert claude.default_model == "claude-opus-5"
-    assert codex.default_model == "gpt-5.6"
+    assert codex.default_model == "gpt-5.6-sol"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
+    # The gateway's deployment name is suffixed; the family predicate has to
+    # keep recognising it or the default id routes to no provider at all.
+    assert codex.owns_model("gpt-5.6-sol")
     assert codex.owns_model("o3-mini")
     assert codex.owns_model("internal-codex-preview")
     assert not codex.owns_model("olmo-7b")

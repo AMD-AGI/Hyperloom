@@ -9,6 +9,7 @@ from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task_publisher import (
+    pending_rejections,
     publish_complete_staged_tasks,
     publish_staged_task,
 )
@@ -32,10 +33,8 @@ def _staged(layout: ControllerLayout, repo: Path, name: str = "draft") -> Path:
     (staged / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": {
                     "producer": "forge-loop",
-                    "kernel_name": "kernel",
                     "framework": "standalone",
                     "framework_version": "unknown",
                     "backend": "triton",
@@ -86,7 +85,6 @@ def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -
     payload["identity"].update(
         {
             "producer": " FORGE-LOOP ",
-            "kernel_name": " Kernel ",
             "framework": " SGLang ",
             "framework_version": " 0.5.17+ROCM ",
             "backend": " TRITON ",
@@ -109,7 +107,31 @@ def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -
     }
 
 
+def test_the_published_identity_states_the_derived_kernel_name(tmp_path: Path) -> None:
+    """The file on disk has to name the operator the controller went on to use.
+
+    Nothing downstream re-reads the draft, so a published task.json that still
+    showed the agent's spelling would disagree with its own directory name.
+    """
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    task_json = staged / "task.json"
+    payload = json.loads(task_json.read_text(encoding="utf-8"))
+    payload["operator_name"] = "backend::Fused.MoE-Kernel"
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is True
+    assert result.operator_id.split(":")[2] == "fused_moe"
+    published = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert published["identity"]["kernel_name"] == "fused_moe"
+    assert published["operator_name"] == "backend::Fused.MoE-Kernel"
+
+
 def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
+    """The refusal names the top level, the one thing the agent cannot resolve."""
     repo, _head = _repo(tmp_path)
     nested = repo / "nested"
     nested.mkdir()
@@ -120,7 +142,20 @@ def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
 
     assert result.published is False
     assert "Git top-level" in result.reason
+    assert f"use {repo.resolve()}" in result.reason
     assert staged.is_dir()
+
+
+def test_a_repo_root_outside_git_is_told_what_to_pass(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    staged = _staged(layout, loose)
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is False
+    assert "Pass the Git top-level of the repository that holds kernel_path" in result.reason
 
 
 def test_publish_rejects_source_files_outside_the_pinned_repo(
@@ -139,6 +174,10 @@ def test_publish_rejects_source_files_outside_the_pinned_repo(
     assert result.published is False
     assert "source path is not tracked" in result.reason
     assert "python/other_repo/source.py" in result.reason
+    # The usual cause is a path from the repository on the other side of a call
+    # chain, which the bare rule reads as an ordinary typo.
+    assert str(repo.resolve()) in result.reason
+    assert "belongs in evidence rather than source_files" in result.reason
 
 
 def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path: Path) -> None:
@@ -151,7 +190,8 @@ def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path:
     result = publish_staged_task(layout, duplicate)
 
     assert result.published is False
-    assert result.reason == "operator task is already published"
+    assert "is already published" in result.reason
+    assert "drop this draft or point it at a different operator" in result.reason
     assert duplicate.is_dir()
 
 
@@ -243,6 +283,51 @@ def test_a_revised_draft_is_offered_again_after_a_refusal(tmp_path: Path) -> Non
     assert [result.published for result in retried] == [True]
     published = json.loads((layout.task_dir(retried[0].operator_id) / "task.json").read_text(encoding="utf-8"))
     assert published["base_commit"] == head
+
+
+def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) -> None:
+    """The scan runs out of process, so a file is the only channel back."""
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    payload = json.loads((staged / "task.json").read_text(encoding="utf-8"))
+    payload["identity"].pop("gpu")
+    (staged / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: _newest_staged_mtime(staged) + 5.0,
+    )
+
+    assert pending_rejections(layout.agent_staging_root) == {
+        "draft": "invalid staged task: identity is missing fields: gpu"
+    }
+
+
+def test_writing_the_refusal_does_not_make_the_draft_look_revised(tmp_path: Path) -> None:
+    """The note lands inside the directory whose mtime decides revalidation."""
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    (staged / "task.json").write_text("{ not json", encoding="utf-8")
+    refused: dict[str, float] = {}
+    clock = _newest_staged_mtime(staged) + 5.0
+
+    first = publish_complete_staged_tasks(layout, quiescent_sec=0.0, now=lambda: clock, refused=refused)
+    second = publish_complete_staged_tasks(layout, quiescent_sec=0.0, now=lambda: clock + 1.0, refused=refused)
+
+    assert [result.published for result in first] == [False]
+    assert second == ()
+
+
+def test_a_published_draft_leaves_no_pending_refusal(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+
+    assert publish_staged_task(layout, staged).published is True
+    assert pending_rejections(layout.agent_staging_root) == {}
 
 
 def test_publish_rejects_a_symlinked_staging_directory(tmp_path: Path) -> None:

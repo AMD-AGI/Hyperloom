@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import subprocess
 import time
@@ -37,6 +38,7 @@ from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tracker import UsageAccumulator, combine_usage_totals
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +141,7 @@ def run_rewrite(
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
+    usage = UsageAccumulator()
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
@@ -162,6 +165,20 @@ def run_rewrite(
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
 
+    def _total_usage(optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
+        """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
+
+        A forge-loop that was cut off or killed reports a ledger that stops at its last checkpoint, so the totals are
+        published as partial rather than as a complete provider-priced answer.
+        """
+        opt_result = optimize_result or {}
+        nested = opt_result.get("llm_usage")
+        return combine_usage_totals(
+            usage.totals(),
+            nested if isinstance(nested, dict) else None,
+            incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
+        )
+
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
     def _setup_failed(reason: str, failure_class: str) -> dict:
@@ -172,6 +189,7 @@ def run_rewrite(
             port_attempts=0,
             source_ms=None,
             optimize_result={},
+            llm_usage=_total_usage(),
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
@@ -252,6 +270,7 @@ def run_rewrite(
                 deadline_unix=search_stop_unix,
                 invocation_spec_file=invocation_spec_file,
                 initial_preflight=preflight,
+                usage=usage,
             )
         )
         if not prepared.ok or prepared.preflight is None:
@@ -341,6 +360,7 @@ def run_rewrite(
                 permission_mode=permission_mode,
                 stop_at_unix=search_stop_unix,
                 pre_task_context=kb_read.reference_context,
+                usage=usage,
             )
         )
     if not port.ok:
@@ -351,6 +371,7 @@ def run_rewrite(
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result={},
+            llm_usage=_total_usage(),
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -411,7 +432,7 @@ def run_rewrite(
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
-            allow_non_improving=True,
+            session_key=port_commit,
         )
         print(
             f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
@@ -432,6 +453,7 @@ def run_rewrite(
         optimize_result={"best_ms": flydsl_baseline_ms},
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
@@ -449,8 +471,49 @@ def run_rewrite(
     )
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
+    #
+    # Every KEEP is published, not just the run's final best, because an OPTIMIZE session can be terminated at its
+    # cutoff or killed outright. forge-loop cannot do this itself -- it runs here under --no-experience-kb because the
+    # rewrite identity is not its own -- so the rewrite layer watches its result file and publishes to its own store.
+    # Naming the record after the forge-loop session rather than the artifact makes each publication replace the last.
+    optimize_session_key = ""
+
+    def _publish_keep(payload: dict) -> None:
+        nonlocal optimize_session_key
+        commit = str(payload.get("best_commit") or "")
+        # Read the kernel out of the commit, never off disk: the workspace still belongs to the running agent, and the
+        # best is only restored there once OPTIMIZE is over.
+        shown = _git(workspace, "show", f"{commit}:{spec.flydsl_kernel_relpath}")
+        if shown.returncode != 0 or not shown.stdout.strip():
+            print(
+                f"  [forge-rewrite] KEEP publish skipped: {commit[:12]} has no {spec.flydsl_kernel_relpath}",
+                flush=True,
+            )
+            return
+        optimize_session_key = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
+        write = write_flydsl_kb_solution(
+            spec,
+            driver_path,
+            config,
+            source_ms=source_ms,
+            flydsl_best_ms=payload.get("best_ms"),
+            best_commit=commit,
+            framework=framework,
+            # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
+            # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
+            snr_db=None,
+            session_key=optimize_session_key,
+            content_override=shown.stdout.encode(),
+        )
+        print(
+            f"  [forge-rewrite] KEEP KB publish ({commit[:12]}): {write.get('reason') or write.get('solution')}",
+            flush=True,
+        )
+
     opt: dict = {}
+    optimize_ran = False
     if time.time() < search_stop_unix:
+        optimize_ran = True
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
         opt = run_optimize(
             spec,
@@ -464,10 +527,17 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:
         print(
             "  [forge-rewrite] 20-minute finalization reserve reached after PORT; skipping forge-loop",
+            flush=True,
+        )
+    if optimize_ran and not opt.get("llm_usage_complete"):
+        print(
+            "  [forge-rewrite] WARNING: forge-loop did not report a final token ledger; the reported llm_usage covers "
+            "only what it checkpointed and is published as partial",
             flush=True,
         )
 
@@ -478,16 +548,21 @@ def run_rewrite(
         opt = {**opt, "best_commit": port_commit}
 
     if rewrite_kb_enabled:
+        final_commit = str(opt.get("best_commit") or "")
         kb_write = write_flydsl_kb_solution(
             spec,
             driver_path,
             config,
             source_ms=source_ms,
             flydsl_best_ms=opt.get("best_ms"),
-            best_commit=str(opt.get("best_commit") or ""),
+            best_commit=final_commit,
             framework=framework,
-            snr_db=port.snr_db,
-            allow_non_improving=port.attempts > 0,
+            # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
+            # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
+            snr_db=port.snr_db if final_commit == port_commit else None,
+            # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
+            # otherwise -- either way it replaces that session's record instead of standing beside it.
+            session_key=optimize_session_key or port_commit,
         )
     else:
         kb_write = {"written": False, "reason": "disabled"}
@@ -506,6 +581,7 @@ def run_rewrite(
         deadline_unix=deadline_unix,
         import_modules=applyback_import_modules,
         max_attempts=max_applyback_attempts,
+        usage=usage,
     )
     if applyback.ok:
         print(
@@ -525,6 +601,7 @@ def run_rewrite(
         optimize_result=opt,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,

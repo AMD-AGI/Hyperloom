@@ -306,6 +306,12 @@ with a different md5 (it benchmarks a different op shape).
 collective cannot be captured under a single CUDA/HIP graph; see that task's
 `driver.py` docstring.
 
+`mori_ep_dispatch_combine/` also predates `dist_harness`, which a multi-rank
+driver must now measure inside. Read it for the operator, not for the launch:
+it spawns its own ranks, which preflight now rejects. It is kept in the shape
+its 8-GPU measurements were taken in rather than ported without hardware to
+re-take them on.
+
 ## 4. `program.md` — agent guidance
 
 Free-form markdown handed to the optimizing agent: the objective, optimization

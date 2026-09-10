@@ -37,12 +37,15 @@ def _phase(last_fusion, *, spent: int = 0, session_dir=None):
     async def _integrate_fusion(result):
         return None
 
-    return SimpleNamespace(
+    phase = SimpleNamespace(
         shared_state=state,
         bus=bus,
         session_dir=session_dir,
         _integrate_fusion=_integrate_fusion,
     )
+    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
+    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
+    return phase
 
 
 def _round(*, withheld: int, status: str = "complete") -> dict[str, Any]:
@@ -134,6 +137,8 @@ async def test_the_counter_survives_a_state_round_trip(tmp_path):
         return None
 
     phase._integrate_fusion = _integrate_fusion
+    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
+    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
 
     for _ in range(MAX_FUSION_WITHHELD_RETRIES):
         await RECORD(phase, _round(withheld=2))

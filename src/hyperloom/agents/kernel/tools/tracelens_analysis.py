@@ -4839,14 +4839,12 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
-    # The nccl-summary lane identifies collectives from TraceLens' own
-    # nccl_summary table plus a resolved device symbol, which outranks a name
-    # guess. Re-deriving over it unresolves rows the lane already resolved:
-    # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1
-    # all carry is_multigpu=True from _nccl_summary_candidates and all read False
-    # by name. That flip also disqualifies them at is_collective_candidate
-    # (_kernel_decisions.py), which gates the lane on candidate_source ==
-    # "nccl_summary" AND is_multigpu -- so the lane refuses its own rows.
+    # The nccl-summary lane identifies collectives from TraceLens' own nccl_summary table plus a resolved device
+    # symbol, which outranks a name guess. Re-deriving over it unresolves rows the lane already resolved:
+    # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1 all carry is_multigpu=True from
+    # _nccl_summary_candidates and all read False by name. That flip reaches the invocation contract built below,
+    # which gates kind == "collective" and world_size on this flag -- so the rows that most need a rank count would
+    # be published as ordinary single-rank work.
     authoritative = bool(item.get("is_multigpu")) and str(item.get("candidate_source") or "") == "nccl_summary"
     if not authoritative:
         item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
@@ -5291,8 +5289,8 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
     (see KernelForge PR #88): each is gated on the *sum* of dispatch's +
     combine's ``gpu_pct``, since together they are one logical round trip.
     Each member keeps its own candidate entry (so either one can be picked as
-    the ``--kernel-id`` the orchestrator dispatches); ``forge_submit``'s
-    vendor-playbook path de-duplicates so only one forge-loop session actually
+    the ``--kernel-id`` the orchestrator dispatches); the vendor-playbook
+    dispatch path de-duplicates so only one forge-loop session actually
     runs per group per analysis session.
     """
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -5392,7 +5390,7 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
 #: about the kernel itself. Every one of these is derived from the old path, so
 #: a rewrite that leaves them in place produces a candidate describing two
 #: different sources at once -- and the downstream readers disagree about which
-#: one wins. ``forge_submit._resolve_framework`` consults ``source_framework``
+#: one wins. Framework resolution consults ``source_framework``
 #: before it ever looks at ``source_file``, and ``classify_patchability`` reads
 #: ``kernel_kind`` to decide a kernel is prebuilt assembly, so a stale value
 #: silently misroutes or skips the new source.
@@ -5687,7 +5685,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "384c362cb0e174ddf4e533e67ae74df30a849dc6"
+_TRACELENS_REF_DEFAULT = "210fb5c8aebb386e4e90bc9422dcf1b6821c6809"
 
 
 def _default_tracelens_root() -> Path:

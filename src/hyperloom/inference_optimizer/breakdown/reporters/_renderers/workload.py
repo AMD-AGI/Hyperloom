@@ -7,13 +7,28 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, md_kv_list, register_renderer
+from ..base import RenderedSection, as_dict, md_kv_list, register_renderer, task_config_of
 
 
 @register_renderer("workload")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the workload section: model / framework name / GPU / shape / objective."""
-    w = breakdown.get("workload") or {}
+    """Render the workload section: model / framework name / GPU / shape / objective.
+
+    Surfaces the model and framework name, GPU type, request shape
+    (tp / conc / isl / osl / max_model_len / precision) and objective,
+    warning when the GPU type is missing. Skipped when neither model nor
+    framework name is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered workload section.
+    """
+    w = task_config_of(breakdown)
+    # ``model_class`` is part of the structural summary rather than the launch
+    # shape, so it sits one level down.
+    model_class = as_dict(w.get("architecture")).get("model_class")
     facts: list[str] = []
     warnings: list[str] = []
 
@@ -47,7 +62,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         [
             ("model_name", model),
             ("model_path", w.get("model_path")),
-            ("model_class", w.get("model_class")),
+            ("model_class", model_class),
             ("framework_name", fw),
             ("framework_version", fw_v or None),
             ("gpu_type", gpu or None),

@@ -10,9 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.collectors.kernels import (
-    _collect_adopted_kernels,
-)
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
@@ -202,56 +199,6 @@ def test_an_unproven_overlay_records_the_row_without_a_gain() -> None:
     assert entry["attempts"][0]["decision"] == "UNATTRIBUTED"
 
 
-def test_unproven_overlay_geak_row_is_not_adopted() -> None:
-    phase = _phase()
-    _record(
-        phase,
-        {"accepted_kernels": [_spec("k", 5.0)]},
-        overlay_loaded=False,
-    )
-    adopted = _collect_adopted_kernels({"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts})
-    assert adopted == []
-
-
-def test_joint_rebench_with_proven_overlay_is_still_adopted() -> None:
-    phase = _phase()
-    result = {"accepted_kernels": [_spec("k_one", 5.0), _spec("k_two", 7.0)]}
-    _record(phase, result)
-    adopted = _collect_adopted_kernels({"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts})
-    assert {r["kernel_id"] for r in adopted} == {"k_one", "k_two"}
-    assert all(r["validated"] is False for r in adopted)
-
-
-def test_historical_keep_survives_a_later_unproven_rebench() -> None:
-    phase = _phase()
-    result = {"accepted_kernels": [_spec("k", 5.0)]}
-    _record(phase, result, measured_tput=150.0)
-    _record(phase, result, measured_tput=150.0, overlay_loaded=False)
-    adopted = _collect_adopted_kernels({"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts})
-    assert len(adopted) == 1
-    assert adopted[0]["kernel_id"] == "k"
-    assert adopted[0]["e2e_gain_pct"] == 50.0
-    assert adopted[0]["validated"] is False
-
-
-def test_reverted_forge_kernel_with_prior_keep_is_not_adopted() -> None:
-    state = {
-        "kernel_integrate_attempts": {
-            "my_kernel": {
-                "kernel_id": "my_kernel",
-                "attempts": [
-                    {"decision": "KEEP", "gain_pct": 8.0},
-                    {"decision": "REVERT", "gain_pct": -2.0},
-                ],
-                "last_decision": "REVERT",
-                "best_gain_pct": 8.0,
-                "validated": True,
-            }
-        }
-    }
-    assert _collect_adopted_kernels(state) == []
-
-
 def test_two_kernels_on_one_rebench_share_no_invented_split() -> None:
     phase = _phase()
     result = {
@@ -307,6 +254,74 @@ def test_a_non_dict_ledger_is_left_alone() -> None:
     phase = SimpleNamespace(shared_state=SimpleNamespace(kernel_integrate_attempts=None, macro_cycle=0))
     _record(phase, {"accepted_kernels": [_spec("k", 5.0)]})
     assert phase.shared_state.kernel_integrate_attempts is None
+
+
+def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Path) -> None:
+    """GEAK writes the per-kernel ledger directly, bypassing the integrate queue.
+
+    Without a row of its own the timeline would show a GEAK adoption that no
+    gate ever ruled on, and the basis its gain was measured on would exist
+    nowhere but in ``state.json``.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+        ROUTE_GEAK,
+        make_kernel_recorder,
+    )
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    with session_scope(tmp_path):
+        recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
+        assert recorder is not None
+        recorder.begin(tput_before=100.0)
+        recorder.finish(verdict="adopted", status="succeeded", tput_after=120.0)
+
+        _record(
+            _phase(),
+            {
+                "accepted_kernels": [_spec("_mxfp8_linear_kernel", 13.87, kind="authored", isolated=2.39)],
+                "alignment_metrics": {"final_basis": "cold"},
+                "baseline_alignment": {"status": "aligned"},
+            },
+        )
+
+        events = [event for event in read_timeline_events(tmp_path) if event.get("type") == "kernel"]
+        row = events[0]["ext"]["integrate"][0]
+
+    assert row["integration_id"] == "geak-_mxfp8_linear_kernel"
+    assert row["kernel_id"] == "_mxfp8_linear_kernel"
+    assert row["decision"] == "KEEP"
+    assert row["basis"] == "cold"
+    assert row["alignment_status"] == "aligned"
+    assert row["gain_attributed"] is True
+
+
+def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path) -> None:
+    """Two kernels on one rebench measured a real gain that is nobody's alone."""
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+        ROUTE_GEAK,
+        make_kernel_recorder,
+    )
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    with session_scope(tmp_path):
+        recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
+        assert recorder is not None
+        recorder.begin(tput_before=100.0)
+        recorder.finish(verdict="adopted", status="succeeded", tput_after=120.0)
+
+        _record(
+            _phase(),
+            {"accepted_kernels": [_spec("k_one", 5.0), _spec("k_two", 6.0)]},
+        )
+
+        events = [event for event in read_timeline_events(tmp_path) if event.get("type") == "kernel"]
+        rows = {row["kernel_id"]: row for row in events[0]["ext"]["integrate"]}
+
+    assert sorted(rows) == ["k_one", "k_two"]
+    assert all(row["gain_attributed"] is False for row in rows.values())
+    assert all(row["gain_pct"] is None for row in rows.values())
 
 
 def test_a_non_dict_result_records_no_candidate() -> None:
