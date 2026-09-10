@@ -32,6 +32,11 @@ log = _logging.getLogger(__name__)
 # Specialist attempts a local-exploration candidate gets before the phase moves on.
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 
+#: Consecutive empty discovery rounds tolerated before the source arm declines.
+#: Moved here from ``framework/client.py`` which was deleted in the
+#: enablement-refactor-2 relocation.
+DISCOVER_FAILURE_RETRY_LIMIT: int = 3
+
 
 #: Progress-row status for a candidate the Critic rejected. The gate writes it
 #: and the working-memory and priors readers select on it, so the ledger is the
@@ -1030,7 +1035,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Repo URLs to query for the FRAMEWORK batch: framework's own repo + global PR_QUERY_REPOS allowlist, dedup preserving order."""
         from hyperloom.inference_optimizer import framework_registry
 
-        from ..framework import client as _fa_client
+        from hyperloom.agents.framework.repo_map import repo_url_for_framework as _repo_url_for_framework
         from ..specialists.domains import PR_QUERY_REPOS
 
         urls: list[str] = []
@@ -1042,7 +1047,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 urls.append(u)
 
         # Primary: the framework's own repo.
-        primary_repo_url = _fa_client.repo_url_for_framework(framework)
+        primary_repo_url = _repo_url_for_framework(framework)
         _add(primary_repo_url)
 
         # Serving/infra PRs cannot be git-applied to scriptable model repos, so a scriptable session queries its own
@@ -1054,7 +1059,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     _add(f"https://github.com/{repo}.git")
             if not urls:
                 # Last-ditch: let phase_discover resolve from framework itself.
-                _add(_fa_client.repo_url_for_framework(framework or "sglang"))
+                _add(_repo_url_for_framework(framework or "sglang"))
         return urls
 
     def _record_framework_agent_phase_done(
@@ -1066,7 +1071,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Append a framework_agent_phase_done row to phase_history describing why the pump gave up."""
         state = self.shared_state
         try:
-            from ..framework import client as _fa_client
             from ..framework.artifacts import summarize_candidate_outcomes
 
             # Classify this phase's candidate outcomes so the report / robustness can tell "discovered nothing"
@@ -1104,7 +1108,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     "event": "framework_agent_phase_done",
                     "failure_count": int(failure_count),
                     "empty_count": int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
-                    "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
+                    "retry_limit": int(DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
                     "outcome_class": outcome_class,
                     "candidate_outcomes": summary.get("by_status") or {},
@@ -1872,10 +1876,8 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
         """Dispatch the candidate-discovery specialist when the pool is empty."""
-        from ..framework import client as _fa_client
-
         state = self.shared_state
-        limit = int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT)
+        limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0)
         failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
         if empties >= limit or failures >= limit:

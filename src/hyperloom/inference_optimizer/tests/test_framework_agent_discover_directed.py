@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.agents.framework import repo_map as _repo_map
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
 )
@@ -66,7 +66,7 @@ def test_repo_urls_cover_global_allowlist_with_framework_primary():
     stub = _CoordinatorStub(Path("/tmp"))
     urls = stub._framework_agent_discover_repo_urls("sglang")
 
-    assert urls[0] == _fa_client.repo_url_for_framework("sglang")
+    assert urls[0] == _repo_map.repo_url_for_framework("sglang")
     for repo in PR_QUERY_REPOS:
         expected = f"https://github.com/{repo}.git"
         assert expected in urls or repo in "".join(urls)
