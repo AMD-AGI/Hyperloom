@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import os
@@ -240,6 +241,27 @@ def test_heartbeat_refreshes_body(tmp_path):
         assert before is not None and after is not None
         assert after["pid"] == os.getpid()
     finally:
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_pulse_refreshes_heartbeat_on_the_running_event_loop(tmp_path, monkeypatch):
+    """The coordinator event loop publishes liveness while an action awaits."""
+    monkeypatch.setattr(session_lock, "_HEARTBEAT_INTERVAL_SEC", 0.0, raising=False)
+    lock = SessionLock(tmp_path)
+    lock.acquire()
+    monkeypatch.setattr(session_lock, "now_iso", lambda **_kwargs: "2099-01-01T00:00:00+00:00")
+    task = asyncio.create_task(lock.pulse())
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        owner = session_lock.read_owner(tmp_path)
+        assert owner is not None
+        assert owner["heartbeat_at"] == "2099-01-01T00:00:00+00:00"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
         lock.release()
 
 

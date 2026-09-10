@@ -18,7 +18,9 @@ from typing import Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.session.session_paths import supervisor_status_path
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
@@ -89,6 +91,7 @@ from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_in
 from ..trace.orchestration_trace import (
     write_mcp_setup_once,
 )
+from ..supervisor.watch import SUPERVISOR_RESTART_REASON, WEDGED_STOP_REASON
 from .coordinator_helpers import (
     _infer_model_class_from_config,
     format_exc_brief,
@@ -692,6 +695,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: Deadline | None = None
         self._signals: SignalDrain | None = None
+        self._resumable_stop = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -1270,7 +1274,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
         # Safety net: recipe/journal finalize when CLOSE sequencer didn't run.
-        await self._recipe_kb_t4_hook()
+        if not self._resumable_stop:
+            await self._recipe_kb_t4_hook()
         self.db.close()
 
     def _bind_session_deadline(
@@ -1453,6 +1458,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
         drain = self._signals
         return drain is not None and drain.requested.is_set()
 
+    def _signal_stop_reason(self) -> str:
+        """Distinguish a supervisor restart request from an operator stop."""
+        try:
+            status = read_json(supervisor_status_path(self.session_dir), strict=True, require_dict=True)
+            coordinator_pid = int(status.get("coordinator_pid") or 0)
+        except (OSError, TypeError, ValueError):
+            return "signal"
+        if coordinator_pid != os.getpid():
+            return "signal"
+        asked = status.get("stop_asked") or []
+        if isinstance(asked, list) and any(str(reason).startswith(f"{WEDGED_STOP_REASON}:") for reason in asked):
+            return SUPERVISOR_RESTART_REASON
+        return "signal"
+
     async def _await_within_session_bound(
         self,
         factory: Callable[[], Awaitable[Any]],
@@ -1491,6 +1510,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
+        self._resumable_stop = False
         # Capture the live loop for the inline fast-action context tool.
         try:
             self._coordinator_loop = asyncio.get_running_loop()
@@ -1596,7 +1616,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
                 # check stop conditions
                 if self._stop_requested():
-                    stop_reason = "signal"
+                    stop_reason = self._signal_stop_reason()
                     break
                 if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
@@ -1648,32 +1668,37 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 if tick_interval_sec > 0:
                     try:
                         await asyncio.wait_for(self._stop.wait(), timeout=tick_interval_sec)
-                        stop_reason = "signal"
+                        stop_reason = self._signal_stop_reason()
                         break
                     except asyncio.TimeoutError:
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
+            resumable_stop = stop_reason == SUPERVISOR_RESTART_REASON
+            self._resumable_stop = resumable_stop
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            # Resuming a terminal session can break out before stop_reason is set.
-            self.shared_state.set_stop_reason(
-                stop_reason
-                or self.shared_state.stop_reason
-                or ("coordinator_exception" if last_tick_exc is not None else "unknown")
-            )
+            if not resumable_stop:
+                # Resuming a terminal session can break out before stop_reason is set.
+                self.shared_state.set_stop_reason(
+                    stop_reason
+                    or self.shared_state.stop_reason
+                    or ("coordinator_exception" if last_tick_exc is not None else "unknown")
+                )
             self.shared_state.save(self.session_dir)
             # Every exit from the loop lands here, including those the phase
             # machine never saw -- a signal, an exception, a resumed terminal
             # session -- so the report is written even when nothing entered
             # CLOSE. The sequencer bounds its own steps.
-            try:
-                await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001 — the teardown below must still run
-                log.exception("Coordinator: terminal close sequence did not finish")
+            if not resumable_stop:
+                try:
+                    await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 — the teardown below must still run
+                    log.exception("Coordinator: terminal close sequence did not finish")
             # Every graceful terminal path gets one idempotent Recipe finalize
             # attempt, including stop-check exits that never enter PHASE_CLOSE.
-            await self._recipe_kb_t4_hook()
+            if not resumable_stop:
+                await self._recipe_kb_t4_hook()
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
                 "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
@@ -1693,7 +1718,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
                 await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
             self.shared_state.save(self.session_dir)
-        return self.shared_state.stop_reason
+        return stop_reason if stop_reason == SUPERVISOR_RESTART_REASON else self.shared_state.stop_reason
 
     async def _close_backends(self) -> None:
         """Release every backend holding a live agent session."""

@@ -13,6 +13,7 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.common.proctree import running
@@ -22,10 +23,10 @@ from hyperloom.orchestrator.supervisor import store
 
 log = logging.getLogger(__name__)
 
-#: The coordinator is alive and its tick is advancing.
+#: The coordinator process has recent liveness evidence.
 ALIVE = "alive"
 
-#: The coordinator's process is alive but its tick has stopped advancing.
+#: The coordinator process exists but both heartbeat and tick are stale.
 WEDGED = "wedged"
 
 #: The coordinator's process is gone.
@@ -34,11 +35,7 @@ DEAD = "dead"
 #: Nothing about the coordinator could be established. Never escalated on.
 UNKNOWN = "unknown"
 
-#: How long a tick may go without advancing before it counts as wedged. Well
-#: above a legitimately slow tick -- role turns are capped at five minutes each
-#: and long actions run as dispatched tasks the tick does not wait on -- and
-#: well inside the default session, which a window it cannot fit in would make
-#: unreachable.
+#: How long all coordinator liveness signals may remain stale.
 DEFAULT_TICK_STALL_SEC: float = 3600.0
 
 #: How long the coordinator is given to act on the stop it was asked for before
@@ -52,6 +49,9 @@ DEFAULT_POLL_SEC: float = 30.0
 #: The stop reason recorded for a coordinator that stopped running its loop.
 WEDGED_STOP_REASON = "supervisor_tick_stalled"
 
+#: Internal handoff telling the launcher that the session remains resumable.
+SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
+
 #: The stop reason recorded in the terminal artifact for a dead coordinator.
 DIED_STOP_REASON = "supervisor_coordinator_died"
 
@@ -61,6 +61,7 @@ __all__ = [
     "DEFAULT_POLL_SEC",
     "DEFAULT_TICK_STALL_SEC",
     "DIED_STOP_REASON",
+    "SUPERVISOR_RESTART_REASON",
     "UNKNOWN",
     "WEDGED",
     "WEDGED_STOP_REASON",
@@ -185,15 +186,36 @@ class Supervisor:
         if stamp is None:
             # A coordinator that has never stamped is starting up, not wedged.
             return Observation(ALIVE, pid=pid, detail="no tick stamp yet", tick=tick, tick_age_sec=age)
-        if age > self.tick_stall_sec:
+        heartbeat_age = self._heartbeat_age(owner)
+        liveness_age = min(age, heartbeat_age) if heartbeat_age is not None else age
+        if liveness_age > self.tick_stall_sec:
+            detail = f"tick {tick} last advanced {age:.0f}s ago"
+            if heartbeat_age is not None:
+                detail = f"heartbeat {heartbeat_age:.0f}s ago; {detail}"
             return Observation(
                 WEDGED,
                 pid=pid,
-                detail=f"tick {tick} last advanced {age:.0f}s ago",
+                detail=detail,
                 tick=tick,
                 tick_age_sec=age,
             )
-        return Observation(ALIVE, pid=pid, detail=f"tick {tick}", tick=tick, tick_age_sec=age)
+        detail = f"tick {tick}"
+        if heartbeat_age is not None and heartbeat_age < age:
+            detail = f"heartbeat {heartbeat_age:.0f}s ago; tick {tick} last advanced {age:.0f}s ago"
+        return Observation(ALIVE, pid=pid, detail=detail, tick=tick, tick_age_sec=age)
+
+    def _heartbeat_age(self, owner: dict) -> float | None:
+        """Return lock-heartbeat age, or None for legacy or malformed owners."""
+        raw = str(owner.get("heartbeat_at") or "").strip()
+        if not raw:
+            return None
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return max(0.0, self._now() - stamp.timestamp())
 
     async def act(self, observation: Observation) -> bool:
         """Respond to one reading.
@@ -208,7 +230,7 @@ class Supervisor:
         if observation.verdict == WEDGED:
             over = await self._escalate_wedged(observation)
         elif observation.verdict == DEAD:
-            over = await self._end(observation, DIED_STOP_REASON)
+            over = True if self._asked_unix else await self._end(observation, DIED_STOP_REASON)
         self._write_status(observation)
         return over
 
@@ -239,18 +261,21 @@ class Supervisor:
     def _ask_to_stop(self, observation: Observation) -> None:
         """Send the coordinator the stop signal its drain thread is waiting on."""
         reason = f"{WEDGED_STOP_REASON}: {observation.detail}"
+        self._asked_unix = self._now()
+        self._report.asked.append(reason)
+        self._write_status(observation)
         try:
             os.kill(observation.pid, signal.SIGTERM)
         except ProcessLookupError:
-            # It exited between the reading and the signal; the next reading
-            # sees a dead coordinator and ends the session on that.
+            # It exited after the restart marker; leave the session resumable.
             return
         except PermissionError as exc:
+            self._asked_unix = 0.0
+            self._report.asked.pop()
             self._report.refusals.append(f"cannot signal coordinator {observation.pid}: {exc}")
+            self._write_status(observation)
             log.error("SUPERVISOR: refusing to escalate -- pid %d is not ours to signal", observation.pid)
             return
-        self._asked_unix = self._now()
-        self._report.asked.append(reason)
         log.error("SUPERVISOR: asked coordinator %d to stop (%s)", observation.pid, reason)
 
     async def _end(self, observation: Observation, stop_reason: str) -> bool:

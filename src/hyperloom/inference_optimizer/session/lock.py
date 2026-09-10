@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import logging
@@ -19,6 +20,8 @@ from hyperloom.common.timeutil import now_iso
 from . import session_paths
 
 log = logging.getLogger(__name__)
+
+_HEARTBEAT_INTERVAL_SEC = 30.0
 
 try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
     import fcntl
@@ -129,6 +132,12 @@ class SessionLock:
             return
         with suppress(OSError):
             self._write_owner(self._now_owner(started_at=self._started_at))
+
+    async def pulse(self) -> None:
+        """Refresh owner liveness while the coordinator event loop runs."""
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
+            self.heartbeat()
 
     def release(self) -> None:
         """Release the lock and close the fd. The file body is left in place."""

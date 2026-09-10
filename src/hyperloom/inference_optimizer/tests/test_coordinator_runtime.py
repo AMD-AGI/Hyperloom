@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,7 +46,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
+from hyperloom.inference_optimizer.session.session_paths import supervisor_status_path, target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
@@ -2013,6 +2014,66 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
         reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
         assert reason == "max_ticks"
         assert c.shared_state.closing_phase is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_interruption_does_not_close_the_session(session_dir):
+    """A watchdog restart leaves no terminal state or report behind."""
+    status_path = supervisor_status_path(session_dir)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "coordinator_pid": os.getpid(),
+                "stop_asked": ["supervisor_tick_stalled: heartbeat expired"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c._stop.set()
+    finalized = 0
+
+    async def _record_finalize():
+        nonlocal finalized
+        finalized += 1
+
+    c._recipe_kb_t4_hook = _record_finalize
+    stopped = False
+    try:
+        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        assert reason == "supervisor_restart_requested"
+        assert c.shared_state.stop_reason == ""
+        terminal_reports = sorted(path.name for path in (session_dir / "reports").glob("final.*"))
+        assert terminal_reports == []
+        await c.stop()
+        stopped = True
+        assert finalized == 0
+    finally:
+        if not stopped:
+            await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        {"coordinator_pid": os.getpid() + 1, "stop_asked": ["supervisor_tick_stalled: stale"]},
+        {"coordinator_pid": "not-a-pid", "stop_asked": ["supervisor_tick_stalled: malformed"]},
+    ],
+)
+async def test_nonmatching_supervisor_status_keeps_signal_terminal(session_dir, status):
+    """Missing, stale, or malformed supervisor status cannot mask an operator stop."""
+    if status is not None:
+        status_path = supervisor_status_path(session_dir)
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        assert c._signal_stop_reason() == "signal"
     finally:
         await c.stop()
 

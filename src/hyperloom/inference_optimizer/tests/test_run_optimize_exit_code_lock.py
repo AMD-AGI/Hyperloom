@@ -15,6 +15,19 @@ import hyperloom.inference_optimizer.cli as ocli
 from hyperloom.inference_optimizer.session.lock import SessionLock
 
 
+def test_supervisor_restart_disables_cli_terminal_reports(tmp_path: Path) -> None:
+    """A resumable watchdog stop must not enable either CLI final-report writer."""
+    enabled = ocli._terminal_reports_enabled("supervisor_restart_requested")
+    if enabled:
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (reports / "final.md").write_text("terminal", encoding="utf-8")
+        (reports / "final.json").write_text("{}", encoding="utf-8")
+
+    terminal_reports = sorted(path.name for path in (tmp_path / "reports").glob("final.*"))
+    assert terminal_reports == []
+
+
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:
     """Gate 1: TP larger than nodes*gpus_per_node fails fast with exit code 2."""
     # nodes=2, gpus_per_node=1 -> total_gpus=2 < tp=4.

@@ -11,6 +11,7 @@ import socket
 import subprocess  # nosec B404 - spawns a process purely so its pid can be signalled
 import sys
 import time
+from datetime import datetime, timezone
 from unittest import mock
 
 import pytest
@@ -35,11 +36,14 @@ from hyperloom.orchestrator.supervisor.watch import (
 _NOW = 1_000_000.0
 
 
-def _own_the_session(session_dir, pid: int) -> None:
+def _own_the_session(session_dir, pid: int, *, heartbeat_unix: float | None = None) -> None:
     """Write an optimizer-lock owner document naming ``pid``."""
     path = optimizer_lock_path(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": pid, "hostname": socket.gethostname()}), encoding="utf-8")
+    owner = {"pid": pid, "hostname": socket.gethostname()}
+    if heartbeat_unix is not None:
+        owner["heartbeat_at"] = datetime.fromtimestamp(heartbeat_unix, timezone.utc).isoformat()
+    path.write_text(json.dumps(owner), encoding="utf-8")
 
 
 def _stamp_tick_as(session_dir, pid: int, *, tick: int, now_unix: float) -> None:
@@ -111,6 +115,26 @@ def test_a_live_pid_with_a_stopped_tick_is_wedged(tmp_path):
     assert observation.verdict == WEDGED
 
 
+def test_a_fresh_heartbeat_keeps_a_long_running_tick_alive(tmp_path):
+    """A live event loop may spend hours awaiting one benchmark round."""
+    _own_the_session(tmp_path, os.getpid(), heartbeat_unix=_NOW - 5.0)
+    store.stamp_tick(tmp_path, tick=7, now_unix=_NOW - 9_999.0)
+
+    observation = _supervisor(tmp_path, tick_stall_sec=100.0).observe()
+
+    assert observation.verdict == ALIVE
+
+
+def test_a_stale_heartbeat_and_stale_tick_are_wedged(tmp_path):
+    """A present pid without event-loop progress remains diagnosable."""
+    _own_the_session(tmp_path, os.getpid(), heartbeat_unix=_NOW - 9_999.0)
+    store.stamp_tick(tmp_path, tick=7, now_unix=_NOW - 9_999.0)
+
+    observation = _supervisor(tmp_path, tick_stall_sec=100.0).observe()
+
+    assert observation.verdict == WEDGED
+
+
 def test_a_resumed_owner_is_not_wedged_by_the_previous_legs_stamp(tmp_path):
     """The stamp file outlives its leg; a resume must not inherit its age."""
     _own_the_session(tmp_path, os.getpid())
@@ -152,6 +176,23 @@ async def test_a_wedged_coordinator_is_asked_to_stop_on_the_one_channel_that_rea
     assert [r.split(":")[0] for r in supervisor.report.asked] == [WEDGED_STOP_REASON]
     assert "tick 1 last advanced" in supervisor.report.asked[0]
     _wait_for_exit(pid)
+
+
+@pytest.mark.asyncio
+async def test_a_supervisor_requested_stop_remains_resumable(tmp_path, request):
+    """A watchdog interruption is not a terminal session outcome."""
+    pid = _a_pid_that_is_running(request)
+    _own_the_session(tmp_path, pid)
+    _stamp_tick_as(tmp_path, pid, tick=1, now_unix=_NOW - 9_999.0)
+    supervisor = _supervisor(tmp_path, tick_stall_sec=100.0)
+
+    await supervisor.act(supervisor.observe())
+    _wait_for_exit(pid)
+    done = await supervisor.act(supervisor.observe())
+
+    assert done is True
+    reports = sorted(str(path.relative_to(tmp_path)) for path in reports_dir(tmp_path).glob("*"))
+    assert reports == []
 
 
 @pytest.mark.asyncio
