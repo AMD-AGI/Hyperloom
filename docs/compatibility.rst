@@ -146,7 +146,7 @@ uses a private registry mirror, set the registry prefix accordingly.
      - MI300X / MI325X
    * - ``lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825``
      - MI355X
-   * - ``vllm/vllm-openai-rocm:v0.27.1``
+   * - ``vllm/vllm-openai-rocm:v0.28.0``
      - MI300X / MI325X / MI355X
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
@@ -183,12 +183,12 @@ Hyperloom does not install ROCm or torch itself.
      - 0.5.18 (rocm724), pinned to commit ``0c7ff19e3b73``
      - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.4 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm724``), so the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
    * - vLLM
-     - v0.27.1 (rocm723), isolated venv
-     - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - v0.28.0 (rocm723), isolated venv
+     - Installs ``vllm==0.28.0+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework, and each one matches its
 container image. The vLLM stack installs the ``rocm723`` variant (ROCm
-7.2.3), matching ``vllm/vllm-openai-rocm:v0.27.1``; the SGLang stack
+7.2.3), matching ``vllm/vllm-openai-rocm:v0.28.0``; the SGLang stack
 installs from the ROCm 7.2.4 AMD wheel index, matching the two
 ``lmsysorg/sglang-rocm:v0.5.18-rocm724-*`` images. ``docker`` mode is still
 the preferred route for a pre-validated stack, since the images also pin the

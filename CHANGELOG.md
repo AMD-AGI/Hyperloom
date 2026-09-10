@@ -63,6 +63,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **Operator note**: sessions lost no recorded knowledge, but until now none of
   it was being shown to the agent.
 
+### Changed
+
+- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
+  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
+  `docs/install/install.md`, the example `SKILL.md` recipes, and
+  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
+  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
+  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
+  (`git apply --check`), so the TraceLens profiler-config patch path is
+  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
+  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
+  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
+
 ### Removed
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the
