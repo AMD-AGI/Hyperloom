@@ -1049,6 +1049,8 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
+                        # Graded against the session latency budget when one is set.
+                        "e2el_mean_ms": r.e2el_mean_ms,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1090,7 +1092,13 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
+                        if graded.veto_reason:
+                            # The variant is refused a round earlier than the
+                            # promotion gate would, so it is never folded onto the
+                            # stack and never becomes the anchor the rest of the
+                            # batch is graded against.
+                            reason = graded.veto_reason
+                        elif _graded_on_intvty:
                             reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
@@ -1102,9 +1110,15 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes"
-                                if (_graded_on_intvty or graded.degrade_reason)
-                                else "keep_threshold",
+                                "gate": (
+                                    "latency_budget"
+                                    if graded.veto_reason
+                                    else (
+                                        "graded_axes"
+                                        if (_graded_on_intvty or graded.degrade_reason)
+                                        else "keep_threshold"
+                                    )
+                                ),
                                 "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as

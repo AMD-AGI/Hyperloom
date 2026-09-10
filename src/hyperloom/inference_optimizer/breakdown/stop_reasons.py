@@ -76,6 +76,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "custom",
         "robustness_escalated",
         "prelude_baseline_failed",
+        # The baseline itself is already over ``--max-latency-ms``: every candidate is graded against it, so there
+        # is no configuration the run could reach that would satisfy the constraint.
+        "baseline_over_latency_budget",
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
