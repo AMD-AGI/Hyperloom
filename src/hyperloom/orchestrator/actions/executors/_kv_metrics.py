@@ -18,10 +18,13 @@ under the fallback the samples either side of it are systematically credited to 
 authoritative stamps are available the rows are re-labelled and the counter windows re-bracketed from them at close --
 which is why every row carries its raw per-series counters, and not just a phase-level first/last pair.
 
+Below the phase, the workload timeline comes from aiperf's per-request export; see :mod:`._agentx_timeline`. That gives
+each row the trajectories, turns and requests in flight during its scrape window, and writes the event stream beside
+this artifact.
+
 What this does not do is stop the workload at a boundary. An exact counter total needs the client to quiesce, take one
 snapshot, and resume, and aiperf exposes no such control: the boundary here is exact to aiperf's own stamp, and the
-counter attribution to the scrape interval either side of it. Per-trajectory, per-turn and per-request timelines are
-likewise not available -- the progress API reports per phase, so that is the granularity a row records.
+counter attribution to the scrape interval either side of it.
 
 Two rules run through everything below:
 
@@ -698,10 +701,14 @@ class KvMetricsRecorder:
         scope: dict[str, Any] | None = None,
         min_interval_sec: float | None = None,
         progress: AiperfProgressPoller | None = None,
+        workspace: Any = None,
     ) -> None:
         """Prepare a recorder without contacting anything."""
         self._poller = poller
         self._output_path = output_path
+        # The round's own directory, which is where both aiperf's export and our artifacts live. Derived from the
+        # output path when not given, so the two can never point at different rounds.
+        self._workspace = workspace if workspace is not None else (Path(output_path).parent if output_path else None)
         self._scope = dict(scope or {})
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._progress = progress
@@ -1013,6 +1020,43 @@ class KvMetricsRecorder:
         self._first_counters = first
         self._last_counters = last
 
+    def _build_workload_timeline(self) -> dict[str, Any] | None:
+        """Emit the AgentX event stream and fold the in-flight work into the rows.
+
+        Read from aiperf's own per-request export rather than asked of it: ``profile_export.jsonl`` is written at the
+        default export level, so every AgentX round already has one. A round that has none -- any synthetic benchmark,
+        or an AgentX round killed before aiperf flushed -- simply reports ``None``.
+        """
+        if self._workspace is None:
+            return None
+        try:
+            from ._agentx_timeline import (
+                TIMELINE_ARTIFACT_NAME,
+                build_events,
+                correlate_rows,
+                find_profile_export,
+                parse_profile_export,
+                write_timeline,
+            )
+
+            export = find_profile_export(self._workspace)
+            if export is None:
+                return None
+            records = parse_profile_export(export)
+            if not records:
+                return None
+            events, summary = build_events(records, self._authoritative_bounds())
+            # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
+            # had to be sampled.
+            summary["rows_correlated"] = correlate_rows(self._rows, records)
+            path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
+            summary["path"] = path.name if write_timeline(path, events) else None
+            summary["source"] = str(export)
+            return summary
+        except Exception:  # noqa: BLE001 - a timeline must never fail a round
+            log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
+            return None
+
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap."""
         if len(self._rows) <= _MAX_STORED_ROWS:
@@ -1027,10 +1071,13 @@ class KvMetricsRecorder:
         # First: it re-labels rows and re-brackets the counter windows the deltas below are read from, so the rows, the
         # phase totals and the timeline in one artifact cannot disagree with each other.
         attribution = self._reattribute_phases()
+        # After attribution, so the phase events in the timeline are the same boundaries the rows were labelled by.
+        workload = self._build_workload_timeline()
         retract_measured, retract_by_phase = self._counter_deltas("retract")
         preempt_measured, preempt_by_phase = self._counter_deltas("preempt")
         return {
             **attribution,
+            "workload_timeline": workload,
             "schema_version": 1,
             "source": "metrics",
             "url": self._poller.url,

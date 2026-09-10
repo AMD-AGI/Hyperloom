@@ -869,6 +869,74 @@ def test_timeline_survives_a_phase_aiperf_stops_reporting():
     assert payload["phase_bounds_unix"]["warmup"]["start"] == pytest.approx(now, abs=1e-3)
 
 
+def test_recorder_writes_the_workload_timeline_beside_the_kv_artifact(tmp_path):
+    """End to end: aiperf's export in, event stream plus correlated rows out.
+
+    The per-request export is written at aiperf's default export level, so this
+    needs nothing added to the invocation and nothing from upstream.
+    """
+    now = _now()
+    art = tmp_path / "aiperf_artifacts"
+    art.mkdir()
+    start_ns = int(now * 1e9)
+    (art / "profile_export.jsonl").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "x_request_id": "req-1",
+                    "x_correlation_id": "traj-1",
+                    "conversation_id": "conv-1",
+                    "turn_index": 0,
+                    "request_start_ns": start_ns,
+                    "request_end_ns": start_ns + 10_000_000_000,
+                    "benchmark_phase": "profiling",
+                },
+                "metrics": {"time_to_first_token": {"value": 250.0, "unit": "ms"}},
+                "error": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=now + 5)]),
+        progress=_StubProgress([{"profiling": {"start_ns": start_ns, "requests_end_ns": None}}]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    payload = rec.close()
+
+    timeline = payload["workload_timeline"]
+    assert timeline["requests"] == 1
+    assert timeline["trajectories"] == 1
+    assert timeline["path"] == "agentx_timeline.jsonl"
+    assert timeline["rows_correlated"] == 1
+
+    events = [
+        json.loads(line) for line in (tmp_path / "agentx_timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert {e["event"] for e in events} >= {"phase_start", "trajectory_start", "turn_start", "request_start"}
+
+    # The sample taken 5s in saw that trajectory running.
+    assert payload["samples"][0]["workload"]["in_flight"]["trajectory_ids"] == ["traj-1"]
+
+
+def test_a_round_without_an_aiperf_export_reports_no_timeline(tmp_path):
+    """Every synthetic benchmark is this case, and it is not a failure."""
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample()]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    payload = rec.close()
+
+    assert payload["workload_timeline"] is None
+    assert not (tmp_path / "agentx_timeline.jsonl").exists()
+
+
 def test_progress_failures_never_reach_the_round():
     """Collection is observational; a broken endpoint costs nothing."""
 
