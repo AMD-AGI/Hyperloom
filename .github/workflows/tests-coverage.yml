@@ -65,7 +65,7 @@ jobs:
   # file. No gate here -- a single shard's coverage is intentionally incomplete.
   # ---------------------------------------------------------------------------
   test:
-    name: test (py${{ matrix.python-version }} shard ${{ matrix.shard }}/4)
+    name: test (py${{ matrix.python-version }} shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -74,7 +74,7 @@ jobs:
         # NOTE: keep this list length in sync with ``total_shards`` in
         # pyproject.toml ([tool.hyperloom.tests_coverage]). GitHub matrices
         # cannot read that value dynamically, so it is mirrored here.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7
 
@@ -158,12 +158,12 @@ jobs:
           print("--splits"); print(str(t.get("total_shards", 4)))
           PY
           )
-          # Duration-based splitting when the DB is present; otherwise
-          # pytest-split falls back to count-based (no flag needed). Always
-          # (re)store this shard's own timing slice so the update-durations job
-          # can merge a fresh full DB on push-to-main.
+          # pytest-split reads and writes the same path. Seed that path from
+          # the cache; the controller replaces it with only this run's timings.
+          # Workers (including replacements) must not overwrite the seed.
           SPLIT_ARGS=()
           if [ -f .test_durations ]; then
+            cp .test_durations ".test_durations.shard${SHARD}"
             SPLIT_ARGS+=(--splitting-algorithm=least_duration)
             echo "::notice::Using cached .test_durations for duration-based sharding."
           else
@@ -179,8 +179,8 @@ jobs:
           # Parallel-mode data file (unique per shard) so the combine job can
           # merge every shard without clobbering. ``--group`` selects this
           # shard's slice of the ``--splits`` partition (from PARGS).
-          # ``--store-durations`` records THIS shard's per-test timings into a
-          # shard-scoped file for the update-durations merge job.
+          # ``--clean-durations`` drops seed entries not measured by this shard.
+          # ci_durations disables worker writes, preserving the seed on restart.
           # ``-rfE`` prints pytest's own "short test summary info" block with one
           # ``FAILED <nodeid> - <reason>`` / ``ERROR <nodeid> - <reason>`` line
           # per failing/erroring test. Those lines carry the AUTHORITATIVE
@@ -198,8 +198,8 @@ jobs:
           # full collection-error traceback that the one-line summary elides).
           export COVERAGE_FILE=".coverage.shard${SHARD}"
           set +e
-          pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
-            --store-durations --durations-path ".test_durations.shard${SHARD}" \
+          python -m pytest -p scripts.ci_durations "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
+            --store-durations --clean-durations --durations-path ".test_durations.shard${SHARD}" \
             --junitxml="pytest-junit.shard${SHARD}.xml" \
             --cov-fail-under=0 -rfE "${EXTRA[@]}" 2>&1 | tee pytest-output.log
           # ``${PIPESTATUS[0]}`` is pytest's own exit code (not tee's); read it
@@ -372,15 +372,17 @@ jobs:
       # Upload this shard's timing slice so update-durations (push-to-main only)
       # can merge a full fresh .test_durations. Only the 3.10 leg is uploaded to
       # keep a single shared DB (see the restore key rationale above).
+      # A failed startup may leave the seed untouched; the controller marks
+      # completion only after writing fresh timings, including failed tests.
       - name: Upload shard durations
-        if: always() && matrix.python-version == '3.10'
+        if: always() && matrix.python-version == '3.10' && hashFiles(format('.test_durations.shard{0}.complete', matrix.shard)) != ''
         uses: actions/upload-artifact@v7
         with:
           name: durations-shard${{ matrix.shard }}
           path: .test_durations.shard${{ matrix.shard }}
           include-hidden-files: true
           retention-days: 1
-          if-no-files-found: warn
+          if-no-files-found: error
 
       # ``continue-on-error`` on the pytest step (above) lets the always()
       # reporting/upload steps run even when tests fail; this final step then
@@ -420,14 +422,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -e ".[test,ci]"
-          if [ -f OOB/pyproject.toml ]; then
-            pip install -e "./OOB"
-          else
-            echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
-          fi
+        run: python -m pip install "coverage[toml]>=7.0"
 
       - name: Download shard coverage data
         uses: actions/download-artifact@v8
@@ -589,184 +584,20 @@ jobs:
           test -f .coverage || { echo "::error::coverage combine produced no .coverage"; exit 1; }
 
       - name: Coverage summary
+        id: coverage_report
         if: always()
         env:
-          # "success" only when the suite BOTH passed and was complete; a
-          # missing shard (complete=false) makes any coverage number partial,
-          # so the summary's "partial or misleading" caveat must show then too.
+          # Missing or failed shards make any available coverage misleading.
           PYTEST_OUTCOME: ${{ steps.outcomes.outputs.tests_ok == 'true' && steps.outcomes.outputs.complete == 'true' && 'success' || 'failure' }}
-        run: |
-          python3 <<'PY'
-          from __future__ import annotations
-
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
-
-          def load_cfg() -> dict:
-              return tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-
-          def extract_total(text: str) -> str:
-              for line in text.splitlines():
-                  if line.startswith("TOTAL "):
-                      parts = line.split()
-                      return parts[-1] if parts else "unknown"
-              return "unknown"
-
-          # Per-tree totals are computed by bucketing the rows of the full
-          # ``coverage report`` (which already has run-time ``omit`` applied)
-          # by a path segment for each source. This is robust to whatever path
-          # form the data uses (e.g. OOB is editable-installed as
-          # ``agent_mcp_server`` and may be recorded as ``OOB/`` or absolute),
-          # and never double-counts (unlike ``--include`` glob unions).
-          # tree-reform.MD P2.5: critic-agent's ``runtime`` package,
-          # robustness-agent, framework-agent, quantization_agent, and
-          # kernel-agent's tools/ were all promoted into
-          # src/hyperloom/agents/{critic,robustness,framework,quantization,
-          # kernel} (measured as part of the "src/hyperloom" source tree
-          # below instead of standalone "critic-agent/runtime" /
-          # "robustness_agent" / "framework-agent/src" / "quantization_agent" /
-          # "kernel-agent/tools" entries). The per-tree bucket keys MUST match
-          # the configured coverage ``source`` list (``src/hyperloom`` / ``OOB``
-          # / ``ci``) so every configured tree renders a real percentage in the
-          # Job Summary; a key absent from ``source`` (e.g. the pre-migration
-          # standalone ``inference_optimizer`` / ``kernel-agent/tools`` buckets)
-          # is never displayed, and the main ``src/hyperloom`` tree would show
-          # ``n/a`` if it lacked a segment here.
-          _SOURCE_SEGMENTS = {
-              "src/hyperloom": ["/hyperloom/"],
-              "OOB": ["/OOB/", "/agent_mcp_server/"],
-          }
-
-          def _row_path_stmts_miss(line: str):
-              """Parse a coverage report row -> (path, stmts, miss) or None.
-
-              Row layout is ``<path> <stmts> <miss> <cover%>``; stmts/miss are
-              the 3rd/2nd-from-last whitespace tokens.
-              """
-              parts = line.split()
-              if len(parts) < 4:
-                  return None
-              try:
-                  stmts = int(parts[-3])
-                  miss = int(parts[-2])
-              except ValueError:
-                  return None
-              path = " ".join(parts[:-3])
-              return path, stmts, miss
-
-          def per_tree_totals(report_text: str) -> dict:
-              """Aggregate (stmts, miss) per source from a full report body."""
-              acc = {src: [0, 0] for src in _SOURCE_SEGMENTS}
-              for line in report_text.splitlines():
-                  if line.startswith(("Name", "TOTAL", "-")):
-                      continue
-                  parsed = _row_path_stmts_miss(line)
-                  if parsed is None:
-                      continue
-                  path, stmts, miss = parsed
-                  norm = "/" + path.lstrip("/")
-                  for src, segs in _SOURCE_SEGMENTS.items():
-                      if any(seg in norm for seg in segs):
-                          acc[src][0] += stmts
-                          acc[src][1] += miss
-                          break
-              out: dict[str, str] = {}
-              for src, (stmts, miss) in acc.items():
-                  out[src] = f"{(stmts - miss) / stmts * 100:.2f}%" if stmts else "n/a"
-              return out
-
-          cfg = load_cfg()
-          sources = list(cfg["tool"]["coverage"]["run"]["source"])
-          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-          outcome = os.environ.get("PYTEST_OUTCOME", "unknown")
-
-          if not Path(".coverage").exists():
-              lines = ["## Coverage (UT)", "", "No `.coverage` data."]
-          else:
-              full = subprocess.run(
-                  ["coverage", "report", "--skip-empty"],
-                  capture_output=True,
-                  text=True,
-                  check=False,
-              )
-              full_txt = full.stdout or ""
-              print("=== Full coverage report (step log) ===")
-              print(full_txt, end="" if full_txt.endswith("\n") else full_txt + "\n")
-              total = extract_total(full_txt)
-              tree_totals = per_tree_totals(full_txt)
-              rows = [
-                  f"| `{src}` | {tree_totals.get(src, 'n/a')} |" for src in sources
-              ]
-              lines = [
-                  "## Coverage (UT)",
-                  "",
-                  f"Python {sys.version_info.major}.{sys.version_info.minor}; "
-                  "roots and CI pytest argv from `pyproject.toml`. "
-                  "Combined across sharded jobs.",
-                  "",
-                  "### Combined measured source (all configured trees)",
-                  f"**TOTAL (line): {total}**",
-                  "",
-                  "### Per-tree (narrow)",
-                  "| Tree | Line coverage (TOTAL) |",
-                  "|------|----------------------|",
-                  *rows,
-              ]
-              if outcome != "success":
-                  lines.extend([
-                      "",
-                      "> Tests did not all pass; coverage can be **partial or misleading**.",
-                  ])
-
-          block = "\n".join(lines) + "\n"
-          if summary_path:
-              with open(summary_path, "a", encoding="utf-8") as fh:
-                  fh.write(block)
-          else:
-              print(block)
-          PY
+        run: python3 scripts/ci_coverage_report.py
 
       - name: Enforce coverage fail_under (strict mode)
-        # Only enforce on a COMPLETE, all-passing suite -- otherwise .coverage
-        # is partial (combine was skipped) and fail_under would be meaningless.
-        # The "Enforce shard results" gate below reds the job for the
-        # failed/incomplete case instead.
+        # Failed or incomplete suites are rejected by the shard-results gate.
         if: always() && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         env:
-          # Same inoperative-switch fix as the shard step above.
           COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
-        run: |
-          python3 <<'PY'
-          import os
-          import pathlib
-          import subprocess
-          import sys
-
-          relax = (os.environ.get("COVERAGE_RELAX_FAIL_UNDER") or "").strip().lower()
-          if relax in {"1", "true", "yes", "on"}:
-              print("Relaxed mode: skip coverage fail_under enforcement.")
-              sys.exit(0)
-          if not pathlib.Path(".coverage").exists():
-              print("::error::No .coverage for fail_under check.")
-              sys.exit(1)
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
-          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          fu = int(cfg["tool"]["coverage"]["report"].get("fail_under", 0))
-          subprocess.run(
-              ["coverage", "report", f"--fail-under={fu}", "--skip-empty"],
-              check=True,
-          )
-          PY
+          REPORT_EXIT_CODE: ${{ steps.coverage_report.outputs.report_exit_code }}
+        run: python3 scripts/ci_coverage_report.py gate
 
       # Single fail-closed gate for BOTH failure modes: a shard's tests failed
       # (tests_ok != true) OR a shard never fully reported (complete != true).
@@ -797,8 +628,8 @@ jobs:
   # every shard passed (needs: [test, coverage] + success()), so the cache is
   # only ever updated from a complete, all-green main run -- never from a
   # partial/failed suite and never from a PR. It merges the per-shard timing
-  # slices into one .test_durations and saves it under the fixed cache key that
-  # the test jobs restore. PRs consume this via main's cache scope (read-only).
+  # slices into one .test_durations only after validating every expected artifact
+  # and timing. PRs consume the rolling cache via main's scope (read-only).
   # ---------------------------------------------------------------------------
   update-durations:
     name: update test durations (main)
@@ -810,43 +641,22 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          # The merge helper uses stdlib tomllib; no project install is needed.
+          python-version: "3.11"
 
       - name: Download shard durations
         uses: actions/download-artifact@v8
         with:
           pattern: durations-shard*
-          merge-multiple: true
+          path: durations
+          merge-multiple: false
 
       - name: Merge shard durations into one DB
-        run: |
-          python3 <<'PY'
-          import glob, json, sys
-          merged = {}
-          files = sorted(glob.glob(".test_durations.shard*"))
-          if not files:
-              print("::warning::No shard duration files found; skipping durations refresh.")
-              sys.exit(0)
-          for f in files:
-              try:
-                  data = json.load(open(f, encoding="utf-8"))
-              except Exception as e:  # noqa: BLE001
-                  print(f"::warning::Skipping unreadable {f}: {e}")
-                  continue
-              # pytest-split writes a flat {nodeid: seconds} mapping. Shards are
-              # disjoint, so a plain update reconstructs the full-suite DB.
-              if isinstance(data, dict):
-                  merged.update(data)
-          if not merged:
-              print("::warning::Merged durations are empty; skipping refresh.")
-              sys.exit(0)
-          with open(".test_durations", "w", encoding="utf-8") as fh:
-              json.dump(merged, fh, indent=2, sort_keys=True)
-          print(f"Merged {len(files)} shard file(s) -> {len(merged)} test timings.")
-          PY
+        id: merge
+        run: python scripts/ci_durations.py
 
       - name: Save merged durations to cache
-        if: hashFiles('.test_durations') != ''
+        if: steps.merge.outcome == 'success'
         uses: actions/cache/save@v6
         with:
           path: .test_durations
