@@ -592,14 +592,30 @@ class CriticRobustness(TypedDict, total=False):
 
 # Telemetry
 class GpuMonitorAggregate(TypedDict, total=False):
-    """Aggregated GPU power/thermal/clock telemetry over the session."""
+    """Aggregated GPU power/thermal/clock/occupancy telemetry over the session.
+
+    Metrics are tri-state: `None` means nobody sampled them, not zero. Test
+    with `is None` -- a real 0.0 reading is falsy too. `samples` counts the
+    underlying samples behind the metrics, over blocks that yielded at least
+    one, so a large count can never sit beside a row of `None`; `blocks`
+    counts every entry read, so a collection gap stays visible.
+    """
 
     samples: int
-    avg_power_w: float
-    max_power_w: float
-    avg_temp_c: float
-    max_temp_c: float
-    avg_clock_mhz: float
+    blocks: int
+    avg_power_w: float | None
+    max_power_w: float | None
+    avg_temp_c: float | None
+    max_temp_c: float | None
+    avg_clock_mhz: float | None
+    # Compute occupancy and memory pressure, in percent. Multi-node only for now:
+    # Magpie's single-node monitor does not sample either, so both read `None`
+    # there -- which is the point of the tri-state, since 0% utilization and
+    # "nobody looked" lead to opposite conclusions about an idle-looking GPU.
+    avg_gpu_util_pct: float | None
+    max_gpu_util_pct: float | None
+    avg_vram_pct: float | None
+    max_vram_pct: float | None
 
 
 class LaneTimelineEntry(TypedDict, total=False):

@@ -552,6 +552,35 @@ Paths only (no copied content): `baseline_report_path`,
 `system_profile_paths[]`, `server_log_paths[]`, and a
 `gpu_monitor_aggregate` summary.
 
+`gpu_monitor_aggregate` is absent entirely when no benchmark report carried a
+`gpu_monitor` block. When present, `samples` counts the underlying telemetry
+samples and `blocks` counts the report entries they came from, while each
+metric (`avg_power_w`, `max_power_w`, `avg_temp_c`, `max_temp_c`,
+`avg_clock_mhz`, `avg_gpu_util_pct`, `max_gpu_util_pct`, `avg_vram_pct`,
+`max_vram_pct`) is `float | None`. **`None` means nothing sampled that
+metric — it is not zero.** Test with `is None` rather than truthiness, since a
+genuine `0.0` reading is falsy too. Averages are weighted by each block's
+`sample_count`, so a block summarising 10 samples does not pull the session mean
+as hard as one summarising 10,000.
+
+`avg_gpu_util_pct` / `max_gpu_util_pct` and `avg_vram_pct` / `max_vram_pct`
+answer what power and temperature cannot: whether the GPU was compute-idle, and
+whether it was under memory pressure. Both are read from percentage-typed
+readings only — an absolute VRAM figure in MiB is a different quantity and is
+never folded into a `_pct` field.
+
+Availability differs by topology, and the tri-state is what makes that legible:
+
+| source | power / temp / clock | GPU util / VRAM |
+| --- | --- | --- |
+| multi-node harvester (flat `rocm-smi` samples) | yes | yes |
+| single-node Magpie `GPUMonitor` (nested `{min,max,avg}` block) | yes | not sampled — reads `None` |
+
+Magpie's monitor emits `power_watts`, `temperature_c`, `gpu_clock_mhz` and
+`mem_clock_mhz`, and no occupancy reading at all, so single-node sessions report
+`None` for utilization and VRAM until that is added upstream. `None` here means
+the question was never asked; do not read it as an idle GPU.
+
 Paths are session-dir relative when the producer can express them
 that way; absolute otherwise. Consumers that need to pull raw
 artifacts (for example, for a replay) should resolve relative paths against
