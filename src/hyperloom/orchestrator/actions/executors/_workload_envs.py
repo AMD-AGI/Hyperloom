@@ -33,7 +33,6 @@ from typing import Any, Mapping
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import env_int
 from hyperloom.common.perf_metric import (
     intvty_grading_enabled,
     is_agentx_mode,
@@ -1073,6 +1072,106 @@ def _finalize_framework_server_args(
         envs[framework_env] = resolved_server_args
 
 
+def _profile_steps_cap(policy_env: Mapping[str, Any]) -> tuple[int, bool]:
+    raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
+    explicit = raw.isdigit() and int(raw) >= 1
+    try:
+        cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
+    except ValueError:
+        cap = _DEFAULT_PROFILE_MAX_STEPS
+    return (cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS), explicit
+
+
+def _profile_capture_window(
+    policy_env: Mapping[str, Any],
+    *,
+    agentx: bool,
+    cap: int,
+    cap_explicit: bool,
+    delay_iters: int = 0,
+    steady_floor: int | None = None,
+) -> tuple[int, int]:
+    """Resolve capture steps and delay without consulting the ambient environment."""
+    max_iters = cap
+    if agentx:
+        delay_iters = 0
+        if max_iters > _AGENTX_PROFILE_MAX_ITERS:
+            if cap_explicit:
+                log.warning(
+                    "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
+                    "being overridden to %d. The cap is calibrated on the "
+                    "synthetic ISL/OSL shape; an agentic step carries orders "
+                    "of magnitude more, and the torch profiler buffers "
+                    "events in host RAM until the OOM killer arrives.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
+            else:
+                log.info(
+                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
+                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
+                    "carries orders of magnitude more, and the torch profiler "
+                    "buffers events in host RAM until the OOM killer arrives.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
+            max_iters = _AGENTX_PROFILE_MAX_ITERS
+            if steady_floor is not None and max_iters < steady_floor:
+                log.warning(
+                    "AgentX: capped profile steps %d is below the steady-state "
+                    "floor of %d; the trace may lack a steady-state window "
+                    "(trace_split_no_steady_state).",
+                    max_iters,
+                    steady_floor,
+                )
+    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
+    if override.isdigit() and int(override) > 0:
+        max_iters = int(override)
+        delay_override = str(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or "").strip()
+        if agentx:
+            if delay_override:
+                log.warning(
+                    "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
+                    "profiling window is wall-clock, so an iteration delay never elapses "
+                    "inside it and the trace comes back empty",
+                    delay_override,
+                )
+        else:
+            try:
+                delay_iters = max(0, int(delay_override or 8))
+            except ValueError:
+                delay_iters = 8
+        if agentx and max_iters > _AGENTX_PROFILE_MAX_ITERS:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
+                "bound of %d. That bound is a host-RAM limit, not a "
+                "serialization one: an agentic step carries orders of "
+                "magnitude more events than the synthetic shape ``cap`` is "
+                "sized against, and at the stock cap a DeepSeek-V4 profile "
+                "round was OOM-killed mid-capture three times in a row. "
+                "Unset it to restore the bound.",
+                max_iters,
+                _AGENTX_PROFILE_MAX_ITERS,
+            )
+        if steady_floor is not None and max_iters < steady_floor:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
+                "floor of %d; the trace may lack a steady-state window "
+                "(trace_split_no_steady_state).",
+                max_iters,
+                steady_floor,
+            )
+        elif max_iters > cap:
+            log.warning(
+                "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
+                "safe cap of %d; the trace may be too large to serialize "
+                "(EngineCore RPC timeout).",
+                max_iters,
+                cap,
+            )
+    return delay_iters, max_iters
+
+
 def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
@@ -1118,8 +1217,8 @@ def materialize_config_with_envs(
         extra_envs: Overrides applied last over any computed env values;
             shell/loader hijack names and credentials are dropped.
         remove_args: Inherited framework server args to remove before launch.
-        unset_envs: Inherited env names to remove before applying
-            ``extra_envs``; workload pins are refused.
+        unset_envs: Env names to remove after applying ``extra_envs``;
+            workload pins are refused.
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
@@ -1304,14 +1403,7 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
-        _cap_raw = os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
-        cap_explicit = _cap_raw.isdigit() and int(_cap_raw) >= 1
-        try:
-            cap = int(_cap_raw or _DEFAULT_PROFILE_MAX_STEPS)
-        except (TypeError, ValueError):
-            cap = _DEFAULT_PROFILE_MAX_STEPS
-        if cap < 1:
-            cap = _DEFAULT_PROFILE_MAX_STEPS
+        cap, cap_explicit = _profile_steps_cap(os.environ)
 
         # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
         # honored as-is; otherwise default to min(served OSL,
@@ -1360,120 +1452,14 @@ def materialize_config_with_envs(
         # Profile server runs at the resolved profile OSL, decoupled from --osl.
         envs["OSL"] = osl_val
 
-        # Capture up to the cap (>= steady_floor in the auto path).
-        max_iters = cap
-        delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
-        if delay_iters < 0:
-            delay_iters = 0
-        # The iteration-based delay assumes the client streams a predictable
-        # number of decode steps before steady state. The AgentX client instead
-        # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
-        # an iteration delay computed from the placeholder OSL (6080 steps at the
-        # 1024/1024 defaults) is never reached inside that window and the trace
-        # comes back empty. Hand the delay to the client and keep only the
-        # capture bound, which is what stops the worker accumulating events in
-        # host RAM until the OOM killer arrives.
-        if agentx_enabled():
-            delay_iters = 0
-            # ...and the bound itself has to come down, because the cap above is
-            # sized in DECODE STEPS against the synthetic OSL. Under AgentX the
-            # captured work per step is agentic: measured ISL p50 was 56k-96k
-            # tokens, two orders of magnitude past the 1024/1024 shape the cap
-            # was calibrated on. At the stock cap a DeepSeek-V4 profile round put
-            # each of the eight vLLM workers at 113-127 GB of HOST RAM -- Ray
-            # reported 1012/1024 GB and killed them mid-capture, three attempts
-            # in a row, so the round produced no trace at all.
-            #
-            # A shorter capture is not a worse trace here: the client already
-            # bounds the window by wall clock (~20s of steady state), so the
-            # extra steps buy nothing and only inflate the in-memory event
-            # buffer. HYPERLOOM_PROFILE_MAX_ITERS still overrides this below.
-            if max_iters > _AGENTX_PROFILE_MAX_ITERS:
-                if cap_explicit:
-                    # The operator asked for this cap explicitly (e.g. to widen
-                    # the steady-state window); silently overriding it with no
-                    # trace of the original value would hide why a deliberate
-                    # HYPERLOOM_PROFILE_MAX_STEPS_CAP setting had no effect.
-                    log.warning(
-                        "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
-                        "being overridden to %d. The cap is calibrated on the "
-                        "synthetic ISL/OSL shape; an agentic step carries orders "
-                        "of magnitude more, and the torch profiler buffers "
-                        "events in host RAM until the OOM killer arrives.",
-                        max_iters,
-                        _AGENTX_PROFILE_MAX_ITERS,
-                    )
-                else:
-                    log.info(
-                        "AgentX: lowering captured profile steps %d -> %d. The cap is "
-                        "calibrated on the synthetic ISL/OSL shape; an agentic step "
-                        "carries orders of magnitude more, and the torch profiler "
-                        "buffers events in host RAM until the OOM killer arrives.",
-                        max_iters,
-                        _AGENTX_PROFILE_MAX_ITERS,
-                    )
-                max_iters = _AGENTX_PROFILE_MAX_ITERS
-                if max_iters < steady_floor:
-                    log.warning(
-                        "AgentX: capped profile steps %d is below the steady-state "
-                        "floor of %d; the trace may lack a steady-state window "
-                        "(trace_split_no_steady_state).",
-                        max_iters,
-                        steady_floor,
-                    )
-        # Operator hard-override of captured steps (e.g. a small eager FlyDSL
-        # profile). Honored verbatim; warn when outside the safe band rather
-        # than silently clamping.
-        _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
-        if _ovr.isdigit() and int(_ovr) > 0:
-            max_iters = int(_ovr)
-            # Raising the capture bound must not revive the delay the AgentX
-            # branch above zeroed; the two knobs are documented together.
-            if agentx_enabled():
-                _delay_ovr = os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "").strip()
-                if _delay_ovr:
-                    log.warning(
-                        "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
-                        "profiling window is wall-clock, so an iteration delay never elapses "
-                        "inside it and the trace comes back empty",
-                        _delay_ovr,
-                    )
-            else:
-                delay_iters = max(0, env_int("HYPERLOOM_PROFILE_DELAY_ITERS", 8))
-            # The AgentX clamp above is a HOST RAM bound, and this override
-            # silently undoes it. Neither check below stands in for saying so:
-            # ``cap`` defaults to _DEFAULT_PROFILE_MAX_STEPS, so the obvious
-            # HYPERLOOM_PROFILE_MAX_ITERS=128 lands exactly on it, trips
-            # neither branch, and restores the very bound that kept the
-            # profiler from being OOM-killed -- without printing anything.
-            if agentx_enabled() and max_iters > _AGENTX_PROFILE_MAX_ITERS:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
-                    "bound of %d. That bound is a host-RAM limit, not a "
-                    "serialization one: an agentic step carries orders of "
-                    "magnitude more events than the synthetic shape ``cap`` is "
-                    "sized against, and at the stock cap a DeepSeek-V4 profile "
-                    "round was OOM-killed mid-capture three times in a row. "
-                    "Unset it to restore the bound.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            if max_iters < steady_floor:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
-                    "floor of %d; the trace may lack a steady-state window "
-                    "(trace_split_no_steady_state).",
-                    max_iters,
-                    steady_floor,
-                )
-            elif max_iters > cap:
-                log.warning(
-                    "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
-                    "safe cap of %d; the trace may be too large to serialize "
-                    "(EngineCore RPC timeout).",
-                    max_iters,
-                    cap,
-                )
+        delay_iters, max_iters = _profile_capture_window(
+            os.environ,
+            agentx=agentx_enabled(),
+            cap=cap,
+            cap_explicit=cap_explicit,
+            delay_iters=max(0, int(osl_val * (r_val + 1) * 3 - cap / 2)),
+            steady_floor=steady_floor,
+        )
         # NUM_PROMPTS must let the engine reach ``delay_iters + max_iters``
         # decode steps before running out of prompts (N prompts ≈ N * OSL / CONC
         # iters; invert + 2x buffer). Hyperloom owns this under PROFILE.

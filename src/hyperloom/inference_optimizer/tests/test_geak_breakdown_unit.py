@@ -589,10 +589,11 @@ async def test_sweep_via_geak_reuses_script_and_records_variants(
         """#!/usr/bin/env bash
 set -euo pipefail
 python3 - <<'PY'
-import json, os
+import json, os, sys
 from pathlib import Path
 out = Path(os.environ["OUT_DIR"])
 if os.environ["CONC"] == "2":
+    print("intentional conc=2 benchmark failure", file=sys.stderr)
     raise SystemExit(3)
 summary = {
     "output_throughput_tok_s_median": 321.0,
@@ -647,7 +648,7 @@ PY
     assert result["source"] == "geak"
     assert result["promotion_measurement"]["output_throughput"] == 321.0
     assert result["points"][1]["status"] == "failed"
-    assert result["points"][1]["error"] == "no throughput"
+    assert result["points"][1]["error"].rstrip().endswith("intentional conc=2 benchmark failure")
 
     ok_dir = tmp_path / "sweep" / "variant_0_conc1_isl8192_osl1024"
     env = json.loads((ok_dir / "env.json").read_text(encoding="utf-8"))

@@ -12,10 +12,19 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+import yaml
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
+from hyperloom.orchestrator.loop.coordinator_helpers import (
+    _coerce_tp,
+    _resolve_gpu_pin,
+    _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+)
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
@@ -98,6 +107,52 @@ def _geak_replay_server_log(out_dir: Path) -> str | None:
         return None
 
 
+def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
+    """Resolve serving identity from the frozen handoff or its materialized recipe."""
+    recipe_path = str(handoff.get("launch_recipe") or env_spec.get("base_launch_recipe") or "")
+    benchmark: dict[str, Any] = {}
+    if recipe_path:
+        parsed = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("benchmark"), dict):
+            raise ValueError("invalid_replay_recipe")
+        benchmark = parsed["benchmark"]
+    recipe_envs = benchmark.get("envs") or {}
+    if not isinstance(recipe_envs, dict):
+        raise ValueError("invalid_replay_recipe_envs")
+    frozen = bool(handoff or benchmark)
+    legacy_env = {} if frozen else os.environ
+    tp = _coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
+    pin = handoff.get("gpu_pin")
+    if not isinstance(pin, dict):
+        pin = _resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
+    gpu_ids = ",".join(effective_mask_tokens(handoff.get("gpu_ids"))) or _resolve_handoff_gpu_ids(gpu_pin=pin, tp=tp)
+    space = str(handoff.get("gpu_ids_space") or _resolve_handoff_gpu_ids_space(gpu_pin=pin))
+    if space not in {"absolute", "logical"} or _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none":
+        raise ValueError("invalid_replay_gpu_ids_space")
+    if len(effective_mask_tokens(gpu_ids)) < tp:
+        raise ValueError("replay_gpu_count_below_tp")
+    masks: dict[str, str] = {}
+    if space == "logical":
+        var = str(pin.get("var") or "")
+        tokens = effective_mask_tokens(pin.get("value"))
+        if not is_rocr_level(var) or not tokens:
+            raise ValueError("missing_replay_logical_gpu_pin")
+        if any(not token.isdigit() or int(token) >= len(tokens) for token in effective_mask_tokens(gpu_ids)):
+            raise ValueError("invalid_replay_logical_gpu_ids")
+        masks[var] = ",".join(tokens)
+    masks["HIP_VISIBLE_DEVICES"] = gpu_ids
+    masks["CUDA_VISIBLE_DEVICES"] = gpu_ids
+    return {
+        "MODEL": str(handoff.get("model_path") or benchmark.get("model") or legacy_env.get("MODEL_PATH") or "").strip(),
+        "BACKEND": str(
+            handoff.get("framework") or benchmark.get("framework") or legacy_env.get("FRAMEWORK") or "sglang"
+        ).strip(),
+        "TP": str(tp),
+        "GPU": gpu_ids,
+        **masks,
+    }
+
+
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
@@ -107,8 +162,12 @@ async def sweep_via_geak(
     variant_timeout_sec: int,
     repeats: int = 3,
     pin_num_prompts: bool = False,
+    handoff: Mapping[str, Any] | None = None,
+    env_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server."""
+    handoff = handoff or {}
+    bench_client = str(result.get("bench_client") or "native").strip() or "native"
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     final_launch_script = str(result.get("final_launch_script") or "").strip()
     final_launch_path = Path(final_launch_script) if final_launch_script else None
@@ -131,12 +190,12 @@ async def sweep_via_geak(
             ),
         }
 
-    model = os.environ.get("MODEL_PATH", "").strip()
-    backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
-    tp = int(os.environ.get("TP", "1") or 1)
-    gpus = _serving_gpus(tp)
-    # Reuse the SAME bench client the KERNEL_AGENT phase measured with.
-    bench_client = str(result.get("bench_client") or "native").strip() or "native"
+    env_spec = handoff.get("baseline_env_spec") or env_spec or {}
+    try:
+        serving_env = _replay_serving_env(handoff, env_spec)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
+        return {"status": "failed", "error_class": "invalid_replay_identity", "error": str(exc)}
+    model, backend = serving_env["MODEL"], serving_env["BACKEND"]
 
     # Forward the validated measurement config + client trust onto every variant so the sweep measures on the same
     # workload shape the KERNEL_AGENT phase accepted (else bench_e2e.sh falls back to its own defaults).
@@ -177,11 +236,8 @@ async def sweep_via_geak(
             out_dir.mkdir(parents=True, exist_ok=True)
             env = build_benchmark_env(
                 {
-                    "BACKEND": backend,
                     "OUT_DIR": str(out_dir),
-                    "GPU": gpus,
-                    "TP": str(tp),
-                    "MODEL": model,
+                    **serving_env,
                     "ISL": str(isl),
                     "OSL": str(osl),
                     "CONC": str(conc),
@@ -193,6 +249,9 @@ async def sweep_via_geak(
                     "BENCH_CLIENT": bench_client,
                 }
             )
+            for name in VISIBLE_DEVICE_VARS:
+                env.pop(name, None)
+            env.update(serving_env)
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
@@ -296,6 +355,7 @@ async def sweep_via_geak(
     promotion_measurement = max(measured, key=lambda e: e["output_throughput"], default={})
     return {
         "status": "succeeded" if succeeded else "failed",
+        **({"error": str(entries[0].get("error") or "replay_failed")} if entries and not succeeded else {}),
         "grid_size": len(entries),
         "points": entries,
         "workspace": output_root.as_posix(),
