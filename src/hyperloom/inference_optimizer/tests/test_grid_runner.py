@@ -1252,6 +1252,98 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
 # Framework-aware help-text probe (atom + multi-framework cache)
 
 
+@pytest.mark.asyncio
+async def test_exported_reference_controls_survive_reimport_and_child_launch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    overlay = tmp_path / "overlay ' literal"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("import os; os.environ['OVERLAY_OBSERVED'] = 'loaded'\n")
+    session = tmp_path / "session"
+    session.mkdir()
+    state = SharedState(framework="sglang", reference_model="/models/test")
+    state.current_best = {
+        "extra_server_args": "--max-running-requests 4",
+        "extra_envs": {"SGLANG_REASSIGN": "accepted"},
+        "unset_envs": ["SGLANG_REMOVE_ME", "SGLANG_REASSIGN"],
+        "remove_args": ["--disable-radix-cache"],
+        "args_mode": "replace",
+        "final_overlay": str(overlay),
+    }
+    state.save(session)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    args, envs, model, source, controls = _resolve_reference_recipe(
+        SimpleNamespace(reference_script=str(session / "current_setting.sh"))
+    )
+    assert "PYTHONPATH" not in envs
+    assert controls["overlay_pythonpath"] == str(overlay)
+    imported = SharedState(
+        framework="sglang",
+        reference_server_args=args,
+        reference_envs=envs,
+        reference_model=model,
+        reference_source=source,
+        reference_launch_controls=controls,
+    )
+    imported.save(session)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"].update(
+        EXTRA_SGLANG_ARGS="--disable-radix-cache --mem-fraction-static 0.7",
+        SGLANG_REMOVE_ME="recipe",
+        SGLANG_REASSIGN="recipe",
+    )
+    base.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("SGLANG_REMOVE_ME", "ambient")
+    monkeypatch.setenv("SGLANG_REASSIGN", "ambient")
+    observed = []
+    managed_run = gr.run_with_session_kill
+
+    def launch_observer(cmd, **kwargs):
+        config_path = Path(cmd[cmd.index("--benchmark-config") + 1])
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        probe = (
+            "import json,os; print(json.dumps({k:os.environ.get(k) for k in "
+            "['EXTRA_SGLANG_ARGS','SGLANG_REMOVE_ME','SGLANG_REASSIGN','OVERLAY_OBSERVED']}))"
+        )
+        observer = (
+            "import os,subprocess,sys,yaml; from pathlib import Path; env=os.environ.copy(); "
+            "env.update({k:str(v) for k,v in yaml.safe_load(Path(sys.argv[1]).read_text())['benchmark']['envs'].items()}); "
+            "subprocess.run([sys.executable,'-c',sys.argv[2]],env=env,check=True)"
+        )
+        result = managed_run([sys.executable, "-c", observer, str(config_path), probe], **kwargs)
+        assert result.returncode == 0, result.stderr
+        observed.append(json.loads(result.stdout))
+        _fake_workspace(slot)
+        return result
+
+    monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
+    with session_scope(session):
+        materialized = materialize_config_with_envs(base, tmp_path / "materialized", model_path="/models/test")
+        await run_grid(
+            base_yaml_path=materialized,
+            base_extra_args="",
+            grid=[GridVariant("reference")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=15,
+        )
+    assert observed
+    for child in observed:
+        assert "--max-running-requests 4" in child["EXTRA_SGLANG_ARGS"]
+        assert "--disable-radix-cache" not in child["EXTRA_SGLANG_ARGS"]
+        assert "--mem-fraction-static 0.7" not in child["EXTRA_SGLANG_ARGS"]
+        assert child["SGLANG_REMOVE_ME"] is None
+        assert child["SGLANG_REASSIGN"] == "accepted"
+        assert child["OVERLAY_OBSERVED"] == "loaded"
+
+
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
     """Clear the framework-keyed help-text caches before/after each test."""

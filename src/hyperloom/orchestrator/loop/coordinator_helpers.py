@@ -212,15 +212,14 @@ _GPU_BENCH_LANES: frozenset[str] = frozenset(
 )
 
 
-def baseline_benchmark_script(last_baseline: Mapping[str, Any]) -> str | None:
-    """Read the explicit script from the baseline task's recorded parameters.
-
-    Args:
-        last_baseline: Baseline attempt audit, including its parameter fingerprint.
-
-    Returns:
-        The operator's script override, or None when the default runner was used.
-    """
+def baseline_benchmark_script(state: Any) -> str | None:
+    """Read the script belonging to the accepted baseline anchor."""
+    accepted = getattr(state, "baseline_benchmark_script", None)
+    if accepted is not None:
+        return accepted or None
+    last_baseline = getattr(state, "last_baseline", {}) or {}
+    if last_baseline.get("decision") != "promoted":
+        return None
     fingerprint = (last_baseline.get("extras") or {}).get("fingerprint") or {}
     return str(fingerprint.get("benchmark_script") or "").strip() or None
 
@@ -668,11 +667,17 @@ def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
 def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     """Normalize a GEAK ``accepted_config`` into the ``(args, envs)`` a variant runs."""
     cfg = cfg if isinstance(cfg, dict) else {}
+    if cfg.get("env_unparsed"):
+        log.warning("GEAK accepted_config.env_unparsed reports discarded source text; using only validated env_map")
     flags = str(cfg.get("flags") or "").strip()
     if "env_map" in cfg:
         envs = cfg["env_map"]
         if not isinstance(envs, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str) for key, value in envs.items()
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+            or "\0" in value
+            for key, value in envs.items()
         ):
             raise ValueError("GEAK accepted_config.env_map must map strings to strings")
     else:
@@ -688,6 +693,8 @@ def _accepted_config_controls(cfg: Any) -> dict[str, Any]:
 
     ``args_mode=replace`` attests that ``flags`` is complete. Neither a result
     schema version nor an empty environment mapping carries that meaning.
+    Environment removals precede current assignments; an assignment re-enables
+    the name even when inherited controls still list it in ``unset_envs``.
     """
     from ..actions.executors._proposal_identity import controls_of, normalize_proposal
 
@@ -737,6 +744,11 @@ def _geak_result_has_material(
 
     if not isinstance(result, dict) or not result:
         return True
+    try:
+        accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+    except ValueError as exc:
+        log.warning("GEAK result has invalid accepted_config: %s", exc)
+        return False
     if _has_nonempty(result.get("accepted_kernels")):
         return True
     if _has_nonempty(result.get("accepted_heads")):
@@ -745,7 +757,6 @@ def _geak_result_has_material(
         return True
     if str(result.get("final_patch") or "").strip():
         return True
-    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
     controls = _accepted_config_controls(result.get("accepted_config"))
     # A missing / all-empty accepted_config carries no config optimization; a
     # bare fingerprint mismatch against a non-empty current_best is NOT material
@@ -866,20 +877,9 @@ def _geak_has_accepted_kernel(result: Any) -> bool:
 
 def _geak_overlay_is_loadable(overlay: str) -> bool:
     """Report whether an overlay dir can actually install an authored kernel."""
-    if not overlay:
-        return False
-    try:
-        if not (Path(overlay) / "sitecustomize.py").is_file():
-            return False
-        manifest = Path(overlay) / "_overlay_manifest.json"
-        if not manifest.is_file():
-            return True
-        spec = json.loads(manifest.read_text())
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
-    if not isinstance(spec, dict):
-        return False
-    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+    from hyperloom.common.overlay import overlay_is_loadable
+
+    return overlay_is_loadable(overlay)
 
 
 def _geak_overlay_digest(overlay: str) -> str:

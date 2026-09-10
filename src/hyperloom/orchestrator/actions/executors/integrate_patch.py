@@ -517,24 +517,36 @@ def _sole_patch_root(
     raw = (done_payload or {}).get("patch_roots")
     if not isinstance(raw, dict) or not patch_paths:
         return None
-    selected = {patch.resolve() for patch in patch_paths}
+    try:
+        selected = {patch.resolve() for patch in patch_paths}
+    except (OSError, RuntimeError):
+        return None
     covered: set[Path] = set()
     roots: set[str] = set()
     for recorded_patch, root in raw.items():
         if not isinstance(recorded_patch, str) or not recorded_patch.strip():
             continue
-        resolved = _resolve_patch_paths(
-            specialist_workspace=specialist_workspace,
-            explicit_patches=[recorded_patch],
-            done_payload=None,
-        )
+        try:
+            resolved = _resolve_patch_paths(
+                specialist_workspace=specialist_workspace,
+                explicit_patches=[recorded_patch],
+                done_payload=None,
+            )
+        except (OSError, RuntimeError):
+            return None
         for patch in resolved:
             if patch not in selected:
                 continue
             if not isinstance(root, str) or not root.strip():
                 return None
             covered.add(patch)
-            roots.add(root)
+            try:
+                root_path = Path(root).expanduser()
+                if not root_path.is_absolute():
+                    root_path = specialist_workspace / root_path
+                roots.add(str(root_path.resolve()))
+            except (OSError, RuntimeError):
+                return None
     return roots.pop() if covered == selected and len(roots) == 1 else None
 
 

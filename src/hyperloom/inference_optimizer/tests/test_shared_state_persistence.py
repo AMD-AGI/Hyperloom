@@ -346,6 +346,7 @@ def test_saved_current_setting_loads_overlay_in_child(tmp_path, pythonpath_sourc
     overlay = tmp_path / "overlay ' $literal $(touch injected_dollar) `touch injected_backtick`"
     package = overlay / "sglang"
     package.mkdir(parents=True)
+    (overlay / "sitecustomize.py").write_text("")
     (package / "__init__.py").write_text("")
     (overlay / "overlay_probe.py").write_text("VALUE = 'selected overlay'\n")
     (package / "launch_server.py").write_text(

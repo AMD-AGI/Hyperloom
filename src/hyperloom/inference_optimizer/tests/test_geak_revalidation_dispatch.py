@@ -414,7 +414,6 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
     assert {key: value for key, value in row.params.items() if key in base_keys} == native_controls
 
 
-@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("current", "accepted", "expected_flags", "expected_env"),
@@ -612,6 +611,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     coordinator, with_removal_controls: bool
 ) -> None:
@@ -686,11 +686,13 @@ async def test_empty_structured_environment_does_not_rebench_legacy_values(coord
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}])
+@pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}, {"BAD-NAME": "1"}, {"VALID": "a\0b"}])
 async def test_malformed_structured_environment_does_not_dispatch(coordinator, env_map) -> None:
     coordinator.shared_state.geak_result = {"status": "ok", "accepted_config": {"env_map": env_map}}
-    with pytest.raises(ValueError, match="env_map must map strings to strings"):
-        await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    result = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert result == {"skipped": True, "reason": "geak_invalid_config"}
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert not coordinator.shared_state.geak_pending
     assert not await coordinator.tasks.queued()
 
 
@@ -2136,7 +2138,6 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
         assert "variant_timeout_sec" not in task.params
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["geak", "resume"])
 async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp_path, monkeypatch, source) -> None:
@@ -2152,10 +2153,18 @@ async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp
         encoding="utf-8",
     )
     state = coordinator.shared_state
-    state.baseline_config_path = str(baseline)
-    state.baseline_tput = 100.0
+    state.baseline_tput = 0.0
     state.baseline_double_run = True
-    state.last_baseline = {"extras": {"fingerprint": {"benchmark_script": "sglang_custom.sh"}}}
+    for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
+        task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
+        await coordinator._promote_to_shared_state(
+            "baseline", {"output_throughput": tput, "materialized_config": str(baseline)}, task=task
+        )
+    assert state.baseline_tput == 100.0
+    assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
+    state.save(coordinator.session_dir)
+    coordinator.shared_state = state = type(state).load_or_init(coordinator.session_dir)
+    assert state.baseline_benchmark_script == "sglang_custom.sh"
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
     else:
@@ -2193,3 +2202,17 @@ async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp
     assert calls[0][1]["runner_type"] == "mi355x"
     assert calls[0][0]["server_lifecycle"] is None
 
+
+@pytest.mark.asyncio
+async def test_invalid_handoff_configuration_never_launches_geak(coordinator, monkeypatch):
+    def invalid_spec():
+        raise ValueError("unserializable launch configuration")
+
+    def must_not_launch(*_args, **_kwargs):
+        pytest.fail("Invalid launch configuration must stop before runner invocation")
+
+    monkeypatch.setattr(coordinator, "build_env_spec", invalid_spec)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
+    assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
+    assert not await coordinator.tasks.queued()

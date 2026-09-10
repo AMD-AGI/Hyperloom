@@ -448,14 +448,14 @@ def test_resolve_no_flag_returns_empty(monkeypatch):
     """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", "")
+    assert _resolve_reference_recipe(args) == ("", {}, "", "", {})
 
 
 def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, source = _resolve_reference_recipe(args)
+    server_args, envs, model, source, controls = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
     assert source == src
 
@@ -477,3 +477,23 @@ def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         _resolve_reference_recipe(args)
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("invalid", ["missing", "empty_manifest", "bad_manifest", "path_list"])
+def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
+    import json
+
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    if invalid != "missing":
+        (overlay / "sitecustomize.py").write_text("")
+    if invalid == "empty_manifest":
+        (overlay / "_overlay_manifest.json").write_text('{"modules": []}')
+    if invalid == "bad_manifest":
+        (overlay / "_overlay_manifest.json").write_text("invalid")
+    value = str(overlay) + (":/another" if invalid == "path_list" else "")
+    with pytest.raises(ValueError, match="overlay_pythonpath"):
+        render_reference_script(framework="sglang", server_args="", overlay_pythonpath=value)
+    source = _write(tmp_path, "# hyperloom-launch-controls: " + json.dumps({"overlay_pythonpath": value}))
+    with pytest.raises(ValueError, match="overlay_pythonpath"):
+        parse_reference_script(source, framework="sglang")

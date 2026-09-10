@@ -1313,7 +1313,7 @@ async def run_conc_sweep(
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
-    benchmark_script = baseline_benchmark_script(state.last_baseline)
+    benchmark_script = baseline_benchmark_script(state)
     try:
         base_yaml_path = materialize_config_with_envs(
             base_yaml_path,

@@ -684,12 +684,18 @@ def resolve_reference_base() -> tuple[str, dict[str, str]]:
 
     Returns ``("", {})`` when the run has no reference recipe.
     """
+    args, envs, _controls = resolve_reference_launch()
+    return args, envs
+
+
+def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Read the accepted reference recipe and its dedicated launch controls."""
     from hyperloom.inference_optimizer.session.paths import session_dir
 
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir())
-    return state.reference_server_args.strip(), dict(state.reference_envs)
+    return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
 
 
 def _apply_custom_runtime_defaults(
@@ -1631,12 +1637,28 @@ def materialize_config_with_envs(
     # Seed the framework server-args env + envs from a reference recipe below
     # the YAML base and any per-task extra_server_args (reference flags leftmost,
     # so last-wins lets later merges override them).
-    ref_args, reference_envs = resolve_reference_base()
-    if ref_args:
+    ref_args, reference_envs, reference_controls = resolve_reference_launch()
+    for name in reference_controls.get("unset_envs", []):
+        envs.pop(name, None)
+    if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        envs[_ref_fw_env] = merge_server_args(ref_args, str(envs.get(_ref_fw_env, "")))
+        from ._grid_server_args import compose_server_args
+
+        envs[_ref_fw_env] = compose_server_args(
+            base_extra_args=ref_args,
+            variant_extra_args=""
+            if reference_controls.get("args_mode") == "replace"
+            else str(envs.get(_ref_fw_env, "")),
+            remove_args=reference_controls.get("remove_args"),
+            args_mode="replace",
+        )
     for _rk, _rv in reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
+    if reference_controls.get("overlay_pythonpath"):
+        from hyperloom.common.overlay import validate_overlay_pythonpath
+
+        overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
+        envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1951,6 +1973,9 @@ def materialize_config_with_envs(
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
     remove_list = to_str_list(remove_args)
     unset_list = to_str_list(unset_envs)
+    for key in reference_controls.get("unset_envs", []):
+        if key not in reference_envs and key not in safe_extra_envs:
+            envs.pop(key, None)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:

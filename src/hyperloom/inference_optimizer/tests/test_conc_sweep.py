@@ -605,7 +605,7 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     )
     state = _make_state(baseline_config_path=str(baseline_yaml), isl=8192)
     state.gpu_type = "MI355X"
-    state.last_baseline = {"extras": {"fingerprint": {"benchmark_script": "sglang_custom.sh"}}}
+    state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
     monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
     monkeypatch.setattr(

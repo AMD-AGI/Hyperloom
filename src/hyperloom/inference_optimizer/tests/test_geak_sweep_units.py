@@ -437,14 +437,15 @@ async def test_sweep_rejects_malformed_structured_environment_before_launch(
         pytest.fail("malformed structured environment must not launch a replay")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _must_not_launch)
-    with pytest.raises(ValueError, match="env_map must map strings to strings"):
-        await sweep_via_geak(
-            result={"bench_script": str(bench), "accepted_config": {"env_map": env_map, "env": "VALID=1"}},
-            conc_values=[1],
-            isl_osl_configs=["16:16"],
-            output_root=tmp_path / "sweep",
-            variant_timeout_sec=30,
-        )
+    result = await sweep_via_geak(
+        result={"bench_script": str(bench), "accepted_config": {"env_map": env_map, "env": "VALID=1"}},
+        conc_values=[1],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "invalid_accepted_config"
 
 
 @pytest.mark.asyncio

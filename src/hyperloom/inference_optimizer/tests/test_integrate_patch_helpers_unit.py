@@ -75,6 +75,35 @@ def test_resolve_framework_root_explicit_dir(tmp_path):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
+def test_recorded_roots_compare_directory_identity(tmp_path):
+    root = tmp_path / "aiter"
+    root.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    patches = [tmp_path / "a.patch", tmp_path / "b.patch"]
+    for patch in patches:
+        patch.touch()
+    payload = {"patch_roots": {"a.patch": str(root) + "/", "b.patch": "alias"}}
+    assert ip._sole_patch_root(payload, patches, specialist_workspace=tmp_path) == str(root)
+
+
+@pytest.mark.parametrize("failing_path", ["a.patch", "aiter"])
+@pytest.mark.parametrize("error", [OSError, RuntimeError])
+def test_recorded_roots_decline_unresolvable_paths(tmp_path, monkeypatch, failing_path, error):
+    patch = tmp_path / "a.patch"
+    patch.touch()
+    resolve = Path.resolve
+
+    def failing_resolve(path, *args, **kwargs):
+        if path.name == failing_path:
+            raise error("unresolvable path")
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", failing_resolve)
+    payload = {"patch_roots": {"a.patch": "aiter"}}
+    assert ip._sole_patch_root(payload, [patch], specialist_workspace=tmp_path) is None
+
+
 def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypatch):
     root = tmp_path / "framework"
     root.mkdir()

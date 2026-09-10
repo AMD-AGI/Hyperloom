@@ -808,7 +808,10 @@ def _run_magpie(
         _kill_stale_servers()
 
     env = scrub_benchmark_process_env(os.environ.copy())
-    for name in unset_envs or []:
+    from ._workload_envs import resolve_reference_launch
+
+    _args, _envs, reference_controls = resolve_reference_launch()
+    for name in [*(reference_controls.get("unset_envs") or []), *(unset_envs or [])]:
         if name.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES:
             env.pop(name, None)
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"

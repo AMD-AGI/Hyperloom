@@ -174,7 +174,10 @@ async def sweep_via_geak(
         }
     replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
-    flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
+    try:
+        flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
+    except ValueError as exc:
+        return {"status": "failed", "error_class": "invalid_accepted_config", "error": str(exc)}
     env_str = shlex.join(f"{name}={value}" for name, value in accepted_env.items())
 
     if not replay_script.is_file():
