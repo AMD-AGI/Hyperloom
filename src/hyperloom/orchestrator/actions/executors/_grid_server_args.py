@@ -692,7 +692,7 @@ def inject_sglang_context_length(
         return args
     if _SGLANG_CONTEXT_LENGTH_RE.search(args):
         return args
-    from hyperloom.inference_optimizer.cli.model_gate import _load_model_max_position_embeddings
+    from hyperloom.inference_optimizer.model_config_utils import _load_model_max_position_embeddings
 
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
@@ -735,7 +735,7 @@ def inject_sglang_attention_backend(
         return args
     if _SGLANG_ATTN_BACKEND_RE.search(args):
         return args
-    from hyperloom.inference_optimizer.cli.model_gate import _model_has_dual_chunk_attention
+    from hyperloom.inference_optimizer.model_config_utils import _model_has_dual_chunk_attention
 
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
@@ -782,7 +782,7 @@ def _online_quant_requires_aiter_moe_runner(server_args: str, model_path: str) -
         return True
     if quantization != _AITER_ONLY_UNLESS_SERIALIZED_QUANT_METHOD:
         return False
-    from hyperloom.inference_optimizer.cli.model_gate import _model_declared_quant_method
+    from hyperloom.inference_optimizer.model_config_utils import _model_declared_quant_method
 
     # Mirrors sglang: is_checkpoint_mxfp4_serialized = "mxfp4" in quant_method.
     return "mxfp4" not in _model_declared_quant_method(model_path)
@@ -790,7 +790,7 @@ def _online_quant_requires_aiter_moe_runner(server_args: str, model_path: str) -
 
 def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -> bool:
     """Whether this model + server args resolve to an aiter-only MoE scheme."""
-    from hyperloom.inference_optimizer.cli.model_gate import _model_moe_runner_requires_aiter
+    from hyperloom.inference_optimizer.model_config_utils import _model_moe_runner_requires_aiter
 
     path = str(model_path or "")
     return _model_moe_runner_requires_aiter(path) or _online_quant_requires_aiter_moe_runner(

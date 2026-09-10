@@ -38,6 +38,10 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
+from ._benchmark_interpreter import (
+    _resolve_magpie_python as _resolve_magpie_python,
+    _resolve_probe_python as _resolve_probe_python,
+)
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -138,56 +142,6 @@ from ._grid_variant_filter import (
 log = logging.getLogger(__name__)
 
 
-def _resolve_magpie_python() -> str:
-    """Resolve the Python interpreter for Magpie subprocesses."""
-
-    def _can_import_magpie(py: str) -> bool:
-        """Whether an interpreter can import Magpie and its ``yaml`` dep."""
-        try:
-            # Probe with ``importlib.util.find_spec`` rather than a bare
-            # ``import`` so a missing module returns a non-zero exit code
-            # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
-            # The launch mirrors child stderr to the parent stream, so a bare
-            # ``import Magpie`` on a candidate that lacks it would leak an
-            # alarming traceback into the run log even though the probe failing
-            # is an expected, benign step of interpreter resolution.
-            proc = run_with_session_kill(
-                [
-                    py,
-                    "-c",
-                    "import importlib.util as u, sys; "
-                    "sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
-                ],
-                timeout=10,
-            )
-            return getattr(proc, "returncode", 1) == 0
-        except Exception:
-            return False
-
-    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
-    if env_val:
-        if _can_import_magpie(env_val):
-            return env_val
-        log.warning(
-            "MAGPIE_PYTHON=%s cannot import Magpie; ignoring it and "
-            "auto-detecting an interpreter that can. (A stale value is often "
-            "baked into kernel-agent.env.sh when install.sh resolved it "
-            "before Magpie was pip-installed.)",
-            env_val,
-        )
-
-    candidate = shutil.which("python3")
-    if candidate and _can_import_magpie(candidate):
-        return candidate
-
-    opt_venv = "/opt/venv/bin/python"
-    if Path(opt_venv).is_file():
-        return opt_venv
-    if candidate:
-        return candidate
-    return "python3"
-
-
 def _validate_magpie_python_override(value: str) -> str:
     """Validate caller-supplied Magpie interpreter overrides before argv[0]."""
     raw = str(value or "").strip()
@@ -206,28 +160,6 @@ def _validate_magpie_python_override(value: str) -> str:
     if not resolved.name.lower().startswith("python"):
         raise ValueError(f"magpie_python must point to a Python interpreter, got: {raw}")
     return str(resolved)
-
-
-def _resolve_probe_python(framework: str = "vllm") -> str:
-    """Resolve the interpreter a build-accuracy probe must use."""
-    if (framework or "").strip().lower() == "vllm":
-        venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
-        if venv_root:
-            venv_python = str(Path(venv_root) / "bin" / "python")
-            if os.access(venv_python, os.X_OK):
-                return venv_python
-    magpie_python = _resolve_magpie_python()
-    # Prefer the harness interpreter; on a single-venv box it already IS the vLLM venv.
-    if magpie_python and magpie_python != "/opt/venv/bin/python":
-        return magpie_python
-    # Fell through to the canonical default; pin the venv that backs ``vllm serve`` so the probe hits the real server
-    # source.
-    vllm_exe = shutil.which("vllm")
-    if vllm_exe:
-        vllm_python = os.path.join(os.path.dirname(vllm_exe), "python")
-        if os.path.exists(vllm_python):
-            return vllm_python
-    return magpie_python
 
 
 def _resolve_session_dir() -> Path:
@@ -2502,6 +2434,8 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
+    "_resolve_magpie_python",
+    "_resolve_probe_python",
     "coerce_extra_envs",
     "compact_json_server_args",
     "_SPACE_VALUE_FLAGS",

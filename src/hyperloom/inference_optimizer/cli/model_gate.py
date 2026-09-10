@@ -22,13 +22,35 @@ from .. import gpu_types as _gpu_types
 from ...common.timeutil import now_iso
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
+    _MAXPOS_CONFIG_KEYS,
+    _MX_FP4_GROUP_SIZE,
+    _NATIVE_MOE_RUNNER_QUANT_METHODS,
+    _QUARK_LAYER_CONFIG_KEYS,
     _config_architectures,
+    _is_quark_mx_fp4_entry,
     _load_model_config_dict,
+    _load_model_max_position_embeddings,
+    _model_declared_quant_method,
+    _model_has_dual_chunk_attention,
+    _model_moe_runner_requires_aiter,
     resolve_local_model_dir,
 )
 
 # Re-exported from model_config_utils for callers/tests.
-__all__ = ["_GEMMA2_ARCHITECTURES", "_config_architectures", "_load_model_config_dict"]
+__all__ = [
+    "_GEMMA2_ARCHITECTURES",
+    "_MAXPOS_CONFIG_KEYS",
+    "_MX_FP4_GROUP_SIZE",
+    "_NATIVE_MOE_RUNNER_QUANT_METHODS",
+    "_QUARK_LAYER_CONFIG_KEYS",
+    "_config_architectures",
+    "_is_quark_mx_fp4_entry",
+    "_load_model_config_dict",
+    "_load_model_max_position_embeddings",
+    "_model_declared_quant_method",
+    "_model_has_dual_chunk_attention",
+    "_model_moe_runner_requires_aiter",
+]
 
 log = logging.getLogger(__name__)
 
@@ -178,15 +200,6 @@ _TEXT_COERCIBLE_MODEL_TYPES = frozenset(
     }
 )
 
-_MAXPOS_CONFIG_KEYS = (
-    "max_position_embeddings",
-    "n_positions",
-    "max_sequence_length",
-    "seq_length",
-    "max_seq_len",
-    "model_max_length",  # HuggingFace tokenizer_config field; used by some custom models (e.g. kimi_linear)
-)
-
 _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
 # minimax_m1: its lightning-attention kernel needs 128KB LDS but MI300X's per-CU shared-memory limit is 64KB → "out of
@@ -231,16 +244,6 @@ _STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
 _AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
-
-# Quark PTQ MX-FP4 (W4A4) MoE is implemented in sglang only on its aiter MoE runner; every other backend leaves the
-# scheme without a ``runner`` attribute and the server dies on the first forward pass.
-_NATIVE_MOE_RUNNER_QUANT_METHODS = frozenset({"quark"})
-
-# MX group size, mirroring sglang's ``QuarkConfig._is_mx_fp4`` validation.
-_MX_FP4_GROUP_SIZE = 32
-
-# sglang resolves a layer's quant config from these, most specific first.
-_QUARK_LAYER_CONFIG_KEYS = ("layer_quant_config", "layer_type_quant_config")
 
 # Quant methods with a real vLLM/sglang loader.
 _SUPPORTED_QUANT_METHODS = frozenset(
@@ -496,42 +499,6 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     }
 
 
-def _load_model_max_position_embeddings(model_path: str) -> int | None:
-    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None."""
-    if not model_path:
-        return None
-    cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        for key in _MAXPOS_CONFIG_KEYS:
-            val = cfg.get(key)
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val > 0:
-                return val
-    return None
-
-
-def _model_has_dual_chunk_attention(model_path: str) -> bool:
-    """Best-effort detect a ``dual_chunk_attention_config`` in config.json."""
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    if data.get("dual_chunk_attention_config"):
-        return True
-    nested = data.get("text_config")
-    return isinstance(nested, dict) and bool(nested.get("dual_chunk_attention_config"))
-
-
 def _model_is_moe(model_path: str) -> bool:
     """Best-effort detect a Mixture-of-Experts model from config.json."""
     data = _load_model_config_dict(model_path)
@@ -558,24 +525,6 @@ def _model_is_moe(model_path: str) -> bool:
     return False
 
 
-def _is_quark_mx_fp4_entry(entry: Any) -> bool:
-    """Whether one Quark layer-config entry is the MX-FP4 (W4A4) scheme."""
-    if not isinstance(entry, dict):
-        return False
-    weight = entry.get("weight")
-    inputs = entry.get("input_tensors")
-    if not isinstance(weight, dict) or not isinstance(inputs, dict):
-        return False
-    for spec in (weight, inputs):
-        if spec.get("dtype") != "fp4" or spec.get("qscheme") != "per_group":
-            return False
-        if spec.get("group_size") != _MX_FP4_GROUP_SIZE:
-            return False
-        if spec.get("scale_format") != "e8m0":
-            return False
-    return weight.get("is_dynamic") is not True and inputs.get("is_dynamic") is not False
-
-
 def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
     """Whether aiter's CK fused-MoE can serve this checkpoint at this TP."""
     if not _model_is_moe(model_path):
@@ -594,53 +543,6 @@ def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
         shards = max(1, int(tp or 1))
         return (size // shards) % 128 == 0
     return True
-
-
-def _model_moe_runner_requires_aiter(model_path: str) -> bool:
-    """Best-effort detect a MoE quant scheme that only the aiter runner serves."""
-    if not model_path:
-        return False
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        qc = cfg.get("quantization_config")
-        if not isinstance(qc, dict):
-            continue
-        if str(qc.get("quant_method") or "").strip().lower() not in _NATIVE_MOE_RUNNER_QUANT_METHODS:
-            continue
-        entries: list[Any] = [qc.get("global_quant_config")]
-        for key in _QUARK_LAYER_CONFIG_KEYS:
-            per_layer = qc.get(key)
-            if isinstance(per_layer, dict):
-                entries.extend(per_layer.values())
-        if any(_is_quark_mx_fp4_entry(entry) for entry in entries):
-            return True
-    return False
-
-
-def _model_declared_quant_method(model_path: str) -> str:
-    """Return the checkpoint's declared ``quant_method``, lowercased."""
-    if not model_path:
-        return ""
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return ""
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        qc = cfg.get("quantization_config")
-        if isinstance(qc, dict):
-            method = str(qc.get("quant_method") or "").strip().lower()
-            if method:
-                return method
-    return ""
 
 
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
