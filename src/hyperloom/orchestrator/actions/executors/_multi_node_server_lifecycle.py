@@ -372,12 +372,22 @@ async def restart_server_for_round(
 
         # Multi-node TraceLens SGLang patch fan-out (fail-soft).
         try:
-            from ._server_patcher import _tracelens_patch_enabled
+            from ._server_patcher import _tracelens_patch_enabled, resolve_sglang_shape_mode
         except Exception:  # noqa: BLE001
             _tracelens_patch_enabled_fn = lambda: True  # noqa: E731 - safe default
+            _sglang_shape_mode_val = "patched"
         else:
             _tracelens_patch_enabled_fn = _tracelens_patch_enabled
-        if _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+            _sglang_shape_mode_val = resolve_sglang_shape_mode()
+        if _sglang_shape_mode_val == "sitecustomize":
+            # SGLang >= 0.5.18: shapes come from the no-patch kernel_shape_tool
+            # (PYTHONPATH + TRACELENS_SHAPE_DISCOVERY, wired in launch_multinode /
+            # infera), so the git-apply fan-out is skipped entirely.
+            log.info(
+                "restart_server_for_round: SGLang shape mode=sitecustomize; "
+                "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."
+            )
+        elif _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 

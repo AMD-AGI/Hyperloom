@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import pathlib
@@ -310,6 +311,50 @@ def _probe_mec_firmware_lt_177() -> bool:
     return False
 
 
+# SGLang >= 0.5.18 uses the no-patch kernel_shape_tool (PYTHONPATH +
+# sitecustomize + TRACELENS_SHAPE_DISCOVERY) for shape discovery. This script is
+# standalone (no hyperloom import), so the gate is mirrored inline.
+_KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
+_SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
+
+
+def _sglang_shape_mode() -> str:
+    """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
+    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return "patched"
+    if override == "sitecustomize":
+        return "sitecustomize"
+    version = ""
+    try:
+        import sglang  # type: ignore
+
+        version = (getattr(sglang, "__version__", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
+    if not m:
+        return "patched"
+    vt = tuple(int(p) for p in m.group(1).split("."))
+    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
+
+
+def _maybe_activate_kernel_shape_tool(sub_env: dict[str, str]) -> None:
+    """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
+    root = os.environ.get("TRACELENS_ROOT", "").strip()
+    if not root or _sglang_shape_mode() != "sitecustomize":
+        return
+    tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
+    if not tool.is_dir():
+        sys.stderr.write(
+            f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled\n"
+        )
+        return
+    existing = sub_env.get("PYTHONPATH", "").strip()
+    sub_env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)
+    sub_env.setdefault("TRACELENS_SHAPE_DISCOVERY", "1")
+
+
 def _subprocess_env() -> dict[str, str]:
     """Build the framework launcher subprocess env."""
     env = dict(os.environ)
@@ -443,6 +488,7 @@ def _spawn_remote(
     dist_init_addr = f"{head_ip}:{dist_init_port}"
     fw = framework.lower()
     if fw == "sglang":
+        _maybe_activate_kernel_shape_tool(sub_env)
         cmd = _build_sglang_cmd(
             model=model,
             tp=tp,

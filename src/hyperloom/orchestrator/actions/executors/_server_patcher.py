@@ -213,6 +213,72 @@ def ensure_sglang_patched_for_tracelens(
     return _ensure_patched(plan)
 
 
+# SGLang shape-discovery mechanism gate.
+#
+# From 0.5.18 the kernel shape profiler is delivered as the no-patch TraceLens
+# tool (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY) instead of a
+# ``git apply`` of the shape-profiler patches; ``detailed_annotations`` is
+# upstream by then, so dropping the patch loses only shapes (the tool restores
+# them). Older versions keep the patch mechanism.
+_SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
+_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
+# The no-patch kernel shape tool lives in the TraceLens package under
+# ``TraceLens/TraceUtils/kernel_shape_tool`` (relative to TRACELENS_ROOT).
+_KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
+
+
+def sglang_shape_mode(version: str) -> str:
+    """Return the shape-discovery mechanism for an SGLang version.
+
+    ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
+    ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
+    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
+    (``auto`` / unset = version-based).
+    """
+    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return "patched"
+    if override == "sitecustomize":
+        return "sitecustomize"
+    vt = _version_tuple(version)
+    if vt is None:
+        # Unparseable version: keep the safe legacy mechanism.
+        return "patched"
+    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
+
+
+def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+    """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
+    root = _resolve_tracelens_root(tracelens_root)
+    if root is None:
+        return None
+    tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
+    return tool if tool.is_dir() else None
+
+
+def _detect_installed_sglang_version() -> str | None:
+    """Return the locally-installed SGLang version, or ``None`` if unimportable."""
+    try:
+        import sglang  # type: ignore  # noqa: I001 - runtime probe
+    except Exception:  # noqa: BLE001
+        return None
+    return (getattr(sglang, "__version__", "") or "").strip() or None
+
+
+def resolve_sglang_shape_mode() -> str:
+    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+
+    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
+    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
+    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    Falls back to ``"patched"`` (legacy) when the version cannot be determined.
+    """
+    version = _detect_installed_sglang_version() or os.environ.get(
+        "HYPERLOOM_SGLANG_VERSION_PIN", ""
+    ).strip()
+    return sglang_shape_mode(version)
+
+
 def ensure_sglang_patched_for_ck_blockscale(
     kernelforge_root: Path | str | None = None,
 ) -> bool:
