@@ -17,6 +17,7 @@ from hyperloom.common.git_safety import repo_root, safe_directory_args
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.inference_optimizer.session import session_paths as session_layout
+from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT
 from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
 
 #: ``vcs`` value for a tree whose directory is itself a git working tree.
@@ -198,7 +199,7 @@ def trees_path(session_dir: Path | None = None) -> Path:
         session_dir: Session root; defaults to the current session.
     """
     sd = session_dir if session_dir is not None else session_paths.session_dir()
-    return session_layout.reports_dir(sd) / "bringup" / "trees.json"
+    return session_layout.reports_dir(sd) / BRINGUP_SEGMENT / "trees.json"
 
 
 def write_trees(trees: Sequence[TreeIdentity], *, session_dir: Path | None = None) -> Path:
