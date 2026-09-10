@@ -9,15 +9,16 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...framework.build_actions import BuildResult, TargetedBuildAction
-from ...framework.stack_actions import FrameworkRuntime
-from ...framework.targeted_build import (
+from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
+from ...enablement.runtime.stack_actions import FrameworkRuntime
+from ...enablement.runtime.targeted_build import (
     _resolve_budget_sec,
     classify_build_exit,
     ensure_build_dead,
     spawn_build,
 )
 from ...loop.build_lifecycle import _driver_command
+from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
 
 if TYPE_CHECKING:
     from ...loop.sub_agent_runner import RunnerContext
@@ -26,16 +27,14 @@ if TYPE_CHECKING:
 class TargetedBuildExecutor:
     """Executor for ``targeted_build`` task rows."""
 
-    @staticmethod
-    def _attempt_root(session_dir: Path, task_id: str) -> str:
-        return str(session_dir / "enablement" / "builds" / task_id)
-
     async def __call__(self, ctx: "RunnerContext") -> dict[str, Any]:
         """Spawn and await a targeted build."""
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
-        attempt_root = self._attempt_root(session_dir, task.task_id)
+        # attempt_root is pre-filled by enqueue_targeted_build; fall back to
+        # deriving it here for tasks enqueued by older code that lacked it.
+        attempt_root = str(action.attempt_root or enablement_builds_dir(session_dir, task.task_id))
         budget_sec = float(_resolve_budget_sec(action))
         shared_state = ctx.extra.get("shared_state")
 

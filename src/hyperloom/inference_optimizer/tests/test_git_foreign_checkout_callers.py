@@ -80,7 +80,7 @@ _BLOCKED_VERBS = ("rev-parse", "status", "tag", "show", "clean", "ls-files", "ch
 
 _GUARDED_MODULES = (
     "orchestrator/kernel/request_handlers.py",
-    "orchestrator/framework/targeted_build.py",
+    "orchestrator/enablement/runtime/targeted_build.py",
     "orchestrator/actions/executors/baseline.py",
 )
 

@@ -195,7 +195,7 @@ def test_runtime_python_exe_overrides_framework_python():
 
 def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     """An extended FrameworkRuntime.to_runtime_override lands end-to-end in YAML."""
-    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime
 
     base_yaml = _base_yaml(tmp_path)
     (tmp_path / "pkg").mkdir()

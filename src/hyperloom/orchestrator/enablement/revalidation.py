@@ -69,7 +69,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         # KEEP'd candidate.
         active_rt = state.enablement.active_runtime or {}
         if isinstance(active_rt, dict) and active_rt:
-            from ..framework.stack_actions import FrameworkRuntime
+            from .runtime.stack_actions import FrameworkRuntime
 
             rt_obj = FrameworkRuntime.from_state(active_rt)
             rt_override = rt_obj.to_runtime_override()

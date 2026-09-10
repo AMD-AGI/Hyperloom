@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
@@ -1987,14 +1988,12 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping runtime provision in multi-node mode")
             return None
 
-        from ...framework.adapters import get_adapter
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.adapters import get_adapter
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
         attempt_dir = (
-            self.session_dir
-            / "enablement"
-            / "stacks"
+            enablement_stacks_dir(self.session_dir)
             / (action.framework or "unknown")
             / (specialist_task_id or "attempt")
         )
@@ -2021,7 +2020,7 @@ class IntegratePatchExecutor:
         try:
             result = adapter.provision(action, attempt_dir)
             if result.ok and not adapter.probe(result, action):
-                from ...framework.stack_actions import ProvisionResult as _PR
+                from ...enablement.runtime.stack_actions import ProvisionResult as _PR
 
                 result = _PR(ok=False, log_path=result.log_path, error="adapter probe failed after provision")
         except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
@@ -2102,8 +2101,8 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping localization in multi-node mode")
             return None
 
-        from ...framework.localization import build_localization_diff
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.localization import build_localization_diff
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
 
@@ -2845,7 +2844,7 @@ class IntegratePatchExecutor:
                 # venv_root is ``<attempt_dir>/venv``; GC the whole attempt dir.
                 self._gc_attempt_dir(Path(root).parent)
 
-        from hyperloom.agents.framework.enablement import runnable_decision
+        from hyperloom.common.failure_signature import runnable_decision
 
         from ...bringup import round_advanced
 
@@ -3159,7 +3158,7 @@ class IntegratePatchExecutor:
         # Editable-refresh so localized Python changes take effect in the attempt
         # runtime (no-op for plain wheel trees like atom).
         try:
-            from ...framework.adapters import get_adapter
+            from ...enablement.runtime.adapters import get_adapter
 
             venv_py = ""
             if provision_result is not None and getattr(provision_result, "ok", False):
@@ -3567,7 +3566,7 @@ class IntegratePatchExecutor:
                     ]
                 )
                 rel_paths += inside_root
-                from ...framework.adapters import get_adapter
+                from ...enablement.runtime.adapters import get_adapter
 
                 source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
                     str(framework_root)

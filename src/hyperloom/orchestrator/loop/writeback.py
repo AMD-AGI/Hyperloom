@@ -5475,7 +5475,7 @@ class WritebackCollaborator:
         import shutil
         import signal
 
-        from ..framework.targeted_build import kill_build_pgroup
+        from ..enablement.runtime.targeted_build import kill_build_pgroup
 
         state = self.shared_state
         pending = getattr(state, "pending_targeted_build", {}) or {}

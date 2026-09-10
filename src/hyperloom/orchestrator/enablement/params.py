@@ -44,7 +44,7 @@ def _maybe_build_runtime_candidate(
 
         if is_multi_node():
             return None
-        from ..framework.adapters import get_adapter
+        from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
         action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
@@ -98,7 +98,7 @@ def _maybe_build_localization_candidate(
 
         if is_multi_node():
             return None
-        from ..framework.adapters import get_adapter
+        from .runtime.adapters import get_adapter
 
         adapter = get_adapter(framework)
         action = adapter.build_localization_action(
@@ -146,8 +146,8 @@ class EnablementParams(CoordinatorCollaborator):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from hyperloom.agents.framework.enablement import EnablementRequest
-        from hyperloom.agents.framework.enablement_ops import build_search_plan
+        from hyperloom.common.failure_signature import EnablementRequest
+        from .mandate import build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -274,7 +274,7 @@ class EnablementParams(CoordinatorCollaborator):
             )
             notes = (span_note + "\n\n" + notes).strip() if notes else span_note
         gap_cid = f"gap.enablement.{signature.kind}"
-        from hyperloom.agents.framework.enablement import CapabilityGap
+        from hyperloom.common.failure_signature import CapabilityGap
 
         capability_gap = CapabilityGap.from_signature(signature)
 
@@ -550,7 +550,7 @@ class EnablementParams(CoordinatorCollaborator):
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from hyperloom.agents.framework.enablement_ops import score_enablement_title
+        from .mandate import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
         from hyperloom.common.pr_monitor_urls import pr_monitor_base_url

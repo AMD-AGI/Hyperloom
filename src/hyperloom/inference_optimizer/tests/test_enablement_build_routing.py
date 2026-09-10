@@ -11,7 +11,7 @@ import types as _types
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
+from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.enablement.build import (
@@ -585,7 +585,7 @@ async def test_route_failed_compile_error_novel_calls_advanced(coord):
 @pytest.mark.asyncio
 async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path):
     """A compile_error whose key is already in the novelty ledger → reverted."""
-    from hyperloom.orchestrator.framework.build_actions import build_novelty_key
+    from hyperloom.orchestrator.enablement.runtime.build_actions import build_novelty_key
 
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     # Pre-seed the ledger with this exact novelty key.
@@ -605,7 +605,7 @@ async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path)
 @pytest.mark.asyncio
 async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
     """Ledger grows on each novel failure and is capped at 20 entries."""
-    from hyperloom.orchestrator.framework.build_actions import build_novelty_key
+    from hyperloom.orchestrator.enablement.runtime.build_actions import build_novelty_key
 
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     # Seed ledger with 20 different entries so the cap truncates old ones.
