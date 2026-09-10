@@ -59,16 +59,6 @@ def _pin_fusion_provider_env(monkeypatch, shape):
         monkeypatch.setenv(key, value)
 
 
-#: A candidate server.log must now carry an aiter dispatch line; these tests
-#: are about priority order, so every candidate gets one.
-_AITER_LINE = (
-    "shape is M:128, N:512, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' "
-    "bias=False, scaleAB=False, bpreshuffle=False found padded_M: 128, N:512, "
-    "K:4096 is tuned on cu_num = 256 in /tmp/aiter_configs/bf16_tuned_gemm.csv, "
-    "libtype is opus, kernel name is opus_gemm\n"
-)
-
-
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
@@ -98,27 +88,6 @@ class TestForgeGemmHelperCoverage:
     def test_truthy_env_value_false(self, value):
         assert is_truthy(value) is False
 
-    def test_resolve_forge_server_log_priority(self, tmp_path):
-        state = SharedState()
-        baseline = tmp_path / "baseline"
-        current = tmp_path / "current"
-        baseline.mkdir()
-        current.mkdir()
-        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
-        (current / "server.log").write_text("current\n" + _AITER_LINE, encoding="utf-8")
-        state.last_baseline = {"workspace": str(baseline)}
-        state.current_best = {"workspace": str(current)}
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(current / "server.log")
-
-    def test_resolve_forge_server_log_bounded_runs_fallback(self, tmp_path):
-        state = SharedState()
-        log = tmp_path / "runs" / "explore" / "abc" / "server.log"
-        log.parent.mkdir(parents=True)
-        log.write_text(_AITER_LINE, encoding="utf-8")
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
-
     def test_resolve_forge_precision_payload_override(self):
         state = SharedState(precision="bf16")
         assert krh._resolve_forge_precision_and_quant(
@@ -144,29 +113,6 @@ class TestForgeGemmHelperCoverage:
         model_dir.mkdir(parents=True, exist_ok=True)
         (model_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
         return str(model_dir)
-
-    def test_resolve_fp8_quant_type(self, tmp_path):
-        block = self._write_cfg(
-            tmp_path / "block",
-            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
-        )
-        method_block = self._write_cfg(
-            tmp_path / "mblock",
-            {"quantization_config": {"quant_method": "fp8_block"}},
-        )
-        plain = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
-        assert krh._resolve_fp8_quant_type(block) == "blockscale"
-        assert krh._resolve_fp8_quant_type(method_block) == "blockscale"
-        assert krh._resolve_fp8_quant_type(plain) == "per_token"
-        # Multimodal: quantization_config nested under text_config is detected.
-        nested_block = self._write_cfg(
-            tmp_path / "nblock",
-            {"text_config": {"quantization_config": {"weight_block_size": [128, 128]}}},
-        )
-        assert krh._resolve_fp8_quant_type(nested_block) == "blockscale"
-        # Unreadable / missing config -> auto.
-        assert krh._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
-        assert krh._resolve_fp8_quant_type("") == "auto"
 
     def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
         model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
@@ -271,15 +217,6 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
 
-    def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
-        state = SharedState()
-        baseline = tmp_path / "baseline"
-        baseline.mkdir()
-        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
-        state.last_baseline = {"workspace": str(baseline)}
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
-
     def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
         state = SharedState()
         shapes = tmp_path / "gemm_shapes.json"
@@ -300,97 +237,6 @@ class TestForgeGemmHelperCoverage:
         bad = tmp_path / "bad.json"
         bad.write_text(json.dumps([123, 456]), encoding="utf-8")
         assert krh._is_forge_compatible_shapes_json(bad) is False
-
-    @staticmethod
-    def _write_aiter_csv(session_dir: Path, hash_id: str, fname: str, rows: str) -> Path:
-        cfg = session_dir / "runs" / "specialist" / hash_id / "worktree" / "aiter" / "configs"
-        cfg.mkdir(parents=True, exist_ok=True)
-        path = cfg / fname
-        path.write_text(rows, encoding="utf-8")
-        return path
-
-    def test_resolve_forge_untuned_csv_fp8_blockscale(self, tmp_path):
-        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "auto") == str(expected)
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
-
-    def test_resolve_forge_untuned_csv_per_token(self, tmp_path):
-        expected = self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_untuned_gemm.csv", "M,N,K,q_dtype_w\n16,1536,7168,fp8\n"
-        )
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "per_token") == str(expected)
-
-    def test_resolve_forge_untuned_csv_skips_header_only(self, tmp_path):
-        # Header-only / empty files are not a valid shape source.
-        self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
-
-    def test_resolve_forge_untuned_csv_picks_newest_nonempty(self, tmp_path):
-        old = self._write_aiter_csv(tmp_path, "old", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n1,2,3\n")
-        new = self._write_aiter_csv(tmp_path, "new", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n4,5,6\n")
-        import os
-
-        os.utime(old, (1, 1))
-        os.utime(new, (10_000_000, 10_000_000))
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(new)
-
-    def test_resolve_forge_untuned_csv_bf16_returns_empty(self, tmp_path):
-        # bf16 dense derives shapes from config.json; no CSV needed.
-        self._write_aiter_csv(tmp_path, "abc", "bf16_untuned_gemm.csv", "M,N,K\n1,2,3\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "bf16", "none") == ""
-
-    def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
-
-    @staticmethod
-    def _write_model_config(model_dir: Path, hidden_size: int) -> str:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "config.json").write_text(json.dumps({"hidden_size": hidden_size}), encoding="utf-8")
-        return str(model_dir)
-
-    def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
-        # CSV carries K=7168 shapes but the model has hidden_size=2048: reject it so forge derives per-model shapes
-        # from config.json.
-        self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
-
-    def test_resolve_forge_untuned_csv_accepts_model_match(self, tmp_path):
-        # A CSV whose K column includes the model hidden_size is accepted.
-        expected = self._write_aiter_csv(
-            tmp_path,
-            "abc",
-            "a8w8_blockscale_untuned_gemm.csv",
-            "M,N,K\n16,6144,2048\n16,2048,8192\n",
-        )
-        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == str(expected)
-
-    def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
-        # Without a model_path the resolver cannot validate; returns newest non-empty CSV.
-        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
-
-    def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
-        # Missing/unreadable config.json: cannot validate, so keep the CSV.
-        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")) == str(
-            expected
-        )
-
-    def test_csv_matches_model_helpers(self, tmp_path):
-        csv_mismatch = self._write_aiter_csv(
-            tmp_path, "h1", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
-        )
-        csv_match = self._write_aiter_csv(tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n")
-        model_path = self._write_model_config(tmp_path / "m", hidden_size=2048)
-        assert krh._model_hidden_size(model_path) == 2048
-        assert krh._csv_k_values(csv_mismatch) == {7168}
-        assert krh._csv_k_values(csv_match) == {2048}
-        assert krh._csv_matches_model(csv_mismatch, model_path) is False
-        assert krh._csv_matches_model(csv_match, model_path) is True
-        # No model_path / unreadable config -> cannot validate -> accept.
-        assert krh._csv_matches_model(csv_mismatch, "") is True
 
     def test_read_forge_result_json(self, tmp_path):
         (tmp_path / "result.json").write_text(
@@ -496,28 +342,6 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_fusion_sentinel(text) == payload
         assert krh._parse_forge_fusion_sentinel("no marker") is None
         assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
-
-    def test_resolve_fusion_decode_trace_prefers_payload_and_newest(self, tmp_path):
-        state = SharedState()
-        state_dir = tmp_path / "state_trace"
-        payload_dir = tmp_path / "payload_trace"
-        state_dir.mkdir()
-        payload_dir.mkdir()
-        state_trace = state_dir / "old.trace.json.gz"
-        payload_old = payload_dir / "old.trace.json.gz"
-        payload_new = payload_dir / "new.trace.json"
-        state_trace.write_text("state", encoding="utf-8")
-        payload_old.write_text("old", encoding="utf-8")
-        payload_new.write_text("new", encoding="utf-8")
-        import os
-
-        os.utime(payload_old, (1, 1))
-        os.utime(payload_new, (10, 10))
-        state.last_profile_trace = str(state_dir)
-
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": str(payload_dir)}) == str(payload_new)
-        assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
-        assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
 
     def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
         probed: list[str] = []
@@ -2030,48 +1854,6 @@ class TestForgeGemmHelperCoverage:
 
         assert result["engine"] == "forge"
 
-    @pytest.mark.parametrize(
-        "quant_type",
-        [
-            "blockscale_bpreshuffle",
-            "a8w8_blockscale_bpreshuffle",
-            "blockscale+bpreshuffle",
-        ],
-    )
-    def test_resolve_forge_untuned_csv_blockscale_bpreshuffle(
-        self,
-        tmp_path,
-        quant_type,
-    ):
-        expected = self._write_aiter_csv(
-            tmp_path,
-            "abc",
-            "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
-            "M,N,K\n16,1536,7168\n",
-        )
-        assert krh._resolve_forge_untuned_csv(
-            tmp_path,
-            "fp8",
-            quant_type,
-        ) == str(expected)
-
-    def test_resolve_forge_untuned_csv_rejects_unknown_fp8_quant(self, tmp_path):
-        self._write_aiter_csv(
-            tmp_path,
-            "abc",
-            "a8w8_blockscale_untuned_gemm.csv",
-            "M,N,K\n16,1536,7168\n",
-        )
-
-        assert (
-            krh._resolve_forge_untuned_csv(
-                tmp_path,
-                "fp8",
-                "misspelled_quant_type",
-            )
-            == ""
-        )
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "source",
@@ -2116,7 +1898,7 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
             krh,
-            "_resolve_forge_untuned_csv",
+            "resolve_forge_untuned_csv",
             lambda *args, **kwargs: str(specialist_csv),
         )
 
@@ -3664,7 +3446,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
             krh,
-            "_resolve_forge_untuned_csv",
+            "resolve_forge_untuned_csv",
             lambda *args, **kwargs: str(stale_untuned),
         )
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)

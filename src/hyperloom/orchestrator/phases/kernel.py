@@ -1879,10 +1879,10 @@ class KernelPhase(PhaseHandler):
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""
-        from ..kernel.request_handlers import _resolve_forge_server_log
+        from ..kernel.kernel_evidence import resolve_forge_server_log
 
         try:
-            log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
+            log_path = resolve_forge_server_log(self.shared_state, self.session_dir)
         except Exception:  # noqa: BLE001 - detection is best-effort
             return False
         if not log_path:
