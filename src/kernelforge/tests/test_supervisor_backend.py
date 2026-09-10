@@ -357,7 +357,8 @@ def test_codex_supervisor_uses_shared_backend_config_and_usage(
     assert captured["usage"] is usage
     assert spec.model == "gpt-codex-supervisor-test"
     assert spec.timeout_sec == 77
-    assert spec.reasoning_effort == "max"
+    # ``agent_reasoning_effort="medium"`` is the operator's value and it wins.
+    assert spec.reasoning_effort == "medium"
     assert spec.writable is False
     assert spec.protected_globs == ["*"]
     assert spec.provider_options == {}

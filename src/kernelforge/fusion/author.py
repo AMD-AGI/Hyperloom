@@ -1090,7 +1090,6 @@ def _run_registered_author(
         model=model,
         writable=True,
         timeout_sec=max(1, int(timeout_s)),
-        reasoning_effort="max",
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
