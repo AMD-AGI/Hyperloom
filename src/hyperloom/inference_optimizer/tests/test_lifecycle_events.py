@@ -22,7 +22,7 @@ def test_lifecycle_label_resolves_human_labels():
     # Pipeline names map to the internal step/handler names.
     assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
-    assert lifecycle_label("run_optimization") == "GEAK"
+    assert lifecycle_label("run_gemm_tuning") == "GEMM tuning"
     assert lifecycle_label("integrate") == "Integrate"
     assert lifecycle_label("apply_patch") == "Integrate"
     assert lifecycle_label("report") == "Report"
@@ -87,7 +87,7 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
     row = s.record_lifecycle_event(
-        step="run_optimization",
+        step="run_gemm_tuning",
         status="START",
         artifacts={"workspace": "/tmp/ws"},
         detail="kernel tg001",
@@ -95,7 +95,7 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
     assert row["phase"] == "KERNEL_AGENT"  # defaulted from current phase
-    assert row["label"] == "GEAK"  # defaulted from step
+    assert row["label"] == "GEMM tuning"  # defaulted from step
     assert row["status"] == "START"
     assert row["artifacts"] == {"workspace": "/tmp/ws"}
     assert row["seq"] == 0

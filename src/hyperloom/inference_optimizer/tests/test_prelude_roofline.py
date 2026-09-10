@@ -85,6 +85,17 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c._run_started_monotonic = None
     c._phase_budget_pct = {}
 
+    # Every lane reports its outcome on the bus, whatever its own work returned.
+    class _Bus:
+        def __init__(self) -> None:
+            self.posted: list[object] = []
+
+        async def append_and_seq(self, message):
+            self.posted.append(message)
+            return message
+
+    c.bus = _Bus()
+
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     async def _skip_controller(
         _handoff_dir: Path,

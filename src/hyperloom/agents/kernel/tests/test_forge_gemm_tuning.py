@@ -31,9 +31,6 @@ def _payload() -> dict:
         "conc": 256,
         "mp": 8,
         "output_dir": "/tmp/out",
-        "iters": 10,
-        "warmup": 2,
-        "min_improvement_pct": 3.0,
         "timeout": 123,
         "global_timeout": 456,
         "tuner": "fmoe_ck",
@@ -42,10 +39,8 @@ def _payload() -> dict:
         "shapes_json": "/tmp/shapes.json",
         "tunableop_input": "/tmp/tunable.txt",
         "kernel_signature_log": "/tmp/server.log",
-        "gpu_ids": "0,1",
         "tokens": "64,128",
         "skip_gpu_check": True,
-        "verbose": True,
         "thorough": True,
     }
 
@@ -68,7 +63,6 @@ def test_build_cmd_maps_all_options():
     assert cmd[cmd.index("--global-timeout") + 1] == "456"
     assert cmd[cmd.index("--tokens") + 1] == "64,128"
     assert "--skip-gpu-check" in cmd
-    assert "--verbose" in cmd
     assert "--thorough" in cmd
 
 
@@ -109,9 +103,6 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--conc",
         "--mp",
         "--output-dir",
-        "--iters",
-        "--warmup",
-        "--min-improvement-pct",
         "--timeout",
         "--global-timeout",
         "--tuner",
@@ -120,9 +111,7 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--shapes-json",
         "--tunableop-input",
         "--kernel-signature-log",
-        "--gpu-ids",
         "--skip-gpu-check",
-        "--verbose",
         "--thorough",
         "--tokens",
         "--kb-current-lib",
