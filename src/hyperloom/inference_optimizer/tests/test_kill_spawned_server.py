@@ -788,7 +788,7 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     classifier only sees Magpie's ``subprocess_nonzero`` stdout tail, classifies
     ``unknown``, and never seeds the ``pip install -U transformers`` bridge —
     starving every enablement round of the real root cause (DeepSeek-V4 repro)."""
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     log_path = tmp_path / "server.log"
     # A healthy INFO banner naming architectures must NOT trip the markers.
