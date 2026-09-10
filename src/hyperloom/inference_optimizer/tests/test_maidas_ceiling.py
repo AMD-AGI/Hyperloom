@@ -71,3 +71,39 @@ def test_spilled_row_falls_back(tmp_path):
     xlsx = _write_xlsx(tmp_path / "l.xlsx", spill=True)
     bd = compute_roofline_breakdown_from_state(_state(maidas_path=xlsx))
     assert bd.bound_kind != "maidas"
+
+
+def _write_multi(path, rows):
+    """Write an AllScenarios sheet with several uct_decode rows (per nbs)."""
+    base = dict(workload="llama405b", soc="mi355x", prefill=1024, decode=1024,
+                bfp="FP8", hp=4, pp=1, ep=1, cp=1, cpp=1, spill=False,
+                scenario="uct_decode")
+    pd.DataFrame([{**base, **r} for r in rows]).to_excel(
+        path, sheet_name="AllScenarios", index=False)
+    return str(path)
+
+
+def test_conc_sweep_ceiling_uses_maidas_per_rung(tmp_path, monkeypatch):
+    # The concurrency sweep must price each rung from MAIDAS (via the seam).
+    # Import actions.executors first to establish the kernel<->executors import
+    # order (a pre-existing circular import between the two conc_sweep modules).
+    import hyperloom.orchestrator.actions.executors  # noqa: F401
+    from hyperloom.orchestrator.kernel import conc_sweep as cs
+    xlsx = _write_multi(tmp_path / "m.xlsx",
+                        [{"nbs": 8, "avg_lat": 30.0}, {"nbs": 16, "avg_lat": 23.32}])
+    # _build_roofline_ceiling early-guards on load_model_meta; supply a stub so
+    # the model_meta report block has something (ceiling itself comes from MAIDAS).
+    dummy = SimpleNamespace(weight_bytes=1, active_weight_bytes=1, num_experts=0,
+                            experts_per_tok=0, expert_weight_bytes=0, num_layers=1,
+                            num_kv_heads=1, head_dim=1, weight_dtype_bytes=2)
+    monkeypatch.setattr(cs, "load_model_meta", lambda *a, **k: dummy)
+    out = cs._build_roofline_ceiling(
+        _state(maidas_path=xlsx), concs=[8, 16], isl=1024, osl=1024,
+        baseline_points=[], optimized_points=[],
+    )
+    assert out is not None
+    by_conc = {r["conc"]: r for r in out["rows"]}
+    assert by_conc[8]["bound_kind"] == "maidas"
+    assert by_conc[8]["t_peak_tok_s"] == pytest.approx(round(8 * 1000.0 / 30.0, 2))
+    assert by_conc[16]["bound_kind"] == "maidas"
+    assert by_conc[16]["t_peak_tok_s"] == pytest.approx(round(16 * 1000.0 / 23.32, 2))
