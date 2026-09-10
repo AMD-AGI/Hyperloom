@@ -1269,6 +1269,23 @@ class TestATickCannotOutliveTheSessionBound:
         assert started == [True]
 
     @pytest.mark.asyncio
+    async def test_a_reactor_turn_uses_the_backend_call_timeout(self, coord: Coordinator):
+        coord._run_deadline = Deadline.after(60.0)
+        coord.backends["orchestration"].call_timeout_s = 0.01
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(
+                _hang_forever,
+                stage="reactor:orchestration",
+            ),
+            timeout=0.5,
+        )
+
+    def test_only_reactor_steps_gain_a_new_stage_timeout(self, coord: Coordinator):
+        assert coord._stage_timeout_sec("advance_phase") is None
+        assert coord._stage_timeout_sec("reactor:not-registered") is None
+
+    @pytest.mark.asyncio
     async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):
         coord._run_deadline = Deadline.after(-10.0)
         coord._closing_deadline = Deadline.after(60.0)

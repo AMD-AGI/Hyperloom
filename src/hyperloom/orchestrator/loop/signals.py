@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 
 __all__ = ["SignalDrain"]
 
-#: Signals an operator uses to ask for a graceful stop.
-STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM)
+#: Signals that ask the coordinator to stop.
+STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class SignalDrain:
@@ -43,6 +43,8 @@ class SignalDrain:
         self.requested = threading.Event()
         """threading.Event: Set by the reading thread the instant a stop arrives,
         so synchronous code on the tick's stack can see it without the loop."""
+        self.received: set[int] = set()
+        """Signal numbers observed by the drain thread."""
         self._read_fd = -1
         self._write_fd = -1
         self._previous: dict[int, Any] = {}
@@ -88,6 +90,7 @@ class SignalDrain:
                 return
             if not data:
                 return
+            self.received.update(data)
             self.requested.set()
             try:
                 self._loop.call_soon_threadsafe(self._stop_event.set)

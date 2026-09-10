@@ -47,6 +47,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   third-party provider plugins published before the rename are still
   discovered, and it is not a CLI surface.
 
+### Fixed
+
+- **Supervisor watchdog restarts are resumable and bounded.** A wedged
+  coordinator receives SIGHUP, preserving the interrupted phase segment without
+  creating a session outcome; repeated wedges become terminal after three
+  restart attempts. Inline role turns now respect the backend call timeout so a
+  single awaited turn cannot consume the full session.
+
 ## [v1.1.0] - 2026-09-09
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

@@ -65,6 +65,71 @@ def _run_monitor_briefly(env, *, seconds=3.0):
     return out, err
 
 
+def _run_terminal_check(session_dir: Path) -> subprocess.CompletedProcess[str]:
+    text = MONITOR.read_text(encoding="utf-8")
+    match = re.search(r"is_terminal_session\(\) \{\n.*?<<'PY'\n(.*?)\nPY\n\}", text, re.DOTALL)
+    assert match is not None
+    return subprocess.run(
+        ["python3", "-", str(session_dir)],
+        input=match.group(1),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_an_incomplete_close_phase_is_not_terminal(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "phase": "CLOSE",
+                "close_sequence_done": False,
+                "stop_reason": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_terminal_check(tmp_path)
+
+    assert result.returncode == 1
+
+
+def test_a_completed_close_sequence_is_terminal(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "phase": "CLOSE",
+                "close_sequence_done": True,
+                "stop_reason": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_terminal_check(tmp_path)
+
+    assert result.returncode == 0
+
+
+def test_a_supervisor_final_json_is_terminal(tmp_path):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "final.json").write_text(
+        json.dumps(
+            {
+                "producer": "supervisor",
+                "stop_reason": "supervisor_tick_stalled",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_terminal_check(tmp_path)
+
+    assert result.returncode == 0
+
+
 def test_monitor_waits_for_delayed_launch_info(tmp_path):
     """A delayed LAUNCH_INFO_FILE: the monitor polls (bounded), resolves it, and exits 0 — not exit 2 before launch-info flushed."""
     sess = tmp_path / "sess"

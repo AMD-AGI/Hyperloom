@@ -5,8 +5,8 @@
 # Robustness monitor for long-running ``python -m hyperloom.inference_optimizer.cli optimize`` runs.
 #
 # Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
-# terminal session (any ``stop_reason`` in ``STOP_REASON_VOCAB``, ``phase=CLOSE``,
-# or ``reports/final.md`` present), exits 0 without resuming. Otherwise it only
+# terminal session (a completed CLOSE sequence, a final artifact, or any
+# ``stop_reason`` in ``STOP_REASON_VOCAB``), exits 0 without resuming. Otherwise it only
 # re-launches the session via ``optimize --resume-from "$session_dir"``
 # when the optimizer is judged dead by a ROBUST, multi-signal liveness check
 # (issue #592). The session is considered ALIVE when ANY of the following hold:
@@ -145,9 +145,10 @@ import sys
 sd = pathlib.Path(sys.argv[1])
 state_path = sd / "state.json"
 final_report = sd / "reports" / "final.md"
+final_summary = sd / "reports" / "final.json"
 
-if final_report.is_file():
-    print("final_report", file=sys.stderr)
+if final_report.is_file() or final_summary.is_file():
+    print("final_artifact", file=sys.stderr)
     raise SystemExit(0)
 
 if not state_path.is_file():
@@ -156,9 +157,10 @@ if not state_path.is_file():
 state = json.loads(state_path.read_text())
 phase = (state.get("phase") or "").strip()
 stop = (state.get("stop_reason") or "").strip()
+close_done = state.get("close_sequence_done") is True
 
-if phase == "CLOSE":
-    print(f"phase={phase}", file=sys.stderr)
+if close_done:
+    print("close_sequence_done", file=sys.stderr)
     raise SystemExit(0)
 
 try:

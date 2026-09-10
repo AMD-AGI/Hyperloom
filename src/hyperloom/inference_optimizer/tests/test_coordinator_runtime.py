@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,7 +46,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
+from hyperloom.inference_optimizer.session.session_paths import supervisor_status_path, target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
@@ -68,6 +69,100 @@ def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     for name in ("orchestration", "critic", "robustness"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
+
+
+def test_signal_stop_reason_comes_from_the_received_signal(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    try:
+        c._signals = SimpleNamespace(received={signal.SIGHUP})
+        assert c._signal_stop_reason() == "supervisor_restart_requested"
+
+        status = supervisor_status_path(session_dir)
+        status.parent.mkdir(parents=True, exist_ok=True)
+        status.write_text(
+            json.dumps({"stop_asked": ["supervisor_tick_stalled: stale"]}),
+            encoding="utf-8",
+        )
+        c._signals = SimpleNamespace(received={signal.SIGTERM})
+        assert c._signal_stop_reason() == "signal"
+
+        c._signals = SimpleNamespace(received={signal.SIGHUP, signal.SIGTERM})
+        assert c._signal_stop_reason() == "signal"
+    finally:
+        c.db.close()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restart_leaves_the_session_resumable(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: None)
+    c._stop.set()
+    c.shared_state.set_stop_reason("time_exhausted")
+    close_calls = 0
+    finalize_calls = 0
+
+    async def _close(*, reason):
+        nonlocal close_calls
+        close_calls += 1
+
+    async def _finalize():
+        nonlocal finalize_calls
+        finalize_calls += 1
+
+    c.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _finalize
+    try:
+        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        assert (
+            reason,
+            c.shared_state.stop_reason,
+            c.shared_state.stop_ts,
+            bool(c.shared_state.leg_ended_ts),
+            close_calls,
+            finalize_calls,
+        ) == (
+            "supervisor_restart_requested",
+            "",
+            "",
+            True,
+            0,
+            0,
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_follows_the_normal_terminal_path(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._signals = SimpleNamespace(received={signal.SIGTERM}, close=lambda: None)
+    c._stop.set()
+    close_calls = 0
+    finalize_calls = 0
+
+    async def _close(*, reason):
+        nonlocal close_calls
+        assert reason == "signal"
+        close_calls += 1
+
+    async def _finalize():
+        nonlocal finalize_calls
+        finalize_calls += 1
+
+    c.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _finalize
+    try:
+        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        assert (
+            reason,
+            c.shared_state.stop_reason,
+            bool(c.shared_state.stop_ts),
+            c.shared_state.leg_ended_ts,
+            close_calls,
+            finalize_calls,
+        ) == ("signal", "signal", True, "", 1, 1)
+    finally:
+        await c.stop()
 
 
 # MockBackend

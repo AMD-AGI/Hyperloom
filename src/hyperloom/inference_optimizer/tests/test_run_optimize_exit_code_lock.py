@@ -13,6 +13,63 @@ import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
 from hyperloom.inference_optimizer.session.lock import SessionLock
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+
+def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
+    )
+
+    ocli._write_cli_terminal_artifacts(
+        tmp_path,
+        SharedState(session_id="s"),
+        "supervisor_restart_requested",
+    )
+
+    assert order == []
+
+
+def test_terminal_artifacts_keep_the_existing_write_order(tmp_path: Path, monkeypatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
+    )
+
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"), "signal")
+
+    assert order == ["final_json", "breakdown", "final_md"]
+
+
+def test_completed_close_only_needs_the_crash_safe_json(tmp_path: Path, monkeypatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
+    )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
+    )
+
+    state = SharedState(session_id="s", close_sequence_done=True)
+    ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
+
+    assert order == ["final_json"]
 
 
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:

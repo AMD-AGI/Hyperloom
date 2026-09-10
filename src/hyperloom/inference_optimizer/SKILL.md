@@ -761,6 +761,11 @@ for the kernel dispatch and artifact layout.
 
 ### Recovery
 
+The out-of-band supervisor uses SIGHUP for a resumable watchdog restart. This
+records the interrupted leg boundary without producing a stop reason or final
+report; the monitor resumes the same session with `--resume-from`. After three
+watchdog restarts, the next watchdog stop is terminal instead.
+
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
 are set in `.env` (or the calling shell) and that the gateway is reachable:
@@ -1217,10 +1222,10 @@ Three exceptions:
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
 `state.json` every 5 min, exits without resuming when the session is terminal
-(any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
-`reports/final.md` present — including failure sentinels like
-`baseline_failed`), and resumes via `--resume-from` only when the optimizer
-dies without those markers (unexpected crash).
+(any `stop_reason` in `STOP_REASON_VOCAB`, a completed CLOSE sequence, or a
+`reports/final.json` / `final.md` artifact — including failure sentinels like
+`baseline_failed`), and resumes via `--resume-from` when the optimizer dies
+without those markers, including a resumable watchdog restart.
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"

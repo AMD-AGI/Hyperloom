@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess  # nosec B404 - spawns a process purely so its pid can be signalled
 import sys
@@ -66,7 +67,7 @@ def _a_pid_that_is_running(request, *, deaf: bool = False) -> int:
     Returns:
         int: The child's pid, once it has announced it is ready to be signalled.
     """
-    ignore = "signal.signal(signal.SIGTERM, signal.SIG_IGN); " if deaf else ""
+    ignore = "signal.signal(signal.SIGHUP, signal.SIG_IGN); " if deaf else ""
     program = f"import signal, sys, time; {ignore}sys.stdout.write('r'); sys.stdout.flush(); time.sleep(300)"
     child = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE)  # nosec B603
     request.addfinalizer(child.kill)
@@ -152,6 +153,66 @@ async def test_a_wedged_coordinator_is_asked_to_stop_on_the_one_channel_that_rea
     assert [r.split(":")[0] for r in supervisor.report.asked] == [WEDGED_STOP_REASON]
     assert "tick 1 last advanced" in supervisor.report.asked[0]
     _wait_for_exit(pid)
+
+
+def test_a_wedged_coordinator_is_asked_to_restart_with_sighup(tmp_path):
+    """The restart intent is carried by the signal itself."""
+    supervisor = _supervisor(tmp_path)
+    observation = mock.Mock(pid=123, detail="stalled")
+
+    with mock.patch.object(os, "kill") as kill:
+        supervisor._ask_to_stop(observation)
+
+    kill.assert_called_once_with(123, signal.SIGHUP)
+
+
+def test_an_unreadable_restart_count_refuses_another_resumable_restart(tmp_path):
+    status = supervisor_status_path(tmp_path)
+    status.parent.mkdir(parents=True)
+    status.write_text("{", encoding="utf-8")
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    observation = mock.Mock(pid=123, detail="stalled")
+
+    with mock.patch.object(os, "kill") as kill:
+        supervisor._ask_to_stop(observation)
+
+    kill.assert_called_once_with(123, signal.SIGTERM)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_within_the_limit_stays_resumable(tmp_path):
+    store.write_status(tmp_path, {"restart_count": 2})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    wedged = mock.Mock(verdict=WEDGED, pid=123, detail="stalled", tick=7, tick_age_sec=999.0)
+    dead = mock.Mock(verdict=DEAD, pid=123, detail="gone", tick=7, tick_age_sec=1000.0)
+
+    with mock.patch.object(os, "kill") as kill:
+        await supervisor.act(wedged)
+    kill.assert_called_once_with(123, signal.SIGHUP)
+    done = await supervisor.act(dead)
+
+    status = json.loads(supervisor_status_path(tmp_path).read_text(encoding="utf-8"))
+    assert done is True
+    assert status["restart_count"] == 3
+    assert not (reports_dir(tmp_path) / "final.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_past_the_limit_becomes_terminal(tmp_path):
+    store.write_status(tmp_path, {"restart_count": 3})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    wedged = mock.Mock(verdict=WEDGED, pid=123, detail="stalled", tick=7, tick_age_sec=999.0)
+    dead = mock.Mock(verdict=DEAD, pid=123, detail="gone", tick=7, tick_age_sec=1000.0)
+
+    with mock.patch.object(os, "kill") as kill:
+        await supervisor.act(wedged)
+    kill.assert_called_once_with(123, signal.SIGTERM)
+    done = await supervisor.act(dead)
+
+    final = json.loads((reports_dir(tmp_path) / "final.json").read_text(encoding="utf-8"))
+    assert done is True
+    assert final["stop_reason"] == WEDGED_STOP_REASON
+    assert final["supervisor"]["restart_count"] == 4
 
 
 @pytest.mark.asyncio
