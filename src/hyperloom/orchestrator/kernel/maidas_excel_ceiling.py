@@ -22,16 +22,6 @@ from .roofline_ceiling import RooflineBreakdown
 
 logger = logging.getLogger(__name__)
 
-#: Map Hyperloom GPU / gfx names to the MAIDAS ``soc`` tokens used in the sheet.
-_GPU_TO_SOC = {
-    "gfx942": "mi300x",
-    "mi300x": "mi300x",
-    "mi325x": "mi325x",
-    "gfx950": "mi355x",
-    "mi350x": "mi350x",
-    "mi355x": "mi355x",
-}
-
 
 @lru_cache(maxsize=8)
 def _load_allscenarios(path: str):
@@ -61,8 +51,18 @@ def _load_allscenarios(path: str):
 
 
 def _soc_token(gpu_type: str) -> str:
-    g = (gpu_type or "").strip().lower()
-    return _GPU_TO_SOC.get(g, g)
+    """Normalize the run's GPU name to a MAIDAS ``soc`` token.
+
+    ``runtime.gpu_type`` is already a resolved AMD mi-name (mi300x/mi325x/
+    mi355x/...) — the same tokens MAIDAS uses in the ``soc`` column — so we only
+    lowercase/strip and pass it through. We deliberately do NOT reuse
+    ``gpu_types._gpu_runner_type`` (it collapses mi325x/mi308x -> mi300x for the
+    Magpie script, which would match the wrong MAIDAS SoC), and we do NOT extend
+    the ``AMD_GPU_DISPATCH_IDENTITIES`` allowlist (that gate flags unsupported
+    GPUs). New GPUs (e.g. mi4xx) match automatically once Hyperloom resolves
+    them, with no change here.
+    """
+    return (gpu_type or "").strip().lower()
 
 
 def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | None:
@@ -119,8 +119,16 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
         return None
 
     logger.info(
-        "MAIDAS ceiling used: soc=%s bfp=%s hp=%s nbs=%s -> %.2f tok/s (avg_lat=%.3f ms)",
-        soc, prec, runtime.tp, runtime.concurrency, peak, lat_ms,
+        "MAIDAS PROJECTION USED for roofline ceiling | source=%s | "
+        "matched row: workload=%s soc=%s bfp=%s hp(TP)=%s nbs(conc)=%s "
+        "prefill(ISL)=%s decode(OSL)=%s scenario=uct_decode | "
+        "data used: avg_lat(decode TPOT)=%.3f ms spill=%s | "
+        "computed ceiling: peak=%.2f tok/s (= conc %s x 1000 / avg_lat)",
+        path,
+        str(q.iloc[0].get("workload", "?")) if "workload" in q.columns else "?",
+        soc, prec, runtime.tp, runtime.concurrency,
+        runtime.isl, runtime.osl,
+        lat_ms, spilled, peak, runtime.concurrency,
     )
     # MAIDAS AllScenarios does not split mem/compute bound; expose peak on both.
     return RooflineBreakdown(
