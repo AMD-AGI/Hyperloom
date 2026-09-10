@@ -375,6 +375,11 @@ export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}
 # measurement window then emits nothing until it ends, so a run that is merely
 # slow is indistinguishable from one that has wedged. Upstream exports it too.
 export AIPERF_UI_REALTIME_METRICS_ENABLED="${AGENTX_REALTIME_METRICS:-true}"
+
+# aiperf scrapes the engine's /metrics itself, on by default, deriving the URL from --url. Its own default cadence is
+# 333ms, which is far tighter than the KV signal needs and six times what the Hyperloom-side collector settled on;
+# widen it so the round is not paying for readings nobody reads. There is no CLI flag for this, only the env var.
+export AIPERF_SERVER_METRICS_COLLECTION_INTERVAL="${AGENTX_SERVER_METRICS_INTERVAL_S:-2.0}"
 # Content-addressed mmap cache: on a hit this skips loader + tokenizer +
 # composer entirely, turning that 4-14 min into ~0 for every run after the
 # first. Soft default -- never required, so a bare environment still works.
@@ -547,6 +552,7 @@ run_aiperf() {
     --stats-interval 30 \
     --slice-duration 1.0 \
     --no-gpu-telemetry \
+    --server-metrics-formats json csv parquet jsonl \
     ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
     ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
     ${AIPERF_PROGRESS_ARGS[@]+"${AIPERF_PROGRESS_ARGS[@]}"} \

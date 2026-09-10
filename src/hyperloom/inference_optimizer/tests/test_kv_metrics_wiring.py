@@ -638,6 +638,147 @@ def test_artifact_is_in_the_package_globs():
 
 
 # ---------------------------------------------------------------------------
+# aiperf's own server-metrics export
+# ---------------------------------------------------------------------------
+def _slim_record(*, ts_ns: int, usage: float, retracts: float, phase: str = "profiling") -> dict:
+    """One line of aiperf's ``server_metrics_export.jsonl``, in its documented shape."""
+    return {
+        "endpoint_url": "http://localhost:34407/metrics",
+        "timestamp_ns": ts_ns,
+        "endpoint_latency_ns": 4_000_000,
+        "request_sent_ns": ts_ns - 4_000_000,
+        "benchmark_phase": phase,
+        "metrics": {
+            "sglang:token_usage": [{"labels": {"tp_rank": "0"}, "value": usage}],
+            "sglang:num_retracted_requests_total": [{"labels": {"tp_rank": "0"}, "value": retracts}],
+        },
+    }
+
+
+def _write_server_metrics(tmp_path, records) -> Path:
+    """Write the export where aiperf would put it."""
+    art = tmp_path / "aiperf_artifacts"
+    art.mkdir(exist_ok=True)
+    path = art / "server_metrics_export.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def test_aiperf_records_rebuild_the_same_normalised_sample(tmp_path):
+    """Labels survive aiperf's export, so one normalisation serves both sources.
+
+    ``SlimRecord.metrics`` is ``{name: [{labels, value}]}`` -- the same information
+    ``parse_prometheus_text`` produces -- so the per-rank assembly does not have to
+    be reimplemented for this path.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    path = _write_server_metrics(tmp_path, [_slim_record(ts_ns=1_789_000_000_000_000_000, usage=0.62, retracts=4)])
+    (sample, timing, phase) = read_aiperf_server_metrics(path)[0]
+
+    assert sample.engine == "sglang"
+    assert sample.active_pool_usage == 0.62
+    assert phase == "measured"  # aiperf's "profiling"
+    assert timing["scrape_sec"] == 0.004
+    assert timing["scrape_start_unix"] <= sample.ts <= timing["scrape_end_unix"]
+
+
+def test_aiperf_phase_stamp_is_used_verbatim(tmp_path):
+    """No re-attribution: aiperf stamps the phase at collection time, from the
+    process that owns the transition, so there is no boundary lag to correct."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    base = 1_789_000_000_000_000_000
+    path = _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.1, retracts=0, phase="warmup"),
+            _slim_record(ts_ns=base + 2_000_000_000, usage=0.5, retracts=3, phase="profiling"),
+        ],
+    )
+
+    assert [phase for _s, _t, phase in read_aiperf_server_metrics(path)] == ["warmup", "measured"]
+
+
+def test_recorder_prefers_aiperfs_scrapes_over_its_own(tmp_path):
+    """On an AgentX round aiperf is already scraping the same endpoint; its rows
+    win, and the live ones are discarded rather than interleaved."""
+    base = 1_789_000_000_000_000_000
+    _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.10, retracts=1, phase="warmup"),
+            _slim_record(ts_ns=base + 2_000_000_000, usage=0.70, retracts=5, phase="profiling"),
+            _slim_record(ts_ns=base + 4_000_000_000, usage=0.80, retracts=9, phase="profiling"),
+        ],
+    )
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(ts=_now(), active_pool_usage=0.99)]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    payload = rec.summary()
+
+    assert payload["sample_source"] == "aiperf_server_metrics"
+    assert payload["phase_source"] == "aiperf_server_metrics"
+    assert [r["phase"] for r in payload["samples"]] == ["warmup", "measured", "measured"]
+    # The live reading of 0.99 is gone: two collectors on one endpoint would bracket
+    # counters across interleaved readings of the same series.
+    assert [r["active_pool_usage"] for r in payload["samples"]] == [0.10, 0.70, 0.80]
+    # Warmup opened at 1 and is closed by the first measured reading; measured runs 5 -> 9.
+    assert payload["retract_delta_by_phase"]["warmup"] == 4.0
+    assert payload["retract_delta"] == 4.0
+
+
+def test_a_round_without_an_aiperf_export_keeps_the_watchdog_rows(tmp_path):
+    """Synthetic benchmarks, the accuracy eval and any round killed before aiperf
+    flushed have no export, and are still the majority of rounds."""
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(active_pool_usage=0.42)]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    payload = rec.summary()
+
+    assert payload["sample_source"] == "watchdog_scrape"
+    assert payload["aiperf_server_metrics_path"] is None
+    assert [r["active_pool_usage"] for r in payload["samples"]] == [0.42]
+
+
+def test_an_unreadable_export_falls_back_rather_than_failing(tmp_path):
+    """A better source that cannot be read is not a reason to lose the round."""
+    art = tmp_path / "aiperf_artifacts"
+    art.mkdir()
+    (art / "server_metrics_export.jsonl").write_text("{not json\n", encoding="utf-8")
+    rec = KvMetricsRecorder(
+        poller=_StubPoller([_sample(active_pool_usage=0.42)]),
+        output_path=str(tmp_path / KV_ARTIFACT_NAME),
+        min_interval_sec=0,
+    )
+    rec.tick(1.0)
+    payload = rec.summary()
+
+    assert payload["sample_source"] == "watchdog_scrape"
+    assert payload["sample_count"] == 1
+
+
+def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
+    """aiperf carries histograms as buckets with no ``value``."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+
+    families = families_from_aiperf_record(
+        {
+            "sglang:token_usage": [{"labels": {}, "value": 0.5}],
+            "sglang:e2e_latency_seconds": [{"labels": {}, "buckets": {"0.1": 3.0}, "sum": 1.0, "count": 3.0}],
+        }
+    )
+
+    assert families == {"sglang:token_usage": [({}, 0.5)]}
+
+
+# ---------------------------------------------------------------------------
 # port resolution
 # ---------------------------------------------------------------------------
 _ROUND_YAML = """\

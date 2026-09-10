@@ -11,6 +11,13 @@ float precision instead of the log's two decimals, stable metric names instead o
 type, explicit units, and ``kv_evictable_tokens``, which the log cannot express at all and which is the only way to
 separate the two occupancy readings this module reports (see :class:`KvSample`).
 
+There are two collectors, and the artifact says which one produced its rows in ``sample_source``. On an AgentX round
+aiperf is already scraping the same endpoint for its own purposes, so its export is adopted wholesale: it samples on a
+tighter cadence, takes a reading at each phase boundary of its own accord, and stamps every record with the phase from
+the process that owns the transition -- which removes the boundary lag rather than correcting for it. Everything else
+-- synthetic benchmarks, the accuracy eval, boot, and any round killed before aiperf flushed -- has no such export, and
+is covered by scraping from the watchdog loop below.
+
 Phase attribution has two sources, and the artifact always says which one it used. Preferred is aiperf's progress API,
 whose ``phases.<name>.start_ns`` is stamped when the phase actually begins; the fallback is the ``aiperf.log`` line the
 watchdog greps for, which is written after the transition and read on the next poll. Both lags land on the boundary, so
@@ -62,7 +69,10 @@ __all__ = [
     "KvSample",
     "canonical_label_key",
     "counter_delta",
+    "families_from_aiperf_record",
+    "find_server_metrics_export",
     "parse_prometheus_text",
+    "read_aiperf_server_metrics",
     "resolve_metrics_port",
     "sample_from_families",
 ]
@@ -179,6 +189,111 @@ def _split_labels(raw: str) -> dict[str, str]:
             labels[name] = "".join(chars)
         index = cursor + 1
     return labels
+
+
+#: aiperf's own export of the engine's ``/metrics``, written into the round's artifact dir.
+_SERVER_METRICS_RELPATHS = (
+    "aiperf_artifacts/server_metrics_export.jsonl",
+    "*/aiperf_artifacts/server_metrics_export.jsonl",
+)
+
+#: aiperf's ``CreditPhase`` values, mapped onto ours. It has no notion of the accuracy eval or of boot, which is why the
+#: live path still covers those.
+_CREDIT_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
+
+
+def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
+    """Rebuild the parser's internal shape from one aiperf scrape record.
+
+    aiperf stores ``{name: [{"labels": {...}, "value": x}]}``, which is the same information
+    :func:`parse_prometheus_text` produces from the raw exposition -- crucially including the labels, without which the
+    per-rank assembly below could not be done at all. Rebuilding rather than re-deriving means both sources go through
+    one normalisation, so an aiperf-fed round and a live-scraped one cannot disagree about what a number means.
+    """
+    families: ParsedFamilies = {}
+    if not isinstance(metrics, dict):
+        return families
+    for name, samples in metrics.items():
+        if not isinstance(samples, list):
+            continue
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            value = _number(sample.get("value"))
+            if value is None:  # histograms carry buckets instead, and are not read here
+                continue
+            labels = sample.get("labels")
+            families.setdefault(str(name), []).append(
+                ({str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}, value)
+            )
+    return families
+
+
+def find_server_metrics_export(workspace: Any) -> Path | None:
+    """Locate aiperf's server-metrics export under a round's directory."""
+    try:
+        root = Path(workspace)
+        for pattern in _SERVER_METRICS_RELPATHS:
+            for candidate in sorted(root.glob(pattern)):
+                if candidate.is_file():
+                    return candidate
+    except OSError:
+        return None
+    return None
+
+
+def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Read aiperf's scrape records as ``(sample, timing, phase)``, oldest first.
+
+    Every field the live path measures for itself is already on the record: ``timestamp_ns`` for the reading,
+    ``request_sent_ns`` and ``endpoint_latency_ns`` for the round trip, and ``benchmark_phase`` for the phase. That last
+    one is why this source is preferred where it exists -- aiperf stamps the phase at collection time, from the process
+    that owns the transition, so there is no lag between the boundary and the label and nothing to re-attribute.
+    """
+    out: list[tuple[KvSample, dict[str, Any], str | None]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                stamp = _number(record.get("timestamp_ns"))
+                if stamp is None or stamp <= 0:
+                    continue
+                families = families_from_aiperf_record(record.get("metrics"))
+                if not families:
+                    continue
+                ts = stamp / 1e9
+                sample = sample_from_families(families, ts=ts, mono=ts)
+                if not sample.has_readings():
+                    continue
+                started = _number(record.get("request_sent_ns"))
+                latency = _number(record.get("endpoint_latency_ns")) or 0.0
+                start_unix = started / 1e9 if started and started > 0 else ts
+                out.append(
+                    (
+                        sample,
+                        {
+                            # Widened to the enclosing millisecond for the same reason the live path does it: these
+                            # bound the interval workload records are joined against.
+                            "scrape_start_unix": math.floor(start_unix * 1000) / 1000,
+                            "scrape_end_unix": math.ceil((start_unix + latency / 1e9) * 1000) / 1000,
+                            "scrape_sec": round(latency / 1e9, 4),
+                        },
+                        _CREDIT_PHASE_NAMES.get(str(record.get("benchmark_phase") or "").lower()),
+                    )
+                )
+    except OSError as exc:
+        log.debug("kv_metrics: could not read %s (%s)", path, exc)
+        return []
+    out.sort(key=lambda item: item[0].ts)
+    return out
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:
@@ -983,6 +1098,45 @@ class KvMetricsRecorder:
             window[f"{name}_delta_by_phase"] = by_phase
         return window
 
+    def _adopt_aiperf_samples(self) -> str | None:
+        """Replace the live rows with aiperf's own scrapes when it collected any.
+
+        aiperf drives the AgentX workload, so on those rounds it is the better source in every way that matters: it
+        scrapes the same endpoint on a tighter cadence, takes its own reading at each phase boundary, and stamps each
+        record with the phase from the process that owns the transition -- so there is no boundary lag to correct and
+        nothing to re-attribute afterwards.
+
+        The live rows are discarded rather than merged. Two collectors on one endpoint produce interleaved readings of
+        the same counters at slightly different instants, and a window bracketed across both would attribute an
+        increment to whichever happened to be sampled either side of it.
+        """
+        if self._workspace is None:
+            return None
+        try:
+            export = find_server_metrics_export(self._workspace)
+            if export is None:
+                return None
+            records = read_aiperf_server_metrics(export)
+            if not records:
+                return None
+            # Rebuilt from scratch so no live reading survives into the counter windows below.
+            self._rows = []
+            self._first_counters = {}
+            self._last_counters = {}
+            previous_phase = self._phase
+            for sample, timing, phase in records:
+                self._phase = phase or "measured"
+                self._absorb(sample, timing=timing)
+            self._phase = previous_phase
+            # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
+            # transition, but tags it with the phase that is ending, so without this the next phase's window would open
+            # at its first periodic sample and the increment in between would be credited to neither.
+            self._rebuild_counter_windows()
+            return str(export)
+        except Exception:  # noqa: BLE001 - a better source that cannot be read is not a reason to fail a round
+            log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
+            return None
+
     def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
         """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
 
@@ -1131,9 +1285,14 @@ class KvMetricsRecorder:
 
     def summary(self, *, aborted: bool = False) -> dict[str, Any]:
         """Build the artifact payload."""
-        # First: it re-labels rows and re-brackets the counter windows the deltas below are read from, so the rows, the
-        # phase totals and the timeline in one artifact cannot disagree with each other.
-        attribution = self._reattribute_phases()
+        # Before attribution, because adopting aiperf's rows replaces the very rows attribution would re-label -- and
+        # makes re-labelling unnecessary, since those rows already carry the phase aiperf stamped at collection time.
+        adopted = self._adopt_aiperf_samples()
+        attribution = (
+            {"phase_source": "aiperf_server_metrics", "phase_timeline": self._phase_timeline or None}
+            if adopted
+            else self._reattribute_phases()
+        )
         # After attribution, so the phase events in the timeline are the same boundaries the rows were labelled by.
         workload = self._build_workload_timeline()
         retract_measured, retract_by_phase = self._counter_deltas("retract")
@@ -1143,6 +1302,10 @@ class KvMetricsRecorder:
             "workload_timeline": workload,
             "schema_version": 1,
             "source": "metrics",
+            # Which collector produced the rows. The two differ in cadence and in how the phase was decided, so a
+            # consumer comparing rounds has to be able to tell them apart.
+            "sample_source": "aiperf_server_metrics" if adopted else "watchdog_scrape",
+            "aiperf_server_metrics_path": adopted,
             "url": self._poller.url,
             "available": self._poller.available,
             "aborted": bool(aborted),
