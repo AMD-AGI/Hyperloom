@@ -190,7 +190,12 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
                     raise ValueError("derived metric benchmark ID does not match its key")
                 value = row.get("p90_e2e_norm_intvty")
                 result[key] = (
-                    float(value) if type(value) in (int, float) and math.isfinite(value) and value > 0 else None
+                    float(value)
+                    if not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and math.isfinite(value)
+                    and value > 0
+                    else None
                 )
         except (ValueError, OSError, EOFError, OverflowError, zlib.error) as exc:
             log.warning("InferenceX: invalid derived interactivity response: %s", exc)
