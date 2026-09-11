@@ -846,10 +846,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="recipe_kb_strict_fingerprint",
         action="store_true",
         default=False,
-        help="When set, T0 refuses warm_start_recipe rows whose "
-        "stack_fingerprint does not match the current pod (recorded "
-        "in manifest.json). Default: lenient (M1 records the flag "
-        "in manifest only; consumed by M5 specialist assembly).",
+        help="When set, T0 demotes a warm_start_recipe row to "
+        "``seed_only`` when its recorded ``workload_shape`` disagrees "
+        "with this pod on tp, ep or partition count -- none of which "
+        "is a canonical_id dimension, so an ``exact`` hit can "
+        "otherwise replay a config tuned on a differently shaped "
+        "machine. The row's lessons and pitfalls still render; only "
+        "its config loses the replay. Dimensions neither side "
+        "recorded are not treated as a disagreement. Default: lenient.",
     )
     # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(

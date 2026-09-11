@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Final, Mapping
 
 from packaging.version import InvalidVersion, Version
 
@@ -941,6 +941,33 @@ def _cascade_warm_start_search(
     return {}, "miss", 0.0
 
 
+#: Shape dimensions no ``canonical_id`` level encodes and no warm-start tier relaxes. ``conc``/``isl``/``osl`` are
+#: absent because the cascade already searches on them; ``tp``, ``ep`` and ``partitions`` have nothing guarding them,
+#: so a row recorded at TP=1 in SPX and one recorded at TP=8 in CPX are indistinguishable by identity alone.
+_GUARDED_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "ep", "partitions")
+
+
+def _shape_mismatch(shared_state: Any, warm_point: Mapping[str, Any]) -> str:
+    """Describe how a warm row's recorded shape differs from this pod's, or "" when nothing contradicts it.
+
+    The pod side goes through the same projection that publishes the row, so the two cannot drift apart. The row side
+    reads the top level, where ``knowledge_to_warm_recipe`` splats the shape. A dimension neither side records is not
+    a disagreement and is skipped: rows written before a dimension was published carry no claim to check, and
+    inventing one would demote every historical row.
+    """
+    from .remote_recipe.values import workload_shape
+
+    exact_history = warm_point.get("exact_history")
+    recorded = exact_history if isinstance(exact_history, Mapping) else warm_point
+    live = workload_shape(shared_state)
+    diffs = [
+        f"{key}: row={recorded.get(key)} pod={live.get(key)}"
+        for key in _GUARDED_SHAPE_KEYS
+        if not (recorded.get(key) is None and live.get(key) is None) and recorded.get(key) != live.get(key)
+    ]
+    return ", ".join(diffs)
+
+
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
@@ -954,6 +981,7 @@ def run_t0_anchor(
     on_status: Callable[[str], None] | None = None,
     session_dir: Path | None = None,
     save_state: bool = True,
+    strict_shape: bool = False,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
     emit = on_status or _default_status_emitter
@@ -1176,6 +1204,22 @@ def run_t0_anchor(
     if warm_point and not _recipe_is_actionable(warm_point):
         warm_tier = "seed_only"
         warm_conf = 0.0
+
+    # Same demotion for a row this pod cannot honour: tp, ep and the partition count are not dimensions of the
+    # canonical_id, and the tier cascade only relaxes conc/isl/osl, so an ``exact`` hit at confidence 1.0 can still
+    # have been recorded on a differently shaped machine. Demoting rather than dropping keeps the row's lessons and
+    # pitfalls readable while denying its config the replay it has not earned here.
+    if warm_point and strict_shape:
+        mismatch = _shape_mismatch(shared_state, warm_point)
+        if mismatch:
+            log.warning(
+                "warm-start row shape does not match this pod (%s); demoting %s to seed_only",
+                mismatch,
+                warm_tier,
+            )
+            emit(f"Recipe KB        : warm row demoted to seed_only ({mismatch})")
+            warm_tier = "seed_only"
+            warm_conf = 0.0
 
     # Config-donor decoupling: the identity match supplies priors; borrow a champion config from the nearest same-arch
     # sibling when it has none.

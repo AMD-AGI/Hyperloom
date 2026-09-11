@@ -50,6 +50,7 @@ class _FakeSharedState:
     max_model_len: int = 0
     model_class: str = ""
     baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
+    compute_partition: dict[str, Any] = field(default_factory=dict)
 
     def save(self, _path: Path) -> None:  # noqa: D401
         """No-op save — tests don't care about disk persistence here."""
@@ -633,3 +634,93 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
     # explicitly: the exact probe has to be readable as having missed before
     # the ladder was walked.
     assert [row["method"] for row in reads["rows"]][:2] == ["get_authoritative_recipe", "get_recipe"]
+
+
+# --- shape guard: tp/ep/partitions are not canonical_id dimensions -----------
+
+
+def _seed_row_with_shape(kb: RecipeKB, cid: str, shape: dict[str, Any]) -> None:
+    """Seed an actionable row whose shape sits where the warm projection splats it: the row's top level."""
+    kb.put_recipe(
+        canonical_id=cid,
+        model="M",
+        hardware="MI300X",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+        extras=dict(shape),
+        pitfalls=[{"description": "watch for X"}],
+        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+        provenance={"source": "seed", "generator": "ut"},
+    )
+
+
+def test_strict_shape_demotes_a_row_recorded_under_a_different_partition_mode(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """A CPX-recorded row must not replay its config on an unpartitioned pod."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    _seed_row_with_shape(kb, cid, {"tp": 8, "partitions": 8})
+
+    run_t0_anchor(
+        kb,
+        state,
+        workload="M",
+        hw="MI300X",
+        extra_attrs={"framework_name": "sglang"},
+        session_dir=session_dir,
+        strict_shape=True,
+    )
+
+    assert state.warm_start_recipe["tier"] == "seed_only"
+    assert state.warm_start_recipe["confidence"] == 0.0
+    # Demoted, not dropped: the priors are what the prompt renders, and they cost nothing to honour.
+    assert state.warm_start_lessons[0]["statement"] == "Y is the answer"
+    assert state.warm_start_pitfalls[0]["description"] == "watch for X"
+
+
+def test_strict_shape_keeps_a_row_whose_shape_matches_this_pod(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """The guard only fires on disagreement; a matching CPX pod still gets its exact hit."""
+    state = _FakeSharedState(compute_partition={"mode": "CPX"})
+    cid = _expected_cid(state, "M", "MI300X")
+    _seed_row_with_shape(kb, cid, {"tp": 8, "partitions": 8})
+
+    run_t0_anchor(
+        kb,
+        state,
+        workload="M",
+        hw="MI300X",
+        extra_attrs={"framework_name": "sglang"},
+        session_dir=session_dir,
+        strict_shape=True,
+    )
+
+    assert state.warm_start_recipe["tier"] == "exact"
+    assert state.warm_start_recipe["confidence"] == 1.0
+
+
+def test_the_shape_guard_is_off_unless_asked_for(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """Default is lenient: the same mismatched row keeps its exact hit and its config."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    _seed_row_with_shape(kb, cid, {"tp": 8, "partitions": 8})
+
+    run_t0_anchor(
+        kb,
+        state,
+        workload="M",
+        hw="MI300X",
+        extra_attrs={"framework_name": "sglang"},
+        session_dir=session_dir,
+    )
+
+    assert state.warm_start_recipe["tier"] == "exact"
+    assert state.warm_start_recipe["confidence"] == 1.0
