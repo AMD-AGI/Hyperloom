@@ -56,10 +56,10 @@ cards (and the emitted ISA via `--save-temps`) before you commit to a layout or 
 
 1. READ the current kernel source, tile configuration, and register layout
 2. PREDICT what PMC counters will show before measuring
-3. BUILD with the `build` tool (backend="hip") — hipcc with the correct arch flags
-4. TEST correctness with the `test` tool, then the task's own correctness suite. If FAIL, do NOT proceed.
-5. BENCH wall-clock with the `bench` tool (30-iter median, in-context measurement)
-6. PROFILE PMC counters with the `pmc` tool; check registers with the `registers` tool
+3. BUILD it yourself — hipcc with the correct arch flags
+4. TEST correctness by running the driver yourself, then the task's own correctness suite. If FAIL, do NOT proceed.
+5. BENCH wall-clock by running the driver in bench mode
+6. PROFILE PMC counters if you need them; check register pressure in the compiler's resource-usage output
 7. ANALYZE: compare the PMC prediction vs reality, diagnose the bottleneck
 8. DECIDE the next change from the PMC data — ONE variable at a time
 9. Log the iteration: config, SNR, wall_ms, PMC summary, register counts, decision

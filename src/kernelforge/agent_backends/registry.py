@@ -225,9 +225,10 @@ def resolve_agent_runtime(
         fallback = ""
     if fallback:
         get_agent_provider(fallback)
+    selected = model.strip() or registration.default_model
     return AgentRuntimeConfig(
         provider=registration.name,
-        model=model.strip() or registration.default_model,
+        model=selected,
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,

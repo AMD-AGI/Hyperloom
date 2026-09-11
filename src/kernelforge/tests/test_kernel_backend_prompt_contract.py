@@ -44,16 +44,44 @@ def forge_loop_prompts(monkeypatch):
 
 # ---------- snapshot hashes -------------------------------------------------
 
-# The fixture mocks ``build_forge_knowledge`` to a constant sentinel, so these hashes cover the prompt TEMPLATE only.
+# The fixture mocks ``build_forge_knowledge`` to a constant sentinel, so these
+# hashes cover the prompt TEMPLATE only. A change to which knowledge folders a
+# backend is served (``resolve_language_dirs``) leaves every hash here alone --
+# which makes an unexpected diff in this table a precise signal that prompt text
+# moved, not that knowledge assembly did.
+# Every hash below has been re-snapshotted three times: once in the KernelForge
+# -> Hyperloom merge (which rewrote one runnable command in a shared knowledge
+# card -- the old package name in ``python3 -m <pkg>.mcp_server.tools.bench``),
+# once for the backend-vocabulary rename, which reaches the prompt TEXT because
+# each backend introduces itself by name ("You are the CK kernel backend --"),
+# and once for the local_knowledge card renames (cheap_sweeps.md ->
+# lever_cheap_sweeps.md and friends). That last one moved every hash even
+# though only ck/hip/triton prompts.py changed, because the two cards every
+# backend is pointed at live in the shared prompt_utils.py preamble.
+# The intellikit backend's removal moved only aiter's hash: its prompt listed
+# `languages/asm/` in the language-folder routing, and that folder went with the
+# backend (diffed: one line changed, nothing else).
+# The token-efficiency pass moved aiter/ck/hip/triton and nothing else. Two
+# edits, both diffed line by line against the previous rendering: the four
+# prompts stopped naming `build`/`test`/`bench`/`pmc`/`registers` as tools --
+# this loop has Bash and the driver, those tools do not exist, and the framing
+# paragraph in orchestrator/agent.py used to spend a sentence per session
+# translating the names back into shell -- and triton's Gluon-escalation section
+# deferred its mechanics to the two cards it already routes to, keeping the
+# trigger, the ownership claim and the route resident (see
+# test_gluon_backend.py::TestTritonEscalationHint, which pins exactly those).
+# Each time the rendered prompts were diffed line by line against their previous
+# rendering; for the card renames every changed line was a card name and nothing
+# else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "67005fca12b430faff552dbf2ed432fc8d2c84836a746ad819f8b9a2633ca33b",
-    "ck": "ec949d82a4226152c4a4e288a8109c3d51eabc23cf0739ed2acd925408a88c01",
+    "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
+    "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
     "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
     "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
     "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
-    "hip": "43261f32b4877c306f60ab62a9a87d4deff8dd6906e88b9380e7aca21487896e",
+    "hip": "7399928977cf188ae30f49fc0087386285d0fd5c131cd70b3a9064095f03fba7",
     "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
-    "triton": "7c682cdc1debbcd42deacce2b6f18e5b694f00fc7c527e772708b436d926a2d3",
+    "triton": "67345584efeba90afc87959e75583167c11bb9b9ac9a0275dbddbed2f945037a",
 }
 
 
@@ -66,6 +94,28 @@ class TestRenderedPromptSnapshots:
             assert got == _SHA256_FORGE_LOOP[backend], (
                 f"{backend}: forge-loop prompt changed (got {got!r}, expected {_SHA256_FORGE_LOOP[backend]!r})"
             )
+
+
+class TestNoInventedTools:
+    """No backend prompt may name a tool the forge loop does not hand a session.
+
+    The implementer gets Bash and the measurement driver. It has never had
+    `build`, `test`, `bench`, `pmc` or `registers` tools, but four of these
+    prompts instructed it to use them, and ``make_agent_fn`` compensated with a
+    sentence -- carried in the cached prefix of every session, of every campaign
+    -- explaining that those five names meant shell commands. A prompt that
+    names the mechanism needs no such correction, so the correction is gone and
+    this is what keeps it gone. `Read`, `Edit`, `Grep`, `Glob`, `Bash` and `Task`
+    are real, hence the allowlist rather than a ban on the word "tool".
+    """
+
+    _INVENTED = ("`build` tool", "`test` tool", "`bench` tool", "`pmc` tool", "`registers` tool")
+
+    def test_no_backend_prompt_names_an_invented_tool(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            collapsed = " ".join(prompt.split())
+            for name in self._INVENTED:
+                assert name not in collapsed, f"{backend}: prompt names the nonexistent {name}"
 
 
 class TestForgeLoopPath:
@@ -160,7 +210,12 @@ class TestSharedCardsAreReachable:
 
     @pytest.fixture()
     def knowledge_block(self) -> str:
-        config = Config(gpu_target=_GPU)
+        # Maps inlined on purpose: what is under test here is the *content* of
+        # the INDEX maps -- whether they register the cards at all. Deferral
+        # (the default) does not touch those files, it only replaces the inlined
+        # copy with a pointer to them, so the registration is asserted against
+        # the inlined form and the pointer path is covered separately below.
+        config = Config(gpu_target=_GPU, defer_knowledge_maps=False)
         return build_single_kernel_backend_prompt(config, "flydsl")
 
     def test_cards_exist_on_disk(self):
@@ -177,7 +232,7 @@ class TestSharedCardsAreReachable:
     def test_loop_form_card_reaches_a_triton_kernel_context(self):
         """The loop-form rule must land in a Triton kernel's context specifically."""
         prompt = build_single_kernel_backend_prompt(
-            Config(gpu_target=_GPU),
+            Config(gpu_target=_GPU, defer_knowledge_maps=False),
             "triton",
             task_type="image_kernel",
             source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
@@ -186,6 +241,33 @@ class TestSharedCardsAreReachable:
         assert prompt.count(_LOOP_FORM_CARD) >= 2, (
             "expected the card in both the common_methodology and languages/triton maps"
         )
+
+    def test_the_default_prompt_still_reaches_the_cards_through_the_pointers(self):
+        """Under the default the maps are pointers, so reachability is a chain.
+
+        Nothing is inlined, so the guarantee the two tests above make about the
+        assembled prompt has to be re-made one link further out: the prompt must
+        name the INDEX of each pillar that registers a card, and that INDEX --
+        the file an agent is told to ``Read`` -- must actually register it.
+        """
+        root = Path(Config(gpu_target=_GPU).local_knowledge_dir)
+        prompt = build_single_kernel_backend_prompt(
+            Config(gpu_target=_GPU),
+            "triton",
+            task_type="image_kernel",
+            source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
+        )
+        assert _LOOP_FORM_CARD not in prompt, "the default must not inline the maps"
+
+        for pillar, cards in (
+            ("common_methodology", (_SWEEP_CARD, _EDIT_SURFACE_CARD, _LOOP_FORM_CARD)),
+            ("languages/triton", (_LOOP_FORM_CARD,)),
+        ):
+            index = root / pillar / "INDEX.md"
+            assert str(index) in prompt, f"the prompt never points at {pillar}/INDEX.md"
+            registered = index.read_text()
+            for card in cards:
+                assert card in registered, f"{card} is not registered in {pillar}/INDEX.md"
 
 
 class TestDocumentedSweepHelper:

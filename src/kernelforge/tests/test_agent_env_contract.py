@@ -152,6 +152,20 @@ def test_the_lower_variable_is_not_consulted_when_the_higher_one_is_valid(clean_
     assert resolve_agent_reasoning_effort() == "low"
 
 
+def test_an_explicit_effort_is_not_vetoed_by_a_stale_environment(clean_env) -> None:
+    """A caller who names an effort does not answer for the variable it overrides.
+
+    ``from_env`` used to spell the fallback as ``overrides.get(key, resolve())``,
+    which evaluates ``resolve()`` before the lookup -- so an off-ladder
+    ``HYPERLOOM_REASONING_EFFORT`` refused a campaign whose caller had already
+    named a valid effort of its own, and the value that was going to win never
+    got the chance.
+    """
+    clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "minimal")
+    config = Config.from_env(agent_backend="claude", workspace="/tmp", agent_reasoning_effort="low")
+    assert config.agent_reasoning_effort == "low"
+
+
 def test_auto_never_hands_a_claude_model_id_to_codex(clean_env) -> None:
     """``auto`` resolves the model after the provider, not before.
 

@@ -27,10 +27,10 @@ high-performance kernels from reusable tiles (block, warp, MFMA instruction leve
 
 1. READ the current kernel source and tile configuration
 2. PREDICT what PMC counters will show before measuring
-3. BUILD with the `build` tool (backend="ck") — always clean stale .cuda.o
-4. TEST correctness with the `test` tool, then the task's own correctness suite. If FAIL, do NOT proceed.
-5. BENCH wall-clock with the `bench` tool (30-iter median, in-context measurement)
-6. PROFILE PMC counters with the `pmc` tool
+3. BUILD it yourself — always clean stale .cuda.o
+4. TEST correctness by running the driver yourself, then the task's own correctness suite. If FAIL, do NOT proceed.
+5. BENCH wall-clock by running the driver in bench mode
+6. PROFILE PMC counters if you need them
 7. ANALYZE: compare PMC prediction vs reality, diagnose bottleneck
 8. DECIDE next configuration change based on PMC data — ONE variable at a time
 9. Log the experiment iteration with config, SNR, wall_ms, PMC summary, and decision
@@ -48,7 +48,7 @@ high-performance kernels from reusable tiles (block, warp, MFMA instruction leve
   - LDS descriptor dimensions (bn0, bk0)
   - Block dimensions to match
   - MFMA instruction count budget (narrower tiles = proportionally more MFMAs)
-- ALWAYS verify the build tool confirms .so deployment (stale artifact trap)
+- ALWAYS verify the build confirms .so deployment (stale artifact trap)
 - ALWAYS rm stale .cuda.o files before building (header deps not tracked)
 - ALWAYS change ONE configuration variable per iteration
 

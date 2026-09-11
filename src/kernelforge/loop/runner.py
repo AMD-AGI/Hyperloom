@@ -105,7 +105,6 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher
-from kernelforge.rtk import smart_wrap
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
@@ -244,6 +243,54 @@ def _bench_failure_detail(bench_result: dict) -> str:
     if not output:
         return message
     return f"{message}\n{textwrap.indent(output[-2000:], '    ')}"
+
+
+def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
+    """The tail of a failed build, taken from whichever stream carried it.
+
+    Only stderr used to be read. ninja prints the compiler's own output on
+    stdout, so a ninja failure was reported to the agent as ``BUILD FAILED:``
+    and nothing else -- the one line that would have told it what to fix went
+    to the stream nobody looked at. Both streams are read now.
+    """
+    combined = b"\n".join(part.strip() for part in (stdout or b"", stderr or b"") if part.strip())
+    text = combined.decode("utf-8", errors="replace").strip()
+    return text[-limit:] if text else "no build output"
+
+
+def llm_spend_lines(usage: dict) -> list[str]:
+    """Render a campaign's LLM spend: the total, then the split by role.
+
+    Four token columns, not two. Priced across the 316 recorded end-to-end
+    campaigns, ``cache_read`` is 39.5% of the bill and ``cache_creation`` 32.9%,
+    against 1.6% for uncached input -- so a summary that reports only ``in`` and
+    ``out`` hides roughly three quarters of what was actually paid for. It also
+    hides the effect of any change that shrinks the prompt, because what such a
+    change moves is exactly these two columns: the campaign whose prefix fell
+    83% reported the same ``in``/``out`` line as the one whose prefix did not.
+
+    Counters are read with a default so a usage dict recorded by an older run --
+    or a partial one checkpointed mid-campaign -- renders as 0 rather than
+    raising while reporting a result that has already been computed.
+    """
+
+    def _row(counters: dict, cost_available: bool) -> str:
+        cost = f"${counters.get('total_cost_usd', 0.0):.2f}" if cost_available else "cost unavailable"
+        return (
+            f"{counters.get('input_tokens', 0):,} in / "
+            f"{counters.get('output_tokens', 0):,} out / "
+            f"{counters.get('cache_creation_input_tokens', 0):,} cache-write / "
+            f"{counters.get('cache_read_input_tokens', 0):,} cache-read tokens, "
+            f"{cost} ({counters.get('calls', 0)} calls)"
+        )
+
+    cost_available = usage.get("cost_available", "total_cost_usd" in usage)
+    lines = [f"  LLM spend: {_row(usage, cost_available)}"]
+    # The total alone says a campaign was expensive; it never says what was
+    # expensive. Print the split so the next cut can be aimed.
+    for name, counters in (usage.get("by_role") or {}).items():
+        lines.append(f"    {name}: {_row(counters, cost_available)}")
+    return lines
 
 
 def _patch_paths(patch: str, *, cwd: str) -> list[str]:
@@ -2460,18 +2507,18 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *smart_wrap(list(self.ic.build_command)),
+                *self.ic.build_command,
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            _, stderr = await communicate_process_group(
+            stdout, stderr = await communicate_process_group(
                 proc,
                 timeout=self.ic.build_timeout_sec,
             )
             if proc.returncode != 0:
-                print(f"  Baseline build FAILED: {stderr.decode()[-300:]}")
+                print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
                 return None
         bench_result = await measure_wallclock(
             driver_script=self.ic.driver_script,
@@ -3558,11 +3605,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         iter_start = time.time()
         force_jit_rebuild(self._jit_source_files())
 
-        # Step 1: Build (if configured) — RTK-wrap so a build failure's tail chars are signal, not boilerplate
-        # (ninja/cmake collapse 80%+).
+        # Step 1: Build (if configured).
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *smart_wrap(list(self.ic.build_command)),
+                *self.ic.build_command,
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -3577,7 +3623,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     iteration=iteration,
                     duration_sec=time.time() - iter_start,
                     validation_passed=False,
-                    validation_summary=f"BUILD FAILED: {stderr.decode()[-500:]}",
+                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
                     kept=False,
                 )
 
@@ -5602,17 +5648,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"{self._refused_round}"
             )
         if self.llm_usage.get("calls"):
-            cost_available = self.llm_usage.get(
-                "cost_available",
-                "total_cost_usd" in self.llm_usage,
-            )
-            cost_text = f"${self.llm_usage['total_cost_usd']:.2f}" if cost_available else "cost unavailable"
-            print(
-                f"  LLM spend: {self.llm_usage['input_tokens']:,} in / "
-                f"{self.llm_usage['output_tokens']:,} out tokens, "
-                f"{cost_text} "
-                f"({self.llm_usage['calls']} calls)"
-            )
+            for line in llm_spend_lines(self.llm_usage):
+                print(line)
         print(f"  Experiment: {self.experiment.experiment_id}")
 
         return self.results

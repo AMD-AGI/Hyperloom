@@ -164,6 +164,27 @@ def _flat_listing(folder: Path) -> str:
     return "\n".join(out)
 
 
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML block from a knowledge map.
+
+    The block carries title/kind/scope/updated -- metadata describing the file
+    to whoever maintains the KB. It is not navigation: nothing downstream
+    reads it, and an agent handed it learns nothing it cannot see from the H1
+    on the next line. It is inlined into every implementer, specialist,
+    orchestration and analysis prompt, so it is paid for once per map per
+    session and then again on every turn that re-reads the prefix.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :]).lstrip("\n")
+    # An opening fence with no close is not front matter; leave it alone
+    # rather than swallow the whole map.
+    return text
+
+
 def _render_level(root: Path, rel: str) -> str:
     """Render one knowledge level as a titled section."""
     folder = root / rel
@@ -173,7 +194,7 @@ def _render_level(root: Path, rel: str) -> str:
     index = folder / "INDEX.md"
     if index.is_file():
         try:
-            body = index.read_text(encoding="utf-8", errors="replace").strip()
+            body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace").strip()).strip()
         except OSError:
             body = ""
         if body:
@@ -184,14 +205,70 @@ def _render_level(root: Path, rel: str) -> str:
     return f"{header}\n\n{listing}"
 
 
+def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
+    """Render one knowledge level as a one-line pointer instead of its whole map.
+
+    Used for the SECOND language a backend carries, and for every pillar when
+    ``defer_all`` is set. Triton and Gluon carry each other so a campaign knows
+    that switching is an available move rather than a different project -- but
+    knowing the move exists needs the map's location, not its 2.7k-token body
+    inlined ahead of every turn of every session. The pointer keeps the
+    affordance and defers the map to a ``Read`` the agent makes only if it
+    actually needs it.
+
+    ``carried`` picks the wording: a level the backend merely carries is an
+    available move ("if this task crosses into ..."), while a deferred pillar is
+    the map itself and reads as one.
+    """
+    folder = root / rel
+    if not folder.is_dir():
+        return ""
+    index = folder / "INDEX.md"
+    if not index.is_file():
+        # No map to defer; a flat listing is already short, so inline it.
+        return _render_level(root, rel)
+    title = ""
+    try:
+        body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        body = ""
+    for line in body.split("\n"):
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+    header = f"## {rel}/  —  base: {folder}"
+    what = f" — {title}" if title else ""
+    call = (
+        f"`Read` `{index}` if this task crosses into `{rel}`."
+        if carried
+        else f"`Read` `{index}` for this pillar's map before opening any card under it."
+    )
+    return f"{header}\n\nMap not inlined{what}. {call}"
+
+
 def build_forge_knowledge(
     root: str | Path | None = None,
     *,
     language: str | Sequence[str] | None = None,
     include_aiter: bool = False,
     include_mori: bool = False,
+    defer_all: bool = False,
 ) -> str:
-    """Assemble the layered knowledge block for one forge-loop kernel task."""
+    """Assemble the layered knowledge block for one forge-loop kernel task.
+
+    Layers, in reading order: ``hardware/`` + ``common_methodology/`` always;
+    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
+    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    when given and present. ``language`` accepts a sequence (triton/gluon are one
+    toolchain and carry each other); duplicates collapse. Each level follows the
+    INDEX.md convention. Returns "" if the root or all levels are missing.
+
+    ``defer_all`` renders EVERY level as a pointer rather than only the carried
+    language -- the ablation behind ``Config.defer_knowledge_maps``. It is off by
+    default: the maps are what tells an agent a card exists at all, and whether it
+    still goes looking without them is a question for an A/B, not for arithmetic
+    on their token cost.
+    """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():
         return ""
@@ -202,10 +279,25 @@ def build_forge_knowledge(
     if include_mori:
         rels.append("framework/mori")
     languages = [language] if isinstance(language, str) else list(language or ())
-    for name in dict.fromkeys(item for item in languages if item):
-        rels.append(f"languages/{name}")
+    deferred: set[str] = set()
+    for position, name in enumerate(dict.fromkeys(item for item in languages if item)):
+        rel = f"languages/{name}"
+        rels.append(rel)
+        # The primary language is inlined whole; every language after it is the
+        # one the backend merely carries, and is deferred to a pointer.
+        if position:
+            deferred.add(rel)
+    if defer_all:
+        deferred.update(rels)
 
-    sections = [s for s in (_render_level(root_path, rel) for rel in rels) if s]
+    def render(rel: str) -> str:
+        if rel not in deferred:
+            return _render_level(root_path, rel)
+        # A level deferred only because the backend merely carries it reads as an
+        # available move; one deferred by the ablation is the pillar itself.
+        return _render_pointer(root_path, rel, carried=not defer_all)
+
+    sections = [s for s in (render(rel) for rel in rels) if s]
     if not sections:
         return ""
 

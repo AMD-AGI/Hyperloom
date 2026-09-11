@@ -229,6 +229,14 @@ class AgentRunSpec:
     # runs the campaign at ``low`` still gets ``low`` here.
     # Appended, like the field above, to keep the positional contract.
     max_reasoning_effort: str = ""
+    # What this session is for, in a name a human reading the campaign summary
+    # will recognise: "implementer", "analysis", "orchestration", "fusion
+    # author". Purely for accounting -- no provider changes behaviour on it --
+    # but without it a campaign's spend is one number, and a number that cannot
+    # be attributed cannot be argued with. Empty folds into "unattributed" so a
+    # caller that names nothing still has its tokens counted.
+    # Appended for the same reason as the field above.
+    role: str = ""
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.

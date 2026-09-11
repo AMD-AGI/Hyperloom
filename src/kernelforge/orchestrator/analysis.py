@@ -1522,6 +1522,7 @@ class AnalysisAgentService:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        role="analysis",
                         cwd=str(work_root),
                         writable=True,
                         timeout_sec=timeout_sec,

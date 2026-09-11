@@ -661,6 +661,7 @@ class CodexBackend:
             writable=False,
             timeout_sec=timeout_sec,
             reasoning_effort=reasoning_effort,
+            role="startup probe",
         )
         client = None
         turn = None
@@ -723,6 +724,7 @@ class CodexBackend:
             usage.add_usage(
                 result.usage,
                 total_cost_usd=result.usage.get("total_cost_usd"),
+                role=spec.role,
             )
         if not result.text:
             raise CodexUnavailableError("Codex gateway precheck returned an empty SDK response")
@@ -819,6 +821,7 @@ class CodexBackend:
             usage.add_usage(
                 result.usage,
                 total_cost_usd=result.usage.get("total_cost_usd"),
+                role=spec.role,
             )
         try:
             actual_changes = guard.verify()
