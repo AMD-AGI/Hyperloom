@@ -49,11 +49,15 @@ Kimi-K3 shape and author-reported timings do not establish performance on
 other shapes, GPUs, MoE kernels, or Forge's FlyDSL adapter. The cards distinguish
 source observations, reported results, and experiments still to run.
 
-Independent MI355X reproduction is recorded in both cards: the tested score
-assembly is slower than the Triton baseline, and combine requires address-carry
-corrections before wider allocation testing. Corrected combine shows gains
-that depend on cache/input reuse. The published headline ratios were not
-reproduced; use the measured scope and numerical contract when choosing a case.
+Independent MI355X reproduction is recorded in both cards. Distinguish the
+production Triton score from AITER's faster test reference, and audit the score
+ASM's hardcoded epsilon. A real Forge campaign improved the ASM seed by 1.314x
+through empty-exec tail skipping and scalar-base addressing, while remaining
+slower than the original test-reference Triton. Combine requires address-carry
+corrections before wider allocation testing. Current SGLang also has a fused
+path that bypasses the replaced score branch. The published headline ratios
+and a model E2E gain were not reproduced; use the measured scope and full caller
+contract when choosing a case.
 
 ## Case knowledge: verified FlyDSL roundtrip
 
