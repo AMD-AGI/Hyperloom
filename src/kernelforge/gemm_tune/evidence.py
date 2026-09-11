@@ -71,11 +71,7 @@ MOE_SHAPE_FIELDS = tuple(f for f in MOE_KEY_FIELDS if f != "token")
 # turning those records into a demand needs the table's own name.
 MOE_TABLE = "tuned_fmoe.csv"
 
-# Kill switch for that conversion. It is on by default because the records it
-# reads are the only runtime evidence fmoe_ck has, but emitting the demand also
-# changes two behaviours outside this module -- the router starts selecting
-# fmoe_ck off the log, and ``demand_for_tuner(report, "fmoe_ck")`` stops
-# returning None -- so there has to be a way to put those back without a revert.
+# Disable converting the only fmoe_ck runtime evidence into routing demand.
 MOE_DEMAND_DISABLE_ENV = "FORGE_MOE_DEMAND_DISABLE"
 
 # vLLM Triton MoE: found vs not-found are two different lines.
@@ -91,10 +87,8 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, ...]] = {
     "a8w8_bpreshuffle_tuned_gemm.csv": ("M", "N", "K", "q_dtype_w"),
     "a4w4_blockscale_tuned_gemm.csv": ("M", "N", "K"),
 }
-# ``tuned_fmoe.csv`` is deliberately absent. Its key schema is MOE_KEY_FIELDS,
-# but this map doubles as "is this a dense GEMM table?" -- vllm_dense_tunableop
-# borrows shapes from every table in it -- and a fused-MoE key has no (M, N, K)
-# for a dense tuner to borrow. The MoE demand carries its own key_schema.
+# ``tuned_fmoe.csv`` stays out: this map also identifies dense tables, while
+# MoE has no dense (M, N, K) and carries its own key schema.
 
 # Key columns the log actually exposes, so a demand entry can never claim one it did not observe.
 UNLOGGABLE_KEY_FIELDS = ("q_dtype_w",)
@@ -112,27 +106,10 @@ TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "tuned_fmoe.csv": ("fmoe_ck", "AITER_CONFIG_FMOE"),
 }
 
-# The name a table has in an aiter miss line is not always the name it has in
-# ``TABLE_TO_TUNER``, for two reasons that compose:
-#
-# * A tuner's artifact is named after the tuner, not after the table the runtime
-#   looks it up in -- ``sglang_dense_bf16`` writes ``tuned_dense_bf16.csv`` for
-#   what aiter calls ``bf16_tuned_gemm.csv``.
-# * Deploy merges the candidate into the bundled default and lands the result as
-#   ``merged_<artifact>.csv``.
-#
-# So once we have deployed anything, the runtime misses against a name no map
-# here has ever heard of, and the demand entry it produces claims no owner. That
-# is not hypothetical: across the fleet's 0903-0906 serving logs,
-# ``merged_tuned_dense_bf16.csv`` accounts for 28,818 misses, all of them filed
-# as ownerless, while ``sglang_dense_bf16`` owns precisely that table. Anything
-# reading ``tuner is None`` as "nothing implements this" -- coverage gaps most of
-# all -- is then reading our own artifact as a hole in our coverage.
+# Runtime names may be ``merged_<artifact>`` rather than lookup-table names.
+# Canonicalizing them prevents deployed artifacts from appearing ownerless.
 ARTIFACT_TABLE_ALIASES: dict[str, str] = {
-    # Verified against each tuner's write path rather than inferred from its
-    # name: ``_aiter_dense_common.py`` writes ``tuned_{tuner_name}.csv`` and
-    # ``sglang_dense_bf16.py`` / ``fmoe_ck.py`` name theirs directly. ``fmoe_ck``
-    # needs no entry -- it writes ``tuned_fmoe.csv``, which is already the key.
+    # These aliases follow each tuner's write path; fmoe_ck already uses the canonical name.
     "tuned_dense_bf16.csv": "bf16_tuned_gemm.csv",
     "tuned_a8w8.csv": "a8w8_tuned_gemm.csv",
     "tuned_a8w8_blockscale.csv": "a8w8_blockscale_tuned_gemm.csv",
@@ -143,12 +120,7 @@ ARTIFACT_TABLE_ALIASES: dict[str, str] = {
 
 
 def canonical_table_name(name: str) -> str:
-    """The ``TABLE_TO_TUNER`` key for a table name as the runtime printed it.
-
-    Basename, minus the deploy-time ``merged_`` prefix, then through the artifact
-    aliases. Names that are already keys pass through untouched, and a genuinely
-    unknown name is returned as its own basename so it stays legible in a report.
-    """
+    """Map a runtime table name to its ``TABLE_TO_TUNER`` key when known."""
     base = str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
     if base.startswith("merged_"):
         base = base[len("merged_") :]
@@ -261,11 +233,8 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
             "cu_num": fields["cu_num"],
             "tokens": set(),
             "untuned_tokens": set(),
-            # Per-token miss counts, keyed by the token as a string so the
-            # record survives a JSON round trip unchanged. ``miss_count`` alone
-            # cannot say which token counts the runtime actually spent its
-            # misses on, and a demand that splits it evenly would be inventing
-            # the number it is asked for most.
+            # String keys survive JSON unchanged and preserve the observed
+            # request distribution instead of inventing an even split.
             "untuned_token_counts": {},
             "miss_count": 0,
         }
@@ -282,30 +251,17 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
 
 
 def _moe_demand(report: dict[str, Any]) -> Demand | None:
-    """The fused-MoE misses, restated as a demand for ``tuned_fmoe.csv``.
+    """Expose fused-MoE dispatch misses as ``tuned_fmoe.csv`` demand.
 
-    MoE misses have always been recorded, but under ``dispatch["moe"]`` rather
-    than in ``demands`` -- so every consumer that reads the demand list saw a run
-    with millions of fmoe misses as a run with no MoE demand at all. The router
-    could not learn from the log that fmoe_ck was needed, ``demand_for_tuner``
-    answered None for it, and ``tuned_fmoe.csv`` could not become a coverage gap
-    however often the runtime missed it.
-
-    Nothing new is measured here. Each row is one (shape, token) pair the
-    runtime asked for and did not find, counted from the same lines, with the
-    stage attribution :func:`moe_ck_missed_keys` already applies -- a token only
-    ever seen on 1-stage dispatch is not something fmoe_ck's CK tuner can serve,
-    and handing it one would be demanding a row that cannot be produced.
+    Reuses existing miss evidence and excludes tokens seen only on one-stage
+    dispatch, which the fmoe CK tuner cannot serve.
     """
     if os.environ.get(MOE_DEMAND_DISABLE_ENV, "").strip().lower() in ("1", "true", "yes"):
         return None
     moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
     impl = str(moe.get("impl") or "")
     if impl and impl != "aiter_ck":
-        # fmoe_ck tunes aiter's CK path. Under vLLM's Triton MoE -- or a log
-        # carrying both -- these keys do not describe what the runtime will
-        # dispatch, and a demand claiming otherwise would route a tuner at a
-        # backend it cannot reach.
+        # fmoe_ck cannot serve Triton-MoE keys, including mixed-backend logs.
         return None
 
     keys: list[dict[str, Any]] = []
@@ -335,14 +291,10 @@ def _moe_demand(report: dict[str, Any]) -> Demand | None:
 
 
 def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
-    """Parse a serving log into demands, an apply verdict and dispatch facts.
+    """Parse a serving log into demands, an apply verdict, and dispatch facts.
 
-    Args:
-        text: The serving log.
-        hit_logging: Whether ``AITER_LOG_TUNED_CONFIG`` was on for the run that
-            wrote this log. ``None`` means unknown, which keeps a zero-hit
-            result ``inconclusive_no_hit_logging``; ``True`` resolves it to
-            ``zero_hit``. A caller that set the variable itself should say so.
+    ``hit_logging=None`` keeps a zero-hit result inconclusive; callers that
+    enabled ``AITER_LOG_TUNED_CONFIG`` should pass ``True``.
     """
     demands: dict[str, Demand] = {}
     key_counts: dict[str, dict[tuple, int]] = {}
@@ -536,10 +488,8 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
 
 def _apply_verdict(hits: int, misses: int, hit_logging: bool | None = None) -> str:
     if hits == 0 and misses > 0:
-        # Hit lines need AITER_LOG_TUNED_CONFIG=1; miss lines are unconditional.
-        # From the counts alone "flag off" and "flag on, nothing matched" look
-        # identical, so stay inconclusive unless the caller set the flag itself.
-        # Matches ``apply_verification.verify_applied``'s ``zero_hit``.
+        # Hits require AITER_LOG_TUNED_CONFIG; without known hit logging, zero
+        # hits cannot distinguish no matches from disabled logging.
         return "zero_hit" if hit_logging else "inconclusive_no_hit_logging"
     if hits == 0 and misses == 0:
         return "no_lookups"
@@ -601,30 +551,11 @@ def demand_shapes(
     limit: int | None = None,
     bucket: bool = True,
 ) -> list[dict[str, Any]]:
-    """Requested keys for one table, most-requested first.
+    """Return requested keys for one table, ranked by logged misses.
 
-    Fused-MoE keys are not M/N/K and are handled separately; everything else
-    goes through the padded-M bucketing below.
-
-    **What ``requests`` can and cannot rank.** It counts *log lines*, and the
-    lookup is memoized (``get_CKGEMM_config`` is ``functools.lru_cache``-d), so
-    a shape is logged once per process however often its kernel runs. Summing
-    per bucket therefore measures how many distinct M happen to fall inside the
-    bucket -- and ``padded_m`` buckets double in width, so wide high-M buckets
-    accumulate hundreds of raw keys while a narrow decode bucket accumulates the
-    handful of batch sizes the scheduler used. Measured on a Qwen3-14B-FP8
-    sglang arm: bucket M=2048 summed 551 requests from 391 raw M and ranked 1st,
-    while every decode bucket summed 1-2 and ranked 33rd-56th of 56; a budget of
-    14 then cut the band entirely and the prefill-only table won +1.30% e2e and
-    was reverted.
-
-    So this ordering is sound for the *prefill* tail but must never decide
-    whether the decode band is tuned at all -- callers guarantee that band from
-    the concurrency contract instead, in
-    ``tuners._aiter_dense_common._ensure_decode_m_coverage``. The measurement
-    once quoted here ("share of logged misses served": 95.6% at budget 24) is
-    the same log-line metric, so it cannot see this failure and must not be read
-    as coverage of GPU time.
+    Memoized lookups make counts a distinct-shape signal, not GPU-time
+    frequency. Dense keys use padded-M buckets, so callers must guarantee decode
+    coverage separately; fused-MoE keys use their exact-key path.
     """
     if canonical_table_name(entry.get("table") or "") == MOE_TABLE:
         return _moe_demand_shapes(entry, limit=limit)
@@ -665,16 +596,7 @@ def demand_shapes(
 
 
 def _moe_demand_shapes(entry: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
-    """Demanded shapes for the fused-MoE table.
-
-    Kept apart from the dense path rather than folded into it, because every
-    step of that path is dense-specific: a MoE key has no M/N/K to read, and the
-    padded-M bucketing that makes a dense budget worth spending has no analogue
-    here -- aiter looks a fmoe row up at the exact token count, so collapsing
-    two token counts into one row would drop one of them. The keys are already
-    one row per (shape, token) the runtime asked for, ranked by how often; the
-    budget just takes the front of that list.
-    """
+    """Return exact fused-MoE shape/token keys without dense M bucketing."""
     shapes = [dict(key) for key in entry.get("keys") or []]
     shapes.sort(key=lambda s: (-(_as_int(s.get("requests")) or 0), _as_int(s.get("token")) or 0))
     if limit is not None and limit > 0:

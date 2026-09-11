@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The fused-MoE dispatch adapter, in the parts that do not need a GPU.
-
-What a GPU settled, and what these tests therefore take as given (measured on
-an MI355X, gfx950, aiter d9e5ef7ce, the production MiniMax-M3-MXFP4 key):
-
-* the FlyDSL-shuffled weights pair with the FlyDSL scales, and crossing the
-  pairings returns NaN rather than failing;
-* ``fused_moe`` derives ``q_dtype_a`` itself and will not serve the fp4-
-  activation key below 256 tokens, so a demanded key is not always reachable;
-* switching ``AITER_CONFIG_FMOE`` mid-process moves nothing unless three caches
-  are cleared with it;
-* a candidate aiter declines to take is served by the default path, and would
-  be timed as a tie.
-
-The last two are why :meth:`_build` reads the resolved kernel names back out of
-aiter's log instead of trusting that writing the row was enough, and that
-read-back is the part worth pinning here: it is the only thing standing between
-"the row was ignored" and "the candidate tied with the baseline".
-"""
+"""Test fused-MoE dispatch decisions that do not require a GPU."""
 
 from __future__ import annotations
 
@@ -155,13 +137,7 @@ class TestTheCandidateBecomesARow:
 
 
 class TestThePairAiterWillActuallyRun:
-    """The guard the log read-back cannot be: aiter logs, then discards.
-
-    Measured on hardware before this existed: a candidate naming ``nope1`` and
-    ``nope2`` was logged by aiter verbatim as the pair it was using, ran the
-    heuristic kernels instead, and timed 1.1% faster than the baseline -- a
-    phantom win, over the referee's 1.01 floor.
-    """
+    """Reject pairs aiter logs but silently declines to dispatch."""
 
     def test_a_flydsl_stage_one_carries_a_foreign_partner(self):
         # The partner is dispatched, but only from inside the branch the FlyDSL
@@ -180,21 +156,12 @@ class TestThePairAiterWillActuallyRun:
         assert not dp.aiter_honours_kernel_pair("cktile_moe1_afp4", "cktile_moe2_afp4")
 
     def test_a_fake_flydsl_name_is_left_to_aiter_to_reject(self):
-        # Deliberately not validated against a name list here. aiter raises
-        # ValueError("Invalid FlyDSL kernel name: ...") for one it cannot
-        # resolve, which _build already catches -- and a list maintained on
-        # this side would go stale against the generator that owns it.
+        # Let aiter own kernel-name validation so a duplicate list cannot go stale.
         assert dp.aiter_honours_kernel_pair("flydsl_moe1_no_such_tile", "flydsl_moe2_no_such_tile")
 
 
 class TestAPairThatNamesOneKernelAndRunsAnother:
-    """Both silent substitutions, refused on paper rather than measured.
-
-    aiter downgrades a tile that does not divide the dimension it walks, and
-    indexes tokens at ``block_m`` regardless of what the names say. Neither
-    faults; both were measured on gfx950 returning a mean error near 1.4 while
-    running *faster* than the default path.
-    """
+    """Reject silent tile substitution and incompatible ``block_m`` values."""
 
     def test_a_tile_that_divides_is_fine(self):
         assert (
@@ -327,11 +294,8 @@ class TestTheErrorMeasure:
     """Why fused MoE does not use the measure the dense adapter uses."""
 
     def test_one_ulp_at_the_peak_swamps_the_peak_measure(self):
-        # Reproduces in miniature what the hardware showed: an output with a
-        # peak far above its mean, perturbed by a single element, scores badly
-        # on max|d|/mean and negligibly on mean|d|/mean. On the real kernel
-        # those numbers were 0.04701 and 0.00021, against limits of 0.05 and
-        # 0.01 -- one has 6% of margin, the other a factor of 48.
+        # A single peak perturbation reproduces the measured 0.04701 peak error
+        # versus 0.00021 mean error that motivates the MoE metric.
         torch = pytest.importorskip("torch")
         ref = torch.full((512, 6144), 1.0)
         ref[0, 0] = 1248.0

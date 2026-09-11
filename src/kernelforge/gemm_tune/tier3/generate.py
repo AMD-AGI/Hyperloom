@@ -1,22 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ask an agent to author a tuner from a mandate.
+"""Ask an agent to author one tuner from a mandate.
 
-``kernelforge.llm`` is imported inside the call, never at module scope: the
-standalone wheel is meant to be the only thing a GPU box installs to tune, and a
-test asserts it imports with no ``kernelforge`` present. Absent, this returns
-"unavailable" and the caller carries on, the same outcome as a closed gate.
-
-The session is writable, which puts it under the workspace guard, which requires
-a git worktree it can snapshot and roll back. Nothing here ever was one, so on a
-real box this stage failed before the model was asked anything -- see
-:func:`_isolate`.
-
-The agent writes one file and is told what it will be judged on. It is not shown
-the existing tuners: this tier exists for a capability nothing else has, and a
-script derived from one that does is either the wrong shape or evidence the gate
-should not have opened.
+The optional LLM dependency is imported lazily. Writable sessions run in an
+isolated git worktree so the guard can snapshot and roll back the generated file.
 """
 
 from __future__ import annotations
@@ -33,11 +21,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
 
-#: Turns the authoring session may take. The default of one is unusable: the
-#: mandate itself tells the author to explore what is callable before committing
-#: to a search, and enumerating a backend's identifiers, reading the answer and
-#: then writing the script is several turns at minimum. ``timeout_s`` remains
-#: the real limit.
+#: Allow backend discovery and script authoring; ``timeout_s`` remains the hard limit.
 MAX_AUTHORING_TURNS = 120
 
 _SYSTEM_PROMPT = """\
@@ -147,20 +131,8 @@ def generate_tuner(
         cwd=str(work_dir),
         writable=True,
         timeout_sec=timeout_s,
-        # Without a policy the backend sets no allowed_tools at all, so nothing
-        # is pre-approved and the session stops to ask. Measured on an MI355X:
-        # it asked for Write and for python3, explained at length why it could
-        # not enumerate hipBLASLt solutions without them, and ended its turn
-        # waiting for an answer nobody was there to give. `agent_stopped`,
-        # no script, a whole GPU run spent.
-        #
-        # Shell is not optional here, and not a widening of what this tier
-        # already does. Three of the five backends it may propose take
-        # identifiers only the installed library can supply -- a solidx, an ASM
-        # kernel name, an opus kernel id -- and the mandate tells the author
-        # that inventing one kills the process. Enumerating them means running
-        # python on this box. The script it writes is then executed anyway, by
-        # `sandbox.run_generated_tuner`, in the same container.
+        # Pre-approve tools because unattended sessions cannot answer permission
+        # prompts; shell access is required to enumerate installed kernel ids.
         tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=MAX_AUTHORING_TURNS),
         target_files=[str(script_path)],
         allow_untracked=True,
@@ -174,12 +146,7 @@ def generate_tuner(
     provider = str(getattr(backend, "name", "") or "")
     session = str(getattr(result, "session_id", "") or "")
     if not script_path.is_file():
-        # Quote the agent. Without this the failure reads "the session ended
-        # (agent_stopped) without writing tuner.py" whatever went wrong, and
-        # the one thing that explains it -- the agent saying which permission
-        # it was missing -- is thrown away. That cost a full GPU run to
-        # rediscover by hand, and the same text is also what the retry note
-        # would need to be useful.
+        # Preserve the agent's explanation for diagnosis and the next retry.
         said = " ".join(str(getattr(result, "text", "") or "").split())[-600:]
         return GeneratedTuner(
             False,
@@ -194,25 +161,10 @@ def generate_tuner(
 
 
 def _isolate(work_dir: Path) -> GeneratedTuner | None:
-    """Make ``work_dir`` its own git worktree. ``None`` when it now is one.
+    """Initialize ``work_dir`` as its own git repository for workspace safety.
 
-    A writable session runs under the workspace guard, and the guard refuses to
-    start anywhere ``git rev-parse --show-toplevel`` comes back empty -- it has
-    no baseline to snapshot and no way to roll back. Nothing ever gave it one
-    here: this work_dir is ``<tuning output>/tier3/<table>/``, an ordinary
-    output directory, so on a GPU box the authoring session died at
-    ``WorkspaceSafetyError('not a git repository')`` before the model was ever
-    asked anything. The gate opening changed nothing, because this is upstream
-    of everything the gate controls.
-
-    An empty repository of its own is the fix rather than an exemption. The
-    guard then does exactly its job -- baseline, rollback, and a verdict on what
-    the session touched -- against a directory that exists to be written to.
-
-    Initialising *the work_dir itself* also matters. Left alone, a tuning run
-    started from inside a checkout would resolve the toplevel to that checkout,
-    and the guard would be judging the operator's real tree against a session
-    that is supposed to be sandboxed.
+    This provides a local baseline and rollback target without exposing an
+    enclosing operator checkout. Return an error or None.
     """
     if (work_dir / ".git").exists():
         return None

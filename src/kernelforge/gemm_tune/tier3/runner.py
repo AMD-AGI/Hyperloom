@@ -36,16 +36,10 @@ class Tier3Outcome:
     table: str = ""
     script: str = ""
     digest: str = ""
-    #: Where the verified rows are, for a caller that has to land them. Carried
-    #: rather than recomputed from the work root: the layout under it is this
-    #: module's business, and a caller rebuilding the path by convention would
-    #: deploy the wrong file the day the layout changes.
+    #: Explicit verified-row path; callers must not reconstruct this module's layout.
     output_csv: str = ""
     judgements: list[Judgement] = field(default_factory=list)
-    #: Whether an operator has signed this exact script off. Named for the
-    #: signature and not for "trusted" because CodeQL's clear-text-storage
-    #: query classifies any field whose name contains "trusted" as a secret,
-    #: and this one is serialised into ``tier3_outcome.json``. It is a bool.
+    #: Avoid "trusted" in this serialized bool's name: CodeQL treats it as secret data.
     operator_signed: bool = False
 
     @property
@@ -91,12 +85,7 @@ def attempt_generated_tuner(
     gap = decision.gap
     outcome.table = gap.table
     if make_baseline is None or make_dispatch is None:
-        # Checked here rather than at the referee, where it used to be. The
-        # verdict does not depend on anything the intervening stages produce, so
-        # deferring it bought nothing and cost an authoring session plus a full
-        # sandbox run -- every one of which was then discarded unread. Any table
-        # without a dispatch adapter reaches this: opening the gate to fused-MoE
-        # demand made that a live path rather than a hypothetical one.
+        # Stop before paying for generation and sandboxing when re-timing is impossible.
         outcome.reason = (
             f"no dispatch was supplied for {gap.table}, so nothing written for it could be "
             "re-timed; an unverified generated tuner is not emitted, and generating one to "

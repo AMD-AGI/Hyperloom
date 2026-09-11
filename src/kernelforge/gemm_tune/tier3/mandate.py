@@ -1,40 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The brief handed to whoever writes a generated tuner.
+"""Build the contract given to a generated-tuner author.
 
-Five things, because a tuner cannot be written without any of them: the output
-contract, the demand it must cover, why the existing tiers did not, the shape a
-candidate has to take to be re-dispatchable, and a skeleton that already runs on
-this hardware.
-
-The fourth was missing for as long as this tier existed, and it made the others
-moot. The brief asked for candidates "carrying enough detail to be dispatched by
-code that did not write your script" without saying what that code reads, so an
-author following it exactly proposed configurations in a vocabulary
-:mod:`.dispatch` does not parse -- every one recorded as "not dispatchable". It
-now comes from ``dispatch.describe_candidate_protocol``, so the words the author
-is given are generated from the code that reads them back.
-
-Four clauses are not style preferences. On real MI355X trials both an LLM-written
-tuner and aiter's own official tuner were confidently wrong the same two ways,
-and a correct search was still destroyed by the hardware. Correctness must be
-re-checked on fresh inputs several times: four split-K winners were wrong on
-1.25-3.98% of elements, and *which* elements changed between identical calls, so
-a single check passes them at random -- the generated tuner reported a worst-case
-relative error of 7.65e-3 for candidates a repeated audit measured at 17 to 50.
-A Python-loop timer cannot rank these kernels: one dispatch costs ~12us against
-kernels of 5-13us, so every candidate collapses to the same number and the honest
-conclusion from that data was "there is nothing to tune here"; capturing N calls
-into a graph removes the host cost. The search must be crash-resumable, because
-sweeping one backend's kernel ids raised no exception and no error -- it ended
-the interpreter with a GPU memory fault, on shape 2 of 42, after four minutes of
-correct work, leaving one row, and nothing in Python can catch that. And its own
-timings decide nothing -- :mod:`.referee` re-times everything, which is what
-makes the rest survivable.
-
-The mandate is data. Rendering it as text is a convenience; the fields are what
-downstream code checks against.
+The mandate supplies demand, prior-tier gaps, the dispatchable candidate
+protocol, a runnable skeleton, repeated correctness checks, graph timing, and
+crash-resumable output. The independent referee remains authoritative; the
+structured fields, not rendered prose, are the downstream contract.
 """
 
 from __future__ import annotations
@@ -58,10 +30,7 @@ MAX_RELATIVE_ERROR = 5e-2
 # of those.
 MAX_RELATIVE_ERROR_DEFINITION = "max|got - ref| / mean|ref|, over the whole output tensor, with ref computed in fp32"
 
-# The rationale for the dense rule above. It is a default, not the rule: a table whose adapter screens differently
-# supplies its own through ``dispatch.describe_correctness_rule``. Stating the dense rationale to an author who cannot
-# follow it is worse than saying nothing, because it sounds authoritative -- see that function's docstring for what it
-# cost the first time.
+# Dense default only; adapters with different screening provide their own rule.
 DENSE_CORRECTNESS_NOTE = """\
 Use that definition and not an element-wise ratio. Dividing element by element
 and flooring the denominator lets any output element that happens to land near
@@ -251,17 +220,10 @@ def build_mandate(
     reference_skeleton: str = "",
     budget_seconds: int = 1500,
 ) -> TunerMandate:
-    """Turn a coverage gap plus its demanded shapes into a mandate.
+    """Build a mandate from a gap and its demanded shapes.
 
-    ``candidate_protocol`` defaults to whatever the dispatch adapter for this
-    table says it can run, rather than to nothing: the author has no other way
-    to learn it, and a candidate the referee cannot re-dispatch is unpromotable
-    however well it was measured.
-
-    The correctness rule arrives the same way and for the same reason. A
-    candidate the referee's screen rejects is just as unpromotable, and an author
-    given the wrong screen spends its whole budget on candidates that cannot
-    survive -- which is exactly what happened on the first real fused-MoE run.
+    Candidate format and correctness defaults come from the same adapter the
+    referee uses, preventing un-dispatchable or unpromotable proposals.
     """
     table = str(getattr(gap, "table", "") or "")
     if candidate_protocol is None:

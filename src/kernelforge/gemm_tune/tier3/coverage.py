@@ -29,9 +29,7 @@ _NOT_A_COVERAGE_GAP = (
 )
 
 
-# Why a demanded table went untuned. Three of these argue for writing a tuner
-# and one does not: `not_selected` is a routing bug, and generating a second
-# tuner would paper over it.
+# Why demand went untuned; ``not_selected`` is a routing bug, not generation work.
 KIND_NO_TUNER = "no_tuner"  # nothing implements this at all
 KIND_SKIPPED = "skipped"  # a tuner exists and declined, for a reason
 KIND_EMPTY = "empty"  # a tuner exists, ran, and produced nothing landable
@@ -60,13 +58,7 @@ class CoverageGap:
 
     @property
     def warrants_generated_tuner(self) -> bool:
-        """An absent result does. A routing miss is a routing bug.
-
-        Absent, not unimplemented: a tuner that owns the table and hands back
-        nothing landable leaves the runtime no better off than one that was
-        never written. What a generated tuner cannot help with is a table whose
-        owner was simply never selected -- there the fix is to select it.
-        """
+        """Return whether Tier3 can help rather than fixing tuner selection."""
         return self.kind in _WARRANTS
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,16 +96,9 @@ def _gap(entry: dict[str, Any], table: str, tuner: str | None, *, kind: str, rea
 
 
 def _landed(results: list[Any] | None) -> set[str] | None:
-    """Tuners that finished with something the integrate lane could apply.
+    """Return tuners with landable candidates, or ``None`` before execution.
 
-    ``None`` when no results were supplied, which is how the pre-run caller says
-    "nobody has run yet" rather than "nobody produced anything" -- the two must
-    not collapse, or every selected tuner would read as empty before it started.
-
-    Built from ``per_tuner_candidates`` rather than from ``status``, so this
-    agrees with the promotion rule the report itself uses. A tuner that reports
-    ``ok`` but wrote no artifact and named no env var is not landable, and the
-    runtime will keep missing exactly the keys it was asked about.
+    Candidate artifacts and env vars, not status alone, define landability.
     """
     if results is None:
         return None
@@ -127,12 +112,7 @@ def coverage_gaps(
     tuner_specs: list[Any],
     results: list[Any] | None = None,
 ) -> list[CoverageGap]:
-    """Demanded tables that no selected tuner will write.
-
-    Passing ``results`` is what turns "a tuner owns this" into "a tuner covered
-    this": an owner that came back empty-handed yields ``KIND_EMPTY`` instead of
-    silently counting as coverage. Omit it before the tuners run.
-    """
+    """Return demanded tables lacking selected or successfully landed owners."""
     demands = (demand_report or {}).get("demands") or []
     if not demands:
         return []

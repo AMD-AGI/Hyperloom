@@ -62,11 +62,8 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     try:
         from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        # Hyperloom's workload env sets AITER_LOG_TUNED_CONFIG=1 for every
-        # serving run, and it is inherited here, so when it is on we can say a
-        # zero-hit table really had zero coverage instead of leaving the verdict
-        # inconclusive. Absent/0 stays unknown -- an operator-supplied log may
-        # have been produced without it.
+        # Hyperloom sets this for serving runs, making zero hits conclusive.
+        # Operator logs without it remain inconclusive.
         hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
         report = parse_log_file(server_log, hit_logging=hit_logging or None)
     except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
@@ -120,13 +117,10 @@ def _coverage_gaps(
     output_dir: Path,
     results: list | None = None,
 ) -> list:
-    """Write the demanded tables no selected tuner produced, and return them.
+    """Write and return demanded tables not covered by selected tuners.
 
-    Called twice per run, and the difference is the point: before the tuners run
-    ``results`` is None and selection alone says what is uncovered; after, a
-    table whose owner came back empty-handed joins the list, which is the state
-    the runtime is in either way. Best-effort -- a report must not affect the
-    tuning it describes.
+    With results, owners that produced nothing landable also count as gaps.
+    Reporting is best-effort and never affects tuning.
     """
     if not demand_report:
         return []
@@ -156,18 +150,10 @@ def _attempt_tier3(
     gpu_type: str,
     framework: str,
 ) -> "TuneResult | None":
-    """Try a generated tuner for the strongest gap nothing else covered.
+    """Try Tier3 for the strongest otherwise-uncovered gap.
 
-    Reached only for a table that went untuned anyway, so its time is not taken
-    from a tuner that would have covered it. Returns a ``TuneResult`` only when
-    the referee confirmed an improvement, so verified rows travel the same road
-    as every other tuner's -- candidate, report, e2e, deploy -- and everything
-    else stays off that road entirely.
-
-    Never raises. Note the caller must not compute arguments for this call
-    either: reading one wrong attribute off the profile at the call site took
-    down a completed run, because argument evaluation happens outside the guard.
-    Hence ``profile`` rather than fields pulled from it.
+    Never raises and returns only referee-verified improvements. Accepting the
+    profile object keeps attribute access inside this failure boundary.
     """
     if not gaps:
         return None
@@ -187,10 +173,7 @@ def _attempt_tier3(
         demand = load_demand(demand_json)
 
         def shapes_for(gap):
-            # ``load_demand`` returns the parsed document, not an object: this
-            # read ``demand.tables`` and raised AttributeError inside the guard
-            # below, so every attempt died as "tier3 attempt failed" before it
-            # had a mandate to write.
+            # ``load_demand`` returns a parsed dict, not an object with ``tables``.
             for entry in (demand or {}).get("demands") or []:
                 if str(entry.get("table") or "") == gap.table:
                     return demand_shapes(entry)
@@ -221,18 +204,10 @@ def _attempt_tier3(
 
 
 def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
-    """A verified generated tuner as an ordinary tuner result, or nothing.
+    """Convert a referee-approved Tier3 outcome into a tuner result.
 
-    ``outcome.ok`` is the referee's verdict on our own clock, and nothing short
-    of it becomes a result: an attempt that stopped at the gate, failed the
-    contract, or was re-timed and found no faster kernel has produced no rows
-    worth deploying, and emitting it as a no-improvement result would only put
-    an unverified artifact in front of the integrate lane.
-
-    ``candidate=True`` rather than relying on ``has_improvement``, so this
-    lands on the same e2e-validated path as split-K: the referee's micro
-    speedup is measured on graph replays of individual kernels and is not by
-    itself a claim about end-to-end throughput.
+    Unverified artifacts return nothing. Marking the result as a candidate
+    forces normal e2e validation; microbenchmark speedup is not an e2e claim.
     """
     from .tuners.base import TuneResult
 
@@ -665,10 +640,7 @@ def run(
                 len(spec.token_hint),
                 spec.token_hint[:8],
             )
-            # Both fields: ``tokens`` so the config-derived paths sweep only what this kernel serves, and
-            # ``token_hint`` so the paths that start from runtime-observed tokens can tell "this is the allowed set"
-            # from "this is the coverage sweep" -- ``tokens`` alone cannot carry that distinction, since every run has
-            # one.
+            # ``tokens`` bounds the sweep; ``token_hint`` marks the observed allowed set.
             tuner_ctx = dataclasses.replace(
                 tuner_ctx,
                 tokens=list(spec.token_hint),

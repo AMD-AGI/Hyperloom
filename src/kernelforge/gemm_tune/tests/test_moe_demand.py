@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The fused-MoE misses, stated as a demand instead of only as a dispatch fact.
-
-The records were always there. They were filed under ``dispatch["moe"]``, and
-every consumer that asks "what did this run demand?" reads ``demands`` -- so a
-run with millions of fmoe misses answered "nothing". Three things followed from
-that one placement: the router could not learn from the log that ``fmoe_ck`` was
-needed, ``demand_for_tuner(report, "fmoe_ck")`` was None however much the
-runtime had missed, and ``tuned_fmoe.csv`` could never become a coverage gap,
-which is the door tier3 comes through.
-
-Nothing new is measured here, and that is the point -- these tests pin the
-mapping down to the records, including the two places it must refuse: a token
-CK did not serve, and a runtime whose MoE is not CK at all.
-
-The tuple literals are verbatim from a production sglang log (MiniMax-M3-MXFP4,
-TP8, gfx950), the same source as ``test_moe_runtime_key``.
-"""
+"""Test mapping fused-MoE dispatch misses into eligible tuner demand."""
 
 from __future__ import annotations
 

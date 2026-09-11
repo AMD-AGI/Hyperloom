@@ -26,55 +26,23 @@ CORRECTNESS_TRIALS = 8
 # Bound the aggregate referee error metric, not an element-wise relative ratio.
 MAX_RELATIVE_ERROR = 5e-2
 
-#: The same limit for fused MoE, on the mean rather than the peak, because on
-#: MoE output the peak measure has no room left. Measured on an MI355X at
-#: gfx950, token=512 of the MiniMax-M3-MXFP4 key, as ``max|d|/mean`` and
-#: ``mean|d|/mean`` against one reference: the same kernel re-run gives 0.04701
-#: and 0.00021, a real tuning run's winner 1.2458 and 0.1445, deliberately
-#: holed scales 4.9008 and 0.5697. The 0.04701 is one bf16 ulp at the largest
-#: output element (``max|d|`` is 8.0 to the bit, twelve runs running) because
-#: stage 2 reduces with atomics and sums in a different order each time -- 6%
-#: of margin against :data:`MAX_RELATIVE_ERROR` on a kernel compared with
-#: itself. The mean measure leaves a factor of 48 below the limit and 14 above
-#: it to the nearest real failure.
+#: MoE uses mean error because atomic reduction makes peak error noisy. On
+#: MI355X, self-noise measured 0.00021 and real failures at least 0.1445.
 MAX_MOE_MEAN_ERROR = 1e-2
 
-#: The prefix that decides whether a tuned fused-MoE row is honoured at all.
-#: ``fused_moe`` reads the row, logs the pair it read, and only then asks
-#: whether either name starts with this; if neither does, control falls past
-#: the whole tuned branch into the heuristic chain. So the log line proves the
-#: row was read, not that the kernels ran. Measured: a candidate naming
-#: ``nope1``/``nope2`` was logged verbatim, ran the default path, and timed 1.1%
-#: faster than the baseline -- above the referee's 1.01 noise floor. A name that
-#: does start with it and is not real raises instead, and is refused on that.
+#: Aiter logs a row before checking this prefix; require it to ensure the tuned
+#: path ran instead of timing the heuristic fallback.
 FLYDSL_KERNEL_PREFIX = "flydsl_"
 
-#: Fewer trials than :data:`CORRECTNESS_TRIALS`, and they vary less. A trial
-#: costs two ``fused_moe`` calls rather than a GEMM, and the weights cannot be
-#: re-rolled: ``generate_data_2stages`` is deterministic (verified -- two calls
-#: return bit-identical tensors), so only the activations differ between trials.
-#: Stated plainly because it is a weaker check than the dense one.
+#: MoE trials cost two calls and vary only activations because its weights are deterministic.
 MOE_CORRECTNESS_TRIALS = 4
 
 # Tables this module knows how to exercise. Everything else is honestly absent
 # rather than approximated.
 SUPPORTED_TABLES = ("bf16_tuned_gemm.csv", MOE_TABLE)
 
-#: What ``_Bf16DenseAdapter._build`` will accept, backend by backend.
-#:
-#: Load-bearing, not documentation: ``_build`` refuses a backend that is not a
-#: key here, and :func:`describe_candidate_protocol` renders it into the
-#: mandate. So the vocabulary the author is given and the vocabulary the referee
-#: understands are the same object, and cannot drift apart silently.
-#:
-#: They *had* drifted, in the only direction that matters. The mandate asked for
-#: candidates "carrying enough detail to be dispatched by code that did not
-#: write your script" and then never said what that code reads. Nothing named
-#: the five backends, the ``k=v;k=v`` grammar, or the fact that the keys of
-#: ``candidates.json`` are parsed as ``MxNxK``. An author working from the
-#: mandate alone -- which is the entire premise -- would have had to guess all
-#: three, and every wrong guess is recorded as "not dispatchable": the gate
-#: opens, the search runs, and nothing can possibly be re-timed.
+#: The single source for both mandate vocabulary and dispatch validation.
+#: Keeping them together prevents advertised and accepted backends from drifting.
 DENSE_BF16_BACKENDS: dict[str, str] = {
     "torch": "the unmodified path, `torch.matmul(a, b.t())`. No config. Propose it only as a control.",
     "hipblaslt": (
@@ -122,25 +90,10 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
 
 
 def describe_correctness_rule(table: str) -> dict[str, Any] | None:
-    """The screen the referee will apply to this table, or ``None`` for the default.
+    """Return the adapter's referee rule, or ``None`` for the dense default.
 
-    The mandate used to state one rule for every table: eight trials against an
-    fp32 reference, discard above 5e-2. That is the dense rule, and it is the
-    rule :class:`_Bf16DenseAdapter` enforces. Handed to a fused-MoE author it
-    asks for a reference that cannot be built -- aiter's generator returns
-    weights already quantized and pre-shuffled, with no unquantized copy -- so
-    the author invents a screen of its own, and the referee then rejects what it
-    passed.
-
-    That is not hypothetical. A real authoring session proposed five candidates
-    per shape, reported all fifteen as improvements, and the referee threw out
-    all fifteen at a mean error of 0.1441-0.1446 against the untuned path: fast
-    stage-1 kernels from the ``_kw2_fp4`` family that return a different answer.
-    An author told the real limit can discard those itself and spend the budget
-    on candidates that can actually be promoted.
-
-    So the rule lives next to the code that enforces it, and the mandate quotes
-    it rather than restating it.
+    Fused-MoE compares with the untuned path because only quantized,
+    pre-shuffled weights exist. The mandate quotes this same rule.
     """
     if table != MOE_TABLE:
         return None
@@ -170,12 +123,7 @@ def describe_correctness_rule(table: str) -> dict[str, Any] | None:
 
 
 def describe_candidate_protocol(table: str) -> str:
-    """How to write a candidate this module can actually dispatch, or "".
-
-    Empty for a table with no adapter, which is the same answer
-    :func:`adapters_for` gives: there is no protocol to describe because
-    nothing would re-time the result anyway.
-    """
+    """Describe the adapter's candidate format, or return "" without one."""
     if table == MOE_TABLE:
         fields = ", ".join(f"`{f}`" for f in MOE_KEY_FIELDS)
         backends = "\n".join(f"- `{name}` -- {detail}" for name, detail in FUSED_MOE_BACKENDS.items())
@@ -272,14 +220,7 @@ def shape_key(shape: str) -> tuple[int, int, int]:
 
 
 def moe_shape_key(shape: str) -> dict[str, str]:
-    """``"token=512|model_dim=6144|..."`` into the dispatch key, as strings.
-
-    Raises ``ValueError`` naming what is missing. Not ``MxNxK`` and not
-    positional: a fused-MoE key carries twelve fields, three of which contain
-    a ``.`` and one of which (``torch.float4_e2m1fn_x2``) contains an ``x``, so
-    any positional encoding built out of the obvious separators is ambiguous
-    against the values it has to carry.
-    """
+    """Parse a named fused-MoE shape key, raising for missing fields."""
     parts = [p for p in str(shape).split("|") if p.strip()]
     got: dict[str, str] = {}
     for part in parts:
@@ -294,49 +235,14 @@ def moe_shape_key(shape: str) -> dict[str, str]:
 
 
 class _FusedMoeAdapter:
-    """Dispatch, baseline and correctness for aiter's fused mxfp4 SwiGLU MoE.
+    """Dispatch and validate aiter fused mxfp4 SwiGLU MoE candidates.
 
-    Unlike the dense adapter this one cannot hand the kernel its arguments. A
-    fused-MoE kernel pair is chosen inside ``aiter.fused_moe`` by looking the
-    dispatch key up in a CSV named by ``AITER_CONFIG_FMOE``, so a candidate is
-    dispatched by writing that CSV and calling the ordinary entry point --
-    which is also aiter's own idiom for re-timing one
-    (``GroupedFmoeTuner._run_candidate``). Four things about that were measured
-    rather than assumed, each of which silently produces a wrong measurement:
-
-    * **The env var alone does not switch anything.** ``get_config_file`` is
-      ``lru_cache``d on a key that does not include the environment variable
-      whose value it reads, so within one process the first resolution wins
-      forever. Three caches have to be cleared together; see :meth:`_point_at`.
-    * **The caller does not choose the activation dtype.** ``fused_moe``
-      derives ``q_dtype_a`` itself from the quant type, the activation, the
-      gate mode and the token count -- for SwiGLU mxfp4 it is bf16 below 256
-      tokens and fp4 at or above. So a demanded key is not necessarily a key
-      this process can be steered to, and the adapter confirms which key was
-      actually served instead of predicting it.
-    * **Operands must match the kernel family's layout.** aiter's generator
-      hands back three pairings (CK-shuffled, unshuffled, FlyDSL-shuffled) and
-      crossing them does not fail -- it returns NaN, or, if the activations are
-      pre-quantized when the path wanted bf16, aborts the queue with
-      ``HSA_STATUS_ERROR_EXCEPTION``.
-    * **A row aiter ignores is timed as the default path.** Which reads as a
-      tie, or, with noise, as a small win for a candidate that did nothing. Two
-      different silences produce that, so there are two guards: a key this
-      process cannot be steered to is caught by reading the resolved kernel
-      names back out of aiter's own log, and a pair aiter discards *after*
-      logging it is caught by :func:`aiter_honours_kernel_pair` before any GPU
-      work happens.
-
-    Scope is the mxfp4 SwiGLU path (``per_1x32``, fp4 weights) because that is
-    where the demand is and where the candidates are: on gfx950 the production
-    MiniMax-M3-MXFP4 key has 834 tunable candidates, every one of them FlyDSL,
-    and zero from the other five generators.
+    Cache resets, observed kernel read-back, compatible operand layouts, and
+    pair checks prevent silently timing a substituted/default kernel. Scope is
+    the ``per_1x32`` fp4 path selected through ``AITER_CONFIG_FMOE``.
     """
 
-    #: aiter reads its tuned fused-MoE config from a CSV with exactly these
-    #: columns. The key half is :data:`MOE_KEY_FIELDS` plus the two aiter adds
-    #: itself; the rest is what the tuner records, of which only the kernel
-    #: names and the four flags are read back at dispatch time.
+    #: Exact aiter fused-MoE CSV schema: dispatch keys, kernels, and flags.
     _CSV_COLUMNS = (
         "gfx",
         "cu_num",
@@ -379,13 +285,7 @@ class _FusedMoeAdapter:
         return fm
 
     def _point_at(self, path: Path) -> None:
-        """Make the next ``fused_moe`` call read *path*, cache clears included.
-
-        All three clears are load-bearing and were found one at a time by
-        switching configs and watching the resolved kernel not change:
-        ``get_config_file`` caches the resolved path, ``cfg_2stages`` caches the
-        parsed table, and ``get_2stage_cfgs`` caches the row for a key.
-        """
+        """Point the next call at *path*, clearing all three dispatch caches."""
         from aiter.jit.core import AITER_CONFIGS
 
         fm = self._fused_moe()
@@ -396,16 +296,7 @@ class _FusedMoeAdapter:
 
     # ------------------------------------------------------------- operands --
     def _ops(self, shape: str) -> dict[str, Any] | None:
-        """Weights, scales and routing for one key, or None if we cannot build.
-
-        Built by aiter's own tuning script rather than reimplemented here.
-        Quantizing 128 experts to mxfp4 and pre-shuffling them into the layout
-        the FlyDSL kernels index is exactly the kind of thing a reimplementation
-        gets subtly wrong and then reports as a numerics failure in the
-        candidate. It lives in ``csrc/`` next to the installed package, so a
-        wheel without sources yields None -- an honest "no dispatch here", not
-        an approximation.
-        """
+        """Build operands with aiter's tuner, or return None without its sources."""
         if shape in self._operands:
             return self._operands[shape]
         key = moe_shape_key(shape)
@@ -493,13 +384,7 @@ class _FusedMoeAdapter:
         return _Bf16DenseAdapter.as_graph(self, fn)  # type: ignore[arg-type]
 
     def make_baseline(self, shape: str) -> Callable[[], Any]:
-        """The unmodified path: no tuned row for this key, so aiter's heuristic.
-
-        An empty table rather than an unset variable, because unsetting it lets
-        aiter fall back to whatever tuned file happens to be installed -- which
-        on a fleet box is a file we deployed, and timing a candidate against our
-        own previous answer is not what "baseline" means here.
-        """
+        """Build an untuned baseline using an empty table, not installed rows."""
         self._point_at(self._baseline_csv)
         run = self._call(shape, self._hidden(shape, 0))
         if run is None:
@@ -604,11 +489,7 @@ class _FusedMoeAdapter:
             self._point_at(self._baseline_csv)
             return None
         if resolved != (kn1, kn2):
-            # Not a bad candidate necessarily -- more often a key this process
-            # cannot be steered to at all, because fused_moe derives q_dtype_a
-            # from the token count. Either way it must not be timed: what would
-            # run is the default path, and that scores as a tie or, with noise,
-            # as a win for a row that changed nothing.
+            # A mismatched key runs the default path, which noise can falsely score as a win.
             log.info(
                 "tier3: aiter did not take the candidate row for %s -- asked for (%s, %s), served %s; not timing it",
                 shape,
@@ -621,13 +502,7 @@ class _FusedMoeAdapter:
         return run
 
     def _resolved_kernels(self, run: Callable[[], Any]) -> tuple[str, str] | None:
-        """Which kernel pair aiter actually chose, read out of its own log.
-
-        Observation rather than prediction. The alternative is to re-derive
-        aiter's dispatch rules here, and those rules are a hundred lines of
-        branching on token count, gate mode and gfx that change release to
-        release -- a copy of them would be wrong quietly.
-        """
+        """Read the kernel pair aiter actually chose from its own log."""
         import re
 
         records: list[str] = []
@@ -655,15 +530,10 @@ class _FusedMoeAdapter:
         return None
 
     def _is_correct(self, shape: str, cand: dict[str, Any]) -> bool:
-        """Does the candidate agree with the path production runs today?
+        """Compare with the untuned path using fresh inputs.
 
-        A weaker question than the dense adapter asks, and deliberately. There
-        the reference is an independent fp32 ``matmul``; here aiter's generator
-        hands over weights that are already quantized and pre-shuffled, and
-        there is no unquantized copy to build an independent reference from.
-        So the reference is the unmodified path -- which is the right question
-        for a promotion decision anyway ("would swapping this in change what we
-        serve?"), just not a proof that either side is arithmetically right.
+        This tests promotion equivalence, not independent arithmetic correctness,
+        because only quantized and pre-shuffled weights are available.
         """
         torch = self._torch()
         written = self._candidate_csv(shape, cand)
@@ -786,27 +656,10 @@ class _Bf16DenseAdapter:
 
     # ------------------------------------------------------------ internals --
     def _hipb_solutions(self, key: tuple[int, int, int], a, bt) -> set[int]:
-        """The solution indices hipBLASLt will accept for this shape.
+        """Return hipBLASLt solution indices valid for these operands.
 
-        Everything here is about not being killed. Two ways to die, both
-        confirmed on an MI355X and neither of them catchable from Python,
-        because the C++ error handler ends the process rather than returning:
-
-        * ``hipb_mm`` on a handle nobody created is a SIGSEGV. The extension
-          has to be created explicitly; this used to warm up by calling
-          ``hipb_findallsols`` instead, which wants the very same handle and so
-          died at ``hipbsolgemm.cu:248`` with ``NOT_INITIALIZED`` before it
-          could protect anything.
-        * ``hipb_mm`` with a solution index that is not real exits at
-          ``hipbsolgemm.cu:945`` with ``INVALID_VALUE``. A generated tuner
-          proposes ``solidx`` as a free integer, so this is not a remote
-          possibility -- it is the expected case for a first draft.
-
-        The referee runs in-process at the tail of a tuning session, after
-        every other tuner has finished, so either death costs the whole run its
-        report. Hence the set: ``findallsols`` is the authoritative answer for
-        these exact operands, and a candidate naming anything outside it is
-        refused as undispatchable, which is an ordinary recorded result.
+        Invalid handles or indices terminate the process in C++, so initialize
+        the extension and reject values outside ``findallsols`` before timing.
         """
         import aiter
 
@@ -827,10 +680,7 @@ class _Bf16DenseAdapter:
         """
         backend = str(cand.get("backend", ""))
         if backend not in DENSE_BF16_BACKENDS:
-            # Checked against the same table the mandate is rendered from, so
-            # "the author was told about it" and "we can run it" are one fact.
-            # First, before aiter or the operands: a name we never offered is
-            # refused on paper, without allocating or importing anything.
+            # Validate against the mandate's source before importing aiter or allocating operands.
             log.info("tier3: unknown backend %r in a candidate", backend)
             return None
 
@@ -958,18 +808,10 @@ def relative_error(got: Any, ref: Any) -> float:
 
 
 def aiter_honours_kernel_pair(kernel_name_1: str, kernel_name_2: str) -> bool:
-    """Will aiter actually run this pair, or read it and move on?
+    """Return whether aiter dispatches this pair instead of silently skipping it.
 
-    The one part of aiter's dispatch this adapter does have to mirror, because
-    it is the part no observation can recover: the tuned row is logged before
-    the decision that discards it, so a pair aiter throws away is
-    indistinguishable in the log from one it keeps. Everything else the adapter
-    confirms by watching; this it has to know.
-
-    A pair is honoured when at least one name is FlyDSL's. Its partner may then
-    be a CK, CKTile or Opus name and is dispatched too -- but only from inside
-    the branch that the FlyDSL name opened. See
-    ``aiter/fused_moe.py``'s ``is_flydsl1 or is_flydsl2`` guard.
+    At least one member must be FlyDSL; logging happens before this guard, so
+    runtime read-back cannot detect rejection.
     """
     return kernel_name_1.startswith(FLYDSL_KERNEL_PREFIX) or kernel_name_2.startswith(FLYDSL_KERNEL_PREFIX)
 
@@ -979,12 +821,7 @@ FLYDSL_TILE = re.compile(r"_t(\d+)x(\d+)x(\d+)")
 
 
 def flydsl_tile(kernel_name: str) -> tuple[int, int, int] | None:
-    """The ``(M, N, K)`` tile in a FlyDSL name, or None if it carries none.
-
-    A CK, CKTile or Opus partner is spelled differently and returns None, which
-    is not an error -- the checks below skip whatever they cannot read rather
-    than refusing a name whose shape they do not know how to see.
-    """
+    """Return a FlyDSL ``(M, N, K)`` tile, or None for other families."""
     if not kernel_name.startswith(FLYDSL_KERNEL_PREFIX):
         return None
     found = FLYDSL_TILE.search(kernel_name)
@@ -992,26 +829,10 @@ def flydsl_tile(kernel_name: str) -> tuple[int, int, int] | None:
 
 
 def flydsl_pair_misconfigured(kernel_name_1: str, kernel_name_2: str, block_m: int, inter_dim: int) -> str:
-    """Why this pair would run something other than what it names -- or "".
+    """Explain silent FlyDSL substitution or row-layout mismatch.
 
-    Two ways to name one kernel and get another, both of which aiter accepts in
-    silence and neither of which faults:
-
-    * **A tile that does not divide the dimension it walks.** Stage 1 walks N
-      over ``inter_dim`` and stage 2 walks K over it. ``moe_kernels.py``'s
-      ``resolve_flydsl_stage1_tile_n`` and ``resolve_flydsl_stage2_tile_k``
-      quietly halve a tile that does not divide, so the kernel that runs is not
-      the one measured. Its own docstrings say tuners should not offer these.
-    * **A ``block_m`` that is not the pair's M tile.** ``block_m`` is the
-      granularity the tokens are sorted into before either kernel indexes them,
-      so a mismatch reads the wrong rows -- quickly. Measured on gfx950, nine
-      combinations with no exception: correct only when ``block_m`` equals the M
-      tile of *both* names, and the mismatched pairs were the fastest thing in
-      the search at 72us against a 112us default, wrong by a mean error of 1.4.
-
-    The correctness gate catches both, which is why this is a saving rather than
-    a safety net: a candidate refused here costs no GPU time, and a search that
-    keeps proposing them is told why instead of silently scoring zero.
+    Stage tiles must divide ``inter_dim`` or aiter halves them, and ``block_m``
+    must match both M tiles. Return "" when neither rejection applies.
     """
     tile_1, tile_2 = flydsl_tile(kernel_name_1), flydsl_tile(kernel_name_2)
     if tile_1 and inter_dim % tile_1[1]:
@@ -1025,10 +846,5 @@ def flydsl_pair_misconfigured(kernel_name_1: str, kernel_name_2: str, block_m: i
 
 
 def mean_error(got: Any, ref: Any) -> float:
-    """Average deviation, against the magnitude of the reference as a whole.
-
-    The peak measure above reports one bf16 ulp at the largest element, which
-    for a fused-MoE output is 0.047 for a kernel against itself. See
-    :data:`MAX_MOE_MEAN_ERROR` for the three cases that settled this.
-    """
+    """Return average deviation normalized by the reference's global magnitude."""
     return float((got.float() - ref).abs().mean() / ref.abs().mean())

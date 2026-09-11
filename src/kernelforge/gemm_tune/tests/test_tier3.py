@@ -56,11 +56,7 @@ class TestCoverageGaps:
         assert not gap.warrants_generated_tuner
 
     def test_a_tuner_that_declined_for_no_reason_of_substance_is_tier3_work(self):
-        # "The script is missing" is not a property of the table, the hardware
-        # or the checkpoint -- it is our own capability being absent on this
-        # run, which is the same position a table with no owner is in. The
-        # reasons that really are answers are excluded before a gap is built;
-        # see test_a_skip_that_is_an_answer_is_not_a_gap.
+        # A missing script is an implementation gap; substantive skips were filtered earlier.
         specs = [TunerSpec("fmoe_ck", skip_reason="the tuner script is missing")]
         (gap,) = coverage_gaps(_demand(tuner="fmoe_ck"), specs)
         assert gap.kind == "skipped"
@@ -467,13 +463,7 @@ def test_shape_key_parses_the_well_formed_case() -> None:
 
 
 class TestAWinHasToClearTheNoise:
-    """The baseline used to beat itself, so "faster" needed a floor.
-
-    Measured on an MI355X: ``time_paired`` run 25 times per shape with the same
-    callable on both sides, over four fleet-demanded shapes. 43 of the 100
-    trials were refused as unstable; of the 57 that produced a number, 28 read
-    above 1.0 and the largest was 1.00925x. None reached 1.01x.
-    """
+    """Require a speedup above the measured 1.00925x null-comparison noise."""
 
     def test_the_floor_sits_above_every_null_reading_we_measured(self):
         from kernelforge.gemm_tune.tier3 import referee
@@ -517,17 +507,7 @@ class TestAWinHasToClearTheNoise:
 
 
 class TestHipblasltCannotTakeTheRunDownWithIt:
-    """Two ways to die on this backend, both confirmed on an MI355X.
-
-    Neither is catchable: the C++ error handler ends the process. Since the
-    referee runs in-process at the tail of a tuning session, after every other
-    tuner has finished, either one costs the whole run its report.
-
-    * ``hipb_mm`` with no extension created -> SIGSEGV (rc=-11).
-    * ``hipb_mm`` with an invented ``solidx`` -> ``INVALID_VALUE`` at
-      ``hipbsolgemm.cu:945``, rc=1. A generated tuner writes ``solidx`` as a
-      free integer, so this is the expected case for a first draft.
-    """
+    """Reject invalid hipBLASLt state before its C++ handler terminates the process."""
 
     @pytest.fixture
     def aiter(self, monkeypatch):
@@ -596,15 +576,7 @@ class TestHipblasltCannotTakeTheRunDownWithIt:
 
 
 class TestTheAuthorIsToldWhatACandidateHasToLookLike:
-    """The brief used to ask for re-dispatchable candidates without saying how.
-
-    ``dispatch._build`` reads five backend names and a ``k=v;k=v`` config, and
-    files candidates by an ``MxNxK`` key. None of that appeared anywhere the
-    author could see it, so a script written from the mandate alone -- the whole
-    premise of this tier -- proposes candidates in some other vocabulary and
-    every one of them is recorded as "not dispatchable". The gate opens, the
-    search runs, and nothing can be promoted.
-    """
+    """Expose the exact backend, config, and shape vocabulary accepted by dispatch."""
 
     def _gap(self, table="bf16_tuned_gemm.csv"):
         return CoverageGap(
@@ -656,13 +628,7 @@ class TestTheAuthorIsToldWhatACandidateHasToLookLike:
 
 
 class TestTheVocabularyIsOneObject:
-    """Advertised and dispatchable have to be the same set, or the gap is silent.
-
-    ``_build`` checks the candidate's backend against the very table the mandate
-    is rendered from, so a name can neither be runnable-but-unadvertised (the
-    author never proposes it) nor advertised-but-unrunnable (every proposal of
-    it is refused) without a test failing here.
-    """
+    """Keep the advertised and dispatchable backend sets identical."""
 
     def test_a_backend_nobody_advertised_is_refused_before_anything_is_touched(self, monkeypatch):
         from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
@@ -699,16 +665,7 @@ class TestTheVocabularyIsOneObject:
 
 
 class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
-    """The generate stage never reached a model on a real box.
-
-    A writable session runs under the workspace guard, and the guard starts by
-    resolving ``git rev-parse --show-toplevel`` from the session's cwd. That cwd
-    is ``<tuning output>/tier3/<table>/`` -- an output directory, never a
-    repository -- so every attempt died at ``WorkspaceSafetyError('not a git
-    repository')``. Measured on an MI355X with a working provider: the gate
-    opened, the adapter resolved, and the run stopped at ``stage='generate'``
-    with that message, having asked nothing.
-    """
+    """Run writable authoring sessions in an isolated git repository."""
 
     def _work_dir(self, tmp_path):
         d = tmp_path / "tier3" / "bf16_tuned_gemm_csv"
@@ -797,15 +754,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
 
 
 class TestTheAuthoringSessionIsAllowedToDoTheJob:
-    """It asked for permission and there was nobody there.
-
-    Measured on an MI355X with a working provider and a sandbox worktree: the
-    session could reach the model, and then stopped to request Write access and
-    permission to run python3, explaining that it could not enumerate hipBLASLt
-    solutions without them. `end_reason=agent_stopped`, no script, a GPU run
-    spent. `tool_policy` was None, so the backend set no allowed_tools at all
-    and nothing was pre-approved.
-    """
+    """Pre-authorize the write and Python tools required to generate a tuner."""
 
     def _spec(self, monkeypatch, tmp_path):
         from kernelforge.gemm_tune.tier3 import generate
@@ -882,16 +831,7 @@ class TestTheAuthoringSessionIsAllowedToDoTheJob:
 
 
 class TestTheAuthorIsWarnedThatABadLaunchKillsTheProcess:
-    """A GPU memory fault is not an exception, and the brief never said so.
-
-    Measured on an MI355X: a tuner written from this mandate swept one backend's
-    kernel ids, took a fault four minutes in on shape 2 of 42, and the process
-    ended -- no traceback, nothing for ``except`` to see, forty-one shapes of
-    work never started. A single-process script has no upper bound on what one
-    bad candidate costs it, and no amount of care in the search protects it.
-    The author cannot infer this from anywhere else, so the mandate has to say
-    it, and has to say what to do about it.
-    """
+    """Warn that a bad GPU launch kills the process and must be isolated."""
 
     def _brief(self):
         gap = CoverageGap(

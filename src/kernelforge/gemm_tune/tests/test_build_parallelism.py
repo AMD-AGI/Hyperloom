@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Sizing an aiter JIT build to the container rather than to the host.
-
-The measurement behind every number here, taken on an MI355X under ROCm 7.2:
-one ``hipcc`` job on a CK-tile fused-MoE source holds **1.64 GiB** and runs for
-30 seconds, three samples within 0.01 GiB of each other. The box shows 236 CPUs
-and a cgroup ceiling of 128 GiB, so aiter's ``-j 188`` asks for roughly 308 GiB
-and the build is killed rather than slowed.
-
-These tests inject both numbers instead of reading the machine, so they say the
-same thing on a laptop as on a fleet node.
-"""
+"""Test cgroup-aware AITER JIT parallelism with injected resource limits."""
 
 from __future__ import annotations
 

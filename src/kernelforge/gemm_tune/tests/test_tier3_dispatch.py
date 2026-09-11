@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for turning a proposed candidate into something the referee can time.
-
-The two measurement decisions in this module were both learned by getting them
-wrong on real hardware, and neither is visible from a passing tuner:
-
-* error is measured against the magnitude of the reference *as a whole*, not
-  element by element -- the element-wise reading scores the unmodified
-  ``torch.matmul`` at 1.375 against its own fp32 reference, so a gate on it
-  rejects the default path;
-* correctness is re-checked on fresh inputs several times, because four winners
-  picked on this box were wrong intermittently and a single check passes such a
-  kernel roughly at random.
-
-Both are pinned below. The rest is the honesty of the dispatch itself: a
-candidate this module cannot build has to come back as ``None`` -- recorded by
-the referee as "not dispatchable" -- rather than as an approximation of what it
-might have meant.
-
-torch and aiter are injected as fakes rather than imported: the point is the
-dispatch logic, and requiring a GPU would mean none of it is covered anywhere.
-"""
+"""Test candidate dispatch, repeated correctness, and aggregate error rules."""
 
 from __future__ import annotations
 
@@ -159,12 +139,7 @@ class _FakeTorch:
 
 
 def _install_aiter(monkeypatch: pytest.MonkeyPatch, *, asm_result=None, raises: bool = False, sols=(7,)):
-    """Wire a fake ``aiter`` package, including the two submodules imported.
-
-    ``sols`` is what hipBLASLt says it can serve for these operands. It has to be
-    a real list rather than None, because ``_build`` now refuses a ``solidx``
-    that is not in it -- running an invented one aborts the process from C++.
-    """
+    """Install fake aiter modules with the supplied hipBLASLt solutions."""
     calls: dict[str, int] = {"findallsols": 0, "workspace_init": 0, "create_extension": 0}
 
     aiter = types.ModuleType("aiter")

@@ -347,10 +347,7 @@ class TestTheCliActuallyReachesTier3:
         assert adapters_for("bf16_tuned_gemm.csv") is not None
 
     def test_the_call_site_keeps_what_it_returns(self):
-        # It did not. `_attempt_tier3(...)` was called for its side effects and
-        # its return value dropped on the floor, so a generated tuner that had
-        # survived generation, the sandbox, the contract and the referee still
-        # reached no report, no candidate and no deploy.
+        # The generated result must reach reporting and deployment, not be dropped.
         import inspect
 
         from kernelforge.gemm_tune import cli
@@ -372,12 +369,7 @@ class TestTheCliActuallyReachesTier3:
 
 
 class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
-    """What the referee approved has to travel the same road as everything else.
-
-    Anything short of the referee's approval must not: the point of the tier is
-    that a generated tuner's own numbers are discarded, so an outcome that never
-    reached re-timing has established nothing to deploy.
-    """
+    """Only referee-approved output enters the normal result pipeline."""
 
     @staticmethod
     def _outcome(**kw):
@@ -440,10 +432,7 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
 
 class TestShapesComeFromTheDemandDocument:
     def test_the_demand_lookup_matches_what_load_demand_returns(self, tmp_path):
-        # It did not: the call site read ``demand.tables`` off a plain dict, and
-        # the AttributeError was swallowed by the guard around the attempt, so
-        # every tier3 run died as "tier3 attempt failed" before writing a
-        # mandate. Nothing noticed, because nothing asserted it got that far.
+        # Guard against treating the parsed demand dict as an object with ``tables``.
         from kernelforge.gemm_tune import cli, evidence
 
         report = evidence.parse_log(
@@ -596,10 +585,7 @@ class TestTheWholeChain:
         assert "re-timed" in out.reason
 
     def test_without_a_dispatch_it_stops_before_it_spends_anything(self, tmp_path, monkeypatch, open_gate):
-        # This used to be checked at the referee, so a table with no adapter
-        # first paid for an authoring session and a sandbox run and then had the
-        # result thrown away unread. Nothing between the gate and the referee
-        # changes the verdict, so it belongs before the spending.
+        # Reject missing dispatch before paying for authoring and sandboxing.
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
         assert out.stage == "gate"
         assert not out.attempted

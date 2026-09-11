@@ -1,22 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a generated tuner may be attempted at all.
+"""Decide whether a generated tuner may run.
 
-Four conditions, separate on purpose so that one misconfiguration cannot open
-the whole path: nobody turned it off, nothing else did the job, there is enough
-demand to be worth it, and the keys are describable.
-
-The second used to read ``no_tuner`` only, which sounds stricter and was in
-practice absolute -- across the fleet's 0903-0906 logs every demanded table had
-a registered owner, so no run ever produced a gap this would accept while the
-runtime went on missing millions of keys those owners never covered. "A tuner
-exists" was standing in for "the table got tuned", and only the second is what
-the runtime experiences.
-
-The decision carries its reasons rather than being a boolean, because when this
-says no the useful artefact is *why*: fix routing, widen the whitelist, or leave
-it alone.
+The gate requires enablement, an uncovered result, sufficient demand, and
+describable keys. It returns reasons so callers can distinguish routing,
+coverage, and configuration failures.
 """
 
 from __future__ import annotations

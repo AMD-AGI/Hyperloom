@@ -230,16 +230,7 @@ class TestRobustness:
 
 
 class TestDeployedTableNamesResolveToTheirOwner:
-    """The deployed name of a table must not read as an ownerless one.
-
-    Deploy renames twice on the way to the runtime -- the artifact is named
-    after the tuner, and the merge prefixes it -- so a table we tuned ourselves
-    comes back as ``merged_tuned_dense_bf16.csv``. Before this resolution the
-    fleet's 0903-0906 logs filed all 28,818 of those misses under ``tuner:
-    None``, which is the same signal a genuinely unimplemented table gives.
-    Anything acting on that signal -- Tier-3's coverage gaps above all -- would
-    have been acting on our own artifact.
-    """
+    """Resolve deployed and merged table names to their owning tuner."""
 
     @staticmethod
     def _miss(table: str) -> str:
