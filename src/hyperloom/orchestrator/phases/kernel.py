@@ -32,6 +32,8 @@ from ..actions.executors._workload_envs import geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
+    kernel_event_id,
+    reject_geak_attempts,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.optimization_journal import (
@@ -1770,6 +1772,7 @@ class KernelPhase(PhaseHandler):
         """Validate the return and record any measured claim without a headline gain."""
         if not isinstance(result, dict):
             return False
+        result.setdefault("kernel_event_id", kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)))
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
@@ -2373,14 +2376,15 @@ class KernelPhase(PhaseHandler):
         rejection_reason: str = "rebench_did_not_beat_current_best",
     ) -> None:
         """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
-        recorder = KernelPhase._kernel_timeline(self)
-        if recorder is not None:
-            recorder.reject_geak_attempts(
-                measured_tput=measured_tput,
-                current_best_tput=current_best_tput,
-                provenance=provenance,
-                rejection_reason=rejection_reason,
-            )
+        reject_geak_attempts(
+            event=str(
+                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+            ),
+            measured_tput=measured_tput,
+            current_best_tput=current_best_tput,
+            provenance=provenance,
+            rejection_reason=rejection_reason,
+        )
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""

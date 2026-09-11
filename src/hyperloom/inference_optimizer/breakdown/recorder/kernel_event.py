@@ -212,6 +212,7 @@ __all__ = [
     "kernel_event_id",
     "make_kernel_recorder",
     "record_integrate_verdict",
+    "reject_geak_attempts",
     "record_trace_analyze_request",
 ]
 
@@ -225,6 +226,51 @@ def kernel_event_id(macro_cycle: Any) -> str:
     """Build ``kernel_agent:{macro_cycle}:kernel``. Raises ``ValueError`` if
     ``macro_cycle`` is not a non-negative integer."""
     return event_id(EVENT_PHASE, macro_cycle, EVENT_COMPONENT)
+
+
+def reject_geak_attempts(
+    *,
+    event: str,
+    measured_tput: float,
+    current_best_tput: float,
+    provenance: str,
+    rejection_reason: str,
+) -> None:
+    """Revoke imported KEEPs by event identity, including after KERNEL closes."""
+    if not make_sink(event, producer=PRODUCER).has_row(SECTION_EVENT):
+        return
+    sink = make_sink(event, producer=PRODUCER_GEAK)
+    parts = event_parts((SECTION_GEAK_ATTEMPT,), event=event)
+    rows = rows_for_event(parts.get(SECTION_GEAK_ATTEMPT) or [], event)
+    for row in rows:
+        e2e = _as_dict(row.get("e2e"))
+        if not (
+            str(e2e.get("decision") or "").upper() in {"KEEP", "ADOPTED"}
+            or e2e.get("integrated")
+            or e2e.get("validated")
+        ):
+            continue
+        sink.record(
+            SECTION_GEAK_ATTEMPT,
+            {
+                **row,
+                "e2e": {
+                    **e2e,
+                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
+                    "revalidation_measured_tput": measured_tput,
+                    "revalidation_current_best_tput": current_best_tput,
+                    "revalidation_provenance": provenance,
+                    "rejection_reason": rejection_reason,
+                    "decision": "REVERT",
+                    "integrated": False,
+                    "validated": False,
+                    "e2e_gain_pct": None,
+                },
+            },
+            row_type=ROW_GEAK_ATTEMPT,
+            natural_ids=str(row["kernel_id"]),
+        )
+    _republish_closed_event(event)
 
 
 def record_integrate_verdict(
@@ -1287,7 +1333,10 @@ class KernelEventRecorder:
         parsed = _as_dict(journey)
         prior = {
             row.get("kernel_id"): _as_dict(row.get("e2e"))
-            for row in event_parts((SECTION_GEAK_ATTEMPT,), event=self._event_id).get(SECTION_GEAK_ATTEMPT) or []
+            for row in rows_for_event(
+                event_parts((SECTION_GEAK_ATTEMPT,), event=self._event_id).get(SECTION_GEAK_ATTEMPT) or [],
+                self._event_id,
+            )
         }
         for ordinal, run in enumerate(_as_list(parsed.get("discovery_runs"))):
             row = _as_dict(run)
@@ -1372,46 +1421,6 @@ class KernelEventRecorder:
                 },
                 row_type=ROW_GEAK_ATTEMPT,
                 natural_ids=kernel_id,
-            )
-        _republish_closed_event(self._event_id)
-
-    def reject_geak_attempts(
-        self,
-        *,
-        measured_tput: float,
-        current_best_tput: float,
-        provenance: str,
-        rejection_reason: str,
-    ) -> None:
-        """Revoke this event's imported KEEPs even if the producer file is gone."""
-        rows = event_parts((SECTION_GEAK_ATTEMPT,), event=self._event_id).get(SECTION_GEAK_ATTEMPT) or []
-        for row in rows:
-            e2e = _as_dict(row.get("e2e"))
-            if not (
-                str(e2e.get("decision") or "").upper() in {"KEEP", "ADOPTED"}
-                or e2e.get("integrated")
-                or e2e.get("validated")
-            ):
-                continue
-            self._geak_sink.record(
-                SECTION_GEAK_ATTEMPT,
-                {
-                    **row,
-                    "e2e": {
-                        **e2e,
-                        "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
-                        "revalidation_measured_tput": measured_tput,
-                        "revalidation_current_best_tput": current_best_tput,
-                        "revalidation_provenance": provenance,
-                        "rejection_reason": rejection_reason,
-                        "decision": "REVERT",
-                        "integrated": False,
-                        "validated": False,
-                        "e2e_gain_pct": None,
-                    },
-                },
-                row_type=ROW_GEAK_ATTEMPT,
-                natural_ids=str(row["kernel_id"]),
             )
         _republish_closed_event(self._event_id)
 

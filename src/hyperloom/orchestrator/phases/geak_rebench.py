@@ -18,7 +18,13 @@ INCOMPARABLE_REVALIDATION = "incomparable"
 
 # Verdict annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
-    {"revalidation_status", "revalidation_error", "revalidation_error_class", "revalidation_blocked_overlay"}
+    {
+        "kernel_event_id",
+        "revalidation_status",
+        "revalidation_error",
+        "revalidation_error_class",
+        "revalidation_blocked_overlay",
+    }
 )
 
 # Failed measurements remain retryable.
