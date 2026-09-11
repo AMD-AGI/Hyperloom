@@ -21,7 +21,7 @@ git -C "$W" init
 git -C "$W" add .
 git -C "$W" commit -m 'AttnRes source and independent driver'
 python "$W/driver.py" --mode test
-python "$W/driver.py" --mode bench
+python "$W/driver.py" --bench-mode
 kernelforge forge-loop \
   --workspace "$W" --kernel "$W/kernel.py" --driver "$W/driver.py" \
   --kernel-backend assembly --gpu-target gfx950 \
