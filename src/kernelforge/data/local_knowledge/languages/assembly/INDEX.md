@@ -2,7 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
-updated: 2026-09-09
+updated: 2026-09-11
 ---
 
 <!--
@@ -14,9 +14,20 @@ SPDX-License-Identifier: MIT
 
 Use assembly to test a specific compiler limitation: instruction scheduling,
 register pressure, spills, barriers, or waits. Structural changes belong first
-in FlyDSL, Triton/Gluon, or HIP; compile a fresh assembly baseline after each
-such change. Read the actual GPU's ISA and memory-ordering documentation from
+in a separate FlyDSL, Triton/Gluon, or HIP campaign; start a fresh PORT after
+such a change. Inside an assembly optimization loop, only its selected `.s` is editable. Read the actual GPU's ISA and memory-ordering documentation from
 the hardware knowledge map before changing synchronization or register usage.
+
+## Campaign phase contract
+
+`forge-loop --kernel-backend assembly` first validates a standalone HIP PORT,
+then freezes its launcher/reference/driver and permits only the selected `.s`
+to change. Source-language maps explain the input during PORT; they do not permit
+high-level fallback during optimization. A deliberate assembly build failure
+must propagate through the driver. Record source, initial ASM and optimized ASM
+separately. The FlyDSL adapter below remains a low-level helper, not the
+standalone campaign launcher contract. The minimal runnable example is
+`examples/triton2asm-attnres/`.
 
 ## Case knowledge: Neha / Evolve
 
@@ -141,17 +152,18 @@ work with Triton or HIP callables.
 
 1. Measure the original high-level implementation with the protected driver.
 2. Run the unmodified assembly through the same callable contract. Require the
-   complete correctness suite and timing parity before optimizing.
+   complete correctness suite before optimizing. Record timing even when the
+   port is slower; PORT does not require speedup or timing parity.
 3. Make one instruction change and rerun correctness, graph-capture
    verification, per-case timing, and relevant counters. Keep the same inputs,
    dtype, tolerances, stream, launch dimensions, and measurement method.
 4. Before trusting the route, use a disposable negative control that changes
    the output and confirm the unchanged oracle rejects it. Restore that edit.
 5. Keep the launcher and `.s` in source control together. Use explicit
-   `--commit-new-path` entries for files created during a campaign; pretracked
-   files use the existing KEEP/REVERT path. Do not commit temporary `.o`,
+   source paths during PORT; the host tracks the verified launcher and `.s`.
+   During OPTIMIZE, only the selected `.s` uses the existing KEEP/REVERT path. Do not commit temporary `.o`,
    `.hsaco`, IR dumps, compiler caches, or benchmark logs.
 
 Assembly does not guarantee a speedup. Report parity, regression, and variance
-as measured. When the limiting factor is an algorithm or layout, return to
-the high-level language, regenerate assembly, and repeat the parity check.
+as measured. When the limiting factor is an algorithm or layout, start a separate
+high-level campaign, regenerate assembly, and repeat PORT correctness validation.
