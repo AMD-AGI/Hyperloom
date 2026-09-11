@@ -312,7 +312,14 @@ class Config:
                     os.getenv("FORGE_AGENT_TIMEOUT_SEC", "1800"),
                 )
             ),
-            agent_reasoning_effort=overrides.get("agent_reasoning_effort", resolve_agent_reasoning_effort()),
+            # Resolved lazily: the env ladder refuses an off-ladder value by
+            # raising, and a caller who named an effort explicitly must not be
+            # made to answer for a variable their value was going to override.
+            agent_reasoning_effort=(
+                overrides["agent_reasoning_effort"]
+                if "agent_reasoning_effort" in overrides
+                else resolve_agent_reasoning_effort()
+            ),
             agent_sandbox_mode=overrides.get(
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),
