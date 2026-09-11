@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -43,6 +45,81 @@ def test_matrix_matches_configured_shards_and_workers():
     assert CONFIG["tool"]["hyperloom"]["tests_coverage"]["xdist_workers"] == 2
     assert WORKFLOW["jobs"]["test"]["strategy"]["fail-fast"] is False
     assert "max-parallel" not in WORKFLOW["jobs"]["test"]["strategy"]
+
+
+def test_matrix_uses_one_resolved_duration_seed():
+    prepare = WORKFLOW["jobs"]["prepare-durations"]
+    resolve = step("prepare-durations", "Resolve test duration seed")
+    select = step("prepare-durations", "Publish selected duration seed")
+    test_job = WORKFLOW["jobs"]["test"]
+    restore = step("test", "Restore selected test durations")
+    require = step("test", "Require selected test durations")
+
+    assert prepare["outputs"] == {"key": "${{ steps.select.outputs.key }}"}
+    assert resolve["with"]["lookup-only"] is True
+    assert resolve["with"]["restore-keys"].strip() == "test-durations-v1-"
+    assert "cache-matched-key" in select["env"]["MATCHED_KEY"]
+    assert test_job["needs"] == "prepare-durations"
+    assert restore["if"] == "needs.prepare-durations.outputs.key != 'cold-cache'"
+    assert restore["with"]["key"] == "${{ needs.prepare-durations.outputs.key }}"
+    assert "restore-keys" not in restore["with"]
+    assert "cache-hit" in require["env"]["EXACT_HIT"]
+    assert require["env"]["SEED_KEY"] == "${{ needs.prepare-durations.outputs.key }}"
+    assert "Re-run all jobs" in require["run"]
+
+    rolling_restores = [
+        item
+        for job in WORKFLOW["jobs"].values()
+        for item in job.get("steps", [])
+        if item.get("uses") == "actions/cache/restore@v6" and "restore-keys" in item.get("with", {})
+    ]
+    assert rolling_restores == [resolve]
+
+
+@pytest.mark.parametrize(
+    ("key", "hit", "expected"),
+    [
+        ("cold-cache", "", 0),
+        ("test-durations-v1-123", "true", 0),
+        ("test-durations-v1-123", "false", 1),
+        ("test-durations-v1-123", "", 1),
+        ("", "", 1),
+    ],
+)
+def test_selected_seed_requires_exact_hit(key, hit, expected, tmp_path):
+    command = step("test", "Require selected test durations")["run"]
+    env = dict(os.environ, SEED_KEY=key, EXACT_HIT=hit)
+    result = subprocess.run(["bash", "-c", command], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == expected, result.stdout + result.stderr
+    if expected:
+        assert "Re-run all jobs" in result.stdout
+
+
+@pytest.mark.parametrize("matched", ["", "test-durations-v1-123"])
+def test_seed_selection_records_cold_miss_separately(matched, tmp_path):
+    output = tmp_path / "output"
+    command = step("prepare-durations", "Publish selected duration seed")["run"]
+    env = dict(os.environ, MATCHED_KEY=matched, GITHUB_OUTPUT=str(output))
+    result = subprocess.run(["bash", "-c", command], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text() == f"key={matched or 'cold-cache'}\n"
+
+
+def test_pinned_seed_prevents_mixed_generation_partition_gaps():
+    from pytest_split.algorithms import LeastDurationAlgorithm
+
+    items = [SimpleNamespace(nodeid=name) for name in "ABCDEFGHIJKL"]
+    old_seed = {item.nodeid: 12 - index for index, item in enumerate(items)}
+    new_seed = dict(old_seed, A=11, B=12)
+    split = LeastDurationAlgorithm()
+    old_groups = split(6, items, old_seed)
+    new_groups = split(6, items, new_seed)
+    mixed = Counter(item.nodeid for group in [old_groups[0], *new_groups[1:]] for item in group.selected)
+    assert mixed["A"] == 2 and mixed["B"] == 0
+    assert sum(mixed.values()) == len(items)
+    for groups in (old_groups, new_groups):
+        actual = Counter(item.nodeid for group in groups for item in group.selected)
+        assert actual == Counter(item.nodeid for item in items)
 
 
 def test_all_six_shards_select_the_complete_test_collection(tmp_path):
@@ -187,8 +264,11 @@ def test_summary_and_gate_reuse_one_report():
 def test_failed_shards_and_missing_data_still_fail():
     gate = step("coverage", "Enforce shard results")
     assert "always()" in gate["if"]
+    assert "needs.test.result != 'success'" in gate["if"]
     assert "complete != 'true'" in gate["if"]
     assert "tests_ok != 'true'" in gate["if"]
+    assert gate["env"]["UPSTREAM_RESULT"] == "${{ needs.test.result }}"
+    assert "test-shards-unavailable" in gate["run"]
     assert "exit 1" in gate["run"]
     assert CONFIG["tool"]["coverage"]["report"]["fail_under"] == 90
 

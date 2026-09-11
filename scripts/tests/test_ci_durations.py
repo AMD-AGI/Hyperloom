@@ -5,10 +5,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
-import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -20,21 +19,24 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _ROOT / ".github" / "workflows" / "tests-coverage.yml"
 _HELPER = _ROOT / "scripts" / "ci_durations.py"
+_SPEC = importlib.util.spec_from_file_location("ci_durations", _HELPER)
+assert _SPEC and _SPEC.loader
+ci_durations = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(ci_durations)
 
 
 def _run_shard(directory: Path, seed: dict[str, float] | None, *, workers: int = 2, group: int = 1):
     directory.mkdir(parents=True, exist_ok=True)
-    workflow = _WORKFLOW.read_text(encoding="utf-8")
     if seed is not None:
         (directory / ".test_durations").write_text(json.dumps(seed), encoding="utf-8")
-        if 'cp .test_durations ".test_durations.shard${SHARD}"' in workflow:
-            shutil.copyfile(directory / ".test_durations", directory / f".test_durations.shard{group}")
-    duration_args = re.search(r"^\s+(--store-durations.*?)--junitxml", workflow, re.DOTALL | re.MULTILINE)
-    assert duration_args
-    args = shlex.split(duration_args.group(1).replace("\\\n", "").replace("${SHARD}", str(group)))
-    plugins = ["-p", "pytest_split.plugin", "-p", "xdist.plugin"]
-    if "-p scripts.ci_durations" in workflow:
-        plugins += ["-p", "scripts.ci_durations"]
+        shutil.copyfile(directory / ".test_durations", directory / f".test_durations.shard{group}")
+    args = [
+        "--store-durations",
+        "--clean-durations",
+        "--durations-path",
+        f".test_durations.shard{group}",
+    ]
+    plugins = ["-p", "scripts.ci_durations", "-p", "pytest_split.plugin", "-p", "xdist.plugin"]
     env = {key: value for key, value in os.environ.items() if not key.startswith(("COVERAGE", "COV_CORE", "PYTEST_"))}
     env.update(PYTHONPATH=str(_ROOT), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
     command = [sys.executable, "-m", "pytest", *plugins, "-n", str(workers), "--splits", "2", "--group", str(group)]
@@ -164,22 +166,19 @@ def test_restarted_worker_reads_original_seed_after_other_worker_finishes(tmp_pa
 
 def _merge(directory: Path):
     return subprocess.run(
-        [
-            sys.executable,
-            str(_HELPER),
-            "--config",
-            "pyproject.toml",
-            "--artifacts",
-            "durations",
-            "--output",
-            ".test_durations",
-        ],
+        [sys.executable, str(_HELPER)],
         cwd=directory,
         capture_output=True,
         text=True,
         timeout=10,
         check=False,
     )
+
+
+@pytest.fixture
+def merge_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 def _artifacts(directory: Path) -> tuple[Path, Path]:
@@ -222,20 +221,19 @@ def test_merge_publishes_complete_disjoint_timings(tmp_path: Path):
         '{"test_sample.py::test_0": 1}',
     ],
 )
-def test_merge_rejects_invalid_or_duplicate_timings_without_overwriting(tmp_path: Path, invalid: str):
-    _, second = _artifacts(tmp_path)
+def test_merge_rejects_invalid_or_duplicate_timings_without_overwriting(merge_workspace, capsys, invalid: str):
+    _, second = _artifacts(merge_workspace)
     second.write_text(invalid, encoding="utf-8")
-    output = tmp_path / ".test_durations"
+    output = merge_workspace / ".test_durations"
     output.write_text("original", encoding="utf-8")
-    result = _merge(tmp_path)
-    assert result.returncode != 0
-    assert "::error::" in result.stdout + result.stderr
+    assert ci_durations.main([]) == 1
+    assert "::error::" in capsys.readouterr().err
     assert output.read_text() == "original"
 
 
 @pytest.mark.parametrize("problem", ["missing", "extra", "duplicate", "wrong-name", "empty", "unreadable"])
-def test_merge_requires_exact_expected_artifacts(tmp_path: Path, problem: str):
-    first, second = _artifacts(tmp_path)
+def test_merge_requires_exact_expected_artifacts(merge_workspace, capsys, problem: str):
+    first, second = _artifacts(merge_workspace)
     if problem == "missing":
         second.unlink()
     elif problem == "extra":
@@ -251,10 +249,20 @@ def test_merge_requires_exact_expected_artifacts(tmp_path: Path, problem: str):
     else:
         first.unlink()
         first.mkdir()
+    assert ci_durations.main([]) == 1
+    assert "::error::" in capsys.readouterr().err
+    assert not (merge_workspace / ".test_durations").exists()
+
+
+def test_merge_cli_preserves_existing_output_on_failure(tmp_path):
+    first, _ = _artifacts(tmp_path)
+    first.write_text("{")
+    output = tmp_path / ".test_durations"
+    output.write_text("original")
     result = _merge(tmp_path)
-    assert result.returncode != 0
-    assert "::error::" in result.stdout + result.stderr
-    assert not (tmp_path / ".test_durations").exists()
+    assert result.returncode == 1
+    assert "::error::" in result.stderr
+    assert output.read_text() == "original"
 
 
 def test_workflow_keeps_pytest_exit_diagnostics_and_fail_closed_publication():
@@ -262,6 +270,8 @@ def test_workflow_keeps_pytest_exit_diagnostics_and_fail_closed_publication():
     assert 'cp .test_durations ".test_durations.shard${SHARD}"' in workflow
     assert "python -m pytest -p scripts.ci_durations" in workflow
     assert "--store-durations --clean-durations" in workflow
+    assert '--durations-path ".test_durations.shard${SHARD}"' in workflow
+    assert "--splitting-algorithm=least_duration" in workflow
     assert 'PYTEST_RC="${PIPESTATUS[0]}"' in workflow
     assert 'exit "$PYTEST_RC"' in workflow
     assert '-rfE "${EXTRA[@]}" 2>&1 | tee pytest-output.log' in workflow

@@ -61,7 +61,7 @@ def merge_durations(artifacts: Path, total_shards: int) -> dict[str, float]:
     return merged
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Merge downloaded artifacts without importing pytest or project dependencies."""
     try:
         import tomllib
@@ -72,7 +72,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=Path("pyproject.toml"))
     parser.add_argument("--artifacts", type=Path, default=Path("durations"))
     parser.add_argument("--output", type=Path, default=Path(".test_durations"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         config = tomllib.loads(args.config.read_text(encoding="utf-8"))
         total = config["tool"]["hyperloom"]["tests_coverage"]["total_shards"]
