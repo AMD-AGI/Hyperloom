@@ -87,7 +87,7 @@ def _point(conc: int, *, arm: str = ARM_OPTIMIZED, status: str = "succeeded", **
         "request_throughput": 1.5 * conc,
         "total_token_throughput": 200.0 * conc,
         "input_throughput": 100.0 * conc,
-        "intvty_p90": 42.0,
+        "e2e_norm_intvty_p90": 42.0,
         "tpot_p90_ms": 13.5,
         "ttft_mean_ms": 130.0,
         "e2el_mean_ms": 4000.0,
@@ -406,7 +406,7 @@ def test_a_rung_carries_the_agentic_axis_the_projection_dropped(_bound_session):
     point = _ext(_bound_session)["arms"][ARM_OPTIMIZED]["points"][0]
     assert point["arm"] == ARM_OPTIMIZED
     assert point["total_token_throughput"] == 12800.0
-    assert point["intvty_p90"] == 42.0
+    assert point["e2e_norm_intvty_p90"] == 42.0
     assert point["tpot_p90_ms"] == 13.5
     assert point["request_throughput"] == 96.0
     assert point["input_throughput"] == 6400.0
