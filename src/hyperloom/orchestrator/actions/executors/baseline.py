@@ -438,10 +438,11 @@ def _is_insufficient_gpu_memory(*texts: str) -> bool:
     return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses
+# --compilation-config.cudagraph_mode NONE.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
 }
 
 
@@ -605,9 +606,21 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
+    """Append the framework-correct disable-cuda-graph flag once (idempotent).
+
+    Dedup is on the option's base name, not the whole flag: vLLM's flag is two tokens with a
+    dotted option, and an operator-supplied ``--compilation-config`` in any form already covers
+    it. Base names are compared whole, so ``--disable-cuda-graph-extra`` is still not mistaken
+    for ``--disable-cuda-graph``.
+    """
+
+    def _base(token: str) -> str:
+        return token.split("=", 1)[0].split(".", 1)[0]
+
     flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
+    option_base = _base(flag.split()[0])
+    existing = (extra_server_args or "").split()
+    if any(_base(t) == option_base for t in existing if t.startswith("-")):
         return extra_server_args or ""
     return f"{extra_server_args} {flag}".strip()
 
