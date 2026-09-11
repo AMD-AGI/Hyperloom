@@ -21,6 +21,7 @@ __all__ = [
     "analysis_detail",
     "as_dict",
     "as_list",
+    "bool_or_none",
     "bounded_block",
     "clip",
     "failure_row",
@@ -87,6 +88,16 @@ def float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def bool_or_none(value: Any) -> bool | None:
+    """``bool(value)`` when a value was recorded, else ``None``.
+
+    A tri-state flag needs the coercion to stop at ``None`` rather than fold it
+    to ``False``: "the framework never answered" and "the answer was no" are
+    different facts, and ``bool(None)`` erases the difference.
+    """
+    return None if value is None else bool(value)
 
 
 def text_or_none(value: Any) -> str | None:

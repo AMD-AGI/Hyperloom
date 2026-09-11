@@ -28,6 +28,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
     _granted_cap_sec,
+    _grading_of,
     _has_optimization,
     _order_concs_desc,
     _point_from_variant,
@@ -175,8 +176,8 @@ def test_build_comparison_mismatched_concs_outer_join():
     ]
     rows, summary = _build_comparison(baseline, optimized)
     assert [r["conc"] for r in rows] == [1, 4, 16]
-    assert rows[0]["optimized_tput"] is None
-    assert rows[2]["baseline_tput"] is None
+    assert rows[0]["optimized_value"] is None
+    assert rows[2]["baseline_value"] is None
     assert summary["successful_pairs"] == 1
 
 
@@ -1324,7 +1325,6 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert graded_metric_key(benchmark_mode="") == "output_throughput"
 
     def test_an_explicit_grading_override_wins_over_the_mode(self, monkeypatch):
-        """The summary follows the axis the KEEP verdicts were taken on."""
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
         from hyperloom.common.perf_metric import INTVTY_V1
@@ -1337,6 +1337,112 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
         assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
+
+
+class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
+    """A curve drawn on one axis beside promotions decided on another is two answers to one question."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_grading(self, monkeypatch):
+        for name in ("HYPERLOOM_PERF_METRIC", "HYPERLOOM_PERF_NOISE_PCT", "HYPERLOOM_AGENTX"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _state(self, **fields: Any) -> SharedState:
+        state = SharedState()
+        for key, value in fields.items():
+            setattr(state, key, value)
+        return state
+
+    def test_the_recorded_axis_beats_the_environment(self, monkeypatch):
+        """A resume is a new process, and the shell it landed in is not evidence about the axis."""
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state) == ("e2e_norm_intvty_p90", 3.5)
+
+    def test_the_recorded_band_travels_with_the_axis(self):
+        """A lost band silently widens a 3.5% guard back to the 5% default."""
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state)[1] == 3.5
+
+    def test_a_session_with_nothing_recorded_falls_back_to_its_mode(self):
+        assert _grading_of(self._state(benchmark_mode="agentx"))[0] == "e2e_norm_intvty_p90"
+        assert _grading_of(self._state(benchmark_mode="synthetic"))[0] == "output_throughput"
+
+    def test_a_scriptable_framework_is_carved_out(self):
+        """An image framework reports no interactivity axis, so ranking every rung on it fails the whole sweep."""
+        state = self._state(benchmark_mode="agentx", framework="xdit")
+        assert _grading_of(state)[0] == "output_throughput"
+
+
+class TestTheGuardAxisIsReportedNotEnforced:
+    """A sweep exists to draw the frontier, so a rung that moved along it is a result and not a failure."""
+
+    def _pts(self, arm: str, *, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_a_rung_that_bought_interactivity_with_throughput_still_pairs(self):
+        """It ranks on the objective it gained on, and carries the throughput it gave up beside it."""
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=30.0, total=10000.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        row = comparison[0]
+        assert row["speedup"] == pytest.approx(1.5)
+        assert summary["successful_pairs"] == 1
+        assert summary["best_conc"] == 8
+        # Halving throughput is far outside any band, and that is visible without having dropped the rung.
+        assert row["guard_holds"] is False
+        assert summary["best_conc_guard_holds"] is False
+        assert row["baseline_guard"] == 20000.0
+        assert row["optimized_guard"] == 10000.0
+
+    def test_a_rung_that_held_throughput_says_so(self):
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19800.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is True
+        assert summary["guard_axis"] == "total_throughput"
+
+    def test_the_recorded_band_decides_the_verdict(self):
+        """The same pair holds under the default band and fails under a tighter one."""
+        arms = (
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19200.0),
+        )
+        assert _build_comparison(*arms, metric_key="e2e_norm_intvty_p90")[0][0]["guard_holds"] is True
+        tight, _ = _build_comparison(*arms, metric_key="e2e_norm_intvty_p90", guard_noise_pct=1.0)
+        assert tight[0]["guard_holds"] is False
+
+    def test_the_output_objective_has_no_second_axis_to_hold(self):
+        comparison, summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "output_throughput": 100.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "output_throughput": 130.0}],
+            metric_key="output_throughput",
+        )
+        assert summary["guard_axis"] == ""
+        assert summary["best_conc_guard_holds"] is None
+        assert comparison[0]["guard_holds"] is None
+
+    def test_an_unmeasured_guard_axis_is_null_not_a_failure(self):
+        """Null says the axis was never measured; False would say it was, and fell outside."""
+        comparison, _summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 20.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 30.0}],
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is None
+        assert comparison[0]["baseline_guard"] is None
 
 
 class TestAnUnreportedTotalComesFromItsHalves:
