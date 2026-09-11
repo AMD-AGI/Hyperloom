@@ -1476,11 +1476,15 @@ def test_the_stored_scrape_window_contains_the_real_one():
     before = time.time()
     rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), min_interval_sec=0)
     rec.tick(1.0)
-    after = time.time()
     row = rec.summary()["samples"][0]
 
-    assert row["scrape_start_unix"] <= before
-    assert row["scrape_end_unix"] >= after
+    # The scrape began after this test did, and the floor can only move that earlier.
+    assert row["scrape_start_unix"] <= time.time()
+    assert row["scrape_start_unix"] >= before - 0.001
+    # The stored window is never narrower than the round trip it brackets. Asserted
+    # against the measured duration rather than a clock read after ``tick`` returns:
+    # that read includes building the row, which the window is not claiming to cover.
+    assert row["scrape_end_unix"] - row["scrape_start_unix"] >= row["scrape_sec"]
     # Still milliseconds, not full float noise.
     assert row["scrape_start_unix"] == round(row["scrape_start_unix"], 3)
     assert row["scrape_end_unix"] == round(row["scrape_end_unix"], 3)
