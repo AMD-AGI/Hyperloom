@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a generated tuner may be attempted at all."""
+"""Decide whether a generated tuner may run.
+
+The gate requires enablement, an uncovered result, sufficient demand, and
+describable keys. It returns reasons so callers can distinguish routing,
+coverage, and configuration failures.
+"""
 
 from __future__ import annotations
 
@@ -63,7 +68,8 @@ def should_generate(gaps: list[CoverageGap]) -> GateDecision:
     for gap in sorted(gaps, key=lambda g: -g.miss_count):
         if not gap.warrants_generated_tuner:
             reasons.append(
-                f"{gap.table}: {gap.kind} -- a tuner for this exists, so the fix is there and not a generated one"
+                f"{gap.table}: {gap.kind} -- a tuner for this exists and was not "
+                f"routed to, so the fix is there and not a generated one"
             )
             continue
         if allow and "*" not in allow and gap.table not in allow:

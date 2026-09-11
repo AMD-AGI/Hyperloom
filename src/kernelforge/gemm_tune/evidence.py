@@ -66,6 +66,14 @@ MOE_KEY_FIELDS = MOE_TUPLE_FIELDS[2:]
 # identifies "the MoE shape to tune".
 MOE_SHAPE_FIELDS = tuple(f for f in MOE_KEY_FIELDS if f != "token")
 
+# The table fused-MoE misses are looked up in. Named here because the MoE side
+# records its misses under ``dispatch["moe"]`` rather than as a demand, and
+# turning those records into a demand needs the table's own name.
+MOE_TABLE = "tuned_fmoe.csv"
+
+# Disable converting the only fmoe_ck runtime evidence into routing demand.
+MOE_DEMAND_DISABLE_ENV = "FORGE_MOE_DEMAND_DISABLE"
+
 # vLLM Triton MoE: found vs not-found are two different lines.
 VLLM_MOE_HIT = re.compile(r"Using configuration from (?P<path>\S+) for MoE layer")
 VLLM_MOE_MISS = re.compile(r"Config file not found at (?P<path>\S+)")
@@ -79,6 +87,8 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, ...]] = {
     "a8w8_bpreshuffle_tuned_gemm.csv": ("M", "N", "K", "q_dtype_w"),
     "a4w4_blockscale_tuned_gemm.csv": ("M", "N", "K"),
 }
+# ``tuned_fmoe.csv`` stays out: this map also identifies dense tables, while
+# MoE has no dense (M, N, K) and carries its own key schema.
 
 # Key columns the log actually exposes, so a demand entry can never claim one it did not observe.
 UNLOGGABLE_KEY_FIELDS = ("q_dtype_w",)
@@ -95,6 +105,27 @@ TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "a4w4_blockscale_tuned_gemm.csv": ("a4w4_blockscale", "AITER_CONFIG_GEMM_A4W4"),
     "tuned_fmoe.csv": ("fmoe_ck", "AITER_CONFIG_FMOE"),
 }
+
+# Runtime names may be ``merged_<artifact>`` rather than lookup-table names.
+# Canonicalizing them prevents deployed artifacts from appearing ownerless.
+ARTIFACT_TABLE_ALIASES: dict[str, str] = {
+    # These aliases follow each tuner's write path; fmoe_ck already uses the canonical name.
+    "tuned_dense_bf16.csv": "bf16_tuned_gemm.csv",
+    "tuned_a8w8.csv": "a8w8_tuned_gemm.csv",
+    "tuned_a8w8_blockscale.csv": "a8w8_blockscale_tuned_gemm.csv",
+    "tuned_a8w8_bpreshuffle.csv": "a8w8_bpreshuffle_tuned_gemm.csv",
+    "tuned_a8w8_blockscale_bpreshuffle.csv": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+    "tuned_a4w4_blockscale.csv": "a4w4_blockscale_tuned_gemm.csv",
+}
+
+
+def canonical_table_name(name: str) -> str:
+    """Map a runtime table name to its ``TABLE_TO_TUNER`` key when known."""
+    base = str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if base.startswith("merged_"):
+        base = base[len("merged_") :]
+    return ARTIFACT_TABLE_ALIASES.get(base, base)
+
 
 KEY_FIELDS = ("M", "N", "K", "dtype", "otype", "bias", "scaleAB", "bpreshuffle")
 
@@ -202,6 +233,9 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
             "cu_num": fields["cu_num"],
             "tokens": set(),
             "untuned_tokens": set(),
+            # String keys survive JSON unchanged and preserve the observed
+            # request distribution instead of inventing an even split.
+            "untuned_token_counts": {},
             "miss_count": 0,
         }
         moe["keys"][shape] = rec
@@ -209,20 +243,58 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
         rec["tokens"].add(token)
         if miss:
             rec["untuned_tokens"].add(token)
+            counts = rec.setdefault("untuned_token_counts", {})
+            counts[str(token)] = counts.get(str(token), 0) + 1
     if miss:
         rec["miss_count"] += 1
     return token
 
 
-def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
-    """Parse a serving log into demands, an apply verdict and dispatch facts.
+def _moe_demand(report: dict[str, Any]) -> Demand | None:
+    """Expose fused-MoE dispatch misses as ``tuned_fmoe.csv`` demand.
 
-    Args:
-        text: The serving log.
-        hit_logging: Whether ``AITER_LOG_TUNED_CONFIG`` was on for the run that
-            wrote this log. ``None`` means unknown, which keeps a zero-hit
-            result ``inconclusive_no_hit_logging``; ``True`` resolves it to
-            ``zero_hit``. A caller that set the variable itself should say so.
+    Reuses existing miss evidence and excludes tokens seen only on one-stage
+    dispatch, which the fmoe CK tuner cannot serve.
+    """
+    if os.environ.get(MOE_DEMAND_DISABLE_ENV, "").strip().lower() in ("1", "true", "yes"):
+        return None
+    moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
+    impl = str(moe.get("impl") or "")
+    if impl and impl != "aiter_ck":
+        # fmoe_ck cannot serve Triton-MoE keys, including mixed-backend logs.
+        return None
+
+    keys: list[dict[str, Any]] = []
+    for rec in moe_ck_missed_keys(report):
+        counts = rec.get("untuned_token_counts") or {}
+        for token in rec.get("untuned_tokens") or []:
+            row: dict[str, Any] = {f: str(rec.get(f, "")) for f in MOE_KEY_FIELDS}
+            row["token"] = str(token)
+            row["requests"] = _as_int(counts.get(str(token))) or 0
+            keys.append(row)
+    if not keys:
+        return None
+    keys.sort(key=lambda r: (-r["requests"], _as_int(r["token"]) or 0))
+
+    tuner, env_var = TABLE_TO_TUNER[MOE_TABLE]
+    return Demand(
+        table=MOE_TABLE,
+        tuner=tuner,
+        env_var=env_var,
+        key_schema=list(MOE_KEY_FIELDS),
+        # Every field of a MoE key comes off the dispatch tuple itself, so
+        # unlike the dense tables there is nothing here supplied from hardware.
+        logged_fields=list(MOE_KEY_FIELDS),
+        miss_count=sum(r["requests"] for r in keys),
+        keys=keys,
+    )
+
+
+def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
+    """Parse a serving log into demands, an apply verdict, and dispatch facts.
+
+    ``hit_logging=None`` keeps a zero-hit result inconclusive; callers that
+    enabled ``AITER_LOG_TUNED_CONFIG`` should pass ``True``.
     """
     demands: dict[str, Demand] = {}
     key_counts: dict[str, dict[tuple, int]] = {}
@@ -262,7 +334,7 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
                 table_path = (m.group("miss_table") or "").strip()
                 if table_path:
                     consulted.add(table_path)
-                base = table_path.rsplit("/", 1)[-1]
+                base = canonical_table_name(table_path)
                 tuner, env = TABLE_TO_TUNER.get(base, (None, None))
                 d = demands.get(base)
                 if d is None:
@@ -357,7 +429,18 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
     if moe and isinstance(moe.get("keys"), dict):
         # Most-missed key first, so a consumer that can only afford one row tunes the one the runtime asked for most.
         moe["keys"] = [
-            {**rec, "tokens": sorted(rec["tokens"]), "untuned_tokens": sorted(rec["untuned_tokens"])}
+            {
+                **rec,
+                "tokens": sorted(rec["tokens"]),
+                "untuned_tokens": sorted(rec["untuned_tokens"]),
+                "untuned_token_counts": {
+                    k: v
+                    for k, v in sorted(
+                        (rec.get("untuned_token_counts") or {}).items(),
+                        key=lambda kv: _as_int(kv[0]) or 0,
+                    )
+                },
+            }
             for rec in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
         ]
         moe["miss_count"] = sum(r["miss_count"] for r in moe["keys"])
@@ -380,6 +463,10 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
             for k, n in sorted(key_counts[base].items(), key=lambda kv: -kv[1])
         ]
 
+    moe_demand = _moe_demand({"dispatch": dispatch})
+    if moe_demand is not None:
+        demands[MOE_TABLE] = moe_demand
+
     ordered = sorted(demands.values(), key=lambda d: -d.miss_count)
     total = hits + misses
     return {
@@ -401,10 +488,8 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
 
 def _apply_verdict(hits: int, misses: int, hit_logging: bool | None = None) -> str:
     if hits == 0 and misses > 0:
-        # Hit lines need AITER_LOG_TUNED_CONFIG=1; miss lines are unconditional.
-        # From the counts alone "flag off" and "flag on, nothing matched" look
-        # identical, so stay inconclusive unless the caller set the flag itself.
-        # Matches ``apply_verification.verify_applied``'s ``zero_hit``.
+        # Hits require AITER_LOG_TUNED_CONFIG; without known hit logging, zero
+        # hits cannot distinguish no matches from disabled logging.
         return "zero_hit" if hit_logging else "inconclusive_no_hit_logging"
     if hits == 0 and misses == 0:
         return "no_lookups"
@@ -466,28 +551,15 @@ def demand_shapes(
     limit: int | None = None,
     bucket: bool = True,
 ) -> list[dict[str, Any]]:
-    """Requested keys for one table, most-requested first.
+    """Return requested keys for one table, ranked by logged misses.
 
-    **What ``requests`` can and cannot rank.** It counts *log lines*, and the
-    lookup is memoized (``get_CKGEMM_config`` is ``functools.lru_cache``-d), so
-    a shape is logged once per process however often its kernel runs. Summing
-    per bucket therefore measures how many distinct M happen to fall inside the
-    bucket -- and ``padded_m`` buckets double in width, so wide high-M buckets
-    accumulate hundreds of raw keys while a narrow decode bucket accumulates the
-    handful of batch sizes the scheduler used. Measured on a Qwen3-14B-FP8
-    sglang arm: bucket M=2048 summed 551 requests from 391 raw M and ranked 1st,
-    while every decode bucket summed 1-2 and ranked 33rd-56th of 56; a budget of
-    14 then cut the band entirely and the prefill-only table won +1.30% e2e and
-    was reverted.
-
-    So this ordering is sound for the *prefill* tail but must never decide
-    whether the decode band is tuned at all -- callers guarantee that band from
-    the concurrency contract instead, in
-    ``tuners._aiter_dense_common._ensure_decode_m_coverage``. The measurement
-    once quoted here ("share of logged misses served": 95.6% at budget 24) is
-    the same log-line metric, so it cannot see this failure and must not be read
-    as coverage of GPU time.
+    Memoized lookups make counts a distinct-shape signal, not GPU-time
+    frequency. Dense keys use padded-M buckets, so callers must guarantee decode
+    coverage separately; fused-MoE keys use their exact-key path.
     """
+    if canonical_table_name(entry.get("table") or "") == MOE_TABLE:
+        return _moe_demand_shapes(entry, limit=limit)
+
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
         m, n, k = _as_int(key.get("M")), _as_int(key.get("N")), _as_int(key.get("K"))
@@ -518,6 +590,15 @@ def demand_shapes(
         for shape in shapes:
             shape["observed_M"] = sorted(set(shape["observed_M"]))
 
+    if limit is not None and limit > 0:
+        shapes = shapes[:limit]
+    return shapes
+
+
+def _moe_demand_shapes(entry: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
+    """Return exact fused-MoE shape/token keys without dense M bucketing."""
+    shapes = [dict(key) for key in entry.get("keys") or []]
+    shapes.sort(key=lambda s: (-(_as_int(s.get("requests")) or 0), _as_int(s.get("token")) or 0))
     if limit is not None and limit > 0:
         shapes = shapes[:limit]
     return shapes

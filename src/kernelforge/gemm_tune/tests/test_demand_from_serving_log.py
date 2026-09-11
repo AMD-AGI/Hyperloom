@@ -81,7 +81,10 @@ class TestDerivingDemand:
 
         assert path == str(out / "demand.json")
         report = json.loads((out / "demand.json").read_text(encoding="utf-8"))
-        assert not report["demands"]  # no dense miss anywhere in this log
+        # No dense miss anywhere in this log, so the only demand is the MoE one
+        # the dispatch record now also states as a demand.
+        (dense,) = [d for d in report["demands"] if d["table"] != "tuned_fmoe.csv"] or [None]
+        assert dense is None
         (key,) = moe_dispatch_keys(report)
         assert key["tokens"] == [16]
         assert key["inter_dim"] == "384"
