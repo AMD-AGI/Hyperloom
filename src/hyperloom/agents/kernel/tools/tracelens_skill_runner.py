@@ -312,8 +312,6 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
         if root in seen or not root.is_dir():
             continue
         seen.add(root)
-        if is_capture_dir_name(root.name):
-            return root
         try:
             children = [child for child in root.iterdir() if child.is_dir()]
         except OSError:
