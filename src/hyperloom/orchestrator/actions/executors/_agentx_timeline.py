@@ -56,10 +56,6 @@ _EXPORT_RELPATHS = ("aiperf_artifacts/profile_export.jsonl", "*/aiperf_artifacts
 #: in-flight counts folded into the KV rows are computed from every record before any sampling.
 _MAX_REQUEST_EVENTS = 60000
 
-#: Cap on trajectory ids recorded against one KV row. Concurrency is tens, not thousands, so this only guards against a
-#: pathological run; the count beside it is never capped.
-_MAX_ROW_TRAJECTORIES = 32
-
 
 @dataclass(frozen=True)
 class RequestRecord:
@@ -321,15 +317,16 @@ def correlate_rows(rows: list[dict[str, Any]], records: list[RequestRecord]) -> 
         in_flight = [ordered[i] for _, i in active if ordered[i].overlaps(start, end)]
         if not in_flight:
             continue
-        trajectories = sorted({r.trajectory_id for r in in_flight if r.trajectory_id})
         workload = rows[index].setdefault("workload", {})
+        # Counts only. The identities live in the timeline, which carries each trajectory's full span and is written
+        # beside this artifact -- so "which trajectory was live when the pool spiked" is answered by intersecting the
+        # row's scrape window with those spans, exactly and without truncation. Repeating the ids here instead cost 1280
+        # bytes a row, measured: a trajectory lasts minutes while rows are seconds apart, so the same set was copied
+        # dozens of times over, and it made 65% of a 4.6 MB artifact that ships in the session bundle.
         workload["in_flight"] = {
             "requests": len(in_flight),
-            "trajectories": len(trajectories),
+            "trajectories": len({r.trajectory_id for r in in_flight if r.trajectory_id}),
             "turns": len({(r.trajectory_id, r.turn_index) for r in in_flight}),
-            # Ids, not just a count: "which trajectory was live when the pool spiked" is the question this exists for,
-            # and a count cannot answer it.
-            "trajectory_ids": trajectories[:_MAX_ROW_TRAJECTORIES],
         }
         annotated += 1
     return annotated

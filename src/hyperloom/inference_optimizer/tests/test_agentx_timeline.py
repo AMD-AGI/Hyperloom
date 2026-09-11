@@ -228,8 +228,14 @@ def test_request_events_are_sampled_but_the_stream_says_so(tmp_path, monkeypatch
     assert len([e for e in events if e["event"] == "turn_start"]) == 10
 
 
-def test_rows_learn_which_trajectories_were_in_flight(tmp_path):
-    """The question this exists for: which trajectory was live when the pool spiked."""
+def test_rows_learn_how_much_was_in_flight(tmp_path):
+    """Counts on the row; the identities are the timeline's job.
+
+    Repeating the ids on every row copied the same set dozens of times over -- a
+    trajectory lasts minutes, rows are seconds apart -- and made 65% of a 4.6 MB
+    artifact that ships in the session bundle. The spans in the timeline answer
+    the same question exactly, and without a truncation cap.
+    """
     records = parse_profile_export(
         _export(
             tmp_path,
@@ -248,11 +254,33 @@ def test_rows_learn_which_trajectories_were_in_flight(tmp_path):
     annotated = correlate_rows(rows, records)
 
     assert annotated == 2
-    assert rows[0]["workload"]["in_flight"]["requests"] == 2
-    assert rows[0]["workload"]["in_flight"]["trajectory_ids"] == ["traj-1", "traj-2"]
-    assert rows[1]["workload"]["in_flight"]["trajectory_ids"] == ["traj-3"]
+    assert rows[0]["workload"]["in_flight"] == {"requests": 2, "trajectories": 2, "turns": 2}
+    assert rows[1]["workload"]["in_flight"] == {"requests": 1, "trajectories": 1, "turns": 1}
     # A window with nothing running is left alone rather than annotated with zeros.
     assert "workload" not in rows[2]
+
+
+def test_the_timeline_still_names_the_trajectories_a_row_counted(tmp_path):
+    """The join the row no longer duplicates: spans overlapping its scrape window."""
+    records = parse_profile_export(
+        _export(
+            tmp_path,
+            [
+                _record(request_id="r1", correlation="traj-1", turn=0, start_offset_ms=0, duration_ms=1000),
+                _record(request_id="r2", correlation="traj-2", turn=0, start_offset_ms=500, duration_ms=1000),
+            ],
+        )
+    )
+    row = {"scrape_start_unix": BASE + 0.6, "scrape_end_unix": BASE + 0.7}
+    correlate_rows([row], records)
+    events, _ = build_events(records)
+
+    live = {
+        e["trajectory_id"] for e in events if e["event"] == "trajectory_start" and e["ts"] <= row["scrape_end_unix"]
+    } & {e["trajectory_id"] for e in events if e["event"] == "trajectory_end" and e["ts"] >= row["scrape_start_unix"]}
+
+    assert live == {"traj-1", "traj-2"}
+    assert row["workload"]["in_flight"]["trajectories"] == len(live)
 
 
 def test_correlation_counts_a_request_that_spans_the_whole_window(tmp_path):

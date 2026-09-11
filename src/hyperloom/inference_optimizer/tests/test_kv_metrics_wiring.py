@@ -1620,8 +1620,9 @@ def test_recorder_writes_the_workload_timeline_beside_the_kv_artifact(tmp_path):
     ]
     assert {e["event"] for e in events} >= {"phase_start", "trajectory_start", "turn_start", "request_start"}
 
-    # The sample taken 5s in saw that trajectory running.
-    assert payload["samples"][0]["workload"]["in_flight"]["trajectory_ids"] == ["traj-1"]
+    # The sample taken 5s in saw that trajectory running; the timeline names it.
+    assert payload["samples"][0]["workload"]["in_flight"]["trajectories"] == 1
+    assert {e["trajectory_id"] for e in events if e["event"] == "trajectory_start"} == {"traj-1"}
 
 
 def test_a_round_without_an_aiperf_export_reports_no_timeline(tmp_path):
