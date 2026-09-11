@@ -1,32 +1,44 @@
 #!/usr/bin/env bash
 # End-to-end CI smoke test: submit ONE single-GPU inference-optimizer run built from
-# *this PR's* branch to the run API, poll until terminal, and map
-# Succeeded -> green / Failed|timeout -> red. The run's workload uid == session_id,
-# printed on every path.
+# *this PR's* branch, follow it to a verdict, and report it on the PR --
+# Succeeded -> green / Failed|cancelled|timeout -> red.
 #
-# Requires: bash, curl, jq on the (self-hosted, in-network) runner.
+# This script no longer talks to the run API. `dispatron-ci`, which the runner image
+# carries, submits and polls; what is left here is the reporting the platform has no
+# business owning: the live commit status, and one sticky comment per PR.
+#
+# The split is the point. The dispatch half was 295 lines of curl and jq against an
+# endpoint owned by another team, duplicated per repository, and a fix to the polling
+# or the error vocabulary had to be made once per copy. The reporting half is specific
+# to how *this* repository wants its PRs annotated, and belongs here.
+#
+# What that costs: the phase names, the error vocabulary and the timings now arrive as
+# `dispatron-ci`'s declared outputs rather than being read out of the API's JSON. That
+# is a contract either way; the difference is that this one is versioned with the CLI
+# and stated in `--help`, and the other one was a jq path into somebody else's
+# response body.
+#
+# Requires: bash, curl, jq, and `dispatron-ci` on PATH (the runner image provides it).
 #
 # Inputs (env):
-#   E2E_API_BASE      run API base url                 (required)
-#   E2E_API_KEY       API key                          (required)
-#   E2E_INFRA_TYPE    infra type for the submission    (required)
-#   MODEL             HF repo id                       (default Qwen/Qwen3-0.6B)
-#   MODEL_CLASS       dense|moe_mla|moe_swa|moe_mla_nsa|"" (default dense; "" -> auto-infer)
-#   GPUS              physical GPUs per replica        (default 1)
-#   TP                tensor-parallel degree           (default 1)
-#   MAX_HOURS         optimizer time budget (hours)    (default 0.5)
-#   PR_NUMBER         PR number (for the job name)
-#   HEAD_REF          PR head branch name (the code to run)
-#   HEAD_SHA          immutable PR head commit SHA (the exact code to run)
-#   HEAD_REPO_URL     PR head repo clone url (for forks)
-#   BASE_REPO_URL     base repo clone url
-#   MODEL_BASE        local model base dir (optional; backend fills if empty)
-#   POLL_INTERVAL_S   seconds between polls             (default 30)
-#   POLL_MAX          max polls before timeout          (default 120 => ~60min)
-#   KNOWLEDGE_STORE_MODE  explicit local|remote mode     (default local)
+#   DISPATRON_BASE_URL  Dispatron's compat facade                     (required)
+#   DISPATCH_TOKEN      bearer token, when the deployment wants one   (optional)
+#   MODEL               HF repo id                       (default Qwen/Qwen3-0.6B)
+#   MODEL_CLASS         dense|moe_mla|moe_swa|moe_mla_nsa|"" (default dense)
+#   GPUS / TP           resources                        (default 1 / 1)
+#   MAX_HOURS           optimizer time budget (hours)    (default 0.5)
+#   PR_NUMBER           PR number (for the job name and the report comment)
+#   HEAD_REF / HEAD_SHA the branch and the exact commit to run
+#   HEAD_REPO_URL       PR head repo clone url (forks); token in userinfo is fine,
+#                       the CLI lifts it out rather than putting it in `params`
+#   BASE_REPO_URL       base repo clone url
+#   MODEL_BASE          local model base dir (optional)
+#   POLL_INTERVAL_S     seconds between polls             (default 30)
+#   POLL_MAX            max polls before giving up        (default 120)
+#   KNOWLEDGE_STORE_MODE  local|remote                    (default local)
 #   KB_STORE_URL / KB_STORE_TOKEN  required together when mode=remote
-#   CI_E2E_PR_CHECK_BASE  base dir for per-PR checkouts (default /tmp/ci-e2e)
-#   CI_E2E_CACERT / CI_E2E_INSECURE   TLS to the API endpoint (CA bundle / skip-verify)
+#   CI_E2E_PR_CHECK_BASE  base dir for per-PR checkouts   (default /tmp/ci-e2e)
+#   CI_E2E_INSECURE     skip TLS verification to the facade (default 0)
 #
 # Optional live commit status on the PR (all three required to enable):
 #   GH_STATUS_TOKEN   GitHub token with statuses:write (Actions: secrets.GITHUB_TOKEN)
@@ -48,9 +60,7 @@ POLL_INTERVAL_S="${POLL_INTERVAL_S:-30}"
 POLL_MAX="${POLL_MAX:-120}"
 KNOWLEDGE_STORE_MODE="${KNOWLEDGE_STORE_MODE:-local}"
 
-: "${E2E_API_BASE:?E2E_API_BASE is required}"
-: "${E2E_API_KEY:?E2E_API_KEY is required}"
-: "${E2E_INFRA_TYPE:?E2E_INFRA_TYPE is required}"
+: "${DISPATRON_BASE_URL:?DISPATRON_BASE_URL is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
 : "${HEAD_SHA:?HEAD_SHA (immutable PR head commit) is required}"
 case "$KNOWLEDGE_STORE_MODE" in
@@ -61,11 +71,13 @@ if [ "$KNOWLEDGE_STORE_MODE" = "remote" ]; then
   : "${KB_STORE_URL:?KB_STORE_URL is required when KNOWLEDGE_STORE_MODE=remote}"
   : "${KB_STORE_TOKEN:?KB_STORE_TOKEN is required when KNOWLEDGE_STORE_MODE=remote}"
 fi
-if [ "$E2E_INFRA_TYPE" != "kubernetes" ]; then
-  echo "CI E2E supports only E2E_INFRA_TYPE=kubernetes; source-SHA pinning is not implemented for '$E2E_INFRA_TYPE'" >&2
+
+# Checked by name rather than left to fail as `command not found`, which reads like a
+# broken workflow rather than a job that landed on a runner without the CLI.
+command -v dispatron-ci >/dev/null 2>&1 || {
+  echo "::error::dispatron-ci is not on PATH; this runner was not built from Dispatron's deploy/ci/runner.Dockerfile" >&2
   exit 2
-fi
-API="${E2E_API_BASE%/}/api/v1/orchestration/workloads"
+}
 
 # Fork PRs: the head branch lives in the contributor's fork, so clone from the head
 # repo. Same-repo PRs use the base repo.
@@ -75,23 +87,11 @@ if [ -n "${HEAD_REPO_URL:-}" ] && [ "${HEAD_REPO_URL}" != "${BASE_REPO_URL:-}" ]
 fi
 # The exact commit is part of the source path. Do not reuse a branch-only checkout:
 # a later push must never make this CI run test a different commit from the one its
-# GitHub status is attached to. The default is Kubernetes Job-local /tmp, which is
-# discarded when the Job ends. CI_E2E_SOURCE_DIR is an explicit persistent override;
-# its owner is responsible for retention and cleanup.
+# GitHub status is attached to.
 PR_CHECK_BASE="${CI_E2E_PR_CHECK_BASE:-/tmp/ci-e2e}"
 SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/${HEAD_SHA}/hyperloom}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
-auth=(-H "Authorization: Bearer ${E2E_API_KEY}")
-
-# TLS to the API endpoint: prefer a CA bundle (CI_E2E_CACERT), fall back to skip-verify
-# only when CI_E2E_INSECURE=1 (test convenience on trusted networks).
-tls=()
-if [ -n "${CI_E2E_CACERT:-}" ]; then
-  tls=(--cacert "$CI_E2E_CACERT")
-elif [ "${CI_E2E_INSECURE:-0}" = "1" ]; then
-  tls=(-k)
-fi
 
 # ---- GitHub commit status (optional live status on the PR) ----------------
 # When GH_STATUS_TOKEN + GH_STATUS_REPO + GH_STATUS_SHA are set we publish a commit
@@ -122,41 +122,41 @@ gh_report_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] &
 _epoch() { date -d "$1" +%s 2>/dev/null || true; }
 _hdur() { local s="${1:-}"; [ -z "$s" ] && { echo "–"; return; }; if [ "$s" -lt 60 ]; then echo "${s}s"; else echo "$((s/60))m $((s%60))s"; fi; }
 
-# Turn a raw platform error into a one-line, plain-language reason a reviewer can act on.
-humanize_reason() {
-  case "$1" in
-    *JobHoldMaxRequeue*)
-      echo "The scheduler kept holding & requeuing the job until it gave up — usually a flaky node; just re-run." ;;
-    *baseline_accuracy*|*accuracy_failed*)
-      echo "Baseline accuracy gate failed — the model server ran but the baseline benchmark didn't pass; check the baseline logs." ;;
-    *NonZeroExitCode*|*"exhausted retries"*)
-      echo "The run exited non-zero on the node — usually a node/env hiccup (e.g. a leftover process holding a port) or a runtime error; often transient, re-run first." ;;
-    *"not terminal"*|*[Tt]imeout*)
-      echo "Timed out — the run never reached a terminal state in time (task stuck, or the GPU stayed queued too long)." ;;
-    *"not associated"*|*user_name*)
-      echo "Dispatch identity rejected — CI_E2E_USER_NAME must be an account the runs are allowed to dispatch under." ;;
-    *128*|*Authentication*|*"could not read Username"*)
-      echo "Could not clone the PR code on the node — GitHub auth/permission issue." ;;
-    "")
-      echo "Unknown failure — the platform reported no error detail." ;;
-    *)
-      echo "$1" ;;
-  esac
-}
+# `humanize_reason` used to live here, as a case statement over the platform's error
+# strings. It is `dispatron-ci`'s `explanation` output now -- the same sentences, moved
+# next to the vocabulary they describe, so the next team to wire up a GPU check gets
+# them without copying this file.
 
 report_upsert() { # result_md (e.g. "✅ Succeeded")
   gh_report_on || return 0
-  local result="$1" q d qe de nows qd="" rt="" tot="" actions="" reason_row="" body cid
-  q="$(printf '%s' "${detail:-}" | jq -r '[.orchestration.conditions[]|select(.phase=="Queued")][0].time // empty' 2>/dev/null || true)"
-  d="$(printf '%s' "${detail:-}" | jq -r '[.orchestration.conditions[]|select(.phase=="Dispatched")][0].time // empty' 2>/dev/null || true)"
-  qe="$(_epoch "$q")"; de="$(_epoch "$d")"; nows="$(date +%s)"
+  local result="$1" qe de ee qd="" rt="" tot="" actions="" reason_row="" detail_block="" job_row="" body cid
+  qe="$(_epoch "${OUT_queued_at:-}")"; de="$(_epoch "${OUT_dispatched_at:-}")"
+  ee="$(_epoch "${OUT_ended_at:-}")"; [ -z "$ee" ] && ee="$(date +%s)"
   [ -n "$qe" ] && [ -n "$de" ] && qd="$(_hdur $((de - qe)))"
-  [ -n "$de" ] && rt="$(_hdur $((nows - de)))"
-  [ -n "$qe" ] && tot="$(_hdur $((nows - qe)))"
+  [ -n "$de" ] && rt="$(_hdur $((ee - de)))"
+  [ -n "$qe" ] && tot="$(_hdur $((ee - qe)))"
   [ -n "${GH_STATUS_DETAILS_URL:-}" ] && actions="[details](${GH_STATUS_DETAILS_URL})"
-  if [ -n "${err:-}" ]; then
-    reason_row="| reason | $(humanize_reason "$err") |
-| detail | \`${err}\` |
+  if [ -n "${OUT_platform_ref:-}" ]; then
+    job_row="| backend run | \`${OUT_platform_ref}\`${OUT_nodes:+ on \`${OUT_nodes}\`} |
+"
+  fi
+  # A platform error is often a stack trace, and a newline inside a table cell ends the
+  # row -- the old single-line `| detail | ... |` silently mangled the whole table the
+  # first time one arrived. The sentence goes in the table; the raw text goes under it,
+  # folded, where it can be as many lines as it likes.
+  if [ -n "${OUT_explanation:-}" ]; then
+    reason_row="| reason | $(printf '%s' "$OUT_explanation" | tr '\n' ' ') |
+"
+  fi
+  if [ -n "${OUT_reason:-}" ]; then
+    detail_block="
+<details><summary>platform error</summary>
+
+\`\`\`
+$(printf '%s' "$OUT_reason" | head -c 4000)
+\`\`\`
+
+</details>
 "
   fi
   body="${REPORT_MARKER}
@@ -169,11 +169,11 @@ report_upsert() { # result_md (e.g. "✅ Succeeded")
 | resources | ${GPUS}× GPU, TP=${TP} |
 | PR branch | \`${HEAD_REF}\` |
 | commit | \`${HEAD_SHA}\` |
-| session_id | \`${UID_}\` |
-| queue → dispatch | ${qd:-–} |
+| session_id | \`${UID_:-–}\` |
+${job_row}| queue → dispatch | ${qd:-–} |
 | run time | ${rt:-–} |
 | total | ${tot:-–} |
-${reason_row}
+${reason_row}${detail_block}
 ${actions}"
   cid="$(curl -sS -H "Authorization: Bearer ${GH_STATUS_TOKEN}" -H "Accept: application/vnd.github+json" \
     "${GH_API}/repos/${GH_STATUS_REPO}/issues/${PR_NUMBER}/comments?per_page=100" 2>/dev/null \
@@ -189,107 +189,131 @@ ${actions}"
   fi
 }
 
-# ---- submit ---------------------------------------------------------------
-params="$(jq -n \
-  --arg repo_id "$MODEL" --arg tp "$TP" --arg mh "$MAX_HOURS" \
-  --arg ref "$HEAD_REF" --arg sha "$HEAD_SHA" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
-  --arg task_source "github-e2e-ci" --arg pr_number "${PR_NUMBER:-}" \
-  --arg mc "$MODEL_CLASS" --arg mbase "${MODEL_BASE:-}" \
-  '{REPO_ID:$repo_id, TP:$tp, MAX_HOURS:$mh,
-    HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_SHA:$sha,
-    HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir,
-    HYPERLOOM_TASK_SOURCE:$task_source, HYPERLOOM_SOURCE_PR:$pr_number}
-   + (if $mc == "" then {} else {MODEL_CLASS:$mc} end)
-   + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)')"
-body="$(jq -n \
-  --arg name "ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
-  --arg uname "${CI_E2E_USER_NAME:-}" --arg itype "$E2E_INFRA_TYPE" \
-  --arg knowledge_mode "$KNOWLEDGE_STORE_MODE" \
-  --arg kb_store_url "${KB_STORE_URL:-}" \
-  --arg kb_store_token "${KB_STORE_TOKEN:-}" \
-  --argjson gpus "$GPUS" --argjson params "$params" \
-  '{name:$name, infra_type:$itype, kind:"hyperloom", replicas:1,
-    gpu_per_replica:$gpus,
-    template:{params:$params, env:
-      ({HL_CI_E2E:"1", KNOWLEDGE_STORE_MODE:$knowledge_mode}
-       + (if $knowledge_mode == "remote"
-          then {KB_STORE_URL:$kb_store_url, KB_STORE_TOKEN:$kb_store_token}
-          else {}
-          end))}}
-   + (if $uname == "" then {} else {user_name:$uname} end)')"
+# ---- run it ---------------------------------------------------------------
+# `dispatron-ci` submits and polls. Two channels come back out of it:
+#   * the events file, one JSON object per poll, which is what the live status is
+#     refreshed from while the run is still going;
+#   * step outputs, which carry the verdict, the reason and the timings.
+# Neither is this script parsing the CLI's prose, which is the coupling the split
+# exists to remove.
+WORK="$(mktemp -d)"
+EVENTS="$WORK/events.jsonl"
+# The CLI writes step outputs of its own. Pointed at a scratch file rather than the
+# job's, so what this step exposes stays this script's contract and not a union of two.
+OUTPUTS="$WORK/cli-outputs"
+: > "$EVENTS"; : > "$OUTPUTS"
+trap 'rm -rf "$WORK"' EXIT
 
-echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
-resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
-  "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
-code="$(printf '%s' "$resp" | tail -n1)"
-json="$(printf '%s' "$resp" | sed '$d')"
-
-if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-  summary "❌ submit failed (HTTP $code): $(printf '%s' "$json" | head -c 500)"
-  exit 1
+insecure=()
+[ "${CI_E2E_INSECURE:-0}" = "1" ] && insecure=(--insecure)
+kb=()
+if [ "$KNOWLEDGE_STORE_MODE" = "remote" ]; then
+  kb=(--knowledge-mode remote --kb-url "$KB_STORE_URL" --kb-token "$KB_STORE_TOKEN")
 fi
-UID_="$(printf '%s' "$json" | jq -r '.uid // empty')"
-if [ -z "$UID_" ]; then
-  summary "❌ submit returned no uid: $(printf '%s' "$json" | head -c 500)"
-  exit 1
-fi
-summary "**session_id (workload uid):** \`$UID_\`"
-echo "session_id=$UID_" >> "${GITHUB_OUTPUT:-/dev/null}"
-# Persist the uid so a workflow `if: cancelled()` step can cancel the workload even
-# if this process is hard-killed on cancel (the trap below is best-effort only).
-echo "$UID_" > "${E2E_UID_FILE:-${RUNNER_TEMP:-/tmp}/e2e_session_uid}" 2>/dev/null || true
 
-# Seed the live commit status (no-op unless GH_STATUS_* are set).
-post_status "pending" "submitted; uid=${UID_}; model=${MODEL}; ref=${HEAD_REF}; sha=${HEAD_SHA:0:12}"
-last_push="$(date +%s)"
+post_status "pending" "dispatching; sha=${HEAD_SHA:0:12}"
 
-# On cancellation (e.g. a newer commit via concurrency cancel-in-progress),
-# best-effort cancel the workload so we don't leak a GPU run.
-cleanup() { curl -sS "${tls[@]}" -X DELETE "$API/$UID_" "${auth[@]}" >/dev/null 2>&1 || true; }
-trap 'echo "[ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"; cleanup; exit 1' INT TERM
+# The CLI's own step outputs must not land in the job's GITHUB_OUTPUT unread: this
+# script reads them itself and re-exports the ones the workflow declares, so the file
+# it writes is ours and the step's outputs stay this script's contract.
+GITHUB_OUTPUT="$OUTPUTS" \
+DISPATCH_EVENTS_FILE="$EVENTS" \
+dispatron-ci \
+  --base-url "$DISPATRON_BASE_URL" \
+  --name "ci-e2e-pr${PR_NUMBER:-manual}-${HEAD_SHA:0:12}" \
+  --source hyperloom-e2e \
+  --model "$MODEL" \
+  --model-class "$MODEL_CLASS" \
+  --model-base "${MODEL_BASE:-}" \
+  --gpus "$GPUS" \
+  --tp "$TP" \
+  --max-hours "$MAX_HOURS" \
+  --user "${CI_E2E_USER_NAME:-}" \
+  --ref "$HEAD_REF" \
+  --sha "$HEAD_SHA" \
+  --source-repo "$SRC_REPO" \
+  --source-dir "$SRC_DIR" \
+  --pr "${PR_NUMBER:-}" \
+  --poll-interval "$POLL_INTERVAL_S" \
+  --poll-max "$POLL_MAX" \
+  "${kb[@]}" "${insecure[@]}" &
+cli=$!
 
-# ---- poll -----------------------------------------------------------------
-i=0
-prev_phase=""
-while [ "$i" -lt "$POLL_MAX" ]; do
-  i=$((i + 1))
-  detail="$(curl -sS "${tls[@]}" "$API/$UID_" "${auth[@]}" || true)"
-  phase="$(printf '%s' "$detail" | jq -r '.orchestration.phase // "Unknown"' 2>/dev/null || echo Unknown)"
-  jobref="$(printf '%s' "$detail" | jq -r '.dispatches[-1].platform_ref // "-"' 2>/dev/null || echo -)"
-  node="$(printf '%s' "$detail" | jq -r '.dispatches[-1].nodes // "-"' 2>/dev/null || echo -)"
-  echo "[ci-e2e] poll $i/$POLL_MAX phase=$phase node=$node job=$jobref uid=$UID_"
-  # Announce phase transitions (from the orchestration conditions ledger).
-  if [ "$phase" != "$prev_phase" ]; then
-    cond="$(printf '%s' "$detail" | jq -r '.orchestration.conditions[-1] | "\(.time) \(.phase): \(.message)"' 2>/dev/null || echo "")"
-    echo "[ci-e2e]   >> phase ${prev_phase:-<start>} -> ${phase}${cond:+   ($cond)}"
-    prev_phase="$phase"
-  fi
-  case "$phase" in
-    Succeeded)
-      summary "✅ **PASS** — run completed. session_id=\`$UID_\` job=\`$jobref\`"
-      post_status "success" "PASS — uid=${UID_}; job=${jobref}; sha=${HEAD_SHA:0:12}"
-      report_upsert "✅ Succeeded"
-      exit 0 ;;
-    Failed)
-      err="$(printf '%s' "$detail" | jq -r '.orchestration.last_error // (.orchestration.conditions[-1].message) // "unknown"' 2>/dev/null)"
-      summary "❌ **FAIL** — session_id=\`$UID_\` job=\`$jobref\` node=\`$node\`"
-      summary "reason: $err"
-      post_status "failure" "FAIL (${HEAD_SHA:0:12}): $(humanize_reason "$err")"
-      report_upsert "❌ Failed"
-      exit 1 ;;
-  esac
-  # Throttled live status: push at most once per STATUS_INTERVAL_S (default 5min).
+# Refresh the commit status while the run is going, from the events file rather than
+# from a second poll of the API -- a status refresh must not be able to add load to
+# the thing it is describing, nor to disagree with it.
+last_push=0
+while kill -0 "$cli" 2>/dev/null; do
   now_s="$(date +%s)"
   if [ $((now_s - last_push)) -ge "$STATUS_INTERVAL_S" ]; then
-    post_status "pending" "running ${phase}; job=${jobref}; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    ev="$(jq -c 'select(.event=="phase")' "$EVENTS" 2>/dev/null | tail -1 || true)"
+    if [ -n "$ev" ]; then
+      ph="$(printf '%s' "$ev" | jq -r '.phase // "?"' 2>/dev/null || echo '?')"
+      jr="$(printf '%s' "$ev" | jq -r '.platform_ref // "" ' 2>/dev/null || true)"
+      post_status "pending" "running ${ph}; job=${jr:--}; sha=${HEAD_SHA:0:12}"
+    fi
     last_push="$now_s"
   fi
-  sleep "$POLL_INTERVAL_S"
+  sleep 5
 done
+rc=0; wait "$cli" || rc=$?
 
-err="not terminal after $((POLL_MAX * POLL_INTERVAL_S))s"
-summary "❌ **FAIL (timeout)** — ${err}. session_id=\`$UID_\`"
-post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-report_upsert "❌ Timeout"
-cleanup
-exit 1
+# Read what the CLI decided, from the terminal event rather than from the step-output
+# file. Both carry the same fields, but the event is JSON: a platform error containing
+# a newline needs no delimiter convention to survive, and reading one out of
+# `key=value` means hand-rolling GitHub's escaping in bash to get it wrong once.
+term="$(jq -c 'select(.event=="terminal")' "$EVENTS" 2>/dev/null | tail -1 || true)"
+field() { [ -n "$term" ] && printf '%s' "$term" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null || true; }
+
+UID_="$(field uid)"
+result="$(field result)"
+OUT_reason="$(field reason)"
+OUT_explanation="$(field explanation)"
+OUT_platform_ref="$(field platform_ref)"
+OUT_nodes="$(field nodes)"
+OUT_queued_at="$(field queued_at)"
+OUT_dispatched_at="$(field dispatched_at)"
+OUT_ended_at="$(field ended_at)"
+# The uid is known from the moment of submission, so prefer that over an outcome that
+# may not exist: a failed dispatch still has to name what it tried, if anything.
+[ -z "$UID_" ] && UID_="$(jq -r 'select(.event=="submitted")|.uid' "$EVENTS" 2>/dev/null | tail -1 || true)"
+# The CLI died before writing an outcome -- a refused submit, or the facade unreachable.
+# Not a run that failed, and saying so stops somebody debugging code that never ran.
+[ -z "$result" ] && result="dispatch-error"
+
+# Re-export the outputs the workflow's later steps read.
+if [ -n "${GITHUB_OUTPUT:-}" ] && [ "${GITHUB_OUTPUT}" != "$OUTPUTS" ]; then
+  {
+    echo "session_id=${UID_}"
+    echo "result=${result}"
+    echo "platform_ref=${OUT_platform_ref:-}"
+  } >> "$GITHUB_OUTPUT"
+fi
+
+case "$result" in
+  succeeded)
+    summary "✅ **PASS** — run completed. session_id=\`${UID_}\` job=\`${OUT_platform_ref:--}\`"
+    post_status "success" "PASS — uid=${UID_}; job=${OUT_platform_ref:--}; sha=${HEAD_SHA:0:12}"
+    report_upsert "✅ Succeeded" ;;
+  cancelled)
+    # Not a red build: a newer commit or a `/retest` cancelled this one, and reporting
+    # it as a failure sends somebody looking for a bug that is not there.
+    summary "🚫 **CANCELLED** — session_id=\`${UID_}\`"
+    post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "🚫 Cancelled" ;;
+  timeout)
+    summary "❌ **FAIL (timeout)** — ${OUT_explanation:-gave up waiting}. session_id=\`${UID_}\`"
+    post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "⏱ Timed out" ;;
+  dispatch-error)
+    summary "❌ **FAIL** — the run was never dispatched; see the job log."
+    post_status "error" "could not dispatch; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Not dispatched" ;;
+  *)
+    summary "❌ **FAIL** — session_id=\`${UID_}\` job=\`${OUT_platform_ref:--}\` node=\`${OUT_nodes:--}\`"
+    summary "reason: ${OUT_explanation:-unknown}"
+    post_status "failure" "FAIL (${HEAD_SHA:0:12}): ${OUT_explanation:-unknown}"
+    report_upsert "❌ Failed" ;;
+esac
+
+exit "$rc"
