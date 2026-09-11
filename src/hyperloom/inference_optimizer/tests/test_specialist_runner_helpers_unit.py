@@ -8,8 +8,14 @@ the prompt/transcript/heartbeat/done writers."""
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
+import pytest
+
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
@@ -17,6 +23,7 @@ from hyperloom.orchestrator.specialists.runner import (
     build_empty_specialist_done,
     classify_specialist_failure,
 )
+from hyperloom.orchestrator.state.task_registry import Task
 
 
 def _runner(**over):
@@ -285,6 +292,49 @@ def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
     )
 
     assert written["confidence"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
+    """In-process ``run`` wraps ``_finalize`` in ``to_thread``; vetting must not freeze the loop."""
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+    orig = sr._patch_safety.vet_patches
+
+    def _spy_vet(*args, **kwargs):
+        seen["ident"] = threading.get_ident()
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
+    done = {
+        "gap_canonical_id": "gap-1",
+        "domain": "serving_specialist",
+        "proposal_set": [{"name": "v1"}],
+        "summary": "s",
+        "reason": "test",
+        "confidence": 0.0,
+        "new_findings": [],
+        "residual_questions": [],
+    }
+    plan = ScriptedPlan(
+        turns=[MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)])],
+    )
+    runner = SpecialistRunner(
+        backend_factory=lambda d: MockBackend(plan, name="mock"),
+        session_dir=tmp_path,
+        default_max_turns=2,
+    )
+    task = Task(
+        task_id="t1",
+        kind="specialist",
+        state="queued",
+        params={"domain": "serving_specialist", "gap_canonical_id": "gap-1", "max_turns": 1},
+        idempotency_key="t1",
+        requires_lanes=tuple(),
+    )
+    await runner.run(RunnerContext(task=task, lease=None, extra={}))
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
 
 
 def test_write_specialist_done_partial_noop_none_workspace():
