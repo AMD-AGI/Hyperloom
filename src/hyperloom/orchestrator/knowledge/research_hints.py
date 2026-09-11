@@ -18,6 +18,25 @@ from hyperloom.inference_optimizer.session import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 
+_AGENTX_AXIS_REASON_TEXT = {
+    "partitioned_gpu": "physical GPU normalization unavailable due to partitioning",
+    "exact_p90_missing": "exact P90 measurement missing",
+    "request_records_missing": "request records missing",
+    "request_records_unreadable": "request records could not be read",
+    "request_records_invalid": "request records invalid",
+    "request_records_changed": "request records changed while being read",
+    "no_eligible_requests": "no eligible requests for exact P90",
+    "topology_unverified": "GPU topology unverified",
+    "topology_mismatch": "GPU topology mismatch",
+    "unsupported_topology": "GPU topology unsupported",
+    "gpu_count_missing": "physical GPU count missing",
+    "total_throughput_missing": "total token throughput missing",
+    "recipe_missing": "accepted measurement recipe missing",
+    "recipe_unreadable": "accepted measurement recipe could not be read",
+    "recipe_mismatch": "accepted measurement recipe does not match recorded digest",
+    "recipe_invalid": "accepted measurement recipe invalid",
+}
+
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
     """Normalize one incoming hint; return ``None`` when it has no source."""
@@ -432,12 +451,20 @@ def full_gap_summary(
             lines.append(f"- comparison unavailable: {gap['reason']}")
         if gap.get("target_conc") is not None:
             lines.append(f"- matched concurrency: {gap['target_conc']}")
-        for key, label in (
-            ("throughput_gap_pct", "total throughput/GPU"),
-            ("interactivity_gap_pct", "E2E normalized interactivity P90"),
+        for axis, label in (
+            ("throughput", "total throughput/GPU"),
+            ("interactivity", "E2E normalized interactivity P90"),
         ):
-            value = gap.get(key)
-            lines.append(f"- {label} gap vs target: {value:+.1f}%" if value is not None else f"- {label}: unavailable")
+            value = gap.get(f"{axis}_gap_pct")
+            if value is not None:
+                lines.append(f"- {label} gap vs target: {value:+.1f}%")
+            else:
+                reason = gap.get(f"{axis}_reason")
+                explanation = (
+                    _AGENTX_AXIS_REASON_TEXT.get(reason, "comparison evidence could not be validated") if reason else ""
+                )
+                suffix = f" ({explanation})" if explanation else ""
+                lines.append(f"- {label}: unavailable{suffix}")
         if gap.get("source"):
             lines.append(f"- target source: {gap['source']} (benchmark {gap.get('benchmark_id') or 'unknown'})")
         return "\n".join(lines)

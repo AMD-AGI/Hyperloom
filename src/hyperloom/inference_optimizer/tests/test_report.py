@@ -88,6 +88,71 @@ def test_report_agentx_comparison_uses_same_state_gap_as_advisory(
     assert "cross-system" in md
 
 
+@pytest.mark.parametrize(
+    "missing_axis,reason,explanation,valid_gap_line,valid_values_line",
+    [
+        (
+            "throughput",
+            "partitioned_gpu",
+            "physical GPU normalization unavailable due to partitioning",
+            "- E2E normalized interactivity P90 gap vs target: +75.0%",
+            "- E2E normalized interactivity P90: ours=5.000, reference=20.000 tok/s/user",
+        ),
+        (
+            "interactivity",
+            "request_records_missing",
+            "request records missing",
+            "- total throughput/GPU gap vs target: +50.0%",
+            "- total throughput/GPU: ours=400.000, reference=800.000 tok/s/GPU",
+        ),
+    ],
+)
+def test_report_agentx_axis_reason_is_readable_and_independent_of_advisory(
+    report_performance_state, monkeypatch, missing_axis, reason, explanation, valid_gap_line, valid_values_line
+):
+    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
+
+    state = report_performance_state
+    state.model_path = "/models/GLM-5.2-MXFP4"
+    local = {
+        "status": "ok",
+        "reason": "",
+        "conc": 4,
+        "total_tput_per_gpu": 400.0,
+        "e2e_norm_intvty_p90": 5.0,
+        "precision": "mxfp4",
+    }
+    if missing_axis == "throughput":
+        state.compute_partition = {"mode": "CPX", "partitions": 8}
+    else:
+        local.update(e2e_norm_intvty_p90=None, interactivity_reason=reason)
+    monkeypatch.setattr(local_measurement, "load_local_measurement", lambda best: local)
+    reference = _agentx_reference()
+    before = deepcopy(reference)
+    summaries = []
+    rendered = []
+    for enabled in (True, False):
+        state.target_advisory_enabled = enabled
+        summary = json.loads(json.dumps(rp._build_summary_dict(state, {}, [], external_baseline=reference)))
+        summary["report_generated_at"] = "2026-09-11T00:00:00+00:00"
+        comparison = summary["external_baseline"]["comparison"]
+        assert comparison[f"{missing_axis}_gap_pct"] is None
+        assert comparison[f"{missing_axis}_reason"] == reason
+        assert comparison["primary_gap"] == ("interactivity" if missing_axis == "throughput" else "throughput")
+        md = rp._format_md(summary)
+        missing_label = "total throughput/GPU" if missing_axis == "throughput" else "E2E normalized interactivity P90"
+        assert f"- {missing_label}: unavailable ({explanation})" in md.splitlines()
+        assert valid_gap_line in md.splitlines()
+        assert valid_values_line in md.splitlines()
+        assert reason not in md
+        assert "9999" not in md
+        summaries.append(summary)
+        rendered.append(md)
+    assert reference == before
+    assert summaries[0] == summaries[1]
+    assert rendered[0] == rendered[1]
+
+
 def test_agentx_report_rejects_old_synthetic_reference(report_performance_state):
     reference = _agentx_reference()
     reference["query"]["benchmark_mode"] = "synthetic"
