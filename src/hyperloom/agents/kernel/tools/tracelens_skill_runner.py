@@ -301,6 +301,7 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
         Path | None: The capture folder if one exists nearby, else ``None``.
     """
 
+    capture_dir_priority = ("capture_traces", "graph_capture_profile", "graph_capture")
     search_roots: list[Path] = []
     if trace_input.is_dir():
         search_roots.append(trace_input)
@@ -312,11 +313,15 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
             continue
         seen.add(root)
         try:
-            children = sorted(root.iterdir())
+            children = [child for child in root.iterdir() if child.is_dir()]
         except OSError:
             continue
-        for child in children:
-            if child.is_dir() and is_capture_dir_name(child.name):
+        children_by_name = {child.name.lower(): child for child in children}
+        for name in capture_dir_priority:
+            if child := children_by_name.get(name):
+                return child
+        for child in sorted(children):
+            if is_capture_dir_name(child.name):
                 return child
     return None
 

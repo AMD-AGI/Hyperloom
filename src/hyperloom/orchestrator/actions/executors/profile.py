@@ -312,8 +312,13 @@ def _validate_trace_structure(
     framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
     scriptable = _fw_reg.is_scriptable(framework)
 
-    # --- Check 1: capture_traces/ presence (LLM/serving only) ---
-    capture = trace_dir / "capture_traces"
+    # --- Check 1: graph-capture directory presence (LLM/serving only) ---
+    capture_dirs = [
+        trace_dir / "capture_traces",
+        trace_dir / "graph_capture_profile",
+        trace_dir / "graph_capture",
+    ]
+    capture = next((path for path in capture_dirs if path.is_dir()), None)
     capture_files: list[Path] = []
     if scriptable:
         _note_check(
@@ -322,9 +327,9 @@ def _validate_trace_structure(
             skip_reason="scriptable framework writes a plain torch-profiler trace",
         )
     else:
-        if not capture.is_dir():
+        if capture is None:
             issues.append(
-                "[1] capture_traces/ subdirectory missing — graph capture "
+                "[1] graph-capture subdirectory missing — graph capture "
                 "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
                 "include the TraceLens flag and the server-side patch landed."
             )
@@ -334,12 +339,13 @@ def _validate_trace_structure(
             capture_traces_present = bool(capture_files)
             if not capture_files:
                 issues.append(
-                    "[1] capture_traces/ exists but is empty — graph capture path fired but produced no files."
+                    f"[1] {capture.name}/ exists but is empty — graph capture path fired but produced no files."
                 )
             _note_check(
                 CHECK_CAPTURE_TRACES_PRESENT,
                 status="passed" if capture_files else "failed",
                 capture_dir_present=True,
+                capture_dir=str(capture),
                 file_count=len(capture_files),
             )
 
