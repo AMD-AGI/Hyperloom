@@ -1982,7 +1982,6 @@ class IntegratePatchExecutor:
         Runs a disk preflight, delegates provision+probe to the framework
         adapter (off the event loop; an in-flight pip install is not killed
         if the await is cancelled), and on success stores the resolved runtime on
-        adapter, and on success stores the resolved runtime on
         ``ctx._ip_provision_result`` / ``ctx._ip_stack_action`` for the gate to
         activate via the YAML-layer ``runtime_override``. Returns an early-exit
         ``reverted`` dict on any provision failure (no patch side effects yet),
