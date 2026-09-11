@@ -928,15 +928,43 @@ def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
+    # Verbatim from the round that exposed this: the build says "Starting vLLM
+    # server on", not the uvicorn banner an earlier pattern here assumed.
     (nested / "server.log").write_text(
-        "INFO 09-10 13:57:01 [api_server.py:1] Starting vLLM API server\n"
-        "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)\n"
-        "INFO:     Application startup complete.\n",
+        "(APIServer pid=18877) INFO 09-10 15:50:09 [api_server.py:577] Supported tasks: ['generate']\n"
+        "(APIServer pid=18877) INFO 09-10 15:50:09 [api_server.py:581] Starting vLLM server on http://0.0.0.0:8000\n"
+        "(APIServer pid=18877) INFO:     Application startup complete.\n",
         encoding="utf-8",
     )
 
     assert port_from_server_log(tmp_path) == 8000
     assert resolve_metrics_port({}, tmp_path) == 8000
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # The three phrasings seen across real runs on this cluster.
+        ("INFO 09-10 15:50:09 [api_server.py:581] Starting vLLM server on http://0.0.0.0:8000", 8000),
+        ("INFO 09-10 06:51:03 [api_server.py:581] Starting vLLM server on http://0.0.0.0:34407", 34407),
+        ("INFO:     Uvicorn running on http://0.0.0.0:30000 (Press CTRL+C to quit)", 30000),
+        # Not a bind announcement: a request log line carries an address but no scheme.
+        ('INFO:     127.0.0.1:38292 - "GET /health HTTP/1.1" 200 OK', None),
+        # Nor is an unrelated URL that happens to have a port.
+        ("INFO downloading from https://mirror.example.com:8443/models/x", None),
+    ],
+)
+def test_bind_line_recognition(tmp_path, line, expected):
+    """Recognised by what the line is about, not by its exact wording.
+
+    Enumerating phrasings is how this collector got its original bug, so the test
+    is the combination: a line announcing the server, carrying a URL with a port.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log
+
+    (tmp_path / "server.log").write_text(line + "\n", encoding="utf-8")
+
+    assert port_from_server_log(tmp_path) == expected
 
 
 def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
