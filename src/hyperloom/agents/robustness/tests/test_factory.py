@@ -184,8 +184,7 @@ async def test_config_discover_does_not_treat_gateway_key_as_official_openai(mon
 
     assert config.llm_base_url == ""
     assert config.llm_api_key == ""
-    # A gateway key configures neither side, and an unconfigured deployment reports Claude's.
-    assert config.llm_provider == "anthropic"
+    assert config.llm_provider == "openai"
 
 
 async def _async_value(value):
@@ -231,6 +230,23 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkey
         await engine.aclose()
     finally:
         await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_discover_llm_credentials_falls_back_to_openai_when_oauth_transport_is_unusable(
+    monkeypatch,
+):
+    """A subscription token must not block a working OpenAI key when the CLI is absent."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-fake")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-working")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
+
+    assert config_module._discover_llm_credentials() == (
+        "https://api.openai.com/v1",
+        "sk-openai-working",
+        "openai",
+    )
 
 
 @pytest.mark.asyncio

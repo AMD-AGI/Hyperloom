@@ -282,7 +282,7 @@ def _openai_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] | No
 
 
 def _anthropic_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] | None:
-    """Resolve the Anthropic-side RCA credential, or ``None`` when that side carries no key."""
+    """Resolve the Anthropic-side RCA credential, or ``None`` when that side carries no usable key."""
     # The synthesizable subset, which is exactly the set that may be handed on as an api_key: a subscription token is
     # spent by the CLI and never travels as a key, so it is excluded here by construction rather than by omission.
     anthropic_key = anthropic_synthesizable_key(env)
@@ -293,9 +293,13 @@ def _anthropic_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] |
             "anthropic",
         )
     # A Claude Max/Pro subscription token is resolved by the CLI itself, so it is deliberately not returned as an
-    # api_key; the provider alone selects it.
+    # api_key; the provider alone selects it. Only claim it when the transport is actually usable here -- otherwise
+    # fall through to a working OpenAI key on the same host.
     if env.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
-        return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
+        from hyperloom.common import llm_config
+
+        if llm_config.anthropic_transport_ready(env):
+            return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
     return None
 
 
@@ -311,15 +315,13 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     env = _provider_env()
     if preferred_agent_backend(env) == AGENT_BACKEND_CLAUDE:
         resolvers = (_anthropic_rca_credentials, _openai_rca_credentials)
-        unconfigured = ("", "", "anthropic")
     else:
         resolvers = (_openai_rca_credentials, _anthropic_rca_credentials)
-        unconfigured = ("", "", "openai")
     for resolve in resolvers:
         discovered = resolve(env)
         if discovered is not None:
             return discovered
-    return unconfigured
+    return "", "", "openai"
 
 
 def _discover_llm_model(provider: str) -> str:

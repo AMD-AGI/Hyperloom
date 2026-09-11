@@ -164,7 +164,17 @@ def test_auto_agent_backend_rejects_neither_credentials_nor_sdk(clean_agent_env,
 def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, installed_sdks, monkeypatch, retired):
     """A key the gateway rejects must not make its side look configured."""
     installed_sdks(claude=True, codex=True)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
     monkeypatch.setenv(retired, "retired-value")
+
+    provider, _model = _resolve_agent_choice("auto", None)
+    assert provider == "claude"
+
+
+def test_auto_agent_backend_ignores_a_bare_openai_base_url(clean_agent_env, installed_sdks, monkeypatch):
+    """A gateway pointer without OPENAI_API_KEY is not a Codex credential."""
+    installed_sdks(claude=True, codex=True)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
 
     provider, _model = _resolve_agent_choice("auto", None)
     assert provider == "claude"

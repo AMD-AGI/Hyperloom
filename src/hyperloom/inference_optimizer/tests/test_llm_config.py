@@ -251,6 +251,35 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
+def test_openai_credential_requires_the_api_key_not_a_bare_base_url():
+    assert not llm_config.has_openai_credential({"OPENAI_BASE_URL": "https://gw/v1"})
+    assert llm_config.has_openai_credential({"OPENAI_API_KEY": "sk-test"})
+
+
+@pytest.mark.parametrize(
+    ("claude_sdk", "codex_sdk", "env", "expected"),
+    [
+        (False, True, {}, llm_config.AGENT_BACKEND_CODEX),
+        (True, False, {}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, True, {}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, True, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
+        (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
+        (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
+        (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
+    ],
+)
+def test_preferred_agent_backend_ranks_credentials_then_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    claude_sdk: bool,
+    codex_sdk: bool,
+    env: dict[str, str],
+    expected: str,
+) -> None:
+    monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: claude_sdk)
+    monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: codex_sdk)
+    assert llm_config.preferred_agent_backend(env) == expected
+
+
 def test_derived_base_url_carries_the_anthropic_gateway_headers():
     """An anthropic-only deployment must still send the gateway's subscription key."""
     kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))

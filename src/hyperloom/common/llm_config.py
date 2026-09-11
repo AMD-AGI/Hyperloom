@@ -76,13 +76,11 @@ def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
 
 
 def has_anthropic_credential(env: Mapping[str, str] | None = None) -> bool:
-    """True when any Anthropic-side credential form is set."""
-    return bool(
-        _first_set_value(
-            ANTHROPIC_CREDENTIAL_ENV_ORDER,
-            env if env is not None else os.environ,
-        )
-    )
+    """True when any Anthropic-side credential form is set for backend selection."""
+    source = env if env is not None else os.environ
+    if _first_set_value(ANTHROPIC_CREDENTIAL_ENV_ORDER, source):
+        return True
+    return any(is_truthy(source.get(name)) for name in ANTHROPIC_MANAGED_GATEWAY_ENVS)
 
 
 def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
@@ -149,6 +147,17 @@ def has_openai_side(env: Mapping[str, str] | None = None) -> bool:
     return any((source.get(name) or "").strip() for name in _OPENAI_SIDE_KEYS)
 
 
+def has_openai_credential(env: Mapping[str, str] | None = None) -> bool:
+    """True when an OpenAI-side key is configured for agent backend selection.
+
+    A bare ``OPENAI_BASE_URL`` without ``OPENAI_API_KEY`` is an endpoint hint,
+    not a credential -- forge-fuse used to require the key explicitly, and
+    treating the URL alone as configured sends an unauthenticated Codex run.
+    """
+    source = env if env is not None else os.environ
+    return bool((source.get("OPENAI_API_KEY") or "").strip())
+
+
 def is_anthropic_only(env: Mapping[str, str] | None = None) -> bool:
     """True when the Anthropic side is the only configured provider."""
     return has_anthropic_side(env) and not has_openai_side(env)
@@ -159,22 +168,47 @@ def is_openai_only(env: Mapping[str, str] | None = None) -> bool:
     return has_openai_side(env) and not has_anthropic_side(env)
 
 
+def _claude_agent_sdk_installed() -> bool:
+    """Return whether the optional Claude Agent SDK is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("claude_agent_sdk") is not None
+
+
+def _codex_agent_sdk_installed() -> bool:
+    """Return whether the optional Codex Agent SDK is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("openai_codex") is not None
+
+
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return the agent backend this environment's credentials point at.
+    """Return the agent backend this environment should run.
 
-    One rule for the whole repository: the configured side decides, and Claude
-    wins whenever both sides -- or neither -- are configured. An OpenAI-only
-    deployment holds no Anthropic credential, so the Claude runtime starts and
-    immediately fails to authenticate; Codex is the only one that can run
-    there. "Neither configured" still resolves to Claude, because a runtime
-    logged in by other means carries no credential this can see, and that
-    runtime's own preflight is what reports a genuine authentication failure.
+    Two ranked keys, shared with
+    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`:
+    a configured credential, then an installed SDK. Claude wins whenever both
+    providers tie. An OpenAI-only credential selects Codex; every other
+    credential shape keeps Claude, including dual-configured and unconfigured
+    deployments where a runtime logged in by other means carries no credential
+    this can see.
 
-    Callers that also need to know whether a backend is *installed* rank this
-    answer above SDK availability rather than below it -- see
-    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`.
+    With no credential on either side, the installed SDK decides; when neither
+    extra is present, Claude is still the default so preflight can report what is
+    missing rather than silently picking the other CLI.
     """
-    return AGENT_BACKEND_CODEX if is_openai_only(env) else AGENT_BACKEND_CLAUDE
+    source = env if env is not None else os.environ
+    claude_rank = (
+        0 if has_anthropic_credential(source) else 1,
+        0 if _claude_agent_sdk_installed() else 1,
+    )
+    codex_rank = (
+        0 if has_openai_credential(source) else 1,
+        0 if _codex_agent_sdk_installed() else 1,
+    )
+    if codex_rank < claude_rank:
+        return AGENT_BACKEND_CODEX
+    return AGENT_BACKEND_CLAUDE
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -1063,6 +1097,7 @@ __all__ = [
     "get_openai_client",
     "has_anthropic_credential",
     "has_anthropic_side",
+    "has_openai_credential",
     "has_openai_side",
     "is_anthropic_only",
     "is_openai_only",

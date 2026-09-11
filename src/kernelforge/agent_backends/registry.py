@@ -349,14 +349,14 @@ def _claude_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether an Anthropic-side credential is configured."""
     from hyperloom.common import llm_config
 
-    return llm_config.has_anthropic_side(env)
+    return llm_config.has_anthropic_credential(env)
 
 
 def _codex_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether an OpenAI-side credential is configured."""
     from hyperloom.common import llm_config
 
-    return llm_config.has_openai_side(env)
+    return llm_config.has_openai_credential(env)
 
 
 def _claude_owns_model(model: str) -> bool:

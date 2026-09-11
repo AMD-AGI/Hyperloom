@@ -249,6 +249,8 @@ def test_agent_backend_follows_the_credential_shape(
 ) -> None:
     """Only the shape that cannot drive Claude at all is redirected to Codex."""
     _pin_provider_env(monkeypatch, shape)
+    monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: True)
     assert preferred_agent_backend() == expected, shape_name
 
 
