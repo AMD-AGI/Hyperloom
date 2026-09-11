@@ -584,9 +584,8 @@ Orchestration turn accounting (`OrchestrationContext`). All fields are
 `EnablementBreakdown`. The enablement subsystem's observability section: which
 lane was admitted, what each authoring round did, the patches and stack actions
 it landed, the attempt runtimes it provisioned, and the targeted builds (AITER /
-sgl-kernel / vLLM-source) it attempted. A curated subset (admission status,
-round outcomes, rounds table, build attempts) is also rendered in the **Enablement**
-section of the Markdown report; the full JSON record remains the authoritative source.
+sgl-kernel / vLLM-source) it attempted. A subset is also rendered in the
+**Enablement** section of the Markdown report.
 
 Emitted when the lane did something, or when it was explicitly turned off — the
 opt-out is what explains a run that failed to establish a baseline without

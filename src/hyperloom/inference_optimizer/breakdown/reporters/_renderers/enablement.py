@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement renderer — admission status, round lifecycle, build attempts."""
+"""Enablement renderer — admission status, round ledger, targeted-build attempts."""
 
 from __future__ import annotations
 
@@ -9,43 +9,20 @@ from typing import Any
 
 from ..base import RenderedSection, as_dict, md_kv_list, md_table, register_renderer
 
+_ROUND_COLUMNS = ("round_id", "state", "outcome", "holder_task_id")
+_BUILD_COLUMNS = ("component", "ref", "gpu_arch", "ok", "failure_class")
 
-def _rounds_table(rounds: list[Any]) -> str:
-    """Render the round ledger as a compact table (newest-first, capped at 10)."""
-    rows: list[list[Any]] = []
-    for r in rounds[:10]:
-        if not isinstance(r, dict):
-            continue
-        rows.append(
-            [
-                r.get("round_id") or "—",
-                r.get("outcome") or "open",
-                r.get("attempts") or 0,
-                r.get("opened_at") or "—",
-            ]
-        )
-    if not rows:
+
+def _table(entries: Any, columns: tuple[str, ...]) -> str:
+    """Render a list of mappings as a table of ``columns``."""
+    return md_table(list(columns), [[e.get(c) for c in columns] for e in entries or []])
+
+
+def _outcomes_table(outcomes: Any) -> str:
+    """Render the settled-round outcome counts."""
+    if not outcomes:
         return ""
-    return md_table(["round_id", "outcome", "attempts", "opened_at"], rows)
-
-
-def _builds_table(builds: list[Any]) -> str:
-    """Render the build-attempt ledger as a table (capped at 10)."""
-    rows: list[list[Any]] = []
-    for b in builds[:10]:
-        if not isinstance(b, dict):
-            continue
-        rows.append(
-            [
-                b.get("attempt_root") or "—",
-                b.get("status") or "—",
-                b.get("framework") or "—",
-                b.get("component") or "—",
-            ]
-        )
-    if not rows:
-        return ""
-    return md_table(["attempt_root", "status", "framework", "component"], rows)
+    return md_table(["outcome", "count"], [[k, v] for k, v in sorted(outcomes.items())])
 
 
 @register_renderer("enablement")
@@ -55,59 +32,42 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if not e:
         return RenderedSection(section_id="enablement", title="Enablement", skipped=True)
 
+    mode = e.get("mode") or "unset"
     facts: list[str] = []
-    warnings: list[str] = []
+    if e.get("engaged"):
+        facts.append(f"Enablement engaged (mode={mode}, attempts={e.get('attempts') or 0}).")
+    else:
+        facts.append(f"Enablement did not engage (mode={mode}).")
+    if e.get("succeeded"):
+        facts.append("Enablement produced a KEEP.")
+    if e.get("failure_kind"):
+        facts.append(f"Last classified failure: {e['failure_kind']}.")
 
-    engaged = e.get("engaged")
-    mode = str(e.get("mode") or "")
-    succeeded = e.get("succeeded")
-    attempts = e.get("attempts")
-    failure_kind = e.get("failure_kind")
-
-    if engaged:
-        facts.append(f"Enablement engaged (mode={mode or 'unset'}).")
-    elif mode:
-        facts.append(f"Enablement mode={mode!r} — not yet engaged this session.")
-    if succeeded:
-        facts.append("Enablement succeeded.")
-    elif engaged and succeeded is False:
-        facts.append("Enablement did not produce a KEEP this session.")
-    if failure_kind:
-        facts.append(f"Last classified failure: {failure_kind}.")
-
-    kv = md_kv_list(
-        [
-            ("mode", mode or None),
-            ("engaged", engaged),
-            ("origin", e.get("origin") or None),
-            ("trigger_kind", e.get("trigger_kind") or None),
-            ("attempts", attempts),
-            ("succeeded", succeeded),
-            ("failure_kind", failure_kind or None),
-            ("round_count", e.get("round_count") or None),
-        ]
-    )
-
-    parts: list[str] = [kv] if kv else []
-
-    round_outcomes = e.get("round_outcomes")
-    if isinstance(round_outcomes, dict) and round_outcomes:
-        outcome_rows = [[k, v] for k, v in sorted(round_outcomes.items())]
-        parts.append("\n**Round outcomes**\n\n" + md_table(["outcome", "count"], outcome_rows))
-
-    rounds_md = _rounds_table(e.get("rounds") or [])
-    if rounds_md:
-        parts.append("\n**Rounds**\n\n" + rounds_md)
-
-    builds_md = _builds_table(e.get("build_attempts") or [])
-    if builds_md:
-        parts.append("\n**Build attempts**\n\n" + builds_md)
+    parts = [
+        md_kv_list(
+            [
+                ("mode", e.get("mode")),
+                ("engaged", e.get("engaged")),
+                ("origin", e.get("origin")),
+                ("trigger_kind", e.get("trigger_kind")),
+                ("attempts", e.get("attempts")),
+                ("succeeded", e.get("succeeded")),
+                ("failure_kind", e.get("failure_kind")),
+                ("round_count", e.get("round_count")),
+            ]
+        )
+    ]
+    for title, block in (
+        ("Round outcomes", _outcomes_table(e.get("round_outcomes"))),
+        ("Rounds", _table(e.get("rounds"), _ROUND_COLUMNS)),
+        ("Build attempts", _table(e.get("build_attempts"), _BUILD_COLUMNS)),
+    ):
+        if block:
+            parts.append(f"\n**{title}**\n\n{block}")
 
     return RenderedSection(
         section_id="enablement",
         title="Enablement",
         key_facts=facts,
         markdown_block="\n".join(parts).strip(),
-        warnings=warnings,
-        skipped=False,
     )

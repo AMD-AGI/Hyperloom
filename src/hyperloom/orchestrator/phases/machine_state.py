@@ -1910,7 +1910,7 @@ def exit_normal_optimize(
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
-    """First active work phase after PRELUDE or ENABLEMENT exits (``--no-framework-agent`` / ``--no-kernel`` collapse the chain)."""
+    """First active work phase after PRELUDE or ENABLEMENT: FRAMEWORK_AGENT, else KERNEL_AGENT, else SWEEP."""
     if optimize_enabled:
         return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:

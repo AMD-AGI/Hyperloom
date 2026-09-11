@@ -197,9 +197,9 @@ and hold while `validation_pending` is set.
 **`a35c7bdef` — render enablement section in the Markdown session report**
 
 `EnablementBreakdown` reached the JSON but not the Markdown report. The new
-`_renderers/enablement.py` surfaces admission status, round outcomes, a bounded
-rounds table, and a build-attempts table. Skipped automatically when the
-section is `{}` so sessions without enablement are unaffected.
+`_renderers/enablement.py` surfaces admission status, round outcomes, the round
+ledger, and targeted-build attempts. Skipped automatically when the section is
+`{}` so sessions without enablement are unaffected.
 
 **`13c703ee0` — correct stale phase enumerations after ENABLEMENT insertion**
 
