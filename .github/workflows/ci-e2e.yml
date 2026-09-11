@@ -246,9 +246,15 @@ jobs:
       - name: Dispatch + monitor single-GPU smoke run
         id: run
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
-          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          # Dispatron's compat facade, which speaks the same frozen
+          # /api/v1/orchestration/workloads contract the retired backend did. No
+          # ingress and unauthenticated because it is only reachable inside the
+          # cluster -- which the runner carrying `dispatron-ci` is.
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          # Read by `dispatron-ci-cancel` in the cleanup step below, so a hard-killed
+          # job still releases its GPUs.
+          DISPATCH_UID_FILE: ${{ runner.temp }}/e2e_session_uid
           MODEL: ${{ secrets.CI_E2E_MODEL }}
           MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
           MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}
@@ -288,16 +294,19 @@ jobs:
       - name: Cancel workload on job cancel
         if: cancelled()
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          DISPATCH_UID_FILE: ${{ runner.temp }}/e2e_session_uid
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
         run: |
-          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
-          if [ -z "$uid" ]; then echo "no session uid recorded; nothing to cancel"; exit 0; fi
-          if [ -z "${E2E_API_BASE:-}" ]; then echo "no API base; cannot cancel"; exit 0; fi
-          echo "cancelling workload $uid"
-          curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
-            -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
-            "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
+          command -v dispatron-ci-cancel >/dev/null 2>&1 || {
+            echo "dispatron-ci-cancel is not on PATH; cannot cancel"; exit 0
+          }
+          insecure=""
+          if [ "${CI_E2E_INSECURE:-0}" = "1" ]; then insecure="--insecure"; fi
+          # Tells a recorded cancel (202) apart from a confirmed one, so a cancel that
+          # did not stop the workload cannot read as "the GPUs are back".
+          dispatron-ci-cancel --base-url "$DISPATRON_BASE_URL" $insecure
 
 # --- docs: quick reference -------------------------------------------------
 # Triggers:  PR (base main/v1.0-dev) · `retest` label · `/retest` comment · manual dispatch
