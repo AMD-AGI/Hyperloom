@@ -2167,7 +2167,9 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
     if enablement_revalidation:
         task = await coordinator.tasks.create(
-            kind="baseline", params={"reason": "enablement_eval_revalidation"}, idempotency_key="revalidate-baseline"
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
+            idempotency_key="revalidate-baseline",
         )
         await coordinator._promote_to_shared_state(
             "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task

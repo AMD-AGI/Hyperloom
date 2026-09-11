@@ -3615,8 +3615,7 @@ class WritebackCollaborator:
         if anchor_accepted:
             from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
-            if not is_revalidation or "benchmark_script" in task_params:
-                self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
+            self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
             self.shared_state.baseline_perf = perf_snapshot_from_mapping(result) or {}
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
