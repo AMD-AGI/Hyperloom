@@ -88,14 +88,17 @@ def test_signal_stop_reason_comes_from_the_received_signal(session_dir):
 
         c._signals = SimpleNamespace(received={signal.SIGHUP, signal.SIGTERM})
         assert c._signal_stop_reason() == "signal"
+
+        c._signals = SimpleNamespace(received={signal.SIGHUP, signal.SIGINT})
+        assert c._signal_stop_reason() == "signal"
     finally:
         c.db.close()
 
 
 @pytest.mark.asyncio
-async def test_supervisor_restart_leaves_the_session_resumable(session_dir):
+async def test_terminal_state_outweighs_a_supervisor_restart_signal(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
-    c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: None)
+    c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: frozenset({signal.SIGHUP}))
     c._stop.set()
     c.shared_state.set_stop_reason("time_exhausted")
     close_calls = 0
@@ -116,40 +119,30 @@ async def test_supervisor_restart_leaves_the_session_resumable(session_dir):
         assert (
             reason,
             c.shared_state.stop_reason,
-            c.shared_state.stop_ts,
+            bool(c.shared_state.stop_ts),
             bool(c.shared_state.leg_ended_ts),
             close_calls,
             finalize_calls,
         ) == (
-            "supervisor_restart_requested",
-            "",
-            "",
+            "time_exhausted",
+            "time_exhausted",
             True,
-            0,
-            0,
+            False,
+            1,
+            1,
         )
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
-async def test_a_sigterm_crossing_the_watchdogs_sighup_stays_terminal(session_dir):
-    """The two signals can cross: the operator's lands after the loop broke on the watchdog's.
-
-    Classified once and never re-read, the session is left resumable and the
-    monitor relaunches a run the operator ended.
-    """
+async def test_the_final_signal_snapshot_makes_a_late_sigterm_terminal(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
-    c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: None)
+    c._signals = SimpleNamespace(
+        received={signal.SIGHUP},
+        close=lambda: frozenset({signal.SIGHUP, signal.SIGTERM}),
+    )
     c._stop.set()
-    classify = c._signal_stop_reason
-
-    def _then_the_operator_signals() -> str:
-        reason = classify()
-        c._signals.received.add(signal.SIGTERM)
-        return reason
-
-    c._signal_stop_reason = _then_the_operator_signals
     close_calls = 0
 
     async def _close(*, reason):
@@ -177,7 +170,7 @@ async def _noop_finalize() -> None:
 @pytest.mark.asyncio
 async def test_sigterm_follows_the_normal_terminal_path(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
-    c._signals = SimpleNamespace(received={signal.SIGTERM}, close=lambda: None)
+    c._signals = SimpleNamespace(received={signal.SIGTERM}, close=lambda: frozenset({signal.SIGTERM}))
     c._stop.set()
     close_calls = 0
     finalize_calls = 0

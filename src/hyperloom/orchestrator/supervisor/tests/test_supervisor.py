@@ -27,12 +27,14 @@ from hyperloom.orchestrator.supervisor.launcher import _TICK_STALL_FLOOR_SEC
 from hyperloom.orchestrator.supervisor.watch import (
     ALIVE,
     DEAD,
+    DEFAULT_POLL_SEC,
     DIED_STOP_REASON,
     UNKNOWN,
     WEDGED,
     WEDGED_STOP_REASON,
     Supervisor,
 )
+from hyperloom.orchestrator.loop.coordinator_helpers import REACTOR_TURN_TIMEOUT_ENV
 
 _NOW = 1_000_000.0
 
@@ -96,6 +98,12 @@ def test_the_stall_window_fits_inside_any_session_long_enough_to_hold_a_tick():
     assert tick_stall_sec(4 * 3600.0) <= 4 * 3600.0 / 2
     # And never so short that a slow tick reads as a stopped one.
     assert tick_stall_sec(60.0) == _TICK_STALL_FLOOR_SEC
+
+
+def test_the_default_stall_window_follows_a_raised_reactor_timeout():
+    timeout = 7200.0
+
+    assert tick_stall_sec(0.0, env={REACTOR_TURN_TIMEOUT_ENV: str(timeout)}) == timeout + DEFAULT_POLL_SEC
 
 
 def test_a_ticking_coordinator_is_left_alone(tmp_path):
@@ -208,6 +216,19 @@ def test_the_restart_is_spent_on_disk_before_the_signal_goes_out(tmp_path):
         supervisor._ask_to_stop(_a_wedged_reading())
 
     assert banked == [3]
+
+
+def test_restart_counter_write_failure_sends_terminal_sigterm(tmp_path):
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+
+    with (
+        mock.patch.object(store, "write_status", side_effect=OSError("disk full")),
+        mock.patch.object(os, "kill") as kill,
+    ):
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    kill.assert_called_once_with(123, signal.SIGTERM)
+    assert supervisor.report.refusals == ["restart counter write failed; resumable restart refused: disk full"]
 
 
 @pytest.mark.asyncio

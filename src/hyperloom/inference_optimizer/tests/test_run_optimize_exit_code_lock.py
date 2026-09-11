@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
 from hyperloom.inference_optimizer.session.lock import SessionLock
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -30,6 +35,12 @@ def _record_terminal_writes(monkeypatch) -> list[str]:
             lambda *_a, _label=label, **_kw: order.append(_label),
         )
     return order
+
+
+def _backends() -> dict[str, Backend]:
+    heartbeat = Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    plan = ScriptedPlan(turns=[], default_intent=heartbeat)
+    return {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -60,6 +71,81 @@ def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkey
     ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
 
     assert order == ["final_json", "package"]
+
+
+@pytest.mark.asyncio
+async def test_resumable_classification_survives_state_save_failure(tmp_path: Path, monkeypatch) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    SharedState(session_id="s").save(session_dir)
+    (session_dir / "manifest.json").write_text(
+        '{"schema_version": 4, "session_id": "s"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(
+        ocli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(ocli, "_preflight", lambda _args: ("", ""))
+    monkeypatch.setattr(ocli, "_resolve_models_for_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ocli, "_build_backends", lambda **_kwargs: _backends())
+    monkeypatch.setattr(ocli, "spawn_supervisor", lambda *_args, **_kwargs: None)
+
+    original_run = Coordinator.run
+
+    async def _run_then_fail_resumable_save(self, **kwargs):
+        self._resumed_from = {"is_resume": False, "rebuilt": True}
+        self._signals = SimpleNamespace(
+            received={signal.SIGHUP},
+            close=lambda: frozenset({signal.SIGHUP}),
+        )
+        self._stop.set()
+        real_save = self.shared_state.save
+
+        def _fail_save(path) -> None:
+            if self.stop_classification == "supervisor_restart_requested":
+                raise OSError("disk full")
+            real_save(path)
+
+        self.shared_state.save = _fail_save
+        kwargs["install_signal_handlers"] = False
+        return await original_run(self, **kwargs)
+
+    monkeypatch.setattr(Coordinator, "run", _run_then_fail_resumable_save)
+    order = _record_terminal_writes(monkeypatch)
+    reasons: list[str | None] = []
+    write_terminal = ocli._write_cli_terminal_artifacts
+
+    def _capture_terminal_reason(path, state, stop_reason) -> None:
+        reasons.append(stop_reason)
+        write_terminal(path, state, stop_reason)
+
+    monkeypatch.setattr(ocli, "_write_cli_terminal_artifacts", _capture_terminal_reason)
+    args = ocli._build_parser().parse_args(
+        [
+            "optimize",
+            "--resume-from",
+            str(session_dir),
+            "--critic-mock",
+            "--robustness-mock",
+            "--no-kernel",
+            "--no-framework-agent",
+            "--degraded-kb",
+            "--degraded-pr",
+            "--research-lane-capacity",
+            "0",
+            "--max-ticks",
+            "1",
+        ]
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await ocli._run_optimize(args)
+
+    assert reasons == ["supervisor_restart_requested"]
+    assert order == []
 
 
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:

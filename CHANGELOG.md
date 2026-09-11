@@ -53,10 +53,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   coordinator receives SIGHUP, preserving the interrupted phase segment without
   creating a session outcome; repeated wedges become terminal after three
   restart attempts, counted durably before the signal goes out. Inline role
-  turns now carry a wall-clock ceiling read off their own backend's per-attempt
-  timeout and retry policy, so raising either raises the ceiling with it and one
-  awaited turn cannot hold the tick open; a turn cancelled at that ceiling counts
-  toward the crash emergency stop, which the advancing tick would otherwise hide.
+  turns now share an explicit total wall-clock timeout, independent of backend
+  streamed-message idle timeouts and retries. Reactor-stage boundaries refresh
+  supervisor progress, while a stage cancelled at the total timeout counts toward
+  the crash emergency stop. A failed restart-counter write refuses the resumable
+  restart and sends SIGTERM, and a cleanly ended leg can resume as soon as its
+  owner pid is gone instead of being held alive by the final state write.
 - **The robustness monitor reads the real stop-reason vocabulary.** It imported
   a module that does not exist and silently fell back to a subset missing 16
   terminal reasons, so a finished session could be relaunched.

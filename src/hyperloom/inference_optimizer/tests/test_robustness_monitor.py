@@ -79,6 +79,22 @@ def _run_terminal_check(session_dir: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_alive_check(session_dir: Path, wrapper_pid: str = "") -> subprocess.CompletedProcess[str]:
+    text = MONITOR.read_text(encoding="utf-8")
+    match = re.search(r"is_session_alive\(\) \{\n.*?<<'PY'\n(.*?)\nPY\n\}", text, re.DOTALL)
+    assert match is not None
+    env = os.environ.copy()
+    env["STATE_FRESH_SEC"] = "600"
+    return subprocess.run(
+        ["python3", "-", str(session_dir), wrapper_pid],
+        input=match.group(1),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+
 def test_an_incomplete_close_phase_is_not_terminal(tmp_path):
     (tmp_path / "state.json").write_text(
         json.dumps(
@@ -336,6 +352,50 @@ def test_monitor_resume_is_pinned_to_resolved_session_dir():
     text = MONITOR.read_text(encoding="utf-8")
     assert '--resume-from "$session_dir"' in text
     assert re.search(r"--resume(?!-from)", text) is None
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_fresh_cleanly_ended_leg_with_dead_owner_is_not_alive(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    dead_pid = 999_999_999
+    assert not Path(f"/proc/{dead_pid}").exists()
+    (runtime / "optimizer.lock").write_text(json.dumps({"pid": dead_pid}), encoding="utf-8")
+    (tmp_path / "state.json").write_text(
+        json.dumps({"leg_ended_ts": "2026-09-11T00:00:00+00:00", "stop_reason": ""}),
+        encoding="utf-8",
+    )
+
+    result = _run_alive_check(tmp_path)
+
+    assert result.returncode == 1
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_fresh_running_leg_without_end_marker_is_alive(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps({"leg_ended_ts": "", "stop_reason": ""}),
+        encoding="utf-8",
+    )
+
+    result = _run_alive_check(tmp_path)
+
+    assert result.returncode == 0
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_live_owner_keeps_a_cleanly_ended_leg_alive(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "optimizer.lock").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    (tmp_path / "state.json").write_text(
+        json.dumps({"leg_ended_ts": "2026-09-11T00:00:00+00:00", "stop_reason": ""}),
+        encoding="utf-8",
+    )
+
+    result = _run_alive_check(tmp_path)
+
+    assert result.returncode == 0
 
 
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")

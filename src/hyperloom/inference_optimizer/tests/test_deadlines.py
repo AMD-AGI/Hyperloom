@@ -327,7 +327,7 @@ class TestAStopIsRecordedBeforeItIsDispatched:
 
         from hyperloom.orchestrator.loop.signals import SignalDrain
 
-        async def _exercise() -> tuple[bool, bool, set[int]]:
+        async def _exercise() -> tuple[bool, bool, frozenset[int]]:
             stop = asyncio.Event()
             drain = SignalDrain(
                 loop=asyncio.get_running_loop(),
@@ -341,7 +341,7 @@ class TestAStopIsRecordedBeforeItIsDispatched:
                 # The threading event is set by the reading thread; the asyncio
                 # one only once the loop runs, which is the ordering under test.
                 await asyncio.wait_for(stop.wait(), timeout=5.0)
-                return drain.requested.is_set(), stop.is_set(), drain.received
+                return drain.requested.is_set(), stop.is_set(), drain.close()
             finally:
                 drain.close()
 

@@ -34,11 +34,8 @@ DEAD = "dead"
 #: Nothing about the coordinator could be established. Never escalated on.
 UNKNOWN = "unknown"
 
-#: How long a tick may go without advancing before it counts as wedged. Well
-#: above a legitimately slow tick -- each role turn is capped at its backend's
-#: own turn budget and long actions run as dispatched tasks the tick does not
-#: wait on -- and well inside the default session, which a window it cannot fit
-#: in would make unreachable.
+#: Base stall window when the reactor timeout does not require a larger one.
+#: The launcher enforces one reactor turn plus one supervisor poll.
 DEFAULT_TICK_STALL_SEC: float = 3600.0
 
 #: How long the coordinator is given to act on the stop it was asked for before
@@ -273,7 +270,15 @@ class Supervisor:
             # is one the next leg reads as never spent. A signal that then fails
             # leaves the budget short, which is the side to be wrong on.
             self._restart_count += 1
-            self._write_status(observation)
+            try:
+                self._write_status(observation)
+            except OSError as exc:
+                self._restart_count -= 1
+                resumable = False
+                self._terminal_stop = True
+                refusal = f"restart counter write failed; resumable restart refused: {exc}"
+                self._report.refusals.append(refusal)
+                log.error("SUPERVISOR: %s", refusal)
         try:
             os.kill(observation.pid, signal.SIGHUP if resumable else signal.SIGTERM)
         except ProcessLookupError:

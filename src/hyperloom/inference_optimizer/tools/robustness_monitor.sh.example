@@ -156,7 +156,6 @@ if not state_path.is_file():
     raise SystemExit(1)
 
 state = json.loads(state_path.read_text())
-phase = (state.get("phase") or "").strip()
 stop = (state.get("stop_reason") or "").strip()
 close_done = state.get("close_sequence_done") is True
 
@@ -254,9 +253,17 @@ try:
 except ValueError:
     fresh = 600
 state_path = sd / "state.json"
+clean_leg_ended = False
+try:
+    state = json.loads(state_path.read_text())
+    clean_leg_ended = bool(str(state.get("leg_ended_ts") or "").strip()) and not str(
+        state.get("stop_reason") or ""
+    ).strip()
+except Exception:
+    pass
 try:
     age = time.time() - state_path.stat().st_mtime
-    if age <= fresh:
+    if age <= fresh and not clean_leg_ended:
         print(f"state_mtime_age={int(age)}s", file=sys.stderr)
         raise SystemExit(0)
 except SystemExit:

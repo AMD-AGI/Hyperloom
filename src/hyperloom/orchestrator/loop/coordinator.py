@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import AbstractSet, Any, Awaitable, Callable
 
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
@@ -94,6 +94,7 @@ from ..trace.orchestration_trace import (
 from .coordinator_helpers import (
     _infer_model_class_from_config,
     format_exc_brief,
+    resolve_reactor_turn_timeout_sec,
     serialize_verdict_advisory,
 )
 
@@ -536,6 +537,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             if name not in backends:
                 raise ValueError(f"missing backend for role {name!r} (provide via Coordinator(backends={{...}}))")
         self.backends = dict(backends)
+        self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
         # Persistence layer
         db_path = db_path_for(self.session_dir)
@@ -618,6 +620,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
+        self._stop_classification = ""
         self._tasks_running: list[asyncio.Task] = []
 
         # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
@@ -1444,20 +1447,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return bound.remaining()
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
-        """Return the wall-clock ceiling for an inline reactor turn.
-
-        Read off the role's own backend, because every input to a legal turn --
-        the per-attempt timeout, the attempt count, the backoff -- is an
-        environment override. A backend that declares no budget is left to the
-        session bound rather than capped at a guess.
-        """
+        """Return the total wall-clock ceiling for an inline reactor turn."""
         role = stage.removeprefix("reactor:")
         if role == stage:
             return None
-        budget = getattr(self.backends.get(role), "turn_budget_sec", None)
-        if not isinstance(budget, (int, float)) or budget <= 0:
-            return None
-        return float(budget)
+        return self.reactor_turn_timeout_sec
 
     def _stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
@@ -1476,9 +1470,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
     def _signal_stop_reason(self) -> str:
         """Classify the stop from the signal captured by the drain."""
         drain = self._signals
-        if drain is not None and signal.SIGTERM not in drain.received and signal.SIGHUP in drain.received:
+        received = frozenset() if drain is None else frozenset(drain.received)
+        return self._classify_stop(received) or "signal"
+
+    def _classify_stop(self, received: AbstractSet[int], *, pending: str = "") -> str:
+        """Classify final state from terminal outcome and captured signals."""
+        if signal.SIGINT in received or signal.SIGTERM in received:
+            return "signal"
+        terminal = pending or self.shared_state.stop_reason
+        if terminal:
+            return terminal
+        if received == {signal.SIGHUP}:
             return SUPERVISOR_RESTART_REASON
-        return "signal"
+        return "signal" if received else ""
+
+    @property
+    def stop_classification(self) -> str:
+        """Authoritative in-process stop classification."""
+        return self._stop_classification
 
     async def _await_within_session_bound(
         self,
@@ -1492,6 +1501,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
             return
         stage_timeout = self._stage_timeout_sec(stage)
+        if stage_timeout is not None:
+            await self.reconciler.stamp_progress(time.time())
         timeout = (
             min(remaining, stage_timeout)
             if remaining is not None and stage_timeout is not None
@@ -1515,6 +1526,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 # healthy loop to the supervisor; the crash count is the only
                 # channel left that can end a session wedged on one role.
                 self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
+        finally:
+            if stage_timeout is not None:
+                await self.reconciler.stamp_progress(time.time())
 
     # Long-run interface
     async def run(
@@ -1696,11 +1710,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
-            if stop_reason == SUPERVISOR_RESTART_REASON:
-                # Re-read the drain as late as it can be read: a SIGTERM that
-                # crossed the watchdog's SIGHUP is an operator ending the
-                # session, and a resumable stop would have it relaunched.
-                stop_reason = self._signal_stop_reason()
+            final_signals: AbstractSet[int] = frozenset()
+            if self._signals is not None:
+                final_signals = self._signals.close()
+                self._signals = None
+            stop_reason = self._classify_stop(final_signals, pending=stop_reason)
+            self._stop_classification = stop_reason
             resumable_stop = stop_reason == SUPERVISOR_RESTART_REASON
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
@@ -1731,9 +1746,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 self.shared_state.cumulative_gain_validated,
                 max_minutes_value,
             )
-            if self._signals is not None:
-                self._signals.close()
-                self._signals = None
             with timed_teardown_step(self.shared_state, "close_backends"):
                 await self._close_backends()
             # A server outliving the run holds every GPU it was given, so the

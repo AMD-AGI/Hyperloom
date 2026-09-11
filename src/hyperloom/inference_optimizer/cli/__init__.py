@@ -2378,6 +2378,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
+        effective_stop_reason = stop_reason or coordinator.stop_classification
         # Stopping the leases and the agent subprocesses is itself a step that
         # can hang, so it happens while the supervisor is still watching; the
         # supervisor is stood down only once it has returned.
@@ -2390,7 +2391,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # exit anyway; this just frees it promptly for an intentional resume.
         with timed_teardown_step(state, "session_lock"):
             session_lock.release()
-        _write_cli_terminal_artifacts(session_dir, state, stop_reason)
+        _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
         except Exception:  # noqa: BLE001
