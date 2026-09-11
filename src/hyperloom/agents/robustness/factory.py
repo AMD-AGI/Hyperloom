@@ -267,8 +267,15 @@ def build_reactor_components(
 
 
 def _llm_credentials_ready(config: Config) -> bool:
-    """Whether the discovered provider can authenticate an RCA call."""
-    if config.llm_provider == "anthropic":
+    """Whether the discovered provider can authenticate an RCA call.
+
+    Only the keyless Anthropic shape depends on the CLI transport: a subscription
+    token is spent by the CLI and never reaches the engine as a key. An Anthropic
+    side that did resolve a key is an HTTP Messages client like any other, and
+    probing the environment for a CLI it will not use discards a usable
+    credential -- one the discovered config is holding.
+    """
+    if config.llm_provider == "anthropic" and not config.llm_api_key:
         return llm_config.anthropic_transport_ready()
     return bool(config.llm_base_url and config.llm_api_key)
 

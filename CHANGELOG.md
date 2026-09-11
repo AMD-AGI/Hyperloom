@@ -19,10 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The credential shape is now `llm_config.preferred_agent_backend`'s for the
   whole repository, and a provider declares its own side through the new
   `AgentProvider.credentialed`, so the ranking is derived from registration
-  rather than restated as a chain of provider names. Model ownership stays the
-  last key rather than the first: an owner that cannot run is worse than a
-  fallback that can, and on the dual-configured box where a named model is
-  worth routing, the first two keys tie and ownership is what decides.
+  rather than restated as a chain of provider names. An explicitly named model
+  narrows the candidates instead of joining that ranking: ownership says which
+  provider the model belongs to, which no credential shape should overrule,
+  while an owner that cannot run is worse than a fallback that can.
 
   What each side accepts as a credential is a question of its own, answered by
   `anthropic_agent_credentialed` / `openai_agent_credentialed` rather than by
@@ -48,7 +48,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   through to the other one when that side carries no usable key: a subscription
   token whose CLI transport is unavailable no longer claims the run, and a host
   with no credential at all reports the OpenAI side it will not reach rather
-  than an Anthropic side it was never configured for.
+  than an Anthropic side it was never configured for. Whether that credential
+  can authenticate a call now follows the key rather than the provider name:
+  only the keyless Anthropic shape depends on the CLI transport, so an Anthropic
+  side that did resolve one — what a normalized `DEEPSEEK_API_KEY` produces —
+  keeps its RCA engine instead of being dropped to a silent `NoopRcaEngine` by
+  a probe for the CLI its HTTP engine never uses.
 
 ### Removed
 

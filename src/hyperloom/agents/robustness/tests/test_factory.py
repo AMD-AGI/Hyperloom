@@ -211,10 +211,10 @@ async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkeypatch):
+async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
+    """A keyed Anthropic side is an HTTP client, so no CLI transport is required."""
     from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
 
-    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: True)
     config = Config(
         session_dir=tmp_path,
         llm_base_url="https://api.deepseek.com/anthropic",

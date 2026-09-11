@@ -173,19 +173,21 @@ def list_agent_providers() -> tuple[str, ...]:
 def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     """Select a provider by the one rule the whole repository shares.
 
-    Three ranked keys: a configured credential, then an installed SDK, then
-    ownership of an explicitly named model. Providers that tie on all three
-    keep registration order, which is what puts Claude ahead of Codex.
+    Two ranked keys, shared with
+    :func:`hyperloom.common.llm_config.preferred_agent_backend`: a configured
+    credential, then an installed SDK. Providers that tie on both keep
+    registration order, which is what puts Claude ahead of Codex.
 
-    Credentials lead because having that pair the other way round is what let
-    an OpenAI-only box resolve to Claude whenever both extras happened to be
-    installed, and then fail to authenticate. Model ownership stays last, a
-    preference among the providers that can actually run rather than a pin: an
-    owner that cannot run is worse than a fallback that can, and on the
-    dual-configured box where a named model is worth routing, the first two
-    keys tie and ownership is what decides.
+    Credentials lead because ranking on the installed SDK alone is what let an
+    OpenAI-only box resolve to Claude whenever both extras happened to be
+    installed, and then fail to authenticate.
 
-    A provider missing one of the first two keys is still returned, so its own
+    A named ``preferred_model`` narrows the candidates rather than joining the
+    ranking: ownership says which provider the caller's model belongs to, and no
+    credential shape should overrule that, while an owner that cannot run is
+    worse than a fallback that can.
+
+    A provider missing one of the two keys is still returned, so its own
     preflight reports the absent extra or the failed login. Only a provider
     missing both is refused.
     """
@@ -202,16 +204,22 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             return False
 
     providers = list(_providers.values())
+    if model:
+        runnable_owners = [
+            provider
+            for provider in providers
+            if _holds(provider, lambda: provider.owns_model(model)) and _holds(provider, provider.availability)
+        ]
+        providers = runnable_owners or providers
     ranks = {
         provider.name: (
             0 if _holds(provider, lambda: provider.credentialed(os.environ)) else 1,
             0 if _holds(provider, provider.availability) else 1,
-            0 if model and _holds(provider, lambda: provider.owns_model(model)) else 1,
         )
         for provider in providers
     }
     chosen = min(providers, key=lambda provider: ranks[provider.name], default=None)
-    if chosen is not None and ranks[chosen.name][:2] != (1, 1):
+    if chosen is not None and ranks[chosen.name] != (1, 1):
         return chosen
     detail = f"; checks: {'; '.join(failures)}" if failures else ""
     raise AgentProviderUnavailableError(
