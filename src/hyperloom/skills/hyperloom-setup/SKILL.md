@@ -171,37 +171,10 @@ value.
      order above without a default selection.
 
 8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
-   check the host Ubuntu version before Step 3:
-
-   ```bash
-   if [ -r /etc/os-release ]; then
-     . /etc/os-release
-     echo "VERSION_ID=${VERSION_ID:-unknown}"
-   fi
-   ```
-
-   The setup backend defaults to `VLLM_VERSION=0.28.0`. That ROCm wheel requires
-   **Ubuntu 24.04 or newer** (glibc >= 2.39). On Ubuntu 22.04 or older, bare-metal
-   vLLM install fails at pip time.
-
-   When `VERSION_ID` is below `24.04`, stop and tell the user clearly:
-
-   > vLLM 0.28.0 and later only support Ubuntu 24.04+. On this host you can either
-   > upgrade to Ubuntu 24.04, switch to `docker (Recommended)`, or downgrade vLLM
-   > to 0.27.1 (or another pre-0.28 version).
-
-   Then ask how to proceed. Do **not** run Step 4 with the default vLLM install
-   until the user picks one path:
-
-   1. **Switch to Docker** — change `HYPERLOOM_RUN_MODE` to `docker` and continue
-      without a bare-metal vLLM install.
-   2. **Downgrade vLLM** — keep baremetal and run Step 4 with
-      `VLLM_VERSION=0.27.1` (or another version the user names) in the setup
-      command environment.
-   3. **Stop** — the user will upgrade the host OS first and rerun setup later.
-
-   Skip this Step 8 check when the user chose `none` or `sglang`, or when
-   `VERSION_ID` is `24.04` or higher.
+   briefly note that the installer enforces the vLLM 0.28.0 glibc floor
+   (glibc >= 2.39). If setup later fails with that error, explain it in plain
+   language and point the user to Docker mode or a pre-0.28 override — do not
+   implement a second version gate here.
 
 ## Step 3: Write `.env`
 
@@ -291,12 +264,19 @@ PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --inst
 ```
 
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already
-defaults to isolated, the flag below is explicit). When Step 8 chose a vLLM
-downgrade on an older Ubuntu host, export the chosen version first:
+defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-export VLLM_VERSION=0.27.1   # only when Step 8 required a downgrade
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+```
+
+Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
+that failed the glibc check:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+export VLLM_VERSION=0.27.1
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 

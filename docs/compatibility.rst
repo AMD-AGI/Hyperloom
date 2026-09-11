@@ -172,7 +172,7 @@ Hyperloom does not install ROCm or torch itself.
      - Notes
    * - Operating System
      - Ubuntu 24.04
-     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead. SGLang on ROCm 7.2.4 (``rocm724``) does not need the ROCm 7.2.0 profiler hotfix; SGLang on ROCm 7.2.0 (``rocm720``) still does.
+     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
    * - ROCm
      - 7.2.x
      - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).

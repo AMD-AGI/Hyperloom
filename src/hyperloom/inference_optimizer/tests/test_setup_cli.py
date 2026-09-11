@@ -1262,10 +1262,7 @@ def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
         tmp_path,
         importable={"atom"},
         dotenv=dotenv,
-        body=(
-            "running_in_container() { return 1; }\n"
-            "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
-        ),
+        body=("running_in_container() { return 1; }\nrocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"),
     )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -1982,7 +1979,6 @@ def _drive_hotfix_gate(
     run_mode: str,
     importable: set[str],
     in_container: bool = False,
-    sglang_rocm_extra: str = "rocm720",
 ):
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"HYPERLOOM_RUN_MODE={run_mode}\n", encoding="utf-8")
@@ -1993,7 +1989,6 @@ def _drive_hotfix_gate(
         body=(
             # Pinned so the result does not depend on whether the test host itself is a container.
             f"running_in_container() {{ return {0 if in_container else 1}; }}\n"
-            f'export SGLANG_ROCM_EXTRA="{sglang_rocm_extra}"\n'
             "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
         ),
     )
@@ -2008,49 +2003,50 @@ def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
 
 
 def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
-    res = _drive_hotfix_gate(
-        tmp_path,
-        run_mode="docker",
-        importable={"sglang"},
-        sglang_rocm_extra="rocm720",
-    )
+    res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"sglang"})
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
 
 
-def test_docker_run_mode_skips_the_hotfix_for_an_sglang_rocm724_image(tmp_path: Path):
-    res = _drive_hotfix_gate(
+def _drive_vllm_glibc_gate(
+    tmp_path: Path,
+    *,
+    glibc: str,
+    vllm_version: str = "0.28.0",
+    check_only: bool = True,
+) -> subprocess.CompletedProcess:
+    return _drive_installer(
         tmp_path,
-        run_mode="docker",
-        importable={"sglang"},
-        sglang_rocm_extra="rocm724",
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="\n".join(
+            [
+                f'host_glibc_version() {{ echo "{glibc}"; }}',
+                f'VLLM_VERSION="{vllm_version}"',
+                f"CHECK_ONLY={1 if check_only else 0}",
+                "install_vllm_framework",
+            ]
+        ),
     )
 
-    assert "HOTFIX_ELIGIBLE" not in res.stdout
-    assert "sglang on ROCm 7.2.4+" in res.stderr
+
+def test_vllm_install_rejects_glibc_235_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.28.0")
+
+    assert res.returncode != 0
+    assert "glibc >= 2.39" in res.stderr
 
 
-def test_baremetal_run_mode_skips_the_hotfix_for_sglang_rocm724(tmp_path: Path):
-    res = _drive_hotfix_gate(
-        tmp_path,
-        run_mode="baremetal",
-        importable={"sglang"},
-        sglang_rocm_extra="rocm724",
-    )
+def test_vllm_install_accepts_glibc_239_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.28.0")
 
-    assert "HOTFIX_ELIGIBLE" not in res.stdout
-    assert "sglang on ROCm 7.2.4+" in res.stderr
+    assert res.returncode == 0, res.stderr
 
 
-def test_baremetal_run_mode_applies_the_hotfix_for_sglang_rocm720(tmp_path: Path):
-    res = _drive_hotfix_gate(
-        tmp_path,
-        run_mode="baremetal",
-        importable={"sglang"},
-        sglang_rocm_extra="rocm720",
-    )
+def test_vllm_install_allows_pre_028_override_on_glibc_235(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.27.1")
 
-    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+    assert res.returncode == 0, res.stderr
 
 
 def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):

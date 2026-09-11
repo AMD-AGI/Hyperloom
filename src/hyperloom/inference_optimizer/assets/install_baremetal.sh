@@ -185,10 +185,9 @@ log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
-IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-* or \
-vllm/vllm-openai-rocm:v0.28.0, or install an equivalent ROCm torch + \
-framework stack), then re-run."
+IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-*; \
+vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
+vllm/vllm-openai-rocm:v0.28.0), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -803,6 +802,35 @@ link_vllm_into_shared_bin() {
   fi
 }
 
+host_glibc_version() {
+  getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+}
+
+_version_ge() {
+  [ "$(printf '%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
+}
+
+_vllm_semver_base() {
+  local ver="${VLLM_VERSION%%+*}"
+  ver="${ver%%-*}"
+  printf '%s' "$ver"
+}
+
+vllm_version_requires_glibc_239() {
+  _version_ge "$(_vllm_semver_base)" "0.28.0"
+}
+
+assert_vllm_glibc_compatible() {
+  vllm_version_requires_glibc_239 || return 0
+  local glibc="${1:-$(host_glibc_version)}"
+  if [ -z "$glibc" ]; then
+    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 on older hosts."
+  fi
+  if ! _version_ge "$glibc" "2.39"; then
+    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 before running setup."
+  fi
+}
+
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
@@ -836,6 +864,8 @@ PY
   log "VLLM_VERSION=${VLLM_VERSION}"
   log "VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT}"
   log "VLLM_ROCM_INDEX=${VLLM_ROCM_INDEX}"
+
+  assert_vllm_glibc_compatible
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ ! -x "$py" ]; then
@@ -943,26 +973,6 @@ install_requested_framework() {
   esac
 }
 
-# ROCm 7.2.4+ / rocm724 SGLang stacks ship fixed profiler libs; only 7.2.0/rocm720
-# SGLang hosts still need the overlay. vLLM bare-metal hosts still need it too.
-sglang_stack_needs_rocm_hotfix() {
-  case "${SGLANG_ROCM_EXTRA:-}" in
-    rocm724) return 1 ;;
-    rocm720|rocm700) return 0 ;;
-  esac
-  local rocm_ver=""
-  [ -r /opt/rocm/.info/version ] && rocm_ver="$(cat /opt/rocm/.info/version 2>/dev/null)"
-  case "$rocm_ver" in
-    7.2.[4-9]*|7.[3-9]*|8.*|9.*|10.*) return 1 ;;
-    7.2.0*|7.2.1*|7.2.2*|7.2.3*) return 0 ;;
-  esac
-  case "$1" in
-    7.2.4*|7.2.5*|7.2.6*|7.2.7*|7.2.8*|7.2.9*) return 1 ;;
-    7.2.0*|7.2.1*|7.2.2*|7.2.3*) return 0 ;;
-  esac
-  return 0
-}
-
 rocm_profiler_hotfix_compatible() {
   local py hip
   py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
@@ -991,38 +1001,18 @@ PY
   [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
 
-  # Container images: vLLM ships its own workaround; SGLang on rocm724 does not
-  # need the overlay; SGLang on rocm720 still does.
+  # Container images: sglang needs the overlay; vLLM ships its own workaround.
   local run_mode
   run_mode="$(read_dotenv_var HYPERLOOM_RUN_MODE | tr -d '[:space:]')"
   if running_in_container || [ "$run_mode" = "docker" ]; then
     case " ${found} " in
-      *" sglang "*)
-        if sglang_stack_needs_rocm_hotfix "$hip"; then
-          log "container run with sglang on ROCm 7.2.0/rocm720; ROCm profiler hotfix is eligible"
-        else
-          warn "container run with sglang on ROCm 7.2.4+; skipping ROCm profiler hotfix"
-          return 1
-        fi
-        ;;
+      *" sglang "*) log "container run with sglang; ROCm profiler hotfix is eligible" ;;
       *) warn "container run without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
     esac
   else
     case " ${found} " in
-      *" vllm "*)
-        warn "bare-metal run with vllm (found: ${found}); applying the ROCm profiler hotfix"
-        ;;
-      *" sglang "*)
-        if sglang_stack_needs_rocm_hotfix "$hip"; then
-          log "bare-metal run with sglang on ROCm 7.2.0/rocm720; ROCm profiler hotfix is eligible"
-        else
-          warn "bare-metal run with sglang on ROCm 7.2.4+; skipping ROCm profiler hotfix"
-          return 1
-        fi
-        ;;
-      *)
-        log "bare-metal run without sglang/vllm (found: ${found}); applying the ROCm profiler hotfix"
-        ;;
+      *" sglang "*) ;;
+      *) warn "bare-metal run without sglang (found: ${found}); applying the hotfix anyway, unlike the container path" ;;
     esac
   fi
 }
