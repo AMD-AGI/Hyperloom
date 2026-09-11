@@ -69,71 +69,82 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
     """Return a MAIDAS-derived ``RooflineBreakdown`` for *runtime*, or ``None``.
 
     ``runtime`` is a ``RuntimeWorkload`` (gpu_type, precision, tp, concurrency,
-    isl, osl). Uses the ``uct_decode`` scenario row (output-token throughput)
-    and converts MAIDAS's per-token decode latency into a tok/s ceiling.
+    isl, osl). Uses the ``uct_decode`` scenario row (output-token throughput).
+
+    Matching is on ``gbs`` (MAIDAS **global** batch = ``nbs*pp*dp``), because
+    Hyperloom's ``concurrency`` is the whole-server in-flight count (the vLLM
+    ``--max-concurrency``), i.e. the global batch — not the per-replica ``nbs``.
+    ``gbs`` is 0 for spilled/infeasible rows, so a ``concurrency > 0`` never
+    matches one; feasibility falls out of the match for free.
     """
     df = _load_allscenarios(path)
     if df is None or getattr(df, "empty", True):
         return None
 
-    needed = {"soc", "bfp", "hp", "nbs", "prefill", "decode", "avg_lat", "scenario"}
+    needed = {"soc", "bfp", "hp", "gbs", "prefill", "decode", "avg_lat", "scenario"}
     if not needed.issubset(set(df.columns)):
         logger.debug("MAIDAS xlsx missing required columns; skipping")
         return None
 
     soc = _soc_token(runtime.gpu_type)
     prec = (runtime.precision or "").strip().lower()
+    conc = int(runtime.concurrency or 0)
+    if conc <= 0:
+        return None  # degenerate concurrency cannot map to a global batch
 
+    # Config filter WITHOUT the batch, so we can tell "no data" from
+    # "config spills at this batch" (gbs == 0 rows).
     try:
-        q = df[
+        cfg = df[
             (df["soc"].astype(str).str.lower() == soc)
             & (df["bfp"].astype(str).str.lower() == prec)
             & (df["hp"] == int(runtime.tp or 0))
-            & (df["nbs"] == int(runtime.concurrency or 0))
             & (df["prefill"] == int(runtime.isl or 0))
             & (df["decode"] == int(runtime.osl or 0))
             & (df["scenario"].astype(str) == "uct_decode")
         ]
+        q = cfg[cfg["gbs"] == conc]
     except Exception:  # noqa: BLE001 - defensive against odd dtypes
         return None
 
     if q.empty:
+        spills = (not cfg.empty) and bool((cfg["gbs"] == 0).any())
         logger.debug(
-            "no MAIDAS row for soc=%s bfp=%s hp=%s nbs=%s isl=%s osl=%s",
-            soc, prec, runtime.tp, runtime.concurrency, runtime.isl, runtime.osl,
+            "no feasible MAIDAS row for soc=%s bfp=%s hp=%s gbs(conc)=%s isl=%s osl=%s%s",
+            soc, prec, runtime.tp, conc, runtime.isl, runtime.osl,
+            " (config spills/infeasible at this batch)" if spills else "",
         )
         return None
 
     try:
         lat_ms = float(q.iloc[0]["avg_lat"])
-        spilled = bool(q.iloc[0].get("spill", False)) if "spill" in q.columns else False
     except Exception:  # noqa: BLE001
         return None
-
-    if lat_ms <= 0 or spilled:
+    if lat_ms <= 0:  # inf/0 latency == infeasible (gbs>0 already implies feasible)
         return None
 
-    # Unit reconciliation: decode tok/s = concurrency * (1000 / TPOT_ms).
-    peak = float(runtime.concurrency or 1) * (1000.0 / lat_ms)
+    # Whole-server decode-output throughput ceiling (tok/s):
+    #   gbs * (1000 / TPOT_ms)   -- and gbs == conc for the matched row.
+    peak = float(conc) * (1000.0 / lat_ms)
     if peak <= 0:
         return None
 
     logger.info(
         "MAIDAS PROJECTION USED for roofline ceiling | source=%s | "
-        "matched row: workload=%s soc=%s bfp=%s hp(TP)=%s nbs(conc)=%s "
+        "matched row: workload=%s soc=%s bfp=%s hp(TP)=%s gbs(conc)=%s "
         "prefill(ISL)=%s decode(OSL)=%s scenario=uct_decode | "
-        "data used: avg_lat(decode TPOT)=%.3f ms spill=%s | "
-        "computed ceiling: peak=%.2f tok/s (= conc %s x 1000 / avg_lat)",
+        "data used: avg_lat(decode TPOT)=%.3f ms | "
+        "computed ceiling: peak=%.2f tok/s (= gbs %s x 1000 / avg_lat, memory-bound)",
         path,
         str(q.iloc[0].get("workload", "?")) if "workload" in q.columns else "?",
-        soc, prec, runtime.tp, runtime.concurrency,
-        runtime.isl, runtime.osl,
-        lat_ms, spilled, peak, runtime.concurrency,
+        soc, prec, runtime.tp, conc, runtime.isl, runtime.osl, lat_ms, peak, conc,
     )
-    # MAIDAS AllScenarios does not split mem/compute bound; expose peak on both.
+    # Decode is memory-bound, so the memory ceiling *is* the peak. MAIDAS
+    # AllScenarios carries no compute-bound side projection, so cmp is left
+    # unset (0.0 -> nulled by build_roofline_snapshot) rather than faked.
     return RooflineBreakdown(
         mem_tok_per_sec=peak,
-        cmp_tok_per_sec=peak,
+        cmp_tok_per_sec=0.0,
         peak_tok_per_sec=peak,
-        bound_kind="maidas",
+        bound_kind="memory",
     )
