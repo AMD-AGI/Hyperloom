@@ -126,6 +126,45 @@ at SNR 137.377 dB and measured 4.041 us. Its source and seed were not remeasured
 there; do not combine those cross-node numbers into another speedup ratio.
 No model E2E improvement has been established by this campaign.
 
+## Complete caller: isolate Forge's contribution from integration repairs
+
+A separate MI355X experiment compared the actual wrapper at `T=16, NVB=8,
+H=7168, eps=1e-5`, with exactly eight allocated bank rows, output RMSNorm
+enabled, and no residual add or bank write. Both ASM variants use the runtime
+epsilon repair and a corrected combine that stores an FP32 mixture before a
+separate Triton RMSNorm. These integration changes are not additional Forge
+instruction-only KEEP iterations.
+
+With the Kimi-K3 model resident but idle, 15 rotated/interleaved rounds, five
+samples per round and 100 calls per graph measured:
+
+| Complete caller | Median latency |
+| --- | --- |
+| Current SGLang fused Triton | 8.107 us |
+| Neha score plus repaired combine and output norm | 7.700 us |
+| Forge score plus the same repaired combine and output norm | 7.404 us |
+
+The Forge caller reduces latency by about **8.7%** versus the current fused
+caller and **3.8%** versus the repaired Neha pipeline. The latter comparison
+isolates the score instruction edits with identical integration. All three
+passed the same FP64 output oracle. Independent wrapper validation passed
+100 cases covering five seeds/scales, padded outer strides, actual NB=8,
+input preservation, nondefault streams, changed-input graph replay, and
+selection of the original implementation outside the supported specialization.
+
+The benefit does not generalize across caller modes. At T=16, adding residual
+materialization or a bank snapshot makes the split pipeline slower than the
+fused caller; at T=64 even the norm-only pipeline regresses. Preserve the
+existing fused path for these cases. Artifacts are under
+`/shared_nfs/chenyi/forge-neha-repro-20260911/recovery-134141/`, in
+`full-pipeline/`, `model-candidate/` and `wrapper-ablation/`.
+
+An eight-GPU model baseline and trace confirmed that the original model uses
+`_agg_kernel`. This establishes the integration point, not ASM dispatch or an
+E2E gain. The candidate needs its own model trace and matched serving A/B/A
+measurements; small savings at a subset of aggregation points may be below
+model timing variability.
+
 ## What the source actually does
 
 Inspect the
