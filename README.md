@@ -36,7 +36,7 @@ is allowed to change.
 A session is a closed loop: **input → optimize → validate → learn**.
 
 ```text
-PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
+PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
 ```
 
 After Sweep, the coordinator either closes or starts another cycle when budget
@@ -47,7 +47,8 @@ framework layer from the established baseline, rather than starting over.
 | Phase | What it does |
 |-------|----------------|
 | **Prelude** | Measures a stock baseline (the anchor for every later comparison), optionally replays the closest recipe from the knowledge base, then profiles and builds a roofline so later phases know where the headroom is. |
-| **Framework optimization** | First makes the model run (enablement, from serving flags up through targeted rebuilds). Then searches serving flags, precision, attention, batching, and ranked upstream diffs. |
+| **Enablement** | Makes the model run at all (serving flags through targeted rebuilds), graded on runnability and accuracy. Only entered when a baseline fails; skipped on healthy runs. |
+| **Framework optimization** | Searches serving flags, precision, attention, batching, and ranked upstream diffs. |
 | **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/KernelForge) — then re-measures every accepted change end to end. Only one backend runs per phase. |
 | **Sweep** | Re-measures the accumulated stack across concurrency and sequence-length operating points. Skips itself when the validated gain has not moved. |
 | **Close** | Records why the run stopped, writes the recipe knowledge base, final report, and machine-readable session artifacts. |

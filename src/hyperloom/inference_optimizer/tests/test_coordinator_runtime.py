@@ -1215,8 +1215,10 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
 async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
     session_dir,
 ):
+    """--enablement=off: three consecutive failures stop the run (the documented fast-fail path)."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
+    c.shared_state.enablement_mode = "off"
     try:
         for i in range(3):
             await c._handle_unpromotable_result(

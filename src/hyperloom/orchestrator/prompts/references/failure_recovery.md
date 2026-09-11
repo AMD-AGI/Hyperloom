@@ -1,5 +1,5 @@
 <!-- when: an action just failed and you are about to re-propose it -->
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
+<!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE -->
 # Failure recovery surfaces
 
 Consult these SharedState surfaces in order before re-proposing:

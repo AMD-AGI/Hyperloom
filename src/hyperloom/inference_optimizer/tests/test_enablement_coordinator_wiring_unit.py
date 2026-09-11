@@ -281,6 +281,7 @@ async def _queued_of_kind(fake, kind: str) -> list:
 
 def _enqueue_self(**state_kw):
     state = types.SimpleNamespace(
+        phase=state_kw.get("phase", "ENABLEMENT"),
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         model_path=state_kw.get("model_path", ""),
@@ -362,8 +363,8 @@ def _enqueue_self(**state_kw):
 
     for name in (
         "_enablement_in_flight",
-        "_refused_argv_is_terminal",
-        "_environment_fault_is_terminal",
+        "_check_argv_terminal",
+        "_check_environment_terminal",
         "_environment_verdict",
         "_round_has_live_work",
         "_open_authoring_round",
@@ -949,69 +950,6 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch):
     ]
 
 
-def test_enablement_close_guard_blocks_premature_skip_to_close():
-    """Q2: pre-enablement (baseline never established) the close guard is active."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.phase = "PRELUDE"
-    s.baseline_tput = 0.0
-    s.enablement.succeeded = False
-    assert s.enablement_close_guard_active() is True
-    # Once a baseline exists, or enablement succeeded, the guard lifts.
-    s.baseline_tput = 100.0
-    assert s.enablement_close_guard_active() is False
-    s.baseline_tput = 0.0
-    s.enablement.succeeded = True
-    assert s.enablement_close_guard_active() is False
-
-
-def test_enablement_close_guard_active_during_validation_pending():
-    """An eval-origin KEEP awaiting revalidation must keep the guard active even if a stale positive tput is present."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.phase = "SWEEP"
-    s.baseline_tput = 100.0
-    s.enablement.succeeded = False
-    s.enablement.validation_pending = True
-    assert s.enablement_close_guard_active() is True
-    s.enablement.validation_pending = False
-    assert s.enablement_close_guard_active() is False
-
-
-def test_the_close_guard_stops_dropping_skip_to_close_once_its_bound_is_spent():
-    """The guard may delay a close; it may not be the reason one never happens.
-
-    Every input the guard reads is set by one path and cleared by several, so a
-    missed clear would otherwise leave it the sole authority refusing the last
-    exit a run that cannot be promoted has.
-    """
-    from hyperloom.orchestrator.state.shared_state import (
-        MAX_SKIP_TO_CLOSE_SUPPRESSIONS,
-        SharedState,
-    )
-
-    for phase, tput, pending in (("PRELUDE", 0.0, False), ("SWEEP", 100.0, True)):
-        s = SharedState()
-        s.phase = phase
-        s.baseline_tput = tput
-        s.enablement.succeeded = False
-        s.enablement.validation_pending = pending
-        assert s.enablement_close_guard_active() is True
-        s.enablement.skip_to_close_suppressions = MAX_SKIP_TO_CLOSE_SUPPRESSIONS
-        assert s.enablement_close_guard_active() is False, f"{phase} latched past its bound"
-
-
-def test_the_suppression_count_survives_a_resume():
-    """A bound that reset on load would let a resumed session latch again."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.enablement.skip_to_close_suppressions = 3
-    assert SharedState.from_dict(s.to_dict()).enablement.skip_to_close_suppressions == 3
-
-
 def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
     """Q3: stacked base setup commands are passed to the next round + noted."""
     _stub_enumerate(monkeypatch, [])
@@ -1069,21 +1007,14 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_noop_when_baseline_runnable(monkeypatch):
+async def test_enqueue_noop_when_not_in_enablement_phase(monkeypatch):
+    """The pump phase-gates: outside ENABLEMENT it no-ops immediately."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(baseline_tput=1234.0)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-
-
-@pytest.mark.asyncio
-async def test_enqueue_noop_when_no_failure_streak(monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(baseline_failure_streak=0)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    fake = _enqueue_self(phase="PRELUDE")
+    assert await Coordinator._pump_enablement_safely(fake, caller="test") is None
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio

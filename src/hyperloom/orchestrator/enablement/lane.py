@@ -19,8 +19,8 @@ from ..actions.executors._grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from ..delivery.archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from ..loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
@@ -44,6 +44,10 @@ _MIN_LEASE_SEC = 300.0
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
+    async def _on_enter_enablement(self, *, from_phase: str) -> None:
+        """ENABLEMENT entry hook: log the transition."""
+        log.info("ENABLEMENT entry (from=%s)", from_phase or "<unknown>")
+
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
@@ -62,20 +66,16 @@ class EnablementLane(CoordinatorCollaborator):
             # which runs ahead of this pump, ends a round nobody is working on.
             await self._enablement_in_flight()
             return ""
-        if state.baseline_tput > 0:
+        # Both terminal helpers write stop_reason; the phase machine reads it on the
+        # next tick and routes to CLOSE.  Returning here prevents opening a new round.
+        if self._check_argv_terminal():
             return ""
-        if state.baseline_failure_streak < 1:
-            return ""
-        # Below the baseline guards on purpose: both stop the whole run, so they
-        # may only speak for a baseline that actually failed. Above them, a
-        # healthy session ran this host preflight every tick, and one stat that
-        # came back False -- a network mount hiccup is enough -- ended it.
-        if self._refused_argv_is_terminal():
-            return ""
-        if self._environment_fault_is_terminal():
+        if self._check_environment_terminal():
             return ""
         stalled = await self.rounds.consecutive_stalled()
         if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
+            # The phase machine will route to CLOSE on the next tick through stop_reason;
+            # do not open another round in the meantime.
             if not state.stop_reason:
                 state.set_stop_reason("enablement_attempts_exhausted")
                 state.save(self.session_dir)
@@ -85,10 +85,8 @@ class EnablementLane(CoordinatorCollaborator):
                     _ENABLEMENT_MAX_ATTEMPTS,
                 )
             return ""
-        deadline = self._run_deadline
-        if deadline is not None and deadline.expired():
-            return ""
         launch_log = state.enablement.launch_log
+        deadline = self._run_deadline
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
@@ -105,15 +103,15 @@ class EnablementLane(CoordinatorCollaborator):
         # auto-escalation when the residual gap is a compiled miss. Both are
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return ""
         try:
             await self._maybe_enqueue_specialist_requested_build()
             await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:  # noqa: BLE001 — a build escalation must not cost the round
             log.exception("enablement: build escalation failed")
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return ""
         await self._warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
@@ -133,14 +131,12 @@ class EnablementLane(CoordinatorCollaborator):
         )
         return spec_tid
 
-    def _refused_argv_is_terminal(self) -> bool:
-        """Stop the run when the last failure was an argv the framework refused.
-
-        No patch to framework source fixes an argument the installed parser does
-        not have, so this is stopped as infrastructure.
+    def _check_argv_terminal(self) -> bool:
+        """Write server_argv_invalid to stop_reason if the last boot was refused by the parser.
 
         Returns:
-            bool: True when the run was stopped here and no round may open.
+            bool: True when a terminal argv fault was detected; the phase machine
+            routes to CLOSE on the next tick through ``_global_terminal``.
         """
         state = self.shared_state
         loaded = load_boot_observation(state.enablement.launch_observation_path)
@@ -158,16 +154,12 @@ class EnablementLane(CoordinatorCollaborator):
             )
         return True
 
-    def _environment_fault_is_terminal(self) -> bool:
-        """Stop the run when the last failure was the host rather than the model.
-
-        A missing framework, an extension with no build for this platform, an
-        unresolvable checkpoint path and a bound port are host faults no patch
-        this lane could author would change, so this is stopped as
-        infrastructure.
+    def _check_environment_terminal(self) -> bool:
+        """Write environment_fault to stop_reason if the host cannot run the combo.
 
         Returns:
-            bool: True when the run was stopped here and no round may open.
+            bool: True when a terminal host fault was detected; the phase machine
+            routes to CLOSE on the next tick through ``_global_terminal``.
         """
         state = self.shared_state
         loaded = load_boot_observation(state.enablement.launch_observation_path)
@@ -640,16 +632,16 @@ class EnablementLane(CoordinatorCollaborator):
         )
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
-        """Phase-independent enablement pump — runs every tick.
-
-        The only PRELUDE exit gate is ``baseline_tput > 0``, which a
-        non-runnable combo never reaches, so this cannot be bound to a phase.
-        Every dispatch guard lives inside the pumped methods, so calling them
-        unconditionally is safe and idempotent.
+        """ENABLEMENT phase pump — called every tick while in ENABLEMENT.
 
         Args:
             caller: Label identifying the caller ("tick" / "run"), for logs.
         """
+
+        from ..phases.machine_state import PHASE_ENABLEMENT as _PHASE_ENABLEMENT
+
+        if (self.shared_state.phase or "").strip().upper() != _PHASE_ENABLEMENT:
+            return
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.
         for pump in (
@@ -659,5 +651,5 @@ class EnablementLane(CoordinatorCollaborator):
         ):
             try:
                 await pump()
-            except Exception:  # noqa: BLE001 — a wedged pump would strand the run in PRELUDE
+            except Exception:  # noqa: BLE001 — a wedged pump must not strand the phase
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)

@@ -177,8 +177,8 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (Coordinator, "_maybe_record_enablement_human_review"),
         (Coordinator, "_maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
-        (EnablementLane, "_refused_argv_is_terminal"),
-        (EnablementLane, "_environment_fault_is_terminal"),
+        (EnablementLane, "_check_argv_terminal"),
+        (EnablementLane, "_check_environment_terminal"),
         (EnablementLane, "_environment_verdict"),
         (EnablementLane, "_enablement_in_flight"),
         (EnablementLane, "_round_has_live_work"),
@@ -399,7 +399,8 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
     launch_backend(launches)
 
     state = coordinator.shared_state
-    state.enablement_mode = "all"
+    # --enablement=off: the three-strike PRELUDE terminal is the documented fast-fail.
+    state.enablement_mode = "off"
     state.enablement.kept_patches = ["srt/attention.py"]
 
     played = await _settle_failures(coordinator, session, slot, len(launches.scenario.attempts))
@@ -438,7 +439,7 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     import hyperloom.agents.framework.sources as sources
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
-    from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
 
     monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
@@ -473,7 +474,7 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     import hyperloom.agents.framework.sources as sources
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
-    from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
 
     monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)

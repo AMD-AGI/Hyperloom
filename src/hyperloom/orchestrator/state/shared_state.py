@@ -301,11 +301,6 @@ _DEFAULT_LAST_FAILURES = 30
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
 
-# How many ``skip_to_close`` hints the pre-enablement guard may drop before it
-# stops dropping them. Matches the stall-streak terminal, so a run that keeps
-# asking to close reaches an exit on the same order as one that stalls out.
-MAX_SKIP_TO_CLOSE_SUPPRESSIONS: int = 5
-
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
 
@@ -1544,33 +1539,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.last_discarded_escalate_hint = hint
         self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
-
-    def enablement_close_guard_active(self) -> bool:
-        """True while a not-yet-enabled run must be protected from premature close.
-
-        While this guard is active a ``skip_to_close`` hint is dropped; a
-        not-yet-enabled run may only terminate via honest paths that do not route
-        through ``skip_to_close`` (``enablement_stalled``,
-        ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
-        aborts).
-
-        The suppression count bounds the guard. Every input it reads is set by
-        one path and cleared by several, so any missed clear would otherwise make
-        this the sole authority denying a session its last exit.
-
-        Returns:
-            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
-            has never gone positive and enablement has not yet succeeded, or
-            while a revalidation window is open, until the bound is spent.
-        """
-        if self.enablement.skip_to_close_suppressions >= MAX_SKIP_TO_CLOSE_SUPPRESSIONS:
-            return False
-        phase = (self.phase or "").strip().upper()
-        return (
-            phase in ("PRELUDE", "FRAMEWORK_AGENT")
-            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and not self.enablement.succeeded
-        ) or self.enablement.validation_pending
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(

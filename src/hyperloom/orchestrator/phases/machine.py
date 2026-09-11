@@ -128,6 +128,29 @@ class MachinePhase(PhaseHandler):
         """Whether the optimisation phase is enabled for this run."""
         return bool(self.shared_state.framework_agent_phase_enabled)
 
+    def _enablement_admitted(self) -> bool:
+        """Whether the enablement lane is configured for this run and host."""
+        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return False
+        state = self.shared_state
+        origin = str(getattr(getattr(state, "enablement", None), "origin", "") or "")
+        return eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
+
+    async def _enablement_work_in_flight(self) -> bool:
+        """True while an enablement targeted_build or integrate_patch probe is queued or running."""
+        active_kinds = frozenset({"targeted_build", "integrate_patch"})
+        for task in list(await self.tasks.queued()) + list(await self.tasks.running()):
+            kind = str(getattr(task, "kind", "") or "")
+            if kind not in active_kinds:
+                continue
+            params = getattr(task, "params", {}) or {}
+            if params.get("enablement"):
+                return True
+        return False
+
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work."""
         kinds = _phase_state.KERNEL_LANE_TASK_KINDS
@@ -174,6 +197,9 @@ class MachinePhase(PhaseHandler):
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             optimize_enabled=optimize_enabled,
+            enablement_enabled=self._enablement_admitted(),
+            enablement_stalled=await self.rounds.consecutive_stalled(),
+            enablement_in_flight=await self._enablement_work_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._maybe_enqueue_explore_research_scout()
@@ -337,7 +363,9 @@ class MachinePhase(PhaseHandler):
                 log.debug("Coordinator: kernel timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
+        if target == _phase_state.PHASE_ENABLEMENT:
+            await self._on_enter_enablement(from_phase=from_phase)
+        elif target == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._on_enter_framework(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)

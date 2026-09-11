@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 # Phase identifiers + ordering (monotonic chain)
 PHASE_PRELUDE = "PRELUDE"
+PHASE_ENABLEMENT = "ENABLEMENT"
 PHASE_FRAMEWORK_AGENT = "FRAMEWORK_AGENT"
 PHASE_KERNEL_AGENT = "KERNEL_AGENT"
 PHASE_SWEEP = "SWEEP"
@@ -29,12 +30,19 @@ PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
+    PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     PHASE_CLOSE,
 )
 PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
+
+# Enablement attempt cap: consecutive *failed* settled rounds before the phase
+# terminates with enablement_attempts_exhausted.  Neutral outcomes (abandoned,
+# expired) are not counted by consecutive_stalled, so this value is the true
+# high-water mark for FAILED rounds in a row.
+ENABLEMENT_MAX_ATTEMPTS: int = 8
 
 
 def phase_index(phase: str) -> int:
@@ -52,6 +60,22 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "roofline",
             "profile",
             "recover",
+        }
+    ),
+    # Authoring specialists + integration + build escalation + revalidation baselines.
+    # ``specialist`` and ``integrate_patch`` are proposed by the LLM; ``targeted_build``
+    # and ``baseline`` are Coordinator-internal (kept out of the proposable set by
+    # ``_NOT_LLM_PROPOSABLE`` / ``COORDINATOR_INTERNAL_ACTIONS``).
+    PHASE_ENABLEMENT: frozenset(
+        {
+            "target_analysis",
+            "baseline",
+            "roofline",
+            "profile",
+            "recover",
+            "specialist",
+            "integrate_patch",
+            "targeted_build",
         }
     ),
     # Three levers: configuration grids (``explore``), investigation and authoring (``specialist``), and landing a
@@ -192,6 +216,14 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "phase_entered",
         # Marker row: the source arm has nothing left to dispatch.
         "no_candidates_and_discovery_exhausted",
+        # PRELUDE → ENABLEMENT entry (non-terminal).
+        "enablement_entered",
+        # ENABLEMENT normal exit: the combo is now runnable.
+        "enablement_done",
+        # ENABLEMENT terminal exits.
+        "enablement_attempts_exhausted",
+        "environment_fault",
+        "server_argv_invalid",
     }
 )
 
@@ -248,9 +280,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_config_incompatible",
         # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement gave up without a booting baseline: a revalidation the
-        # round depended on never promoted.
-        "enablement_stalled",
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
         "enablement_attempts_exhausted",
@@ -297,9 +326,10 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock).
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
+    PHASE_ENABLEMENT: 0.05,
     # The optimisation phase carries both levers' share.
-    PHASE_FRAMEWORK_AGENT: 0.40,
-    PHASE_KERNEL_AGENT: 0.50,
+    PHASE_FRAMEWORK_AGENT: 0.38,
+    PHASE_KERNEL_AGENT: 0.47,
     PHASE_SWEEP: 0.05,
     PHASE_CLOSE: 0.02,
 }
@@ -1899,6 +1929,9 @@ def compute_next_phase(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
+    enablement_enabled: bool = False,
+    enablement_stalled: int = 0,
+    enablement_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``."""
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
@@ -1916,8 +1949,8 @@ def compute_next_phase(
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
     # A met target ends the optimizing phases early; SWEEP is their normal next station, and the curve then measures
-    # the configuration it was met on.
-    if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
+    # the configuration it was met on.  Only phases between PRELUDE and SWEEP are eligible.
+    if target_was_reached(state) and phase_index(PHASE_ENABLEMENT) <= phase_index(current) < phase_index(PHASE_SWEEP):
         return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     if current == PHASE_PRELUDE:
@@ -1929,6 +1962,10 @@ def compute_next_phase(
         cold = exit_cold_anchor_prelude(state)
         if cold is not None:
             return PHASE_CLOSE, cold[0], {"terminal": True, **cold[1]}
+        # Route into ENABLEMENT when admitted and at least one baseline has failed.
+        streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
+        if enablement_enabled and streak >= 1:
+            return PHASE_ENABLEMENT, "enablement_entered", {"baseline_failure_streak": streak}
         norm = exit_normal_prelude(state)
         if norm is None:
             # No baseline and no clock left: name the failure instead of letting the run read as an ordinary exit.
@@ -1944,6 +1981,29 @@ def compute_next_phase(
             if target != PHASE_FRAMEWORK_AGENT:
                 evidence["optimize_skipped"] = True
             return target, norm[0], evidence
+        return None
+
+    if current == PHASE_ENABLEMENT:
+        # Terminal exits first.
+        enablement = getattr(state, "enablement", None)
+        env_fault_stop = (getattr(state, "stop_reason", "") or "").strip() in ("environment_fault", "server_argv_invalid")
+        if env_fault_stop:
+            sr = (getattr(state, "stop_reason", "") or "").strip()
+            return PHASE_CLOSE, sr, {"terminal": True}
+        if enablement_stalled >= ENABLEMENT_MAX_ATTEMPTS:
+            return PHASE_CLOSE, "enablement_attempts_exhausted", {"terminal": True, "consecutive_stalled": enablement_stalled}
+        # Normal exit: the combo is runnable, the revalidation window is closed, and no in-flight enablement work remains.
+        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        validation_pending = bool(getattr(enablement, "validation_pending", False)) if enablement is not None else False
+        if tput > 0.0 and not validation_pending and not enablement_in_flight:
+            target = _post_prelude_target(
+                optimize_enabled=optimize_enabled,
+                kernel_enabled=kernel_enabled,
+            )
+            evidence: dict[str, Any] = {"baseline_tput": tput}
+            if target != PHASE_FRAMEWORK_AGENT:
+                evidence["optimize_skipped"] = True
+            return target, "enablement_done", evidence
         return None
 
     if current == PHASE_FRAMEWORK_AGENT:
@@ -2068,6 +2128,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
 # Human-friendly labels for the coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
+    PHASE_ENABLEMENT: "Enablement (make the combo runnable)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
     PHASE_KERNEL_AGENT: "Kernel optimization",
     PHASE_SWEEP: "Concurrency sweep",
@@ -2334,8 +2395,10 @@ __all__ = [
     "LIFECYCLE_STATUS_ERROR",
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
+    "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
+    "PHASE_ENABLEMENT",
     "PHASE_EXIT_REASONS",
     "PHASE_FRAMEWORK_AGENT",
     "PHASE_HUMAN_LABELS",

@@ -440,6 +440,8 @@ def _collect_phase_breakdown(
     lever_buckets: dict[str, float] = {}
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
+        # Enablement KEEPs are graded on runnability, not throughput; gain stays 0.
+        "enablement": {"total_gain_pct": 0.0},
         # by_pr keyed per adopted PR.
         "framework": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},

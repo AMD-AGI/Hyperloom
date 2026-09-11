@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom optimization loop: the phase chain PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. ENABLEMENT is only entered when a baseline fails and enablement is admitted. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
 :class: hl-lightbox-trigger
 ```
 
@@ -68,7 +68,7 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
+PRELUDE -> ENABLEMENT -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
@@ -81,7 +81,7 @@ accounting: short bounded runs keep charge-back phase budgeting, while long /
 unbounded runs use the fixed per-cycle budget window.
 
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
-the ``=== Phase ===`` block for the four middle phases.
+the ``=== Phase ===`` block for the five middle phases.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
@@ -104,32 +104,23 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_AGENT — the optimisation phase
+## ENABLEMENT
 
-One phase, two levers worked in parallel:
+ENABLEMENT is entered when a baseline fails and enablement is admitted
+(`--enablement` is not `off` and the run is not multi-node). It is skipped
+entirely on runs where the baseline boots on the first attempt.
 
-- **Configuration** — the `explore` action runs server-argument and
-  environment grids through the canonical `explore_search` ledger. Nothing on
-  disk changes, so a revert is a non-composition.
-- **Source and upstream** — `integrate_patch` lands every patch, and
-  `patch_source` says where the diff came from: `specialist_authored` for one
-  a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
-  that a `candidate_discovery_specialist` found, ranked and judged. Both
-  serialise on the `workspace_mutation` lane: one landing at a time,
-  independent of how fast proposals arrive.
+Admission is controlled by `--enablement {off,launch,eval,all}`,
+defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
+accuracy-failure lane, `all` both. With `off`, a baseline that keeps failing
+terminates with `stop_reason='baseline_failed'` rather than opening an
+authoring loop.
 
-`specialist` serves both levers — investigation, patch authoring, and
-candidate discovery are all dispatches of the one specialist action.
-
-The phase advances to KERNEL_AGENT only when **both** levers are dry
-(`optimize_no_more_leverage`). Either arm going quiet raises
-`switch_bottleneck` so the next macro-cycle steers off this bottleneck,
-without abandoning the lever that is still paying. It also exits when its
-phase budget is spent, and at the absolute phase cap.
-
-After each KEEP the runtime revalidates the full stack end to end, so the
-reported `cumulative_gain_validated` always comes from a measurement taken
-with every accepted change applied.
+A KEEP in ENABLEMENT is graded on runnability and the accuracy floor, not
+throughput. The phase exits normally when `baseline_tput > 0`, the
+revalidation window is closed, and all in-flight enablement work is drained.
+It exits terminally on `server_argv_invalid`, `environment_fault`, or
+`enablement_attempts_exhausted` (eight consecutive failed rounds).
 
 ### Enablement escalation ladder
 
@@ -218,6 +209,33 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
 - **Crash / resume.** An in-flight build is tracked by a durable sentinel,
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
+
+## FRAMEWORK_AGENT — the optimisation phase
+
+One phase, two levers worked in parallel:
+
+- **Configuration** — the `explore` action runs server-argument and
+  environment grids through the canonical `explore_search` ledger. Nothing on
+  disk changes, so a revert is a non-composition.
+- **Source and upstream** — `integrate_patch` lands every patch, and
+  `patch_source` says where the diff came from: `specialist_authored` for one
+  a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
+  that a `candidate_discovery_specialist` found, ranked and judged. Both
+  serialise on the `workspace_mutation` lane: one landing at a time,
+  independent of how fast proposals arrive.
+
+`specialist` serves both levers — investigation, patch authoring, and
+candidate discovery are all dispatches of the one specialist action.
+
+The phase advances to KERNEL_AGENT only when **both** levers are dry
+(`optimize_no_more_leverage`). Either arm going quiet raises
+`switch_bottleneck` so the next macro-cycle steers off this bottleneck,
+without abandoning the lever that is still paying. It also exits when its
+phase budget is spent, and at the absolute phase cap.
+
+After each KEEP the runtime revalidates the full stack end to end, so the
+reported `cumulative_gain_validated` always comes from a measurement taken
+with every accepted change applied.
 
 ## KERNEL_AGENT
 

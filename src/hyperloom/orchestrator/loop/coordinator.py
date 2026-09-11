@@ -38,11 +38,7 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement attempt cap: consecutive settled rounds that made no progress
-# before the lane stops dispatching. Advancing rounds (outcome ADVANCED or
-# BOOTED) reset the streak; abandoned and expired rounds are skipped.
-# The wall clock is the outer bound for a bring-up still making progress.
-_ENABLEMENT_MAX_ATTEMPTS: int = 8
+# _ENABLEMENT_MAX_ATTEMPTS moved to phases/machine_state.py as ENABLEMENT_MAX_ATTEMPTS.
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
@@ -893,6 +889,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_framework_agent_critic_denied": "phase_framework",
         "_maybe_reauthor_from_critic_feedback": "phase_framework",
         "_pump_framework_agent_phase_safely": "phase_framework",
+        "_on_enter_enablement": "enablement_lane",
         "_pump_enablement_safely": "enablement_lane",
         "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
         "_open_revalidation_row": "enablement_revalidation",

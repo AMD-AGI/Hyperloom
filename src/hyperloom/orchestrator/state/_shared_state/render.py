@@ -158,6 +158,7 @@ class _RenderMixin:
     ) -> str:
         """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
         from ...phases.machine_state import (
+            PHASE_ENABLEMENT,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
@@ -199,7 +200,7 @@ class _RenderMixin:
             allowed_line,
         ]
         # Whether deferring work to a later cycle is still a real option.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
             feasible = reloop and self.framework_agent_phase_enabled
             reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"

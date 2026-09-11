@@ -1040,6 +1040,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict."""
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
+        PHASE_ENABLEMENT,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
@@ -1049,6 +1050,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
+        ("phase_budget_enablement_pct", PHASE_ENABLEMENT),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
         ("phase_budget_sweep_pct", PHASE_SWEEP),

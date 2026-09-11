@@ -871,8 +871,10 @@ failure MUST change at least one of `params.benchmark_script` /
 `params.result_dir` / `params.extra_server_args` / `params.extra_envs`
 (prompt RULE F1 — LLM-side judgement, not a PolicyGate deny); a proposal
 repeating a recent failing params fingerprint is dropped as a duplicate.
-Three consecutive baseline failures with no enablement engaged stop the run
-with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
+With enablement admitted (`--enablement all/launch/eval`), the first baseline
+failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
+the combo boots. With `--enablement off`, three consecutive failures stop the
+run with `stop_reason='baseline_failed'`.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as

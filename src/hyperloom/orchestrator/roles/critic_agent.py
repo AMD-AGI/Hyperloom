@@ -219,6 +219,15 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "else slips through (PolicyGate R1 should already have blocked it), "
         "`advise` with a phase hint rather than reject."
     ),
+    "ENABLEMENT": (
+        "Typical proposals are `specialist` and `integrate_patch`. "
+        "The gate is runnability plus the accuracy floor, not throughput: a patch "
+        "that boots the model and holds accuracy is a legitimate KEEP even with "
+        "no throughput gain. The before/after benchmark gate does not apply — a "
+        "booting baseline does not yet exist. `approve` when the patch clearly "
+        "makes the combo runnable; `reject` if it worsens the crash or lowers "
+        "accuracy below the floor; `advise` otherwise."
+    ),
     "FRAMEWORK_AGENT": (
         "Typical proposals are `explore`, `specialist` and `integrate_patch`. "
         "Specialist-style proposal_set packets arrive as "

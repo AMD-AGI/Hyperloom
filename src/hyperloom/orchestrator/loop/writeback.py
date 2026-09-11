@@ -1220,16 +1220,23 @@ class WritebackCollaborator:
                 # that failed some other way is no evidence the arguments were
                 # fixed.
                 self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress:
+                _in_enablement = (
+                    str(getattr(self.shared_state, "phase", "") or "").strip().upper() == "ENABLEMENT"
+                )
+                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not _in_enablement:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
             if not stopped_by_the_run:
                 self.shared_state.baseline_total_failures += 1
+            _in_enablement = (
+                str(getattr(self.shared_state, "phase", "") or "").strip().upper() == "ENABLEMENT"
+            )
             if (
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not eval_pending_suppress
+                and not _in_enablement
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is

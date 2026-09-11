@@ -226,5 +226,6 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     # The FRAMEWORK_AGENT flag is spelled --phase-budget-framework-pct.
     real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
     real["KERNEL"] = real.pop("KERNEL_AGENT")
+    # ENABLEMENT stays as "ENABLEMENT" (--phase-budget-enablement-pct).
 
     assert quoted == real

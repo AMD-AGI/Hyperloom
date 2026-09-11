@@ -31,6 +31,8 @@ def test_every_phase_gets_a_budget_share_and_the_shares_sum_to_one():
     overhead = budget[_phase_state.PHASE_PRELUDE] + budget[_phase_state.PHASE_CLOSE]
     assert work >= 0.8
     assert overhead <= 0.1
+    # ENABLEMENT is not counted in work (it precedes the optimization phases).
+    assert _phase_state.PHASE_ENABLEMENT in budget
 
 
 # --------------------------------------------------------------------------- # Shared stub for the arm behavior

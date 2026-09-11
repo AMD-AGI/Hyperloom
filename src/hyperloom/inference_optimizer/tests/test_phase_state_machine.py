@@ -29,6 +29,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
+        "ENABLEMENT",
         "FRAMEWORK_AGENT",
         "KERNEL_AGENT",
         "SWEEP",

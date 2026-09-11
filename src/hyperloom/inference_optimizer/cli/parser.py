@@ -1258,6 +1258,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
     )
     opt.add_argument(
+        "--max-minutes-enablement-pct",
+        "--phase-budget-enablement-pct",
+        dest="phase_budget_enablement_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for ENABLEMENT as a fraction of --max-hours. Default: 0.05.",
+    )
+    opt.add_argument(
         "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
         # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
@@ -1267,7 +1275,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1275,7 +1283,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

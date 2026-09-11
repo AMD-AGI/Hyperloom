@@ -2006,6 +2006,7 @@ def _stage_reached(
         ):
             return "warm_start"
     phase_map = {
+        "ENABLEMENT": "enablement",
         "FRAMEWORK_AGENT": "framework_agent",
         "EXPLORE": "framework_agent",
         "KERNEL_AGENT": (
