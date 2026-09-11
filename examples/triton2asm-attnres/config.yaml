@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+compile_command:
+  - python driver.py --mode profile
+correctness_command:
+  - python driver.py --mode test
