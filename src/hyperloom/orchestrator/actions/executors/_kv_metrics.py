@@ -306,14 +306,39 @@ def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any
                             "scrape_end_unix": math.ceil((start_unix + latency / 1e9) * 1000) / 1000,
                             "scrape_sec": round(latency / 1e9, 4),
                         },
-                        _CREDIT_PHASE_NAMES.get(str(record.get("benchmark_phase") or "").lower()),
+                        # Unstamped means aiperf took it before any phase began -- its baseline capture, of an idle
+                        # pool. That is boot, and naming it here keeps one value per meaning downstream.
+                        _CREDIT_PHASE_NAMES.get(str(record.get("benchmark_phase") or "").lower(), "boot"),
                     )
                 )
     except OSError as exc:
         log.debug("kv_metrics: could not read %s (%s)", path, exc)
         return []
     out.sort(key=lambda item: item[0].ts)
-    return out
+    return _demote_premature_measured(out)
+
+
+def _demote_premature_measured(
+    records: list[tuple[KvSample, dict[str, Any], str | None]],
+) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Re-file a measured-stamped record that arrives before warmup as boot.
+
+    The phases are ordered: profiling follows warmup. Observed on every AgentX round so far, aiperf stamps one record
+    ``profiling`` a couple of seconds *before* the first warmup record -- its phase context leaking during setup, not a
+    measurement of the profiling phase. Left alone it lands in ``measured``, which is the only phase allowed into a
+    comparison, and the gap-free bracketing then runs that window from the stray record to the first warmup reading and
+    credits warmup's opening seconds to it. On one round that was the whole of the measured prefix-cache delta.
+
+    Only demoted when warmup records exist and the stray precedes them; a run configured without a warmup has its
+    profiling records first legitimately, and those are left alone.
+    """
+    first_warmup = next((s.ts for s, _t, p in records if p == "warmup"), None)
+    if first_warmup is None:
+        return records
+    return [
+        (s, t, "boot" if p == "measured" and s.ts < first_warmup else p)  # type: ignore[misc]
+        for s, t, p in records
+    ]
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:

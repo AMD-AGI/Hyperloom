@@ -917,6 +917,63 @@ def test_an_unstamped_aiperf_record_is_boot_not_measured(tmp_path):
     assert [r["phase"] for r in payload["samples"]] == ["boot", "measured"]
 
 
+def test_a_profiling_stamp_that_precedes_warmup_is_not_measured(tmp_path):
+    """Ordered phases: profiling follows warmup, so one stamped before it is setup.
+
+    Verbatim shape from a live round -- two unstamped baselines, a ``profiling``
+    record 8ms after the second, then warmup two seconds later. Left in
+    ``measured`` it is the only phase allowed into a comparison, and the gap-free
+    bracketing runs that window into warmup's opening seconds.
+    """
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    base = 1_789_094_031_527_000_000
+    path = _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.0, retracts=0, phase=None),
+            _slim_record(ts_ns=base + 21_026_000_000, usage=0.0, retracts=0, phase=None),
+            _slim_record(ts_ns=base + 21_034_000_000, usage=0.0, retracts=0, phase="profiling"),
+            _slim_record(ts_ns=base + 23_041_000_000, usage=0.1, retracts=0, phase="warmup"),
+            _slim_record(ts_ns=base + 25_044_000_000, usage=0.2, retracts=0, phase="warmup"),
+        ],
+    )
+
+    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["boot", "boot", "boot", "warmup", "warmup"]
+
+
+def test_profiling_after_warmup_is_left_alone(tmp_path):
+    """The ordinary case, and the whole point of reading aiperf's stamp."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    base = 1_789_094_031_527_000_000
+    path = _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.1, retracts=0, phase="warmup"),
+            _slim_record(ts_ns=base + 60_000_000_000, usage=0.6, retracts=2, phase="profiling"),
+        ],
+    )
+
+    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["warmup", "measured"]
+
+
+def test_a_run_without_warmup_keeps_its_leading_profiling_records(tmp_path):
+    """Nothing to be premature relative to, so the stamp stands."""
+    from hyperloom.orchestrator.actions.executors._kv_metrics import read_aiperf_server_metrics
+
+    base = 1_789_094_031_527_000_000
+    path = _write_server_metrics(
+        tmp_path,
+        [
+            _slim_record(ts_ns=base, usage=0.5, retracts=0, phase="profiling"),
+            _slim_record(ts_ns=base + 2_000_000_000, usage=0.6, retracts=1, phase="profiling"),
+        ],
+    )
+
+    assert [p for _s, _t, p in read_aiperf_server_metrics(path)] == ["measured", "measured"]
+
+
 def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     """On an AgentX round nothing pins ``PORT`` and vLLM binds its own 8000.
 
