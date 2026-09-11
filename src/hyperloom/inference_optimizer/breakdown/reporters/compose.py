@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection, as_dict, render_section
+from .base import REGISTRY, RenderedSection, render_section, session_of
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -21,17 +21,12 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     capability_summary as _r_capability_summary,
     phase_timeline as _r_phase_timeline,
     kernel_lifecycle as _r_kernel_lifecycle,
-    kernel_profiling as _r_kernel_profiling,
-    kernel_decision_path as _r_kernel_decision_path,
     roofline as _r_roofline,
-    invocations as _r_invocations,
     param_search as _r_param_search,
-    decision_journal as _r_decision_journal,
-    critic_robustness as _r_critic_robustness,
     attribution as _r_attribution,
     optimizations as _r_optimizations,
-    source_files as _r_source_files,
-    data_provenance as _r_data_provenance,
+    critic as _r_critic,
+    robustness as _r_robustness,
 )
 
 
@@ -42,21 +37,12 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         "Performance Results",
         ["baseline", "final", "roofline", "optimizations", "attribution"],
     ),
-    ("Capability Search", ["capability_summary", "param_search", "decision_journal"]),
-    (
-        "Kernel Optimization",
-        [
-            "kernel_lifecycle",
-            # The per-backend invocation logs behind the capability-summary counts.
-            "geak_invocations",
-            "forge_invocations",
-            "kernel_profiling",
-            "kernel_decision_path",
-            "critic_robustness",
-        ],
-    ),
+    ("Capability Search", ["capability_summary", "param_search"]),
+    ("Kernel Optimization", ["kernel_lifecycle"]),
+    # The two side-channel agents watch the run rather than take part in it, so
+    # they sit after the optimization story and before the raw trace.
+    ("Review & Robustness", ["critic", "robustness"]),
     ("Run Trace", ["phase_timeline"]),
-    ("Source Artifacts", ["source_files", "data_provenance"]),
 ]
 
 __all__ = [
@@ -71,17 +57,12 @@ __all__ = [
     "_r_capability_summary",
     "_r_phase_timeline",
     "_r_kernel_lifecycle",
-    "_r_kernel_profiling",
-    "_r_kernel_decision_path",
     "_r_roofline",
-    "_r_invocations",
     "_r_param_search",
-    "_r_decision_journal",
-    "_r_critic_robustness",
     "_r_attribution",
     "_r_optimizations",
-    "_r_source_files",
-    "_r_data_provenance",
+    "_r_critic",
+    "_r_robustness",
 ]
 
 
@@ -154,8 +135,24 @@ def _stitch(
     used_llm: bool,
     breakdown: dict[str, Any],
 ) -> str:
-    """Assemble the final markdown document from all rendered pieces."""
-    session = as_dict(breakdown.get("session"))
+    """Assemble the final markdown document from all rendered pieces.
+
+    Lays out the title, executive summary (LLM or deterministic fallback),
+    the deterministic key-facts block, and each section group with its
+    optional LLM narrative, verbatim markdown block and data-quality notes.
+
+    Args:
+        sections (list[RenderedSection]): All renderer outputs.
+        global_facts (GlobalFacts): The deterministic cross-section fact pack.
+        llm_exec_summary (str): The LLM-written executive summary (may be empty).
+        llm_narratives (dict[str, str]): Section-id keyed narrative paragraphs.
+        used_llm (bool): Whether a successful LLM pass produced the narratives.
+        breakdown (dict[str, Any]): The parsed ``session_breakdown.json`` dict.
+
+    Returns:
+        str: The complete report markdown, newline-terminated.
+    """
+    session = session_of(breakdown)
     title = f"# Hyperloom Session Report — {session.get('session_id') or '(no session_id)'}"
 
     parts: list[str] = [title, ""]

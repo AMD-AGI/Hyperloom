@@ -26,6 +26,7 @@ __all__ = [
     "failure_row",
     "float_or_none",
     "int_or_none",
+    "now_iso_micros",
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
@@ -35,7 +36,15 @@ __all__ = [
 
 now_iso_seconds = functools.partial(now_iso, "seconds")
 
-# Kept small on purpose.
+#: For rows whose order carries meaning and that land faster than one a second.
+#: Ordering does not rest on this alone -- the wall clock is not monotonic across
+#: an NTP step or a resume, so rows that must hold an order carry an explicit
+#: ordinal and use the stamp only to read them by.
+now_iso_micros = functools.partial(now_iso, "microseconds")
+
+# The full candidate list already lives in the ``kernel_candidates`` artifact,
+# so the event carries only the ranking head. 15 matches the
+# ``hot_kernels_top15`` slice that the pipeline itself routes on.
 MAX_HOT_KERNELS = 15
 
 # Warning payloads carry long remediation prose.
@@ -80,7 +89,11 @@ def float_or_none(value: Any) -> float | None:
 
 
 def text_or_none(value: Any) -> str | None:
-    """Distinguish \"not recorded\" from \"recorded empty\"."""
+    """Distinguish "not recorded" from "recorded empty".
+
+    V6 reserves ``None`` for a field nothing produced; ``""`` means the producer
+    ran and had nothing to say, so a caller that does not know passes ``None``.
+    """
     if value is None:
         return None
     text = str(value).strip()
@@ -106,7 +119,12 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
 
 
 def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
-    """Normalize trace-health warnings into queryable rows."""
+    """Normalize trace-health warnings into queryable rows.
+
+    ``code`` already carries its own namespace (``bypass_*`` for the TraceLens-free
+    reader, bare names for TraceLens), so one flat list serves every route; the
+    remaining keys are parked under ``detail`` instead of widening the row.
+    """
     out: list[dict[str, Any]] = []
     for row in as_list(rows):
         if not isinstance(row, dict):
@@ -147,14 +165,18 @@ def bounded_block(value: Any, *, label: str, limit_bytes: int = MAX_EXT_BLOCK_BY
 
 #: Action statuses from worst to best, for the event types whose event holds an
 #: array of actions. A failure ranks above everything so a later action that
-#: recovered from it cannot hide it, and a success ranks above ``skipped`` for
-#: the mirror-image reason: an action that was refused before it ran does not
-#: unmake the anchor a sibling action established.
+#: recovered cannot hide it, and a success ranks above ``skipped`` because an
+#: action refused before it ran does not unmake a sibling's anchor.
 STATUS_ORDER: tuple[str, ...] = ("failed", "degraded", "running", "succeeded", "skipped")
 
 
 def worst_status(statuses: Iterable[Any]) -> str:
-    """Reduce the statuses of an event's actions to the one the event reports."""
+    """Reduce the statuses of an event's actions to the one the event reports.
+
+    The worst of them per :data:`STATUS_ORDER`, an unranked status as given
+    when that is all there is, or ``"skipped"`` when there are none -- an event
+    holding no action recorded nothing to judge.
+    """
     present = [str(status) for status in statuses if str(status or "")]
     for status in STATUS_ORDER:
         if status in present:
@@ -172,7 +194,7 @@ def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict
 
 
 def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
-    """Project the artifact paths a ``trace_analyze`` result surfaces."""
+    """Project the artifact paths a ``trace_analyze`` result surfaces, absent ones as ``""``."""
     return {
         "trace_report_path": str(result.get("trace_report_path") or ""),
         "analysis_report_path": str(result.get("analysis_report_path") or ""),
@@ -184,7 +206,13 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def analysis_detail(result: Any) -> dict[str, Any]:
-    """Project one ``trace_analyze`` result into the shared detail block."""
+    """Project one ``trace_analyze`` result into the shared detail block.
+
+    ``route`` and ``tool`` both come from ``_build_analysis_meta`` -- the agent
+    route reports ``agent`` / ``tracelens``, the TraceLens-free reader reports
+    ``bypass`` / ``bypass`` -- so keeping both preserves routing policy and tool
+    provenance. Tool-specific output stays in ``route_ext``.
+    """
     payload = as_dict(result)
     meta = as_dict(payload.get("analysis_meta"))
     return {

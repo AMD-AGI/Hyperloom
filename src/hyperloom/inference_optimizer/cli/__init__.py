@@ -2154,10 +2154,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
-    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
-
-    transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
-    set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 

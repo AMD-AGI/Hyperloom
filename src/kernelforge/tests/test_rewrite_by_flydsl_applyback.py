@@ -541,7 +541,8 @@ class _StoppedBackend:
         self._end_reason = end_reason
         self.runtime = type("_Runtime", (), {"model": "fake-model"})()
 
-    async def run(self, _run_spec):
+    async def run(self, _run_spec, usage=None):
+        del usage
         from kernelforge.agent_backends.base import AgentRunResult
 
         return AgentRunResult(end_reason=self._end_reason)

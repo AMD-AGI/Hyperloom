@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
+from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
 
 #: Below this the residue is float noise from re-serialized throughputs, well
 #: under any measurement's own repeatability.
@@ -16,17 +16,29 @@ _NOISE_PP = 0.01
 
 @register_renderer("attribution")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the source-attribution section: gain split across sources."""
-    optimizations = breakdown.get("optimizations") or {}
-    validation = optimizations.get("validation") or {}
-    notes = validation.get("notes") or []
-    # Render ``validation.method`` verbatim; never substitute a different label.
-    method_raw = validation.get("method")
-    method = str(method_raw) if isinstance(method_raw, str) else ""
-    method_display = "unknown attribution method" if method in ("", "missing") else method
+    """Render the source-attribution section: gain split across sources.
 
-    summary = optimizations.get("summary_by_source") or {}
-    claimed = [[source, bucket.get("total_gain_pct")] for source, bucket in summary.items() if isinstance(bucket, dict)]
+    The shares are taken against what the session actually moved, so a source
+    that claims half the gain reads as half. That denominator is larger than
+    the sum of the claims whenever the workload moved between adopted steps,
+    and the difference gets its own row: dropping it would leave shares that
+    silently fail to reach 100% with nothing to say why.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, marked skipped when there is no
+            per-source split to show.
+    """
+    validation = validation_of(breakdown)
+    attribution = as_dict(validation.get("attribution"))
+    notes = [str(note) for note in validation.get("notes") or []]
+
+    claimed = [
+        [source, as_dict(bucket).get("total_gain_pct")]
+        for source, bucket in as_dict(attribution.get("by_source")).items()
+    ]
     total_v = validation.get("validated_total_gain_pct")
     unattributed = validation.get("unattributed_gain_pct")
     if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
@@ -47,13 +59,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts: list[str] = []
     if total_v is not None:
         facts.append(f"Validated total gain attributed: {fmt_pct(total_v, plus=True)}.")
-    facts.append(f"Attribution method: `{method_display}`.")
+    if not attribution.get("available"):
+        facts.append("No stack ledger was recorded, so nothing can be attributed.")
     has_any_split = any(r[1] not in (None, 0, 0.0) for r in rows)
-    if not has_any_split:
+    if not has_any_split and attribution.get("available"):
         facts.append(
-            "No per-source split available — either the session ran a "
-            "single capability (single-source) or attribution mining was "
-            "not executed."
+            "No per-source split available — the ledger holds no adoption with "
+            "a measurable contribution, either because the session kept nothing "
+            "or because every adoption is missing one of its throughputs."
         )
     for src, pct, share in rows:
         if pct in (None, 0, 0.0):

@@ -820,18 +820,23 @@ async def test_wall_clock_closing_stops_rebench_and_settles(coordinator) -> None
     assert st.resume_pending_revalidation is False
 
 
-def _render_final(geak_pending: dict, *, geak: dict | None = None) -> tuple[list[str], list[str]]:
+def _render_final(
+    geak_candidate: dict, *, rebench: dict | None = None, claim: dict | None = None
+) -> tuple[list[str], list[str]]:
     from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
 
+    timeline = []
+    if rebench is not None or claim is not None:
+        timeline.append({"type": "kernel", "ext": {"geak": {"rebench": rebench or {}, "claim": claim or {}}}})
     section = render(
         {
-            "final": {
-                "throughput_tok_s_per_gpu": 140.0,
-                "cumulative_gain_pct_validated": 0.0,
-                "geak_pending": geak_pending,
+            "outcome": {
+                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
+                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "validation": {},
             },
-            "baseline": {"throughput_tok_s_per_gpu": 100.0},
-            "geak": geak or {},
+            "close": {"geak_candidate": geak_candidate},
+            "timeline": timeline,
         }
     )
     return list(section.key_facts), list(section.warnings)
@@ -857,16 +862,39 @@ def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
 def test_final_report_surfaces_failed_geak_revalidation() -> None:
     facts, warnings = _render_final(
         {},
-        geak={
-            "revalidation_status": "failed",
-            "revalidation_error": "subprocess_nonzero",
-            "gain_pct": 3.2,
-        },
+        rebench={"final_status": "failed", "final_error": "subprocess_nonzero"},
+        claim={"self_reported_gain_pct": 3.2},
     )
 
     blob = " ".join(facts + warnings).lower()
     assert "dropped" in blob
     assert "subprocess_nonzero" in blob
+
+
+def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None:
+    """A terminal status outlives the visit that stamped it.
+
+    An earlier cycle's ``failed`` must not outrank a later cycle's rebench
+    that concluded nothing about a candidate still in play.
+    """
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    section = render(
+        {
+            "outcome": {
+                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
+                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "validation": {},
+            },
+            "close": {"geak_candidate": {}},
+            "timeline": [
+                {"type": "kernel", "ext": {"geak": {"rebench": {"final_status": "failed"}}}},
+                {"type": "kernel", "ext": {"geak": {"rebench": {"final_status": "validated"}}}},
+            ],
+        }
+    )
+
+    assert not any("DROPPED" in fact for fact in section.key_facts)
 
 
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:

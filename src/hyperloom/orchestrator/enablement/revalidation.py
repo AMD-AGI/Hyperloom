@@ -11,6 +11,8 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor
@@ -78,6 +80,11 @@ class EnablementRevalidation(CoordinatorCollaborator):
         task_id = await self._open_revalidation_row(params)
         if not task_id:
             return ""
+        enablement_event.record_revalidation(
+            generation=int(state.enablement.revalidation_generation or 0),
+            task_id=task_id,
+            config_path=cfg,
+        )
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
             state.enablement.revalidation_task_id = task_id

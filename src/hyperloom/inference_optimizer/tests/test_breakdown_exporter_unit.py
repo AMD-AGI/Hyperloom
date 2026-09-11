@@ -14,8 +14,6 @@ import pytest
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
-from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_session_meta
-
 
 # ---- _load_session_json ----
 
@@ -94,44 +92,8 @@ def test_json_default_typeerror():
 def test_build_empty_session(tmp_path):
     out = ex.build(tmp_path)
     assert out["exporter_version"] == ex.EXPORTER_VERSION
-    assert "warnings" in out
-    assert "session" in out
-    assert any("missing" in w for w in out["warnings"])
-
-
-def test_build_exports_geak_diagnostics_and_capability_engagement(tmp_path):
-    (tmp_path / "state.json").write_text(
-        json.dumps(
-            {
-                "session_id": "geak-session",
-                "kernel_optimizer": "geak",
-                "geak_result": {
-                    "status": "ok",
-                    "baseline_throughput_tok_s": 1000.0,
-                    "final_throughput_tok_s": 1032.0,
-                    "accepted_kernels": [{"kernel_id": "k1"}],
-                },
-                "optimization_stack": [{"action": "geak_e2e", "variant_name": "geak_e2e", "source": "geak_e2e"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    out = ex.build(tmp_path)
-
-    assert out["geak"]["engaged"] is True
-    assert out["geak"]["gain_pct"] == pytest.approx(3.2)
-    assert out["capability_summary"]["geak"]["status"] == "kept"
-    assert out["capability_summary"]["geak"]["attempts"] == 1
-
-
-def test_build_include_transcripts_process_default(tmp_path):
-    ex.set_default_include_transcripts(True)
-    try:
-        out = ex.build(tmp_path)
-        assert out["schema_version"] is not None
-    finally:
-        ex.set_default_include_transcripts(False)
+    assert "session" in out["metadata"]
+    assert any("missing" in w for w in out["metadata"]["warnings"])
 
 
 # ---- write_breakdown_json ----
@@ -283,27 +245,25 @@ def test_patch_breakdown_langfuse_success(tmp_path):
 
     assert ex.patch_breakdown_langfuse(tmp_path) is True
     bd = json.loads((tmp_path / ex.BREAKDOWN_FILENAME).read_text())
-    assert bd["langfuse"]["enabled"] is True
+    assert bd["metadata"]["langfuse"]["enabled"] is True
     assert ex.patch_breakdown_langfuse(tmp_path) is False
 
 
-# ---- recorder fragment / collector final merge ----
+# ---- outcome.final over the close-out's recipe ----
 
 
-def test_final_fragment_keeps_collector_invocation(tmp_path):
-    """When a recorder fragment exists for final, collector invocation must be preserved."""
+def test_final_is_projected_from_the_recipe_the_close_out_settled(tmp_path):
+    """``outcome.final`` reports the recipe the close recorded, not a state re-read.
+
+    The export used to rebuild the headline from ``current_best`` and recover
+    the launch by trying candidate run directories. The close-out states the
+    terminal configuration instead, and this is the only source of it.
+    """
     import json
 
     sd = tmp_path
     (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "current_best": {"tput": 123.0, "extra_server_args": "", "extra_envs": {}},
-                "optimization_stack": [],
-                "cumulative_gain_validated": 0.0,
-                "framework": "sglang",
-            }
-        ),
+        json.dumps({"optimization_stack": [], "framework": "sglang"}),
         encoding="utf-8",
     )
     (sd / "manifest.json").write_text(
@@ -312,101 +272,41 @@ def test_final_fragment_keeps_collector_invocation(tmp_path):
     )
     parts = sd / "runtime" / "breakdown" / "parts"
     parts.mkdir(parents=True)
-    # Partial fragment with live scalar but no invocation.
-    (parts / "final__coordinator.json").write_text(
+    (parts / "close__coordinator.json").write_text(
         json.dumps(
             {
                 "kind": "singleton",
-                "section": "final",
+                "section": "close",
                 "producer": "coordinator",
                 "seq": 1,
                 "ts": "2026-01-01T00:00:00Z",
-                "payload": {"throughput_tok_s_per_gpu": 123.0, "extra_server_args": "", "extra_envs": {}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    bd = ex.build(sd)
-    final_sec = bd.get("final", {})
-    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "fragment scalar lost"
-    invocation = final_sec.get("invocation")
-    assert invocation is not None, "collector invocation must not be silenced by fragment"
-
-
-def test_final_source_layers_populated_from_stack(tmp_path):
-    """source_layers in final.invocation reflects source_patch entries."""
-    import json
-
-    sd = tmp_path
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "current_best": {
-                    "tput": 200.0,
-                    "extra_server_args": "",
-                    "extra_envs": {},
-                    "optimization_stack": [
-                        {
-                            "action": "integrate_patch",
-                            "scope": "source_patch",
-                            "variant_name": "patch-abc",
-                            "source_snapshot": "/session/opt/src/abc",
-                            "framework_root": "/opt/sglang",
-                            "base_sha": "cafebabe",
-                        }
-                    ],
+                "payload": {
+                    "status": "succeeded",
+                    "final_recipe": {
+                        "throughput": 123.0,
+                        "action_path": ["baseline"],
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    },
                 },
-                "optimization_stack": [
-                    {
-                        "action": "integrate_patch",
-                        "scope": "source_patch",
-                        "variant_name": "patch-abc",
-                        "source_snapshot": "/session/opt/src/abc",
-                        "source_snapshot_complete": True,
-                        "framework_root": "/opt/sglang",
-                        "base_sha": "cafebabe",
-                    }
-                ],
-                "cumulative_gain_validated": 0.0,
-                "framework": "sglang",
             }
         ),
         encoding="utf-8",
     )
-    (sd / "manifest.json").write_text(
-        json.dumps({"schema_version": 3, "session_id": "s", "model_name": "m", "framework": "sglang"}),
-        encoding="utf-8",
-    )
 
     bd = ex.build(sd)
-    invocation = bd.get("final", {}).get("invocation", {})
-    layers = invocation.get("source_layers", [])
-    assert len(layers) == 1, f"expected 1 source_layer, got {layers}"
-    assert layers[0]["snapshot_dir"] == "/session/opt/src/abc"
-    assert layers[0]["reproducible"] is True
+    final_sec = bd.get("outcome", {}).get("final", {})
+    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "recorded recipe lost"
+    assert final_sec.get("action_path") == ["baseline"]
+    invocation = final_sec.get("invocation")
+    assert invocation is not None, "the final block must always carry an invocation"
+    # A session that never settled a validation has no recorded launch, and the
+    # block says so rather than leaving the reader to guess at an empty string.
+    assert invocation["framework_args_source"] == "unrecorded"
 
 
-# ---- telemetry.orchestration_context ----
-
-
-def test_orchestration_context_reports_the_tick_count(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
-
-    section = collect_telemetry(tmp_path, {"tick": 32}, [])["orchestration_context"]
-    assert section == {"tick_count": 32}
-
-
-def test_orchestration_context_is_zero_without_state(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.collectors.telemetry import collect_telemetry
-
-    warnings: list[str] = []
-    assert collect_telemetry(tmp_path, {}, warnings)["orchestration_context"] == {"tick_count": 0}
-    assert warnings == []
-
-
-def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
-    """A recorder fragment replaces its whole section, so it must not own workload."""
+def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
+    """An unset knob must stay unset; a recorder snapshot used to coerce it to 0."""
     from types import SimpleNamespace
 
     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -424,15 +324,38 @@ def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
         SimpleNamespace(framework="sglang", model_name="qwen3-8b", model_path="", session_id="s"),
     )
 
-    workload = ex.build(tmp_path)["workload"]
-    assert workload["framework_name"] == "sglang"
-    assert workload["framework_version"] == "0.4.1"
-    assert workload["conc"] == 64
-    # Unset knobs stay None; a recorder fragment used to coerce them to 0.
-    assert workload["tp"] is None
+    task_config = ex.build(tmp_path)["metadata"]["task_config"]
+    assert task_config["framework_name"] == "sglang"
+    assert task_config["framework_version"] == "0.4.1"
+    assert task_config["conc"] == 64
+    assert task_config["tp"] is None
 
 
-# ---- session_meta duration ----
+def _snapshot_session_row(tmp_path, **state_attrs) -> dict:
+    """Snapshot a live state and read back the ``session`` fragment it wrote."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+
+    instrument.snapshot_state_sections(tmp_path, SimpleNamespace(session_id="s", **state_attrs))
+    return assemble_parts(tmp_path, warnings=[])["session"]
+
+
+def test_a_budget_nobody_set_is_left_off_the_snapshot(tmp_path):
+    """Writing it as 0 is what forced the export to guess, and guess wrong."""
+    row = _snapshot_session_row(tmp_path)
+    assert "max_minutes" not in row
+    assert "tick_count" not in row
+
+
+def test_a_session_that_really_ran_zero_ticks_records_the_zero(tmp_path):
+    row = _snapshot_session_row(tmp_path, max_minutes=0, tick=0)
+    assert row["max_minutes"] == 0
+    assert row["tick_count"] == 0
+
+
+# ---- session elapsed time ----
 
 
 def _freeze_now(monkeypatch, instant: datetime) -> None:
@@ -446,66 +369,24 @@ def _freeze_now(monkeypatch, instant: datetime) -> None:
     monkeypatch.setattr(sessions, "datetime", _FrozenDatetime)
 
 
-def test_session_duration_is_measured_from_the_session_timestamps():
-    """The live recorder's ``session`` snapshot carries no ``elapsed_minutes``."""
-    meta = collect_session_meta(
-        {"code_revision": "abc1234"},
-        {
-            "start_ts": "2026-08-08T00:37:27+00:00",
-            "ended_at_utc": "2026-08-08T02:55:27+00:00",
-        },
-        [],
-    )
-    assert meta["session_duration_seconds"] == 8280
-
-
-def test_a_running_session_is_measured_up_to_now():
-    started = datetime.now(timezone.utc) - timedelta(minutes=10)
-    meta = collect_session_meta({}, {"start_ts": started.isoformat()}, [])
-    assert 590 <= meta["session_duration_seconds"] <= 620
-
-
-def test_a_session_that_has_not_stopped_yet_is_still_measured_up_to_now(monkeypatch):
+def test_a_session_that_has_not_stopped_yet_is_still_measured_up_to_now(tmp_path, monkeypatch):
     _freeze_now(monkeypatch, datetime(2026, 8, 8, 1, 37, 27, tzinfo=timezone.utc))
-    meta = collect_session_meta(
-        {},
-        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": ""},
-        [],
-    )
-    assert meta["session_duration_seconds"] == 3600
+    section = sessions.collect_session(tmp_path, {"session_id": "s", "start_ts": "2026-08-08T00:37:27+00:00"}, {}, [])
+    assert section["elapsed_minutes"] == 60.0
 
 
-def test_a_stopped_session_without_an_end_timestamp_is_not_measured_up_to_now(monkeypatch):
-    """The live recorder's ``session`` snapshot of a crashed run has no end."""
-    _freeze_now(monkeypatch, datetime(2026, 10, 20, 0, 37, 27, tzinfo=timezone.utc))
-    meta = collect_session_meta(
-        {},
-        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": "coordinator_exception"},
-        [],
-    )
-    assert meta["session_duration_seconds"] == 0
-
-
-def test_a_stopped_session_measures_the_same_however_late_it_is_exported(monkeypatch):
-    section = {
+def test_a_stopped_session_measures_the_same_however_late_it_is_exported(tmp_path, monkeypatch):
+    state = {
+        "session_id": "s",
         "start_ts": "2026-08-08T00:37:27+00:00",
         "stop_reason": "time_exhausted",
-        "elapsed_minutes": 138.0,
+        "stop_ts": "2026-08-08T02:55:27+00:00",
     }
     _freeze_now(monkeypatch, datetime(2026, 8, 8, 3, 0, 0, tzinfo=timezone.utc))
-    first = collect_session_meta({}, section, [])["session_duration_seconds"]
+    first = sessions.collect_session(tmp_path, state, {}, [])["elapsed_minutes"]
     _freeze_now(monkeypatch, datetime(2026, 10, 20, 3, 0, 0, tzinfo=timezone.utc))
-    second = collect_session_meta({}, section, [])["session_duration_seconds"]
-    assert first == second == 8280
-
-
-def test_elapsed_minutes_still_answers_when_no_timestamp_does():
-    meta = collect_session_meta({}, {"elapsed_minutes": 12.5}, [])
-    assert meta["session_duration_seconds"] == 750
-
-
-def test_a_session_with_nothing_to_measure_reports_zero():
-    assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0
+    second = sessions.collect_session(tmp_path, state, {}, [])["elapsed_minutes"]
+    assert first == second == 138.0
 
 
 def _stopped_session(session_dir: Path, *, ran_for: timedelta, stopped_ago: timedelta = timedelta(0)):
@@ -528,9 +409,9 @@ def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
     state = _stopped_session(tmp_path, ran_for=timedelta(hours=2), stopped_ago=timedelta(days=3))
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["start_ts"] == state.start_ts
-    assert bd["session"]["ended_at_utc"] == iso_z(state.stop_ts)
-    assert bd["session_meta"]["session_duration_seconds"] == 7200
+    assert bd["metadata"]["session"]["start_ts"] == state.start_ts
+    assert bd["metadata"]["session"]["ended_at_utc"] == iso_z(state.stop_ts)
+    assert bd["metadata"]["session"]["elapsed_minutes"] == pytest.approx(120.0, abs=0.02)
 
 
 def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_path):
@@ -538,9 +419,7 @@ def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_p
     _stopped_session(tmp_path, ran_for=timedelta(hours=2))
 
     bd = ex.build(tmp_path)
-    elapsed_minutes = bd["session"]["elapsed_minutes"]
-    assert elapsed_minutes == pytest.approx(bd["session_meta"]["session_duration_seconds"] / 60.0, abs=0.02)
-    assert 119.0 <= elapsed_minutes <= 121.0
+    assert 119.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 121.0
 
 
 def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
@@ -549,9 +428,9 @@ def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_p
     _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["image"] == "registry.example/hyperloom:test"
-    assert bd["session_meta"]["image"] == "registry.example/hyperloom:test"
-    assert bd["session"]["session_dir"] == str(tmp_path.resolve())
+    assert bd["metadata"]["session"]["image"] == "registry.example/hyperloom:test"
+    assert bd["metadata"]["session"]["image_id"] == "hyperloom:test"
+    assert bd["metadata"]["session"]["session_dir"] == str(tmp_path.resolve())
 
 
 def test_a_clean_stop_resume_keeps_measuring_from_the_original_start(tmp_path):
@@ -578,9 +457,9 @@ def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tm
     _stopped_session(tmp_path, ran_for=timedelta(minutes=30))
 
     bd = ex.build(tmp_path)
-    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+    assert 29.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 31.0
     # The first launch is still on record, so the gap before the resume is visible.
-    assert bd["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
+    assert bd["metadata"]["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
 
 
 def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close(tmp_path):
@@ -600,9 +479,9 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["stop_reason"] == ""
-    assert bd["session"]["ended_at_utc"] == ""
-    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+    assert bd["outcome"]["stop_reason"] == ""
+    assert bd["metadata"]["session"]["ended_at_utc"] == ""
+    assert 29.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 31.0
 
 
 def test_a_session_resumed_after_a_clean_stop_is_still_reported_as_running(tmp_path):
@@ -756,13 +635,23 @@ def test_a_section_with_no_fragment_is_returned_untouched():
 
 
 def test_an_unrecorded_budget_does_not_erase_the_collected_one():
-    """The snapshot writes every key on every save, so an unset int arrives as 0."""
+    """An unset int is left off the snapshot, so the collected one stands."""
     merged = ex._merge_session(
-        {"max_minutes": 0, "tick_count": 0},
+        {"session_id": "sess-1178"},
         {"max_minutes": 360, "tick_count": 12},
     )
     assert merged["max_minutes"] == 360
     assert merged["tick_count"] == 12
+
+
+def test_a_recorded_zero_is_a_fact_and_wins():
+    """A session really can run zero ticks, and only the recorder saw it."""
+    merged = ex._merge_session(
+        {"max_minutes": 0, "tick_count": 0},
+        {"max_minutes": 360, "tick_count": 12},
+    )
+    assert merged["max_minutes"] == 0
+    assert merged["tick_count"] == 0
 
 
 def test_the_live_phase_stays_in_the_section_even_when_blank():
@@ -786,27 +675,17 @@ def test_the_merged_section_measures_its_own_elapsed_time():
 # ---- every collector is isolated ----
 
 
-def test_a_failing_collector_does_not_abort_the_build(tmp_path, monkeypatch):
-    """source_files was the one collector called outside the isolation wrapper."""
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+def test_collector_arguments_are_evaluated_inside_the_isolation():
+    """A collector whose arguments raise is caught like one whose body does.
 
-    def _boom(*_a, **_kw):
-        raise OSError("filesystem gone")
+    The arguments are built by the zero-argument closure the wrapper calls, so
+    a section that drifted to an unexpected shape cannot abort the build while
+    another collector's call is being assembled.
+    """
+    warnings: list[str] = []
+    drifted = "not-a-mapping"
 
-    monkeypatch.setattr(ex.collectors, "collect_source_files", _boom)
+    out = ex._safe_collect("probe", lambda: {"seen": drifted.get("key")}, warnings, default={})
 
-    out = ex.build(tmp_path)
-
-    assert out["source_files"] == {}
-    assert any("collector:source_files failed" in w for w in out["warnings"])
-
-
-def test_collector_arguments_are_evaluated_inside_the_isolation(tmp_path, monkeypatch):
-    """A drifted section must not raise while building a collector's arguments."""
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(ex.collectors, "collect_baseline", lambda *_a, **_kw: "not-a-mapping")
-
-    out = ex.build(tmp_path)
-
-    assert out["source_files"] == {}
-    assert any("collector:source_files failed" in w for w in out["warnings"])
+    assert out == {}
+    assert any("collector:probe failed: AttributeError" in w for w in warnings)

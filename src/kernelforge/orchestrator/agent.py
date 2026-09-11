@@ -598,7 +598,18 @@ Make your change(s) now.
             allow_dirty_baseline=True,
             ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
-            hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
+            # Built only for a provider that runs them. A backend which ignores
+            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
+            # attaching one anyway makes this call site read as protection the
+            # session does not have -- the confusion the outer gate below
+            # exists to answer. Keyed on the backend that was resolved rather
+            # than the one that was asked for, so a provider fallback carries
+            # the decision with it.
+            hooks=(
+                gate.make_agent_hooks(stop_check=gate_stop_check)
+                if gate is not None and backend.capabilities.stop_hooks
+                else None
+            ),
             mcp_servers=pr_mcp_servers,
             progress_log=progress_log,
         )

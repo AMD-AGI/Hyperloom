@@ -38,6 +38,7 @@ from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +140,15 @@ def run_rewrite(
     rewrite_kb_enabled: bool = True,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
+    # The nested forge-loop runs from the workspace and resolves this path against its own working directory, so a
+    # relative one would send the two processes to different directories for the artifacts they share.
+    experiments_dir = str(Path(experiments_dir).resolve())
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
+    # Only this process's own stages feed the shared ledger: the nested forge-loop publishes its own share to the same
+    # file, so folding the combined total in here would count that share twice.
+    usage_ledger = UsageLedgerFile(experiments_dir)
+    usage = UsageAccumulator(on_update=usage_ledger.publish)
+    usage_ledger.publish(usage.totals())
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
@@ -163,6 +172,20 @@ def run_rewrite(
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
 
+    def _total_usage(optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
+        """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
+
+        A forge-loop that was cut off or killed reports a ledger that stops at its last checkpoint, so the totals are
+        published as partial rather than as a complete provider-priced answer.
+        """
+        opt_result = optimize_result or {}
+        nested = opt_result.get("llm_usage")
+        return combine_usage_totals(
+            usage.totals(),
+            nested if isinstance(nested, dict) else None,
+            incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
+        )
+
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
     def _setup_failed(reason: str, failure_class: str) -> dict:
@@ -173,6 +196,7 @@ def run_rewrite(
             port_attempts=0,
             source_ms=None,
             optimize_result={},
+            llm_usage=_total_usage(),
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
@@ -253,6 +277,7 @@ def run_rewrite(
                 deadline_unix=search_stop_unix,
                 invocation_spec_file=invocation_spec_file,
                 initial_preflight=preflight,
+                usage=usage,
             )
         )
         if not prepared.ok or prepared.preflight is None:
@@ -342,6 +367,7 @@ def run_rewrite(
                 permission_mode=permission_mode,
                 stop_at_unix=search_stop_unix,
                 pre_task_context=kb_read.reference_context,
+                usage=usage,
             )
         )
     if not port.ok:
@@ -352,6 +378,7 @@ def run_rewrite(
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result={},
+            llm_usage=_total_usage(),
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -433,6 +460,7 @@ def run_rewrite(
         optimize_result={"best_ms": flydsl_baseline_ms},
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
@@ -490,7 +518,9 @@ def run_rewrite(
         )
 
     opt: dict = {}
+    optimize_ran = False
     if time.time() < search_stop_unix:
+        optimize_ran = True
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
         opt = run_optimize(
             spec,
@@ -509,6 +539,12 @@ def run_rewrite(
     else:
         print(
             "  [forge-rewrite] 20-minute finalization reserve reached after PORT; skipping forge-loop",
+            flush=True,
+        )
+    if optimize_ran and not opt.get("llm_usage_complete"):
+        print(
+            "  [forge-rewrite] WARNING: forge-loop did not report a final token ledger; the reported llm_usage covers "
+            "only what it checkpointed and is published as partial",
             flush=True,
         )
 
@@ -552,6 +588,7 @@ def run_rewrite(
         deadline_unix=deadline_unix,
         import_modules=applyback_import_modules,
         max_attempts=max_applyback_attempts,
+        usage=usage,
     )
     if applyback.ok:
         print(
@@ -571,6 +608,7 @@ def run_rewrite(
         optimize_result=opt,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
+        llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,

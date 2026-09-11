@@ -106,7 +106,6 @@ def _ta_result(**overrides: Any) -> dict[str, Any]:
 
 
 def test_begin_puts_the_event_on_the_timeline(tmp_path: Path) -> None:
-    """A session killed mid-roofline has to be readable as "this was running"."""
     recorder = _recorder(reason="prelude_initial")
     recorder.begin(max_profile_attempts=3)
 
@@ -120,7 +119,6 @@ def test_begin_puts_the_event_on_the_timeline(tmp_path: Path) -> None:
 
 
 def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
-    """The retry budget distinguishes exhausting it from stopping early."""
     recorder = _recorder(reason="prelude_initial")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_failed(phase="profile", message="never booted")
@@ -131,7 +129,6 @@ def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
-    """The GEMM shape-capture path reuses this executor but measures no arm."""
     recorder = _recorder(task_id="t-capture-1", task_kind="gemm_shape_capture", framework="vllm")
     recorder.begin(max_profile_attempts=1)
     recorder.finish_failed(phase="profile", message="stopped")
@@ -142,7 +139,6 @@ def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) ->
 
 
 def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) -> None:
-    """A roofline task may carry no reason, and current_best remains its default."""
     recorder = _recorder(task_id="t-2", task_kind="roofline")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_failed(phase="profile", message="stopped")
@@ -153,7 +149,6 @@ def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) 
 
 
 def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
-    """The retry is internal to the action, so it must not read as a second one."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(
@@ -268,7 +263,6 @@ def _succeed(recorder, *, snapshot_id: int = 1) -> None:
 
 
 def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Path) -> None:
-    """A phase can dispatch roofline more than once, and the task id separates them."""
     for index, reason in enumerate(("kernel_followup", "close_post_opt")):
         recorder = _recorder(task_id=f"t-{index}", reason=reason, phase="sweep", macro_cycle=2)
         recorder.begin(max_profile_attempts=3)
@@ -285,7 +279,6 @@ def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Pat
 
 
 def test_a_different_phase_or_cycle_is_a_different_event(tmp_path: Path) -> None:
-    """What separates two events is the phase and the cycle, nothing else."""
     for phase, cycle in (("prelude", 0), ("sweep", 1), ("sweep", 2)):
         recorder = _recorder(task_id=f"t-{phase}-{cycle}", phase=phase, macro_cycle=cycle)
         recorder.begin(max_profile_attempts=3)
@@ -299,7 +292,6 @@ def test_a_different_phase_or_cycle_is_a_different_event(tmp_path: Path) -> None
 
 
 def test_one_failed_action_is_not_hidden_by_a_later_success(tmp_path: Path) -> None:
-    """The event takes the worst status of its actions, not the last one."""
     first = _recorder(task_id="t-0", phase="sweep", macro_cycle=2)
     first.begin(max_profile_attempts=3)
     first.finish_failed(phase="profile", message="server never booted")
@@ -313,7 +305,6 @@ def test_one_failed_action_is_not_hidden_by_a_later_success(tmp_path: Path) -> N
 
 
 def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
-    """Zero routable candidates is a completed roofline that cannot advance work."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
@@ -329,8 +320,168 @@ def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     assert event["ext"]["actions"][0]["outcome"]["kernel_attribution_degraded"] is True
 
 
+def _write_sidecar(session_dir: Path, **overrides: Any) -> str:
+    """Write a kernel-roofline sidecar the way the analyzer subprocess does."""
+    import json
+
+    payload: dict[str, Any] = {
+        "schema_version": "1",
+        "source": "tracelens_analysis",
+        "trace_input": "/w/traces/a.gz",
+        "trace_input_type": "file",
+        "analysis_md_path": "/w/reports/analysis.md",
+        "kernel_candidates_path": "/w/reports/candidates.json",
+        "kernels": [
+            {
+                "kernel_id": "k-cheap",
+                "name": "rms_norm",
+                "gpu_pct": 4.0,
+                "duration_us": 12.5,
+                "call_count": 900,
+                "kernel_category": "norm",
+                "bound_type": "memory",
+                "arithmetic_intensity": 0.5,
+                "efficiency_percent": 3.0,
+                "bandwidth_utilization_pct": 41.0,
+                "recommended_actions": ["fuse"],
+                "roofline_source": "analytical",
+            },
+            {
+                "kernel_id": "k-hot",
+                "name": "gemm",
+                "gpu_pct": 61.0,
+                "duration_us": 900.0,
+                "call_count": 120,
+                "kernel_category": "gemm",
+                "bound_type": "compute",
+                "arithmetic_intensity": 180.0,
+                "efficiency_percent": 78.0,
+                "compute_utilization_pct": 77.5,
+                "reusable_native_kernel": True,
+                "roofline_source": "analytical",
+            },
+        ],
+    }
+    payload.update(overrides)
+    path = session_dir / "kernel_roofline.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_the_action_carries_the_per_kernel_roofline_table(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+        trace_path="/w/traces/a.gz",
+    )
+
+    table = _actions(tmp_path)[0]["kernel_roofline"]
+    assert table["source"] == "tracelens_analysis"
+    assert table["kernel_count"] == 2
+    assert table["truncated"] is False
+    # Ranked by GPU share, so the reader meets the expensive kernel first.
+    assert [row["kernel_id"] for row in table["kernels"]] == ["k-hot", "k-cheap"]
+    hot, cheap = table["kernels"]
+    assert hot["bound_type"] == "compute"
+    assert hot["efficiency_percent"] == 78.0
+    assert hot["arithmetic_intensity"] == 180.0
+    assert hot["duration_us"] == 900.0
+    assert hot["call_count"] == 120
+    assert hot["reusable_native_kernel"] is True
+    # The cheap kernel is exactly what a top-N-by-cost cut would have dropped
+    # and exactly what a reader is hunting: 4% of the GPU at 3% efficiency.
+    assert cheap["bound_type"] == "memory"
+    assert cheap["efficiency_percent"] == 3.0
+    assert cheap["recommended_actions"] == ["fuse"]
+
+
+def test_a_missing_sidecar_does_not_fail_a_run_that_succeeded(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": str(tmp_path / "absent.json")},
+        trace_path="/w/traces/a.gz",
+    )
+
+    event = _roofline_events(tmp_path)[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"]["actions"][0]["kernel_roofline"] is None
+
+
+def test_the_outcome_carries_the_snapshot_and_not_only_its_id(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=7,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 7},
+        trace_path="/w/traces/a.gz",
+        snapshot={
+            "snapshot_id": 7,
+            "ts": "2026-09-06T10:00:00Z",
+            "framework": "sglang",
+            "achieved_tok_per_sec": 1200.0,
+            "theoretical_peak_tok_per_sec": 4000.0,
+            "roofline_mem_ceiling_tok_per_sec": 4000.0,
+            "roofline_cmp_ceiling_tok_per_sec": 9000.0,
+            "roofline_bound_kind": "memory",
+            "within_roofline_pct": 30.0,
+            "gap_to_roofline_pct": 70.0,
+            "compute_pct": 55.0,
+            "idle_pct": 30.0,
+            "comm_pct": 15.0,
+            "top_bottleneck": "memory",
+            "top_kernel": {"name": "gemm", "gpu_pct": 61.0, "efficiency_pct": 78.0, "bound_type": "compute"},
+            "roofline_provenance": {"formula": "decode_mem"},
+            "perfmodel_breakdown": {"bound_kind": "memory", "ops": [{"name": "attn", "time_s": 0.001}]},
+        },
+    )
+
+    snapshot = _actions(tmp_path)[0]["outcome"]["snapshot"]
+    assert snapshot["snapshot_id"] == 7
+    assert snapshot["achieved_tok_per_sec"] == 1200.0
+    assert snapshot["theoretical_peak_tok_per_sec"] == 4000.0
+    assert snapshot["roofline_bound_kind"] == "memory"
+    assert snapshot["gap_to_roofline_pct"] == 70.0
+    assert snapshot["top_kernel"]["bound_type"] == "compute"
+    assert snapshot["roofline_provenance"] == {"formula": "decode_mem"}
+    assert snapshot["perfmodel_breakdown"]["op_count"] == 1
+
+
+def test_an_analysis_with_no_snapshot_records_none_rather_than_an_empty_one(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    _succeed(recorder)
+
+    assert _actions(tmp_path)[0]["outcome"]["snapshot"] is None
+
+
+def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+        trace_path="/w/traces/a.gz",
+    )
+    recorder.finish_crashed(RuntimeError("late"))
+
+    table = _actions(tmp_path)[0]["kernel_roofline"]
+    assert [row["kernel_id"] for row in table["kernels"]] == ["k-hot", "k-cheap"]
+    assert table["kernel_count"] == 2
+
+
 def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
-    """The KERNEL entry's re-profile belongs to the kernel event, not beside it."""
     from hyperloom.inference_optimizer.breakdown.recorder.assembler import roofline_event_parts
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import assemble_roofline_action
@@ -416,7 +567,6 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
 
 
 def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
-    """A trace both consumers can route can still carry a false decode answer."""
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
         trace_dir=Path("/w"),
@@ -455,7 +605,6 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
 
 
 def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
-    """No graph launches means no denominator, which is not a failed check."""
     out = _build_trace_validate(
         {"checks": []},
         trace_dir=Path("/w"),
@@ -477,7 +626,6 @@ def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
 
 
 def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
-    """One certified rank is not a claim about the other seven."""
     out = _build_trace_validate(
         {"checks": []},
         trace_dir=Path("/w"),
@@ -495,7 +643,6 @@ def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
 
 
 def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
-    """A probe that could not run must not leave an empty verdict looking clean."""
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
         trace_dir=Path("/w"),
@@ -509,7 +656,6 @@ def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
 
 
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
-    """Each attempt keeps the verdict computed against the trace it produced."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(
@@ -560,7 +706,6 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
 
 
 def test_crash_closes_the_event(tmp_path: Path) -> None:
-    """An executor that raised must not read as a session killed mid-roofline."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_crashed(RuntimeError("record_trace_analyze blew up"))
@@ -574,7 +719,6 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
 
 
 def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Path) -> None:
-    """The profile succeeded and was adopted, so it is not what failed."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(
@@ -607,7 +751,6 @@ def test_crash_does_not_overwrite_a_closed_action(tmp_path: Path) -> None:
 
 
 def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
-    """A verbose tool must not be able to multiply the SBD payload."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     bloated = _ta_result()
@@ -624,13 +767,11 @@ def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
 
 
 def test_no_sink_records_nothing(tmp_path: Path) -> None:
-    """A caller with no event to write into declines rather than guessing one."""
     assert make_roofline_recorder(None, reason="kernel_followup", framework="sglang") is None
     assert not (tmp_path / "reports").exists()
 
 
 def test_recorder_write_failure_does_not_raise(tmp_path: Path, monkeypatch) -> None:
-    """Observability must never change roofline behavior."""
     recorder = _recorder(reason="kernel_followup")
 
     def _boom(*_args: Any, **_kwargs: Any) -> None:

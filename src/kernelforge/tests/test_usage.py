@@ -4,7 +4,11 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-from kernelforge.tracker import ExperimentTracker, UsageAccumulator
+from kernelforge.tracker import (
+    ExperimentTracker,
+    UsageAccumulator,
+    combine_usage_totals,
+)
 
 
 # Minimal stand-ins for the claude-agent-sdk message types.
@@ -106,6 +110,97 @@ def test_accumulator_rejects_boolean_provider_cost():
     assert totals["total_cost_usd"] == 0.0
     assert totals["cost_available"] is False
     assert totals["cost_source"] == "unavailable"
+
+
+def test_combine_usage_totals_preserves_tokens_calls_and_provider_cost():
+    combined = combine_usage_totals(
+        {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 10,
+            "cache_read_input_tokens": 5,
+            "total_cost_usd": 0.25,
+            "cost_available": True,
+            "cost_source": "provider",
+            "calls": 1,
+        },
+        {
+            "input_tokens": 200,
+            "output_tokens": 40,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 50,
+            "total_cost_usd": 0.75,
+            "cost_available": True,
+            "cost_source": "provider",
+            "calls": 2,
+        },
+    )
+
+    assert combined == {
+        "input_tokens": 300,
+        "output_tokens": 60,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 55,
+        "total_cost_usd": 1.0,
+        "cost_available": True,
+        "cost_source": "provider",
+        "calls": 3,
+    }
+
+
+def test_combine_usage_totals_marks_mixed_provider_cost_partial():
+    combined = combine_usage_totals(
+        {
+            "input_tokens": 10,
+            "total_cost_usd": 0.1,
+            "cost_available": True,
+            "cost_source": "provider",
+            "calls": 1,
+        },
+        {
+            "output_tokens": 5,
+            "total_cost_usd": 0.0,
+            "cost_available": False,
+            "cost_source": "unavailable",
+            "calls": 1,
+        },
+    )
+
+    assert combined["calls"] == 2
+    assert combined["total_cost_usd"] == 0.1
+    assert combined["cost_available"] is False
+    assert combined["cost_source"] == "partial"
+
+
+def test_combine_usage_totals_degrades_to_partial_when_a_ledger_is_missing():
+    """A run that could not recover a contributor's spend must not be billed as a complete provider total."""
+    combined = combine_usage_totals(
+        {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_cost_usd": 0.1,
+            "cost_available": True,
+            "cost_source": "provider",
+            "calls": 1,
+        },
+        incomplete=True,
+    )
+
+    assert combined["input_tokens"] == 10
+    assert combined["calls"] == 1
+    assert combined["total_cost_usd"] == 0.1
+    assert combined["cost_available"] is False
+    assert combined["cost_source"] == "partial"
+
+
+def test_combine_usage_totals_reports_unavailable_when_nothing_was_priced():
+    combined = combine_usage_totals(
+        {"input_tokens": 10, "calls": 1},
+        incomplete=True,
+    )
+
+    assert combined["cost_available"] is False
+    assert combined["cost_source"] == "unavailable"
 
 
 def test_set_llm_usage_persists_to_experiment():

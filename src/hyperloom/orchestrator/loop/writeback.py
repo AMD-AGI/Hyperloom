@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
     observed_sglang_server_identity_from_log,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -47,7 +48,7 @@ from ..state.optimization_journal import (
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
@@ -99,6 +100,42 @@ from .coordinator import (
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Stable ``result_type`` codes for the reasons the remote KB Store returns.
+# An exact lookup, not substring matching: ``agentx`` the skip reason and
+# ``agentx`` inside an exception class name are different things.
+_REMOTE_RESULT_TYPES: dict[str, str] = {
+    "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
+    "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
+    "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
+    "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
+    "invalid_recipe_scope": _close_out.RESULT_INVALID_SCOPE,
+    "empty_replay_material": _close_out.RESULT_EMPTY_REPLAY_MATERIAL,
+    "not_better_than_champion": _close_out.RESULT_NOT_BETTER,
+    "champion_not_promoted": _close_out.RESULT_CHAMPION_NOT_PROMOTED,
+}
+
+# The one exception class meaning the store rejected the bundle, rather than
+# that we never reached the store at all.
+_REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
+
+
+def _remote_result_type(status: str, reason: str) -> str:
+    """The ``close_out.RESULT_*`` code for a remote KB Store write result.
+
+    ``status`` is consulted only when the store's own reason token is
+    unrecognized.
+    """
+    known = _REMOTE_RESULT_TYPES.get(str(reason or "").strip())
+    if known:
+        return known
+    verdict = str(status or "").strip().lower()
+    if verdict == "written":
+        return _close_out.RESULT_WRITTEN
+    if verdict in {"skipped", "disabled"}:
+        return _close_out.RESULT_SKIPPED_OTHER
+    return _close_out.RESULT_TRANSPORT_FAILED
+
 
 # Upstream-PR KEEPs are stacked under the ``framework`` attribution family
 # label rather than under their task kind, because that label is what
@@ -270,6 +307,132 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
         if val is not None and val != 0.0:
             return val
     return None
+
+
+#: Explore outcomes that are not an attempt at anything: a variant skipped as a
+#: duplicate was never measured, so no measurement would back its funnel row.
+_NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
+
+
+def _record_config_attempts(
+    coord: Any,
+    *,
+    task: Any,
+    per_variant: list[dict[str, Any]],
+    result_dict: Mapping[str, Any],
+) -> None:
+    """Record the configuration arm's measured attempts on the framework event.
+
+    The executor has no recorder to reach; this is the first coordinator-side
+    seam that sees the full per-variant outcome. The outcome is recorded
+    verbatim, unlike the journal beside it, which collapses ``KEEP_UNSTABLE``
+    and ``KILLED_OVERTIME`` into a plain revert.
+    """
+    getter = getattr(coord, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
+
+    task_id = str(getattr(task, "task_id", "") or "")
+    params = getattr(task, "params", None) or {}
+    round_id = str(result_dict.get("round_id") or "")
+    recorded = 0
+    for row in per_variant:
+        if not isinstance(row, dict):
+            continue
+        outcome = str(row.get("outcome") or "")
+        if outcome in _NON_ATTEMPT_OUTCOMES:
+            continue
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
+        fingerprint = str(row.get("fingerprint") or "")
+        # The fingerprint identifies the variant within the round and the round
+        # within the task, so the three together identify the attempt.
+        attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
+        if not attempt_id:
+            continue
+        try:
+            recorder.record_attempt(
+                attempt_id,
+                arm=ARM_CONFIG,
+                round_id=round_id,
+                task_id=task_id,
+                proposal_ref=str(params.get("proposal_msg_id") or ""),
+                provenance=str(row.get("provenance") or ""),
+                outcome=outcome,
+                reason=str(row.get("reason") or ""),
+                stage=str(row.get("stage") or ""),
+                fingerprint=fingerprint,
+                # The fingerprint is the join key; the name is what a reader
+                # recognises the variant by.
+                variant_name=str(row.get("variant_name") or ""),
+                measurement={
+                    # Both ends of the pair: the anchor advances on every KEEP,
+                    # so a percentage without its denominator adds to nothing.
+                    "before_tput": metrics.get("base_tput"),
+                    "after_tput": metrics.get("tput"),
+                    "gain_pct": metrics.get("gain_pct"),
+                    "runtime_sec": metrics.get("runtime_sec"),
+                    "estimated_output_throughput": metrics.get("estimated_output_throughput"),
+                },
+                config_delta={
+                    "extra_server_args": variant.get("extra_server_args"),
+                    "extra_envs": variant.get("extra_envs"),
+                },
+                failure={
+                    "error_class": str(row.get("error_class") or ""),
+                    "error_excerpt": str(row.get("error_excerpt") or ""),
+                },
+                artifacts={
+                    "workspace": str(row.get("workspace") or ""),
+                    "server_log_path": str(row.get("server_log_path") or ""),
+                    "raw_result_path": str(row.get("raw_result_path") or ""),
+                },
+                decision=outcome,
+                adopted=outcome == "KEEP",
+                # Recorded rather than referenced: every KEEP advances the
+                # stack, so the session's current config is not what this
+                # variant was measured on top of.
+                measured_against=row.get("measured_against") or {},
+                # What stood behind the verdict. Absent when nothing ruled.
+                validation_basis=str(row.get("validation_basis") or ""),
+                # A pair is what makes a gain addable, so eligibility follows
+                # the pair being present rather than the outcome being a KEEP.
+                attribution_eligible=(
+                    outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
+                ),
+            )
+            for gate in row.get("gates") or []:
+                if not isinstance(gate, dict) or not str(gate.get("gate") or ""):
+                    continue
+                recorder.record_attempt_gate(
+                    attempt_id,
+                    str(gate.get("gate")),
+                    passed=gate.get("passed"),
+                    reason=str(gate.get("reason") or ""),
+                    observed=gate.get("observed"),
+                    threshold=gate.get("threshold"),
+                )
+        except Exception:  # noqa: BLE001 — observability cannot change write-back
+            log.debug("framework timeline: config attempt record failed", exc_info=True)
+        recorded += 1
+    proposal_ref = str(params.get("proposal_msg_id") or "")
+    if not (recorded and proposal_ref):
+        return
+    # Settled here rather than at materialization: a grid whose task dies before
+    # any variant runs has no attempt to stand behind an ``attempted`` reading,
+    # and is more honestly left unsettled.
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_ATTEMPTED,
+        STEP_ATTEMPTED,
+    )
+
+    try:
+        recorder.record_proposal_step(proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
+        recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
+    except Exception:  # noqa: BLE001 — observability cannot change write-back
+        log.debug("framework timeline: config proposal settle failed", exc_info=True)
 
 
 class WritebackCollaborator:
@@ -703,21 +866,25 @@ class WritebackCollaborator:
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
-            instrument.record_session_validation(
-                self.session_dir,
+            stack_event.record_validation(
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
                 baseline_tput=graded.reference,
                 validated_tput=graded.candidate,
                 validated_gain_pct=float(validated_gain),
-                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
                 source=source,
                 measurement_basis=measurement_basis,
                 graded_objective=graded.objective,
                 ts=ts,
+                ttft_mean_ms=measurement.get("ttft_mean_ms"),
+                e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                ttft_e2el_source=str(measurement.get("ttft_e2el_source") or ""),
+                server_launch_flags=str(measurement.get("resolved_server_launch_flags") or ""),
+                workspace=measurement.get("workspace"),
             )
         except Exception as exc:  # noqa: BLE001
-            log.debug("record_session_validation failed", exc_info=True)
+            log.debug("stack validation record failed", exc_info=True)
             # Losing this one costs the export its only independent check on
             # the ledger: with no promoted figure to compare against, the
             # session total falls back to the sum of the very steps it is
@@ -922,10 +1089,20 @@ class WritebackCollaborator:
         # against the round ledger by the caller that settles the round.
         if was_validation_pending:
             state.enablement.validation_pending = False
+            enablement_event.record_revalidation_outcome(
+                generation=int(state.enablement.revalidation_generation or 0),
+                promoted=False,
+                task_id=str(state.enablement.revalidation_task_id or ""),
+                accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
+                accuracy_floor=state.enablement.accuracy_floor,
+                error_class=str(incoming_kind or ""),
+                reason="revalidation eval failed",
+            )
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
             state.enablement.accuracy_floor = float(floor)
         if preserve_measured_trigger:
+            self._record_enablement_eval_trigger()
             log.info(
                 "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
                 "an eval-less baseline reported accuracy_unavailable and must not "
@@ -952,7 +1129,50 @@ class WritebackCollaborator:
         if evidence:
             state.enablement.baseline_eval_evidence = evidence[:4000]
             state.enablement.launch_log = evidence
-            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+        state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+        self._record_enablement_eval_trigger()
+
+    def _record_enablement_eval_trigger(self) -> None:
+        """Open the enablement lane's event on the eval failure that triggered it.
+
+        Recorded here rather than derived at export: ``origin`` is cleared when
+        the lane succeeds, so the fields it reads do not all survive the run.
+        Only the first trigger is kept, which is what stops an eval-less
+        re-baseline downgrading a measured trigger to an empty one.
+        """
+        state = self.shared_state
+        enablement_event.record_trigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode=str(state.enablement_mode or ""),
+            kind=str(state.enablement.baseline_eval_kind or ""),
+            evidence=str(state.enablement.baseline_eval_evidence or ""),
+            observed_accuracy=state.enablement.observed_accuracy,
+            accuracy_floor=state.enablement.accuracy_floor,
+            observed_task=state.enablement.observed_task,
+            observed_metric=state.enablement.observed_metric,
+            eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+            probe_config_path=state.enablement.probe_config_path,
+        )
+
+    async def _close_enablement_lane(self, *, outcome: str, reason: str) -> None:
+        """Close the enablement lane's event on the terminal it just reached.
+
+        ``outcome`` is one of the ``OUTCOME_*`` constants.
+        """
+        lane = self.shared_state.enablement
+        enablement_event.finish(
+            outcome=outcome,
+            reason=reason,
+            kept_patches=lane.kept_patches,
+            kept_artifacts=lane.kept_artifacts,
+            setup_commands=lane.setup_commands,
+            accepted_config=lane.accepted_config,
+            accepted_config_path=str(lane.accepted_config_path or ""),
+            active_runtime=lane.active_runtime,
+            attempt_runtimes=lane.attempt_runtimes,
+            framework_root=str(lane.framework_root or ""),
+            stall_streak=await self.rounds.consecutive_stalled(),
+        )
 
     async def _reopen_revalidation_window(self) -> None:
         """Leave an enablement revalidation window open for a round the run stopped.
@@ -999,12 +1219,23 @@ class WritebackCollaborator:
                 round saying anything about the baseline.
         """
         state = self.shared_state
+        generation = int(state.enablement.revalidation_generation or 0)
         if stopped_by_the_run:
             await self._reopen_revalidation_window()
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             await self._settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
+        # A window the run stopped measured nothing, so recording it as a failed
+        # revalidation would charge the lane for a clock.
+        enablement_event.record_revalidation_outcome(
+            generation=generation,
+            promoted=False,
+            task_id=str(task.task_id or ""),
+            accuracy_floor=state.enablement.accuracy_floor,
+            error_class="" if stopped_by_the_run else str(err_class or ""),
+            reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
+        )
         launch_log = _extract_enablement_launch_log(result_payload)
         if launch_log:
             state.enablement.launch_log = launch_log
@@ -1033,24 +1264,6 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        if task.kind in {"conc_sweep", "replay_warm_recipe", "integrate_patch"}:
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                result_payload.setdefault("workload", self._v4_workload())
-                instrument.record_action_operation(
-                    self.session_dir,
-                    action=task.kind,
-                    task_id=task.task_id,
-                    status="failed",
-                    decision="discarded",
-                    result=result_payload,
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("v4 action failure capture failed", exc_info=True)
         any_changed = False
         params = task.params or {}
         if task.kind == "explore" and bool(params.get("geak_fallback")):
@@ -1072,6 +1285,11 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
+                self._record_geak_rebench_conclusion(
+                    final_status="failed",
+                    final_error_class=str(geak_result.get("revalidation_error_class") or ""),
+                    final_error=str(geak_result.get("revalidation_error") or ""),
+                )
                 # ``geak_pending`` is a live-work slot, not a diagnostic
                 # archive.  Keeping a terminal failure here prevents the
                 # KERNEL -> SWEEP transition forever.  The settled verdict and
@@ -1101,24 +1319,9 @@ class WritebackCollaborator:
         )
         any_changed = True
         if task.kind == "conc_sweep":
-            self.shared_state.record_action_attempt(
-                action="conc_sweep",
-                task_id=task.task_id,
-                status=str(result_payload.get("status") or "failed"),
-                decision="discarded",
-                result=result_payload,
-                extras={
-                    "was_skipped": bool(result_payload.get("was_skipped", False)),
-                    "skip_reason": result_payload.get("skip_reason"),
-                    "budget_exhausted": bool(result_payload.get("budget_exhausted", False)),
-                    "total_budget_sec": result_payload.get("total_budget_sec"),
-                    "elapsed_sec": result_payload.get("elapsed_sec"),
-                    "best_speedup": ((result_payload.get("summary") or {}).get("best_speedup")),
-                    "best_conc": ((result_payload.get("summary") or {}).get("best_conc")),
-                    "successful_pairs": ((result_payload.get("summary") or {}).get("successful_pairs")),
-                    "report_path": result_payload.get("report_json_path"),
-                },
-            )
+            # No audit attempt here: ``record_action_attempt`` returns early for
+            # any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in.
+            # The conc_sweep event carries these facts instead.
             self.shared_state.record_conc_sweep(result_payload)
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
@@ -1252,6 +1455,16 @@ class WritebackCollaborator:
                     self.shared_state.enablement.launch_observation_path = str(
                         result_payload.get("boot_observation_path") or ""
                     )
+                    # Only the first trigger is kept, so a serial enablement does
+                    # not rewrite the reason the lane opened with the gap it is
+                    # now on.
+                    if not str(self.shared_state.enablement.origin or ""):
+                        enablement_event.record_trigger(
+                            origin=enablement_event.ORIGIN_BOOT,
+                            mode=str(self.shared_state.enablement_mode or ""),
+                            kind=str(err_class or ""),
+                            evidence=launch_log,
+                        )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -1323,6 +1536,7 @@ class WritebackCollaborator:
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
+            _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
             for vo in per_variant:
                 try:
                     self._record_fact_per_variant(
@@ -2152,6 +2366,9 @@ class WritebackCollaborator:
         attempts = int(getattr(state, "recipe_finalize_attempts", 0) or 0) + 1
         state.recipe_finalize_attempts = attempts
         state.recipe_finalize_status = "pending"
+        # Opened before the write is tried, so an attempt that never settles
+        # reads as unsettled rather than as a refusal the store never issued.
+        _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — publication can still proceed
@@ -2173,16 +2390,66 @@ class WritebackCollaborator:
                 "source": source,
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+                "error_class": type(exc).__name__,
             }
 
         raw_status = str(outcome.get("status") or "error")
         state.recipe_finalize_status = "failed" if raw_status == "error" else raw_status
         state.recipe_finalize_outcome = outcome
+        self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — T4 can still retry in-process
             log.exception("Recipe finalize outcome save failed")
         return outcome
+
+    def _record_write_back_settled(
+        self,
+        outcome: dict[str, Any],
+        *,
+        attempt: int,
+        source: str,
+    ) -> None:
+        """Record a settled publication attempt into the breakdown's close-out.
+
+        The publisher already stamped the outcome with a stable ``result_type``
+        at whichever exit it took, so this only adds the workload facts the
+        recipe was scoped to. ``source`` is ``close`` or ``t4_fallback``.
+        """
+        state = self.shared_state
+        current_best = getattr(state, "current_best", {}) or {}
+        tput = current_best.get("tput") if isinstance(current_best, dict) else None
+        _close_out.record_write_back_settled(
+            self.session_dir,
+            attempt=attempt,
+            source=source,
+            status=str(outcome.get("status") or ""),
+            result_type=str(outcome.get("result_type") or ""),
+            raw_reason=str(outcome.get("reason") or ""),
+            error_class=str(outcome.get("error_class") or ""),
+            backend=str(outcome.get("backend") or ""),
+            canonical_id=str(outcome.get("canonical_id") or ""),
+            session_id=str(outcome.get("session_id") or ""),
+            scope=self._write_back_scope(),
+            optimized_throughput=to_float(tput, None),
+            validated_gain_pct=to_float(getattr(state, "cumulative_gain_validated", None), None),
+            ts=str(outcome.get("updated_at") or ""),
+        )
+
+    def _write_back_scope(self) -> dict[str, Any]:
+        """The workload dimensions the published recipe is partitioned by.
+
+        Matches the ``RecipeScope`` shape the section already published.
+        """
+        state = self.shared_state
+        return {
+            "kernel_optimizer": str(getattr(state, "kernel_optimizer", "") or ""),
+            "tp": to_int(getattr(state, "tp", None), None),
+            "conc": to_int(getattr(state, "conc", None), None),
+            "isl": to_int(getattr(state, "isl", None), None),
+            "osl": to_int(getattr(state, "osl", None), None),
+        }
 
     def finalize_recipe_and_journal(
         self,
@@ -2209,6 +2476,7 @@ class WritebackCollaborator:
                 "status": "skipped",
                 "reason": "degraded_kb",
                 "backend": "disabled",
+                "result_type": _close_out.RESULT_KB_DISABLED,
             }
 
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
@@ -2221,6 +2489,8 @@ class WritebackCollaborator:
                 "status": "error",
                 "reason": f"configuration:{type(exc).__name__}",
                 "backend": "unknown",
+                "result_type": _close_out.RESULT_CONFIGURATION_FAILED,
+                "error_class": type(exc).__name__,
             }
         # Every Recipe sink funnels through agentx_kb_blocked; see it for
         # why an agentic measurement must not enter a cross-session store. Placed
@@ -2246,6 +2516,7 @@ class WritebackCollaborator:
                 "status": "skipped",
                 "reason": "agentx",
                 "backend": str(getattr(config, "mode", "") or "unknown"),
+                "result_type": _close_out.RESULT_AGENTX_BLOCKED,
             }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
@@ -2286,6 +2557,7 @@ class WritebackCollaborator:
                     "backend": "kb-store",
                     "canonical_id": str(getattr(remote_result, "canonical_id", "") or remote_cid),
                     "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
+                    "result_type": _remote_result_type(remote_result.status, remote_result.reason),
                 }
             except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
                 self._record_remote_recipe_audit(
@@ -2302,6 +2574,14 @@ class WritebackCollaborator:
                     "backend": "kb-store",
                     "canonical_id": remote_cid,
                     "session_id": remote_sid,
+                    # A validation error means the store rejected the bundle we
+                    # built; anything else failed on the way there.
+                    "result_type": (
+                        _close_out.RESULT_BUNDLE_BUILD_FAILED
+                        if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
+                        else _close_out.RESULT_TRANSPORT_FAILED
+                    ),
+                    "error_class": type(exc).__name__,
                 }
 
         # Local mode never consults ambient KB_STORE_* credentials.
@@ -2310,6 +2590,7 @@ class WritebackCollaborator:
                 "status": "skipped",
                 "reason": "no_recipe_backend",
                 "backend": "local",
+                "result_type": _close_out.RESULT_KB_DISABLED,
             }
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
@@ -2324,6 +2605,7 @@ class WritebackCollaborator:
                 "status": "skipped",
                 "reason": "missing_model_or_hardware",
                 "backend": "local",
+                "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
         try:
             attrs = self._coord._build_recipe_attrs_from_state()
@@ -2408,6 +2690,7 @@ class WritebackCollaborator:
                 "status": "written",
                 "reason": "",
                 "backend": "local",
+                "result_type": _close_out.RESULT_WRITTEN,
             }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -2416,7 +2699,52 @@ class WritebackCollaborator:
                 "status": "error",
                 "reason": type(exc).__name__,
                 "backend": "local",
+                "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+                "error_class": type(exc).__name__,
             }
+
+    def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:
+        """Record what a specialist round came back with, on the event that owns it.
+
+        The FRAMEWORK arm's dispatch already has a run row on the framework
+        event keyed by this same task id, so the product merges onto that. Every
+        other round merges onto the action row its dispatching phase opened.
+        """
+        product = {
+            "summary": round_entry.get("summary") or "",
+            "proposals_total": round_entry.get("proposals_total"),
+            "empty": round_entry.get("empty"),
+            "confidence": round_entry.get("confidence"),
+            "new_findings": round_entry.get("new_findings") or [],
+            "residual_questions": round_entry.get("residual_questions") or [],
+            "notes": round_entry.get("notes") or [],
+            "ensemble_scores": round_entry.get("ensemble_scores") or {},
+        }
+        source_phase = str(round_entry.get("source_phase") or "").strip().upper()
+        recorder = getattr(self, "_framework_timeline_recorder", None)
+        if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
+            try:
+                recorder.record_run(str(task.task_id or ""), **product)
+            except Exception:  # noqa: BLE001 — a round outranks its own record
+                log.debug("specialist bookkeeping: framework run product record failed", exc_info=True)
+            return
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+            phase_event.record_specialist_round(
+                task_id=str(task.task_id or ""),
+                phase=source_phase or str(getattr(self.shared_state, "phase", "") or ""),
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                round_id=str(round_entry.get("round_id") or ""),
+                domain=round_entry.get("domain") or "",
+                gap_canonical_id=round_entry.get("gap_canonical_id") or "",
+                reason=round_entry.get("reason") or "",
+                source=round_entry.get("source") or "",
+                tags=round_entry.get("tags") or [],
+                **product,
+            )
+        except Exception:  # noqa: BLE001 — a round outranks its own record
+            log.debug("specialist bookkeeping: phase round product record failed", exc_info=True)
 
     async def _record_specialist_result(
         self,
@@ -2499,6 +2827,7 @@ class WritebackCollaborator:
                 "specialist bookkeeping: record_specialist_round failed for task=%s",
                 task.task_id,
             )
+        self._record_specialist_round_product(task=task, round_entry=round_entry)
 
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
@@ -3013,6 +3342,22 @@ class WritebackCollaborator:
                     new_tput=best_tput,
                     extra_server_args=full_args,
                 )
+                # ``graded.reference`` is the anchor this winner had to beat,
+                # and this call is the last moment it exists: the current_best
+                # write below overwrites it. A pre-baseline enablement patch was
+                # never graded against an anchor, so it has no adoption to claim.
+                if not prebaseline_enablement:
+                    from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+                    stack_event.record_adoption(
+                        stack_index=len(self.shared_state.optimization_stack) - 1,
+                        entry=stack_entry,
+                        throughput_before=graded.reference,
+                        throughput_after=graded.candidate,
+                        baseline_tput=self.shared_state.baseline_tput,
+                        objective=graded.objective,
+                        degrade_reason=graded.degrade_reason,
+                    )
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
         # (extra_envs_applied={}) do not clear prior explore/env layers.
@@ -3109,35 +3454,6 @@ class WritebackCollaborator:
         # only reached further down this call, so mirroring it here published
         # every replay as discarded -- including the ones that went on to be
         # pushed onto the stack.
-        if task_kind in {"conc_sweep", "integrate_patch"}:
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                result_status = str(result.get("status") or "succeeded")
-                # Every promotable kind reports its own verdict; hardcoding
-                # "discarded" for the rest made kept integrate_patch work look
-                # rejected in the breakdown and stripped its attribution.
-                kept = result_status.lower() in {"kept", "kept_inert", "promoted", "adopted"}
-                v4_result = dict(result)
-                v4_result.setdefault("workload", self._v4_workload())
-                instrument.record_action_operation(
-                    self.session_dir,
-                    action=task_kind,
-                    task_id=getattr(task, "task_id", "") if task is not None else "",
-                    status=result_status,
-                    decision="promoted" if kept else "discarded",
-                    result=v4_result,
-                    extras={
-                        "candidate_id": self._framework_candidate_key(result.get("candidate"))
-                        if isinstance(result.get("candidate"), dict)
-                        else ""
-                    },
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("v4 action result capture failed", exc_info=True)
         outcome = _PromoteOutcome()
         handler_name = self._PROMOTE_HANDLERS.get(task_kind)
         if handler_name is not None:
@@ -3234,6 +3550,7 @@ class WritebackCollaborator:
                 if is_revalidation:
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
+                    generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
                     if accuracy_meets_floor(acc, floor):
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
@@ -3241,6 +3558,20 @@ class WritebackCollaborator:
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
                         await self._settle_enablement_round(BOOTED, reason="revalidation_promoted")
+                        # This promote is the eval-origin lane's terminal: the
+                        # KEEP that preceded it was provisional, so the round
+                        # that landed it did not close the lane.
+                        enablement_event.record_revalidation_outcome(
+                            generation=generation,
+                            promoted=True,
+                            task_id=str(promoting_tid or ""),
+                            accuracy=acc,
+                            accuracy_floor=floor,
+                        )
+                        await self._close_enablement_lane(
+                            outcome=enablement_event.OUTCOME_SUCCEEDED,
+                            reason="revalidation promoted",
+                        )
                     else:
                         # Sub-floor accuracy on the tracked revalidation: rearm the
                         # specialist loop without clearing the frozen trigger identity.
@@ -3252,6 +3583,14 @@ class WritebackCollaborator:
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
                         await self._settle_enablement_round(FAILED, reason="revalidation_below_floor")
+                        enablement_event.record_revalidation_outcome(
+                            generation=generation,
+                            promoted=False,
+                            task_id=str(promoting_tid or ""),
+                            accuracy=acc,
+                            accuracy_floor=floor,
+                            reason="accuracy below floor",
+                        )
                 else:
                     # An unrelated baseline promoted while revalidation is pending.
                     # Only anchor tput; do not consume or clear the pending state.
@@ -3501,107 +3840,6 @@ class WritebackCollaborator:
             log.exception("baseline drain: queued-task scan failed")
         return {t for t in spared if t}
 
-    def _v4_workload(self) -> dict[str, Any]:
-        """The workload identity a mirrored action result is measured under."""
-        return {
-            "framework": str(getattr(self.shared_state, "framework", "") or ""),
-            "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
-            "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
-            "precision": str(getattr(self.shared_state, "precision", "") or ""),
-            "tp": int(getattr(self.shared_state, "tp", 0) or 0),
-            "conc": int(getattr(self.shared_state, "conc", 0) or 0),
-            "isl": int(getattr(self.shared_state, "isl", 0) or 0),
-            "osl": int(getattr(self.shared_state, "osl", 0) or 0),
-        }
-
-    def _mirror_warm_replay_verdict(
-        self,
-        result: dict,
-        task: "Task | None",
-    ) -> None:
-        """Mirror the replay under the verdict the promote path just reached.
-
-        A replay's keep decision belongs to the promote path, not to its
-        executor: the action settles on ``succeeded`` whether or not the recipe
-        reproduced, and only ``_promote_warm_replay`` compares the measured
-        throughput against the bar. Mirroring it alongside the other actions,
-        ahead of that ruling, recorded every replay as discarded -- so a
-        reproduced one was pushed onto ``optimization_stack``, moved
-        ``cumulative_gain_validated`` and journalled a KEEP while the canonical
-        streams held no adoption for it. Its gain then had no adopted step to
-        hang on: ``optimizations.entries`` came back empty on a session that had
-        measurably gained, and the whole gain surfaced as a reconciliation gap.
-        """
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        state = self.shared_state
-        outcome = dict(getattr(state, "warm_replay_outcome", None) or {})
-        reproduced = str(outcome.get("status") or "") == "reproduced"
-        mirrored = dict(result)
-        mirrored.setdefault("workload", self._v4_workload())
-
-        # Evidence that explains the verdict on either side: the measured gain,
-        # the bar it was judged against, and why it landed there. Kept outside
-        # the reproduced branch so a rejected replay's attempt row can still
-        # state why it was dropped -- the case that most needs an audit trail.
-        gain = to_float(outcome.get("actual_gain_pct"))
-        keep_threshold = to_float(outcome.get("keep_threshold_pct"))
-        reason = str(outcome.get("reason") or "")
-        if gain is not None:
-            mirrored.setdefault("delta_pct", gain)
-        if keep_threshold is not None:
-            mirrored.setdefault("keep_threshold_pct", keep_threshold)
-        if reason:
-            mirrored.setdefault("decision_reason", reason)
-
-        if reproduced:
-            mirrored["provenance"] = "warm_replay"
-            mirrored.setdefault(
-                "decision_reason",
-                f"warm replay reproduced {gain:+.2f}% over baseline" if gain is not None else "warm replay reproduced",
-            )
-            # Only a scored, passing verdict is "validated". A replay admitted
-            # when its eval ran but returned no usable score (``eval_ran`` true,
-            # ``replay_accuracy`` None) is adopted on the keep verdict alone and
-            # must read ``keep_verdict_unscored``, not a passed accuracy gate.
-            accuracy = outcome.get("replay_accuracy")
-            mirrored["validated"] = True if accuracy is not None else None
-            if accuracy is not None:
-                # Carry the score into the measurement stream so accuracy_pass
-                # has evidence standing behind it.
-                mirrored.setdefault("accuracy", accuracy)
-            # ``attribution_eligible`` is intentionally left to the recorder
-            # default (instrument excludes enablement / inert keeps), so an
-            # enablement replay is not force-credited its delta as its own gain.
-            # The ledger chains this keep from the recorded session baseline,
-            # not an enqueue-time anchor, keeping the ledger and
-            # ``cumulative_gain_validated`` a single number.
-            #
-            # The executor's real status is preserved: the keep rides on
-            # ``decision``, not on rewriting the status to "kept".
-            status = str(result.get("status") or "succeeded")
-            decision = "promoted"
-        else:
-            # A non-reproduced replay is not adopted. Force the recorded status
-            # outside the executor-adoption verdict set so a shared executor
-            # that ever reports "kept" cannot lift a drifted replay into an
-            # adoption.
-            status = str(outcome.get("status") or "discarded")
-            decision = "discarded"
-        mirrored["status"] = status
-
-        instrument.record_action_operation(
-            self.session_dir,
-            action="replay_warm_recipe",
-            task_id=str(getattr(task, "task_id", "") or "") if task is not None else "",
-            status=status,
-            decision=decision,
-            result=mirrored,
-            phase=str(getattr(state, "phase", "") or ""),
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
-            tick=int(getattr(state, "tick", 0) or 0),
-        )
-
     async def _promote_replay_warm_recipe(
         self,
         result: dict,
@@ -3613,14 +3851,6 @@ class WritebackCollaborator:
             self._promote_warm_replay(result, task=task)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("warm-replay promote failed")
-        # Mirrored after the ruling, so the canonical streams carry the verdict
-        # the run actually acted on. This record is the whole point of the fix,
-        # so a failure here is surfaced rather than swallowed at debug: the
-        # original bug was found only by hand-scanning sessions.
-        try:
-            self._mirror_warm_replay_verdict(result, task)
-        except Exception:  # noqa: BLE001 — best-effort recording
-            log.exception("warm-replay v4 verdict capture failed")
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
@@ -3781,6 +4011,32 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — observability cannot change the verdict
             log.debug("kernel timeline: geak rebench record failed", exc_info=True)
 
+    def _record_geak_rebench_conclusion(
+        self,
+        *,
+        final_status: str,
+        final_error_class: str = "",
+        final_error: str = "",
+    ) -> None:
+        """Record the terminal revalidation verdict on the kernel timeline event.
+
+        The points that stamp a closed verdict onto ``geak_result`` also release
+        the candidate slot, so the verdict has nowhere else to be read from
+        afterwards. The recorder declines silently when the kernel event has
+        already closed, and the close-out's ``geak_candidate`` carries it then.
+        """
+        recorder = self.phase_kernel._kernel_timeline()
+        if recorder is None:
+            return
+        try:
+            recorder.record_geak_rebench_conclusion(
+                final_status=final_status,
+                final_error_class=final_error_class,
+                final_error=final_error,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the verdict
+            log.debug("kernel timeline: geak rebench conclusion record failed", exc_info=True)
+
     async def _promote_roofline(
         self,
         result: dict,
@@ -3890,19 +4146,6 @@ class WritebackCollaborator:
         update = result.get("explore_search_update")
         if isinstance(update, dict):
             self.shared_state.apply_explore_search_update(update)
-            changed = True
-        # 2. Search-space expansion bookkeeping (honoured defensively when an update is present).
-        disc_update = result.get("discovered_flags_update")
-        if isinstance(disc_update, dict):
-            self.shared_state.record_discovered_flags(
-                framework=str(disc_update.get("framework") or ""),
-                backend_flags=disc_update.get("backend_flags"),
-                param_flags=disc_update.get("param_flags"),
-                source_path=str(disc_update.get("source_path") or ""),
-            )
-            err = disc_update.get("discovery_error")
-            if err:
-                self.shared_state.discovered_flags_error = str(err)
             changed = True
         # Per-lever attribution from this round. Recorded regardless of whether
         # the lever variant won: a rewrite measured at +0.1% is as useful to know
@@ -4148,6 +4391,7 @@ class WritebackCollaborator:
                     ps_stamped = dict(ps) if isinstance(ps, dict) else {}
                     ps_stamped["revalidation_status"] = "no_material"
                     self.shared_state.geak_result = ps_stamped
+                    self._record_geak_rebench_conclusion(final_status="no_material")
                     try:
                         self.phase_kernel._reject_geak_kernel_journey(
                             ps_stamped,
@@ -4196,6 +4440,7 @@ class WritebackCollaborator:
                     ps_stamped = dict(ps) if isinstance(ps, dict) else {}
                     ps_stamped["revalidation_status"] = "no_promote"
                     self.shared_state.geak_result = ps_stamped
+                    self._record_geak_rebench_conclusion(final_status="no_promote")
                     self.shared_state.geak_pending = {}
                     result["status"] = "no_promote"
                     result[PROMOTION_REFUSED_KEY] = True
@@ -4222,24 +4467,10 @@ class WritebackCollaborator:
                             "reason": repr(exc),
                         }
                         try:
-                            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
                             geak_result = (
                                 self.shared_state.geak_result
                                 if isinstance(getattr(self.shared_state, "geak_result", None), dict)
                                 else {}
-                            )
-                            instrument.record_geak_operation(
-                                self.session_dir,
-                                stage="final_validation_failed",
-                                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                                result={
-                                    **geak_result,
-                                    "failure_reason": "geak_harness_fallback_exception",
-                                    "error": repr(exc),
-                                },
-                                status="failed",
-                                validation_source="geak_same_harness_geak",
                             )
                         except Exception:  # noqa: BLE001
                             log.debug("geak v4 fallback-exception recording failed", exc_info=True)
@@ -4262,6 +4493,10 @@ class WritebackCollaborator:
                             fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
                         )[:500]
                         self.shared_state.geak_result = geak_result
+                        self._record_geak_rebench_conclusion(
+                            final_status="fallback_failed",
+                            final_error=str(geak_result.get("revalidation_error") or ""),
+                        )
                         self.shared_state.geak_pending = {}
                         result["status"] = refusal if refusal == INCOMPARABLE_REVALIDATION else "failed"
                         result[PROMOTION_REFUSED_KEY] = True
@@ -4583,26 +4818,14 @@ class WritebackCollaborator:
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> None:
-        """Promote a conc_sweep result: self-audit + record_conc_sweep + save; discovery-only."""
+        """Promote a conc_sweep result: record_conc_sweep + save; discovery-only.
+
+        No audit attempt is written: ``record_action_attempt`` returns early for
+        any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in. The
+        conc_sweep event carries the skip reason, the budget verdict and the
+        summary instead.
+        """
         outcome.early_return = True
-        self.shared_state.record_action_attempt(
-            action="conc_sweep",
-            task_id=getattr(task, "task_id", "") if task is not None else "",
-            status=str(result.get("status") or "succeeded"),
-            decision="discarded",
-            result=result,
-            extras={
-                "was_skipped": bool(result.get("was_skipped", False)),
-                "skip_reason": result.get("skip_reason"),
-                "budget_exhausted": bool(result.get("budget_exhausted", False)),
-                "total_budget_sec": result.get("total_budget_sec"),
-                "elapsed_sec": result.get("elapsed_sec"),
-                "best_speedup": ((result.get("summary") or {}).get("best_speedup")),
-                "best_conc": ((result.get("summary") or {}).get("best_conc")),
-                "successful_pairs": ((result.get("summary") or {}).get("successful_pairs")),
-                "report_path": result.get("report_json_path"),
-            },
-        )
         # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
@@ -5802,26 +6025,6 @@ class WritebackCollaborator:
                     requires_lanes=lanes,
                     lease_ttl_sec=ttl,
                 )
-                try:
-                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                    instrument.record_geak_operation(
-                        self.session_dir,
-                        stage="rebench_started",
-                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                        result={
-                            **ps,
-                            "rebench": {
-                                "task_id": task.task_id,
-                                "existing": bool(existing),
-                                "mode": "orchestrator_same_harness",
-                                "expected_cfg_hash": expected_cfg_hash,
-                            },
-                        },
-                        status="running",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("geak v4 rebench recording failed", exc_info=True)
                 return {
                     "task_id": task.task_id,
                     "task_state": task.state,
@@ -5927,19 +6130,6 @@ class WritebackCollaborator:
         # Same check 2b runs; see ``_geak_overlay_is_loadable``.
         ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="geak_harness_fallback",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result={**ps, "fallback_reason": reason},
-                status="running",
-                validation_source="geak_same_harness_geak",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
         # Read GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
@@ -5999,19 +6189,6 @@ class WritebackCollaborator:
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
                 log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
-                try:
-                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                    instrument.record_geak_operation(
-                        self.session_dir,
-                        stage="final_validation_failed",
-                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                        result={**ps, "fallback_result": res, "failure_reason": "missing_measured_throughput"},
-                        status="failed",
-                        validation_source="geak_same_harness_geak",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
             # The replay proves the config engaged. It does not prove the
             # overlay did: the overlay has to still be loadable, and still be
@@ -6052,24 +6229,6 @@ class WritebackCollaborator:
             geak_sp,
             reason,
         )
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="final_validation_failed",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result={
-                    **ps,
-                    "fallback_result": res,
-                    "failure_reason": reason,
-                    "geak_speedup": geak_sp,
-                },
-                status="failed",
-                validation_source="geak_same_harness_geak",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 failed-validation recording failed", exc_info=True)
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _resume_reenter_kernel_if_needed(self) -> None:

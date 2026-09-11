@@ -8,17 +8,6 @@ from __future__ import annotations
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def test_format_discovered_flags():
-    st = SharedState()
-    assert "first backends" in st._format_discovered_flags()
-    st.discovered_flags = {
-        "sglang": {"backend_flags": ["a", "b"], "param_flags": ["c"]},
-        "bad": "not-a-dict",
-    }
-    out = st._format_discovered_flags()
-    assert "sglang:backend=2/param=1" in out
-
-
 def test_format_variant_line():
     line = SharedState._format_variant_line(
         {

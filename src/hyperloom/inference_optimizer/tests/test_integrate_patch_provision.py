@@ -228,7 +228,12 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     async def _no_round(*_a, **_k):
         """No round is open, so the rearm's settle is a no-op."""
 
+    async def _no_stalls(*_a, **_k):
+        """An empty ledger, which the rearm reads to stamp the round's row."""
+        return 0
+
     coord._settle_enablement_round = _no_round
+    coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls)
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()
