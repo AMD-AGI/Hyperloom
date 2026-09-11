@@ -103,20 +103,26 @@ def benchmark(kernel, warmup, iters):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("test", "bench", "profile"), default="test")
+    parser.add_argument("--profile-run", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=100)
     args = parser.parse_args()
     if args.warmup < 1 or args.iters < 1:
         parser.error("warmup and iters must be positive")
     kernel = Score()
-    if args.mode == "test":
+    if args.profile_run or args.mode == "profile":
+        tensors = inputs(42, 0.1)
+        for _ in range(5):
+            kernel(*tensors)
+        torch.cuda.synchronize()
+        torch.cuda.profiler.start()
+        kernel(*tensors)
+        torch.cuda.synchronize()
+        torch.cuda.profiler.stop()
+    elif args.mode == "test":
         correctness(kernel)
     elif args.mode == "bench":
         benchmark(kernel, args.warmup, args.iters)
-    else:
-        tensors = inputs(42, 0.1)
-        kernel(*tensors)
-        torch.cuda.synchronize()
     torch.cuda.synchronize()
     kernel.close()
 
