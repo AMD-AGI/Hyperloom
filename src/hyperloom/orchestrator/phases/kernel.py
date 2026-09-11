@@ -1731,6 +1731,7 @@ class KernelPhase(PhaseHandler):
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",
+                "raw_result_path",
                 "workspace",
                 "single_workspace",
             ):

@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env import env_str
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.baseline_comparison.inferencex_client import base_url
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     _clear_competitor_target,
+    _persist,
     analyze,
+    to_inferencex_name,
 )
+from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery, BaselineSummary, BenchmarkMode
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -90,21 +95,11 @@ class TargetAnalysisExecutor:
         """Run the external-baseline comparison and persist report artefacts."""
         params = dict(ctx.task.params or {})
 
-        # Upstream agentic rows carry null isl/osl by design, so the strict
-        # isl/osl match in ``find_reference_rows`` can never hit one. Fetching
-        # them would always return empty; report that instead of a false miss.
-        # Matching agentic rows is tracked in agentX-compareGPU.issue.md.
         from ._workload_envs import agentx_active
 
-        if agentx_active((getattr(ctx, "extra", None) or {}).get("shared_state")):
-            log.info("target_analysis_executor: AgentX has no comparable upstream row; skipping")
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": "skipped: upstream agentic rows carry null isl/osl",
-                "baseline_status": "skipped",
-                "reason": "agentx_not_supported",
-            }
+        state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+        benchmark_mode: BenchmarkMode = "agentx" if agentx_active(state) else "synthetic"
+        model_path = str(params.get("model_path") or getattr(state, "model_path", "") or env_str("MODEL_PATH"))
 
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
@@ -130,23 +125,17 @@ class TargetAnalysisExecutor:
             try:
                 summary = analyze(
                     session_dir=session_dir,
-                    model_path=str(params.get("model_path") or env_str("MODEL_PATH")),
+                    model_path=model_path,
                     compare_against_gpu="",
+                    benchmark_mode=benchmark_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.exception("target_analysis_executor: analyze() raised: %s", exc)
-                return {
-                    "status": "succeeded",
-                    "kind": ctx.task.kind,
-                    "note": f"analyzer crashed: {exc}",
-                    "baseline_status": "fetch_error",
-                    "reason": "analyzer_crash",
-                }
+                return self._analyzer_failure(ctx, session_dir, model_path, "", benchmark_mode, exc)
             return self._format_result(ctx, summary, session_dir)
 
-        model_path = str(params.get("model_path") or env_str("MODEL_PATH"))
-        framework = str(params.get("framework") or env_str("FRAMEWORK"))
-        precision = str(params.get("precision") or env_str("PRECISION"))
+        framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
+        precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))
         isl = int(params.get("isl") or _env_int("ISL", 0))
         osl = int(params.get("osl") or _env_int("OSL", 0))
 
@@ -159,17 +148,46 @@ class TargetAnalysisExecutor:
                 precision=precision,
                 isl=isl,
                 osl=osl,
+                benchmark_mode=benchmark_mode,
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": f"analyzer crashed: {exc}",
-                "baseline_status": "fetch_error",
-                "reason": "analyzer_crash",
-            }
+            return self._analyzer_failure(ctx, session_dir, model_path, compare_against_gpu, benchmark_mode, exc)
         return self._format_result(ctx, summary, session_dir)
+
+    def _analyzer_failure(
+        self,
+        ctx: RunnerContext,
+        session_dir: Path,
+        model_path: str,
+        gpu: str,
+        benchmark_mode: BenchmarkMode,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        _clear_competitor_target(session_dir)
+        summary = BaselineSummary(
+            query=BaselineQuery(
+                model=to_inferencex_name(model_path) or "",
+                gpu=gpu,
+                benchmark_mode=benchmark_mode,
+                isl=None if benchmark_mode == "agentx" else 0,
+                osl=None if benchmark_mode == "agentx" else 0,
+            ),
+            fetched_at=now_iso(timespec="seconds", z_suffix=True),
+            row_count=0,
+            best=None,
+            status="fetch_error",
+            reason="analyzer_crash",
+            warning=str(exc),
+            source=base_url(),
+        )
+        try:
+            _persist(summary, session_dir=session_dir)
+        except OSError:
+            log.warning("target_analysis_executor: could not persist failed analysis", exc_info=True)
+        result = self._format_result(ctx, summary, session_dir)
+        result["note"] = f"analyzer crashed: {exc}"
+        return result
 
     def _format_result(
         self,
@@ -197,6 +215,9 @@ class TargetAnalysisExecutor:
             out["best_tput_per_gpu"] = best.tput_per_gpu
             out["best_conc"] = best.conc
             out["best_decode_tp"] = best.decode_tp
+            if getattr(getattr(summary, "query", None), "benchmark_mode", "synthetic") == "agentx":
+                out["best_e2e_norm_intvty_p90"] = best.e2e_norm_intvty_p90
+                out["best_benchmark_id"] = best.benchmark_id
         log.info(
             "target_analysis_executor: status=%s reason=%s rows=%d (%s)",
             out["baseline_status"],

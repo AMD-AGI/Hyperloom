@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,6 +248,272 @@ async def test_report_executor_renders_external_baseline_section(tmp_path: Path,
     final_json = json.loads(Path(result["json_path"]).read_text())
     assert "external_baseline" in final_json
     assert final_json["external_baseline"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode_source", ["state", "environment"])
+async def test_agentx_executor_fetches_reference_and_maps_derived_id(session_dir, monkeypatch, mode_source):
+    from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    ctx = _ctx(session_dir, {"model_path": "/models/GLM-5.2-MXFP4", "precision": "mxfp4", "isl": 1024, "osl": 2048})
+    ctx.extra["shared_state"] = SimpleNamespace(benchmark_mode="agentx" if mode_source == "state" else "")
+    if mode_source == "environment":
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if "/benchmarks?" in url:
+            return json.dumps(
+                [
+                    {
+                        "id": "42",
+                        "hardware": "b300",
+                        "model": "glm5.2",
+                        "precision": "fp4",
+                        "benchmark_type": "agentic_traces",
+                        "isl": None,
+                        "osl": None,
+                        "conc": 4,
+                        "decode_tp": 8,
+                        "metrics": {"tput_per_gpu": 800.0, "mean_tpot": 0.001},
+                    }
+                ]
+            ).encode()
+        assert "/derived-agentic-metrics?ids=42" in url
+        return b'{"42":{"id":42,"p90_e2e_norm_intvty":20.0}}'
+
+    monkeypatch.setattr(inferencex_client, "_fetch_raw", fetch)
+    result = await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
+    assert result["baseline_status"] == "ok"
+    assert result["best_e2e_norm_intvty_p90"] == 20.0
+    assert result["best_benchmark_id"] == "42"
+    assert len(calls) == 2
+    summary = json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))
+    assert summary["query"]["benchmark_mode"] == "agentx"
+    assert summary["query"]["isl"] is None
+    assert summary["best"]["tput_per_gpu"] == 800.0
+    target = research_hints.load_competitor_target(session_dir)
+    assert target["per_conc"][0]["e2e_norm_intvty_p90"] == 20.0
+    assert "interactivity" not in target["per_conc"][0]
+
+
+@pytest.mark.asyncio
+async def test_agentx_executor_uses_persisted_model_and_precision(session_dir, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    for key in ("MODEL_PATH", "FRAMEWORK", "PRECISION"):
+        monkeypatch.delenv(key, raising=False)
+    ctx = _ctx(session_dir)
+    ctx.extra["shared_state"] = SimpleNamespace(
+        benchmark_mode="agentx", model_path="/models/GLM-5.2-MXFP4", framework="sglang", precision="mxfp4"
+    )
+    captured = []
+
+    def analyze(**kwargs):
+        captured.append(kwargs)
+        return _DummySummary()
+
+    monkeypatch.setattr(ta, "analyze", analyze)
+    await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
+    assert captured[0]["model_path"] == "/models/GLM-5.2-MXFP4"
+    assert captured[0]["precision"] == "mxfp4"
+    assert captured[0]["benchmark_mode"] == "agentx"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["params", "environment"])
+async def test_agentx_explicit_precision_override_wins_over_stale_state(session_dir, monkeypatch, source):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("PRECISION", raising=False)
+    params = {"model_path": "GLM-5.2"}
+    if source == "params":
+        params["precision"] = "bf16"
+    else:
+        monkeypatch.setenv("PRECISION", "bf16")
+    ctx = _ctx(session_dir, params)
+    ctx.extra["shared_state"] = SimpleNamespace(benchmark_mode="agentx", precision="fp8")
+    captured = []
+
+    def analyze(**kwargs):
+        captured.append(kwargs)
+        return _DummySummary()
+
+    monkeypatch.setattr(ta, "analyze", analyze)
+    await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
+    assert captured[0]["precision"] == "bf16"
+    assert ctx.extra["shared_state"].precision == "fp8"
+
+
+@pytest.mark.asyncio
+async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(session_dir, monkeypatch):
+    from hyperloom.inference_optimizer.session import session_paths
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    ctx = _ctx(session_dir, {"model_path": "GLM-5.2"})
+    stale = session_paths.competitor_target_json(session_dir)
+    stale.write_text('{"old":true}', encoding="utf-8")
+    result = await TargetAnalysisExecutor(compare_against_gpu="")(ctx)
+    assert result["reason"] == "no_target_gpu_configured"
+    assert not stale.exists()
+    assert json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))["query"]["benchmark_mode"] == "agentx"
+
+
+@pytest.mark.asyncio
+async def test_analyzer_exception_replaces_previous_reference_artifacts(session_dir, monkeypatch):
+    from hyperloom.inference_optimizer.session import session_paths
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    stale = session_paths.competitor_target_json(session_dir)
+    stale.write_text('{"old":true}', encoding="utf-8")
+    baseline = session_dir / "target_analysis/target_baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text('{"status":"ok","best":{"tput_per_gpu":9999}}', encoding="utf-8")
+
+    def fail(**kwargs):
+        raise ValueError("schema mismatch")
+
+    monkeypatch.setattr(ta, "analyze", fail)
+    result = await TargetAnalysisExecutor(compare_against_gpu="b300")(_ctx(session_dir, {"model_path": "GLM-5.2"}))
+    assert result["reason"] == "analyzer_crash"
+    assert not stale.exists()
+    persisted = json.loads(baseline.read_text(encoding="utf-8"))
+    assert persisted["reason"] == "analyzer_crash"
+    assert persisted["best"] is None
+    assert persisted["query"]["benchmark_mode"] == "agentx"
+
+
+@pytest.mark.asyncio
+async def test_agentx_request_records_to_external_reference_and_final_report(session_dir, monkeypatch):
+    import yaml
+
+    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+    from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
+    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    workspace = session_dir / "accepted"
+    workspace.mkdir()
+    source = workspace / "profile_export_aiperf.json"
+    source.write_text(
+        json.dumps(
+            {
+                "metadata": {"submission_valid": True},
+                "output_token_throughput": {"avg": 100.0},
+                "input_token_throughput": {"avg": 900.0},
+                "total_token_throughput": {"avg": 1000.0},
+                "e2e_output_token_throughput": {"p10": 1.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "metadata": {"benchmark_phase": "profiling"},
+            "metrics": {
+                "request_latency": {"value": latency, "unit": "ms"},
+                "time_to_first_token": {"value": 10, "unit": "ms"},
+                "input_sequence_length": {"value": 128, "unit": "tokens"},
+                "output_sequence_length": {"value": 10, "unit": "tokens"},
+            },
+        }
+        for latency in (1000.0, 10000.0)
+    ]
+    source.with_name("profile_export.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+    )
+    spec = importlib.util.spec_from_file_location("_closed_loop_mapper", agentx_asset_dir() / "map_aiperf.py")
+    mapper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mapper)
+    raw_path = workspace / "inferencex_result.json"
+    mapper.main(str(source), str(raw_path))
+    recipe = workspace / "config.yaml"
+    recipe.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/models/GLM-5.2-MXFP4",
+                    "precision": "mxfp4",
+                    "run_mode": "local",
+                    "envs": {"TP": 2, "CONC": 4},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = SharedState(
+        session_id=session_dir.name,
+        benchmark_mode="agentx",
+        framework="sglang",
+        model_name="GLM-5.2-MXFP4",
+        model_path="/models/GLM-5.2-MXFP4",
+        precision="mxfp4",
+        tp=8,
+        conc=99,
+        baseline_tput=100.0,
+        baseline_perf={"total_throughput": 1000.0, "e2e_norm_intvty_p90": 1.9},
+        current_best={
+            "tput": 100.0,
+            "total_throughput": 1000.0,
+            "e2e_norm_intvty_p90": 1.9,
+            "measurement": {
+                "tput": 100.0,
+                "raw_result_path": str(raw_path),
+                "benchmark_workspace": str(workspace),
+                "launch_evidence": {
+                    "materialized_config_path": str(recipe),
+                    "recipe_digest": "sha256:" + hashlib.sha256(recipe.read_bytes()).hexdigest(),
+                    "requested_server_env": {"TP": "2", "CONC": "4"},
+                },
+            },
+        },
+    )
+    state.save(session_dir)
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if "/benchmarks?" in url:
+            return json.dumps(
+                [
+                    {
+                        "id": "42",
+                        "hardware": "b300",
+                        "precision": "fp4",
+                        "benchmark_type": "agentic_traces",
+                        "isl": None,
+                        "osl": None,
+                        "conc": 4,
+                        "decode_tp": 8,
+                        "metrics": {"tput_per_gpu": 1000.0},
+                    }
+                ]
+            ).encode()
+        return json.dumps({"42": {"id": 42, "p90_e2e_norm_intvty": 2.0 / 0.91}}).encode()
+
+    monkeypatch.setattr(inferencex_client, "_fetch_raw", fetch)
+    ctx = _ctx(session_dir)
+    ctx.extra["shared_state"] = state
+    analyzed = await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
+    assert analyzed["baseline_status"] == "ok"
+    advisory = research_hints.gap_for_state(research_hints.load_competitor_target(session_dir), state)
+    assert advisory["throughput_gap_pct"] == 50.0
+    assert advisory["interactivity_gap_pct"] == pytest.approx(50.0)
+    ctx.task.kind = "report"
+    report = await ReportExecutor()(ctx)
+    final = json.loads(Path(report["json_path"]).read_text(encoding="utf-8"))
+    assert final["external_baseline"]["comparison"] == advisory
+    assert final["current_best"]["e2e_norm_intvty_p90"] == 1.9
+    assert final["external_baseline"]["comparison"]["local_e2e_norm_intvty_p90"] == pytest.approx(1.0 / 0.91)
+    assert "same-concurrency" in Path(analyzed["md_path"]).read_text(encoding="utf-8")
+    assert "total throughput/GPU" in Path(report["md_path"]).read_text(encoding="utf-8")
+    assert len(calls) == 2
 
 
 # Unit tests
