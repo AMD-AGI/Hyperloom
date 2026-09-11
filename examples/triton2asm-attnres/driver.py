@@ -74,9 +74,11 @@ def correctness(kernel):
     print("graph_capture: PASS")
 
 
-def benchmark(kernel, warmup, iters):
+def benchmark(kernel, warmup, iters, case="", repeat=1):
     medians = []
     for name, seed, scale in CASES:
+        if case and name != case:
+            continue
         args = inputs(seed, scale)
         for _ in range(warmup):
             kernel(*args)
@@ -86,7 +88,7 @@ def benchmark(kernel, warmup, iters):
             for _ in range(iters):
                 kernel(*args)
         samples = []
-        for _ in range(5):
+        for _ in range(5 * repeat):
             start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             start.record()
             graph.replay()
@@ -104,11 +106,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("test", "bench", "profile"), default="test")
     parser.add_argument("--profile-run", action="store_true")
+    parser.add_argument("--bench-mode", action="store_true")
+    parser.add_argument("--bench-case", choices=[name for name, _, _ in CASES], default="")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=100)
+    parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()
-    if args.warmup < 1 or args.iters < 1:
-        parser.error("warmup and iters must be positive")
+    if args.warmup < 1 or args.iters < 1 or args.repeat < 1:
+        parser.error("warmup, iters and repeat must be positive")
     kernel = Score()
     if args.profile_run or args.mode == "profile":
         tensors = inputs(42, 0.1)
@@ -119,10 +124,10 @@ def main():
         kernel(*tensors)
         torch.cuda.synchronize()
         torch.cuda.profiler.stop()
-    elif args.mode == "test":
+    elif args.bench_mode or args.mode == "bench":
+        benchmark(kernel, args.warmup, args.iters, args.bench_case, args.repeat)
+    else:
         correctness(kernel)
-    elif args.mode == "bench":
-        benchmark(kernel, args.warmup, args.iters)
     torch.cuda.synchronize()
     kernel.close()
 
