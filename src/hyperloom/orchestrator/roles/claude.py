@@ -29,6 +29,7 @@ from .base import (
     BackendTurnResult,
     LLMCallFailed,
     RetryPolicy,
+    derive_turn_budget_sec,
     parse_call_timeout_env,
     retry_with_backoff,
     safe_int,
@@ -214,6 +215,18 @@ class ClaudeBackend:
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
     _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
     _active_stderr: list[str] = field(default_factory=list, init=False)
+
+    @property
+    def turn_budget_sec(self) -> float:
+        """float: Wall-clock ceiling for one ``run()`` call.
+
+        Each retry doubles the idle budget, so the chain is not attempts times
+        ``call_timeout_s``.
+        """
+        return derive_turn_budget_sec(
+            lambda n: self.call_timeout_s * _RETRY_IDLE_TIMEOUT_MULTIPLIER ** (n - 1),
+            self.retry_policy,
+        )
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""

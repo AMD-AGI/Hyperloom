@@ -251,6 +251,21 @@ def test_core_state_fields_contains_v08_new_additions():
     assert not missing, f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"
 
 
+def test_a_run_leg_boundary_is_not_writable_by_update_state():
+    """``leg_ended_ts`` decides where the stopped leg's phase segment ends.
+
+    The next leg banks time up to it, so a forged value bills that phase for
+    time it never ran; the Coordinator owns it exactly as it owns ``stop_ts``.
+    """
+    state = SharedState()
+    state.leg_ended_ts = "2026-08-01T00:00:00+00:00"
+
+    applied = state.apply_changes({"leg_ended_ts": "2099-01-01T00:00:00+00:00"}, allow_core=False)
+
+    assert applied == {}
+    assert state.leg_ended_ts == "2026-08-01T00:00:00+00:00"
+
+
 def test_policy_blocks_llm_phase_write():
     """LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
     from hyperloom.orchestrator.roles.agent_role import (

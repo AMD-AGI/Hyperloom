@@ -110,6 +110,37 @@ class RetryPolicy:
             capped += random.uniform(0.0, self.jitter_s)
         return max(0.0, capped)
 
+    def worst_case_backoff_sec(self) -> float:
+        """Longest total backoff a full run of attempts can sleep through."""
+        return max(0, self.max_attempts - 1) * (self.max_delay_s + max(0.0, self.jitter_s))
+
+
+#: Multiple of a backend's own worst-case chain used as the caller's ceiling. The
+#: caller's cap is a backstop for a backend that did not honour its own budget,
+#: so it has to sit clear of every turn that budget still calls healthy.
+TURN_BUDGET_HEADROOM: float = 2.0
+
+
+def derive_turn_budget_sec(
+    per_attempt_sec: Callable[[int], float],
+    policy: RetryPolicy | None = None,
+) -> float:
+    """Wall-clock ceiling for one turn, read off the backend's own budget.
+
+    Args:
+        per_attempt_sec: Seconds attempt ``n`` (1-based) is allowed to spend.
+        policy: The retry policy wrapped around those attempts, or ``None`` when
+            the backend makes a single attempt.
+
+    Returns:
+        float: The longest turn the backend's configuration still calls healthy,
+        with :data:`TURN_BUDGET_HEADROOM` on top.
+    """
+    attempts = 1 if policy is None else max(1, policy.max_attempts)
+    work = sum(per_attempt_sec(n) for n in range(1, attempts + 1))
+    backoff = 0.0 if policy is None else policy.worst_case_backoff_sec()
+    return (work + backoff) * TURN_BUDGET_HEADROOM
+
 
 async def retry_with_backoff(
     fn: Callable[[], Awaitable[Any]],

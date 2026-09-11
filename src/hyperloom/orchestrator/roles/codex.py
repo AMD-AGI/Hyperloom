@@ -30,6 +30,7 @@ from .base import (
     BackendTurnResult,
     LLMCallFailed,
     RetryPolicy,
+    derive_turn_budget_sec,
     parse_call_timeout_env,
     retry_with_backoff,
     safe_int,
@@ -142,6 +143,11 @@ class CodexBackend:
     _session: CodexSession | None = field(default=None, init=False, repr=False)
     # Developer instructions the open thread was started with.
     _thread_instructions: str = field(default="", init=False, repr=False)
+
+    @property
+    def turn_budget_sec(self) -> float:
+        """float: Wall-clock ceiling for one ``run()`` call, retries included."""
+        return derive_turn_budget_sec(lambda _n: self.call_timeout_s, self.retry_policy)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""

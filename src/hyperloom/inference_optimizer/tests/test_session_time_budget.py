@@ -31,18 +31,13 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     run_with_session_kill,
 )
-from hyperloom.orchestrator.loop import coordinator as coordinator_module
-from hyperloom.orchestrator.loop.coordinator import (
-    CANONICAL_TICK_ROLES,
-    REACTOR_TURN_BUDGET_SEC,
-    Coordinator,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
 )
-from hyperloom.orchestrator.roles.base import RetryPolicy
-from hyperloom.orchestrator.supervisor.launcher import _TICK_STALL_FLOOR_SEC
+from hyperloom.orchestrator.roles.claude import _RETRY_IDLE_TIMEOUT_MULTIPLIER, ClaudeBackend
+from hyperloom.orchestrator.roles.codex import CodexBackend
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -1298,8 +1293,8 @@ class TestATickCannotOutliveTheSessionBound:
         assert finished == [True]
 
     @pytest.mark.asyncio
-    async def test_a_reactor_turn_is_bounded_by_the_turn_budget(self, coord: Coordinator, monkeypatch):
-        monkeypatch.setattr(coordinator_module, "REACTOR_TURN_BUDGET_SEC", 0.01)
+    async def test_a_reactor_turn_is_bounded_by_the_turn_budget(self, coord: Coordinator):
+        coord.backends["orchestration"].turn_budget_sec = 0.01
         coord._run_deadline = Deadline.after(60.0)
 
         await asyncio.wait_for(
@@ -1311,13 +1306,13 @@ class TestATickCannotOutliveTheSessionBound:
         )
 
     @pytest.mark.asyncio
-    async def test_a_turn_cancelled_at_its_ceiling_counts_as_a_crash(self, coord: Coordinator, monkeypatch):
+    async def test_a_turn_cancelled_at_its_ceiling_counts_as_a_crash(self, coord: Coordinator):
         """Cancelling the turn lets the tick advance, which hides the wedge from the watchdog.
 
         Nothing downstream would otherwise see it, and the session would spend
         the rest of its budget re-cancelling the same turn.
         """
-        monkeypatch.setattr(coordinator_module, "REACTOR_TURN_BUDGET_SEC", 0.01)
+        coord.backends["orchestration"].turn_budget_sec = 0.01
         coord._run_deadline = Deadline.after(60.0)
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
@@ -1342,8 +1337,16 @@ class TestATickCannotOutliveTheSessionBound:
         assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before
 
     def test_only_reactor_steps_are_bounded_by_the_turn_budget(self, coord: Coordinator):
+        coord.backends["orchestration"].turn_budget_sec = 777.0
         assert coord._stage_timeout_sec("advance_phase") is None
-        assert coord._stage_timeout_sec("reactor:orchestration") == REACTOR_TURN_BUDGET_SEC
+        assert coord._stage_timeout_sec("reactor:orchestration") == 777.0
+
+    def test_a_backend_that_declares_no_budget_is_not_capped(self, coord: Coordinator):
+        """A ceiling invented for a backend whose budget is unknown is a guess.
+
+        Guessing low cancels healthy turns, and the session bound still applies.
+        """
+        assert coord._stage_timeout_sec("reactor:orchestration") is None
 
     @pytest.mark.asyncio
     async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):
@@ -1359,26 +1362,36 @@ class TestATickCannotOutliveTheSessionBound:
         assert started == [True]
 
 
-class TestTheTurnBudgetComposesWithTheStallWindow:
-    """One turn, one tick, one stall window: three numbers that must nest.
+class TestTheTurnCeilingIsReadOffTheBackendsOwnBudget:
+    """Every input to a legal turn is an environment override.
 
-    Sized the wrong way round, the cap is not a wedge detector but a way to
-    cancel healthy agents, or a window the watchdog fires inside a legal tick.
+    A ceiling written as a constant is only right for the defaults it was
+    written against; raise a per-attempt timeout or the attempt count and the
+    same constant starts cancelling turns the backend still calls healthy.
     """
 
-    def test_the_budget_covers_a_backend_spending_all_of_its_retries(self):
-        # Codex bounds each attempt at 300s of wall clock; the shared policy
-        # allows three, with 1s and 2s of backoff plus jitter between them.
-        policy = RetryPolicy()
-        chain = policy.max_attempts * 300.0 + sum(policy.delay_for(n) for n in range(1, policy.max_attempts))
-        assert REACTOR_TURN_BUDGET_SEC >= chain
+    def test_the_ceiling_covers_a_backend_spending_all_of_its_retries(self):
+        backend = CodexBackend(allowed_intents=frozenset({IntentType.SEND_MESSAGE}))
+        policy = backend.retry_policy
+        chain = policy.max_attempts * backend.call_timeout_s + policy.worst_case_backoff_sec()
 
-    def test_a_whole_tick_of_turns_fits_inside_the_stall_window(self):
-        """A tick runs every role in turn, so the window has to hold all of them."""
-        assert _TICK_STALL_FLOOR_SEC >= len(CANONICAL_TICK_ROLES) * REACTOR_TURN_BUDGET_SEC
+        assert backend.turn_budget_sec >= chain
 
-    def test_the_roles_a_tick_runs_are_the_ones_the_window_was_sized_for(self, coord: Coordinator):
-        assert coord._tick_roles == CANONICAL_TICK_ROLES
+    def test_a_raised_per_attempt_timeout_raises_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC", "600")
+        raised = CodexBackend(allowed_intents=frozenset({IntentType.SEND_MESSAGE}))
+        policy = raised.retry_policy
+
+        assert raised.turn_budget_sec >= policy.max_attempts * 600.0
+
+    def test_the_ceiling_follows_the_idle_budget_the_retries_amplify(self, monkeypatch):
+        """Claude doubles its idle budget per attempt, so the chain is not attempts x timeout."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "120")
+        backend = ClaudeBackend(allowed_intents=frozenset())
+        policy = backend.retry_policy
+        amplified = sum(120.0 * _RETRY_IDLE_TIMEOUT_MULTIPLIER ** (n - 1) for n in range(1, policy.max_attempts + 1))
+
+        assert backend.turn_budget_sec >= amplified + policy.worst_case_backoff_sec()
 
 
 class TestTheSessionBudgetIsSummedForwardOverLegs:

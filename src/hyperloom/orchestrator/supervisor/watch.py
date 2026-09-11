@@ -35,10 +35,10 @@ DEAD = "dead"
 UNKNOWN = "unknown"
 
 #: How long a tick may go without advancing before it counts as wedged. Well
-#: above a legitimately slow tick -- each role turn is capped at
-#: :data:`~..loop.coordinator.REACTOR_TURN_BUDGET_SEC` and long actions run as
-#: dispatched tasks the tick does not wait on -- and well inside the default
-#: session, which a window it cannot fit in would make unreachable.
+#: above a legitimately slow tick -- each role turn is capped at its backend's
+#: own turn budget and long actions run as dispatched tasks the tick does not
+#: wait on -- and well inside the default session, which a window it cannot fit
+#: in would make unreachable.
 DEFAULT_TICK_STALL_SEC: float = 3600.0
 
 #: How long the coordinator is given to act on the stop it was asked for before
@@ -154,6 +154,7 @@ class Supervisor:
         self._ask_attempted = False
         self._asked_unix = 0.0
         self._end_attempted = False
+        self._terminal_stop = False
         self._restart_count = self._load_restart_count()
 
     def _load_restart_count(self) -> int:
@@ -229,7 +230,7 @@ class Supervisor:
         if observation.verdict == WEDGED:
             over = await self._escalate_wedged(observation)
         elif observation.verdict == DEAD:
-            if self._asked_unix and self._restart_count <= self.max_restarts:
+            if self._asked_unix and not self._terminal_stop:
                 over = True
             else:
                 reason = WEDGED_STOP_REASON if self._asked_unix else DIED_STOP_REASON
@@ -264,10 +265,17 @@ class Supervisor:
     def _ask_to_stop(self, observation: Observation) -> None:
         """Send the coordinator the stop signal its drain thread is waiting on."""
         reason = f"{WEDGED_STOP_REASON}: {observation.detail}"
-        next_restart_count = self._restart_count + 1
-        stop_signal = signal.SIGHUP if next_restart_count <= self.max_restarts else signal.SIGTERM
+        resumable = self._restart_count < self.max_restarts
+        self._terminal_stop = not resumable
+        if resumable:
+            # Banked before the signal, not after: the coordinator's stop path
+            # can outlive this supervisor, and a restart spent only afterwards
+            # is one the next leg reads as never spent. A signal that then fails
+            # leaves the budget short, which is the side to be wrong on.
+            self._restart_count += 1
+            self._write_status(observation)
         try:
-            os.kill(observation.pid, stop_signal)
+            os.kill(observation.pid, signal.SIGHUP if resumable else signal.SIGTERM)
         except ProcessLookupError:
             # It exited between the reading and the signal; the next reading
             # sees a dead coordinator and ends the session on that.
@@ -277,7 +285,6 @@ class Supervisor:
             log.error("SUPERVISOR: refusing to escalate -- pid %d is not ours to signal", observation.pid)
             return
         self._asked_unix = self._now()
-        self._restart_count = next_restart_count
         self._report.asked.append(reason)
         log.error("SUPERVISOR: asked coordinator %d to stop (%s)", observation.pid, reason)
 

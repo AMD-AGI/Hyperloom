@@ -16,17 +16,24 @@ from hyperloom.inference_optimizer.session.lock import SessionLock
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+def _record_terminal_writes(monkeypatch) -> list[str]:
+    """Capture every terminal artifact the close-out writes, in order."""
     order: list[str] = []
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
-    )
+    for name, label in (
+        ("write_minimal_final_json", "final_json"),
+        ("write_breakdown_json", "breakdown"),
+        ("write_minimal_final_report", "final_md"),
+        ("package_session_artifacts", "package"),
+    ):
+        monkeypatch.setattr(
+            f"hyperloom.inference_optimizer.breakdown.{name}",
+            lambda *_a, _label=label, **_kw: order.append(_label),
+        )
+    return order
+
+
+def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
+    order = _record_terminal_writes(monkeypatch)
 
     ocli._write_cli_terminal_artifacts(
         tmp_path,
@@ -38,38 +45,21 @@ def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypa
 
 
 def test_terminal_artifacts_keep_the_existing_write_order(tmp_path: Path, monkeypatch) -> None:
-    order: list[str] = []
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
-    )
+    order = _record_terminal_writes(monkeypatch)
 
     ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"), "signal")
 
-    assert order == ["final_json", "breakdown", "final_md"]
+    assert order == ["final_json", "breakdown", "final_md", "package"]
 
 
-def test_completed_close_only_needs_the_crash_safe_json(tmp_path: Path, monkeypatch) -> None:
-    order: list[str] = []
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_json", lambda *_: order.append("final_json")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_breakdown_json", lambda *_: order.append("breakdown")
-    )
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.breakdown.write_minimal_final_report", lambda *_: order.append("final_md")
-    )
+def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkeypatch) -> None:
+    """The sequencer wrote the reports; the package is the session's, not the sequencer's."""
+    order = _record_terminal_writes(monkeypatch)
 
     state = SharedState(session_id="s", close_sequence_done=True)
     ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
 
-    assert order == ["final_json"]
+    assert order == ["final_json", "package"]
 
 
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:

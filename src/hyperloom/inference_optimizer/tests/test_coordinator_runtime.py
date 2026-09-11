@@ -133,6 +133,48 @@ async def test_supervisor_restart_leaves_the_session_resumable(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_sigterm_crossing_the_watchdogs_sighup_stays_terminal(session_dir):
+    """The two signals can cross: the operator's lands after the loop broke on the watchdog's.
+
+    Classified once and never re-read, the session is left resumable and the
+    monitor relaunches a run the operator ended.
+    """
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: None)
+    c._stop.set()
+    classify = c._signal_stop_reason
+
+    def _then_the_operator_signals() -> str:
+        reason = classify()
+        c._signals.received.add(signal.SIGTERM)
+        return reason
+
+    c._signal_stop_reason = _then_the_operator_signals
+    close_calls = 0
+
+    async def _close(*, reason):
+        nonlocal close_calls
+        close_calls += 1
+
+    c.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _noop_finalize
+    try:
+        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        assert (
+            reason,
+            c.shared_state.stop_reason,
+            c.shared_state.leg_ended_ts,
+            close_calls,
+        ) == ("signal", "signal", "", 1)
+    finally:
+        await c.stop()
+
+
+async def _noop_finalize() -> None:
+    """Stand in for the recipe/journal finalize hook."""
+
+
+@pytest.mark.asyncio
 async def test_sigterm_follows_the_normal_terminal_path(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     c._signals = SimpleNamespace(received={signal.SIGTERM}, close=lambda: None)

@@ -52,11 +52,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Supervisor watchdog restarts are resumable and bounded.** A wedged
   coordinator receives SIGHUP, preserving the interrupted phase segment without
   creating a session outcome; repeated wedges become terminal after three
-  restart attempts. Inline role turns now carry their own wall-clock ceiling,
-  sized above the longest legal turn, so one awaited turn cannot hold the tick
-  open without the watchdog being able to tell a slow turn from a wedged one; a
-  turn cancelled at that ceiling counts toward the crash emergency stop, which
-  the advancing tick would otherwise hide.
+  restart attempts, counted durably before the signal goes out. Inline role
+  turns now carry a wall-clock ceiling read off their own backend's per-attempt
+  timeout and retry policy, so raising either raises the ceiling with it and one
+  awaited turn cannot hold the tick open; a turn cancelled at that ceiling counts
+  toward the crash emergency stop, which the advancing tick would otherwise hide.
+- **The robustness monitor reads the real stop-reason vocabulary.** It imported
+  a module that does not exist and silently fell back to a subset missing 16
+  terminal reasons, so a finished session could be relaunched.
 
 ## [v1.1.0] - 2026-09-09
 Current packaged version (`pyproject.toml`). See

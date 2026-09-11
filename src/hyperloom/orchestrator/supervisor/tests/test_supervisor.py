@@ -162,13 +162,19 @@ async def test_a_wedged_coordinator_is_asked_to_stop_on_the_one_channel_that_rea
     _wait_for_exit(pid)
 
 
+def _a_wedged_reading(**kw) -> mock.Mock:
+    """A complete wedged reading, so a status write over it round-trips as JSON."""
+    fields = {"verdict": WEDGED, "pid": 123, "detail": "stalled", "tick": 7, "tick_age_sec": 999.0}
+    fields.update(kw)
+    return mock.Mock(**fields)
+
+
 def test_a_wedged_coordinator_is_asked_to_restart_with_sighup(tmp_path):
     """The restart intent is carried by the signal itself."""
     supervisor = _supervisor(tmp_path)
-    observation = mock.Mock(pid=123, detail="stalled")
 
     with mock.patch.object(os, "kill") as kill:
-        supervisor._ask_to_stop(observation)
+        supervisor._ask_to_stop(_a_wedged_reading())
 
     kill.assert_called_once_with(123, signal.SIGHUP)
 
@@ -178,12 +184,30 @@ def test_an_unreadable_restart_count_refuses_another_resumable_restart(tmp_path)
     status.parent.mkdir(parents=True)
     status.write_text("{", encoding="utf-8")
     supervisor = _supervisor(tmp_path, max_restarts=3)
-    observation = mock.Mock(pid=123, detail="stalled")
 
     with mock.patch.object(os, "kill") as kill:
-        supervisor._ask_to_stop(observation)
+        supervisor._ask_to_stop(_a_wedged_reading())
 
     kill.assert_called_once_with(123, signal.SIGTERM)
+
+
+def test_the_restart_is_spent_on_disk_before_the_signal_goes_out(tmp_path):
+    """The coordinator's stop path can outlive this supervisor.
+
+    A count banked only after the signal is a restart the next leg reads as
+    never spent, which is how a bounded limit becomes an unbounded loop.
+    """
+    store.write_status(tmp_path, {"restart_count": 2})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    banked: list[int] = []
+
+    def _read_status_at_signal_time(pid, sig):
+        banked.append(json.loads(supervisor_status_path(tmp_path).read_text(encoding="utf-8"))["restart_count"])
+
+    with mock.patch.object(os, "kill", _read_status_at_signal_time):
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    assert banked == [3]
 
 
 @pytest.mark.asyncio
@@ -219,7 +243,8 @@ async def test_a_restart_past_the_limit_becomes_terminal(tmp_path):
     final = json.loads((reports_dir(tmp_path) / "final.json").read_text(encoding="utf-8"))
     assert done is True
     assert final["stop_reason"] == WEDGED_STOP_REASON
-    assert final["supervisor"]["restart_count"] == 4
+    # The terminal ask is not a restart, so the count stays at the three spent.
+    assert final["supervisor"]["restart_count"] == 3
 
 
 @pytest.mark.asyncio

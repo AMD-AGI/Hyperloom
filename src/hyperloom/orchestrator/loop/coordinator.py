@@ -33,16 +33,6 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
 MAINTENANCE_INTERVAL_SEC: int = 1800
 
-# The roles a tick runs a reactor turn for, in order.
-CANONICAL_TICK_ROLES: tuple[str, ...] = ("orchestration", "critic", "robustness")
-
-# Wall-clock ceiling on one inline reactor turn, so a wedged turn cannot hold
-# the tick open indefinitely. Sized above the longest legal turn -- a backend
-# spending all three attempts of its retry policy at the 300s per-attempt cap,
-# plus the backoff between them -- because a backend's own ``call_timeout_s``
-# is an idle budget between streamed messages, not a bound on the turn.
-REACTOR_TURN_BUDGET_SEC: float = 960.0
-
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
@@ -678,7 +668,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry.
-        self._tick_roles: tuple[str, ...] = tuple(r for r in CANONICAL_TICK_ROLES if r in self.role_registry)
+        _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
+        self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
         _inline_raw = (
@@ -1453,8 +1444,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return bound.remaining()
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
-        """Return the wall-clock ceiling for an inline reactor turn."""
-        return REACTOR_TURN_BUDGET_SEC if stage.startswith("reactor:") else None
+        """Return the wall-clock ceiling for an inline reactor turn.
+
+        Read off the role's own backend, because every input to a legal turn --
+        the per-attempt timeout, the attempt count, the backoff -- is an
+        environment override. A backend that declares no budget is left to the
+        session bound rather than capped at a guess.
+        """
+        role = stage.removeprefix("reactor:")
+        if role == stage:
+            return None
+        budget = getattr(self.backends.get(role), "turn_budget_sec", None)
+        if not isinstance(budget, (int, float)) or budget <= 0:
+            return None
+        return float(budget)
 
     def _stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
@@ -1693,6 +1696,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
+            if stop_reason == SUPERVISOR_RESTART_REASON:
+                # Re-read the drain as late as it can be read: a SIGTERM that
+                # crossed the watchdog's SIGHUP is an operator ending the
+                # session, and a resumable stop would have it relaunched.
+                stop_reason = self._signal_stop_reason()
             resumable_stop = stop_reason == SUPERVISOR_RESTART_REASON
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False

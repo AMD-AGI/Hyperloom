@@ -25,7 +25,14 @@ from hyperloom.inference_optimizer.protocol.intent import (
 
 from ..trace.llm_trace import new_call_id
 from .agent_role import DEFAULT_CODEX_MODEL
-from .base import BackendError, BackendTurnResult, LLMCallFailed, parse_call_timeout_env, safe_int
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    LLMCallFailed,
+    derive_turn_budget_sec,
+    parse_call_timeout_env,
+    safe_int,
+)
 
 
 _BARE_INTENTS_RE = re.compile(r'(\{.*?"intents".*\})', re.DOTALL)
@@ -72,6 +79,11 @@ class CodexAgentBackend:
     env: dict[str, str] | None = None
     name: str = "codex-agent"
     calls: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def turn_budget_sec(self) -> float:
+        """float: Wall-clock ceiling for one ``run()`` call; a single attempt, no retries."""
+        return derive_turn_budget_sec(lambda _n: self.call_timeout_s)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -110,6 +111,31 @@ def test_a_completed_close_sequence_is_terminal(tmp_path):
     result = _run_terminal_check(tmp_path)
 
     assert result.returncode == 0
+
+
+def test_a_canonical_only_stop_reason_is_terminal(tmp_path):
+    """The vocabulary the monitor gates on is the orchestrator's, not a copy of it.
+
+    ``coordinator_exception`` is terminal and absent from the offline fallback,
+    so a monitor reading the fallback would resume a finished session.
+    """
+    (tmp_path / "state.json").write_text(
+        json.dumps({"phase": "SWEEP", "stop_reason": "coordinator_exception"}),
+        encoding="utf-8",
+    )
+
+    result = _run_terminal_check(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_monitor_names_the_module_the_vocabulary_lives_in():
+    """A renamed module must break here, not silently downgrade the live monitor."""
+    importlib.import_module("hyperloom.orchestrator.phases.machine_state")
+
+    assert "from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB" in MONITOR.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_a_supervisor_final_json_is_terminal(tmp_path):

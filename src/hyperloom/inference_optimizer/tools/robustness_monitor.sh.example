@@ -79,7 +79,7 @@
 #
 # Edit the defaults above before copying if your run uses different
 # values. Terminal detection is aligned with
-# ``hyperloom.orchestrator.phase_state.STOP_REASON_VOCAB`` (not a
+# ``hyperloom.orchestrator.phases.machine_state.STOP_REASON_VOCAB`` (not a
 # hard-coded subset — ``baseline_failed`` and other failure sentinels must not
 # trigger auto-resume).
 
@@ -135,7 +135,8 @@ read_stop() {
 }
 
 # Exit 0 when the session is finished (no auto-resume). Uses STOP_REASON_VOCAB
-# from phase_state when importable; falls back to a minimal set for offline use.
+# from machine_state when importable; falls back to a minimal subset for offline
+# use, and says on stderr when it does.
 is_terminal_session() {
   python3 - "$session_dir" <<'PY'
 import json
@@ -164,8 +165,11 @@ if close_done:
     raise SystemExit(0)
 
 try:
-    from hyperloom.orchestrator.phase_state import STOP_REASON_VOCAB
+    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
 except ImportError:
+    # Narrower than the real vocabulary, so say so: a session that stopped for a
+    # reason only the canonical set carries would be resumed from here.
+    print("warn: STOP_REASON_VOCAB unavailable; using the offline subset", file=sys.stderr)
     STOP_REASON_VOCAB = frozenset({
         "target_reached", "global_converged", "time_exhausted", "max_ticks",
         "baseline_failed", "prelude_baseline_failed", "policy_loop",
