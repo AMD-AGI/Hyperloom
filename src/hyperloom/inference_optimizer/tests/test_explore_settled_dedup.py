@@ -8,6 +8,7 @@ anything whose stack moved, whose workload moved, that never reached a verdict,
 or that landed close enough to the KEEP threshold that noise could have decided
 it.
 """
+
 from __future__ import annotations
 
 from hyperloom.orchestrator.actions.executors.explore import (
@@ -63,9 +64,7 @@ def test_a_variant_that_never_got_a_verdict_is_retested():
     """Crashed, killed on overtime, or failed at warmup: the ledger holds no
     result to reuse, only the fact that it did not finish."""
     for status in ("failed", "killed_overtime", ""):
-        assert _settled_against_same_stack(
-            _prior(status=status, gain_pct=None), WS, BASE, THRESH
-        ) is False
+        assert _settled_against_same_stack(_prior(status=status, gain_pct=None), WS, BASE, THRESH) is False
 
 
 def test_a_result_near_the_threshold_is_retested():
@@ -73,24 +72,18 @@ def test_a_result_near_the_threshold_is_retested():
     been decided by the measurement rather than by the variant. That deserves a
     second sample, not a skip."""
     for gain in (THRESH - BAND * 0.5, THRESH + BAND * 0.5, THRESH, THRESH - BAND):
-        assert _settled_against_same_stack(
-            _prior(gain_pct=gain), WS, BASE, THRESH
-        ) is False
+        assert _settled_against_same_stack(_prior(gain_pct=gain), WS, BASE, THRESH) is False
 
 
 def test_a_clear_winner_is_also_settled():
     """The guard is symmetric: a variant that won by a wide margin is as settled
     as one that lost by one, and re-running it re-derives a known number."""
-    assert _settled_against_same_stack(
-        _prior(gain_pct=THRESH + BAND + 5.0, outcome="KEEP"), WS, BASE, THRESH
-    ) is True
+    assert _settled_against_same_stack(_prior(gain_pct=THRESH + BAND + 5.0, outcome="KEEP"), WS, BASE, THRESH) is True
 
 
 def test_missing_fields_are_retested():
     for missing in ("base_tput", "gain_pct"):
-        assert _settled_against_same_stack(
-            _prior(**{missing: None}), WS, BASE, THRESH
-        ) is False
+        assert _settled_against_same_stack(_prior(**{missing: None}), WS, BASE, THRESH) is False
 
 
 def test_no_baseline_yet_is_retested():
@@ -104,20 +97,15 @@ def test_only_the_decisive_real_session_variants_are_settled():
     re-measured, which is the guard declining to prune on a number it cannot
     distinguish from noise."""
     settled = {"chunked-prefill-8192": -0.812, "sched-conservativeness-03": -0.157}
-    inside_band = {"attn-aiter": 0.045, "cuda-graph-max-bs-256": 0.241,
-                   "mem-frac-092": 0.165}
+    inside_band = {"attn-aiter": 0.045, "cuda-graph-max-bs-256": 0.241, "mem-frac-092": 0.165}
     for name, g in settled.items():
-        assert _settled_against_same_stack(
-            _prior(gain_pct=g), WS, BASE, THRESH
-        ) is True, name
+        assert _settled_against_same_stack(_prior(gain_pct=g), WS, BASE, THRESH) is True, name
     for name, g in inside_band.items():
-        assert _settled_against_same_stack(
-            _prior(gain_pct=g), WS, BASE, THRESH
-        ) is False, name
+        assert _settled_against_same_stack(_prior(gain_pct=g), WS, BASE, THRESH) is False, name
 
 
 def test_the_variant_that_failed_at_warmup_is_not_skipped():
     """One of the six never produced a number at all. It is not settled."""
-    assert _settled_against_same_stack(
-        _prior(status="failed", gain_pct=None, outcome="REVERT"), WS, BASE, THRESH
-    ) is False
+    assert (
+        _settled_against_same_stack(_prior(status="failed", gain_pct=None, outcome="REVERT"), WS, BASE, THRESH) is False
+    )

@@ -880,9 +880,7 @@ class ExploreExecutor:
                 )
                 continue
             prior = (tested_dict or {}).get(fp)
-            if isinstance(prior, dict) and _settled_against_same_stack(
-                prior, ws_sig, base_tput, keep_threshold_pct
-            ):
+            if isinstance(prior, dict) and _settled_against_same_stack(prior, ws_sig, base_tput, keep_threshold_pct):
                 skipped_dup.append(
                     {
                         "name": gv.name,
@@ -947,9 +945,7 @@ class ExploreExecutor:
         # Drop the variants a cheap reduced-scale probe puts decisively behind
         # the stack. Off by default; a no-op when the probe cannot run, or when
         # it cannot be held in the deployment's kernel regime.
-        runnable, screened_out = screen_variants(
-            runnable, config_path, session_dir=_resolve_session_dir()
-        )
+        runnable, screened_out = screen_variants(runnable, config_path, session_dir=_resolve_session_dir())
         skipped_dup.extend(screened_out)
 
         round_id_seed = int(search.get("cursor") or 0) + 1
@@ -1115,23 +1111,20 @@ class ExploreExecutor:
                         # has to reach steady state and run the accuracy gate.
                         # Shorten it to one wave of the concurrency instead of
                         # the five to ten a measured round would use.
-                        warmup_gv = run_gv
-                        warmup_prompts = (
-                            _warmup_num_prompts(config_path) if _short_warmup_enabled() else None
-                        )
+                        warmup_prompts = _warmup_num_prompts(config_path) if _short_warmup_enabled() else None
                         if warmup_prompts is not None:
-                            warmup_envs = dict(run_extra_envs)
+                            warmup_envs = dict(getattr(warmup_gv, "extra_envs", {}) or {})
                             warmup_envs["NUM_PROMPTS"] = str(warmup_prompts)
                             warmup_gv = _carry_variant_metadata(
-                                run_gv,
+                                warmup_gv,
                                 GridVariant(
-                                    name=gv.name,
-                                    extra_server_args=gv.extra_server_args,
+                                    name=warmup_gv.name,
+                                    extra_server_args=warmup_gv.extra_server_args,
                                     extra_envs=warmup_envs,
-                                    note=gv.note,
-                                    remove_args=run_remove_args,
-                                    unset_envs=run_unset_envs,
-                                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                                    note=warmup_gv.note,
+                                    remove_args=list(getattr(warmup_gv, "remove_args", []) or []),
+                                    unset_envs=list(getattr(warmup_gv, "unset_envs", []) or []),
+                                    args_mode=str(getattr(warmup_gv, "args_mode", "append") or "append"),
                                 ),
                             )
                         warmup_results = await run_grid(

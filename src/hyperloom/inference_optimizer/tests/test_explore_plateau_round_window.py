@@ -31,10 +31,7 @@ def _state(winners, rounds):
 
 def _barren_rounds(n, *, start=0, proposals=12):
     """Rounds that proposed a full grid and kept none of it."""
-    return [
-        {"round_id": f"r{i}", "proposals_total": proposals, "proposals_kept": 0}
-        for i in range(start, start + n)
-    ]
+    return [{"round_id": f"r{i}", "proposals_total": proposals, "proposals_kept": 0} for i in range(start, start + n)]
 
 
 def _productive_round(idx, *, kept=1, proposals=12):
@@ -53,9 +50,7 @@ def test_single_keep_no_longer_disables_the_gain_arm(monkeypatch):
     """
     monkeypatch.setenv(GATE, "1")
     winners = [{"round_id": "r0", "gain_pct": 1.5}]
-    rounds = [_productive_round(0)] + _barren_rounds(
-        DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK, start=1
-    )
+    rounds = [_productive_round(0)] + _barren_rounds(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK, start=1)
     triggered, ev = compute_plateau_explore(_state(winners, rounds))
     assert triggered is True
     assert ev["gain_window"] == "recent_rounds"
@@ -66,9 +61,7 @@ def test_legacy_window_is_unsatisfiable_after_one_keep(monkeypatch):
     """The behaviour the gate restores, pinned so the contrast is explicit."""
     monkeypatch.setenv(GATE, "0")
     winners = [{"round_id": "r0", "gain_pct": 1.5}]
-    rounds = [_productive_round(0)] + _barren_rounds(
-        DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK, start=1
-    )
+    rounds = [_productive_round(0)] + _barren_rounds(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK, start=1)
     triggered, ev = compute_plateau_explore(_state(winners, rounds))
     assert triggered is False
     assert ev["gain_window"] == "recent_winners"
@@ -123,9 +116,7 @@ def test_a_kept_round_breaks_the_streak(monkeypatch):
 def test_rounds_with_no_proposals_still_count(monkeypatch):
     """The original signal is a subset of the new one, not a casualty of it."""
     monkeypatch.setenv(GATE, "1")
-    rounds = [
-        {"round_id": f"r{i}", "proposals_total": 0, "proposals_kept": 0} for i in range(5)
-    ]
+    rounds = [{"round_id": f"r{i}", "proposals_total": 0, "proposals_kept": 0} for i in range(5)]
     _, ev = compute_plateau_explore(_state([], rounds))
     assert ev["empty_streak"] == 5
 

@@ -210,12 +210,8 @@ def _queue_kernel_keep(
         return None
     # Amdahl gate: a full end-to-end serving benchmark that cannot arithmetically
     # clear its own bar is GPU time spent to confirm a foregone conclusion.
-    gate_threshold = float(
-        getattr(state, "kernel_integrate_keep_threshold_pct", None) or 1.0
-    )
-    if _amdahl_gate_enabled() and integrate_cannot_pass(
-        entry.get("last_gpu_pct", 0.0), micro_speedup, gate_threshold
-    ):
+    gate_threshold = float(getattr(state, "kernel_integrate_keep_threshold_pct", None) or 1.0)
+    if _amdahl_gate_enabled() and integrate_cannot_pass(entry.get("last_gpu_pct", 0.0), micro_speedup, gate_threshold):
         ceiling = amdahl_e2e_ceiling_pct(
             float(entry.get("last_gpu_pct", 0.0) or 0.0) * AMDAHL_GPU_PCT_MARGIN,
             micro_speedup,

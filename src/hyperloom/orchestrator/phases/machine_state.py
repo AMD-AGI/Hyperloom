@@ -335,10 +335,6 @@ def _plateau_round_window_enabled() -> bool:
     return (raw if raw else "1").lower() not in {"0", "false", "no", "off"}
 
 
-# FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
-DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
-DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved candidates without a KEEP (including
 # non-benchmarked terminal outcomes), the source arm is dry.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
@@ -1072,20 +1068,14 @@ def compute_plateau_explore(
         for row in specialist_rounds[-lookback:]
         if isinstance(row, dict) and row.get("round_id") is not None
     }
-    winners_carry_rounds = any(
-        isinstance(w, dict) and w.get("round_id") is not None for w in winners_history
-    )
+    winners_carry_rounds = any(isinstance(w, dict) and w.get("round_id") is not None for w in winners_history)
     # A ledger whose winners predate round attribution would read as an empty
     # window and plateau the phase on missing data, so that case keeps the
     # winner-window behaviour: the failure mode is exploring longer.
-    scoped_by_round = bool(
-        round_window and recent_round_ids and (winners_carry_rounds or not winners_history)
-    )
+    scoped_by_round = bool(round_window and recent_round_ids and (winners_carry_rounds or not winners_history))
     if scoped_by_round:
         recent_winners = [
-            w
-            for w in winners_history
-            if isinstance(w, dict) and str(w.get("round_id")) in recent_round_ids
+            w for w in winners_history if isinstance(w, dict) and str(w.get("round_id")) in recent_round_ids
         ]
     else:
         recent_winners = list(winners_history[-lookback:])
