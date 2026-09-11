@@ -152,6 +152,18 @@ def make_agent_fn(
     source_files = [f for f in (source_files or []) if f]
     target_functions = [f for f in (target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
+    if kernel_backend_name == "assembly" and not correctness_only:
+        from kernelforge.assembly.port import frozen_paths
+
+        assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
+        if not assembly_files:
+            raise ValueError("assembly optimization requires a verified .s target from PORT")
+        extra_protected_paths = list(extra_protected_paths or []) + frozen_paths(config.workspace, assembly_files)
+        port_dir = Path(config.workspace) / "forge_experiments" / "assembly_port"
+        extra_protected_paths.extend(str(path) for path in port_dir.glob("*") if path.is_file())
+        commit_new_paths = []
+        source_files = assembly_files
+        is_repo_task = False
 
     def _bullets(items: list[str]) -> str:
         return "\n".join(f"  - {i}" for i in items)
@@ -459,6 +471,12 @@ Never `cat` a whole file — use the Read tool.
                 )
         else:
             target_section = f"## Target kernel\n{kernel_path}\n"
+        if kernel_backend_name == "assembly" and not correctness_only:
+            target_section = (
+                "## Editable assembly source\n"
+                + _bullets(source_files)
+                + "\nAll other tracked files are frozen, including the Python launcher and reference.\n"
+            )
 
         # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
         # and the stated cut can never disagree.

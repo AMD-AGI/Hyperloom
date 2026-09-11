@@ -3071,7 +3071,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             wall_ms=self.ic.warm_start_wall_ms,
             mean_case_speedup=self.ic.warm_start_mean_case_speedup,
             commit_hash=head,
-            plan=f"KB warm-start {self.ic.warm_start_solution_slug}".strip(),
+            plan=f"Validated start: {self.ic.warm_start_solution_slug}".strip(),
             source="warm_start",
         )
         self.run_state.head_commit = head
@@ -3109,7 +3109,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             wall_ms=incumbent_wall_ms,
             mean_case_speedup=incumbent_mean_case_speedup,
             commit_hash=head,
-            plan=f"KB warm-start {self.ic.warm_start_solution_slug}".strip(),
+            plan=f"Validated start: {self.ic.warm_start_solution_slug}".strip(),
             source="warm_start",
         )
         self.run_state.head_commit = head
@@ -3144,7 +3144,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             iteration=0,
             duration_sec=0.0,
             validation_passed=True,
-            validation_summary="KB warm-start passed canonical correctness and performance gates",
+            validation_summary=f"Validated start: {self.ic.warm_start_solution_slug}; correctness passed, timings recorded",
             wall_ms=incumbent_wall_ms,
             mean_case_speedup=incumbent_mean_case_speedup,
             kept=True,

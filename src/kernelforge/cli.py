@@ -989,6 +989,8 @@ def forge_loop(
     import dataclasses as _dataclasses
     import hashlib as _hashlib
 
+    if return_after_read_kb and kernel_backend == "assembly":
+        raise click.UsageError("--return-after-read-kb is incompatible with assembly PORT")
     if return_after_read_kb and not experience_kb:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:
@@ -1395,6 +1397,42 @@ def forge_loop(
             campaign_store.save(campaign, program_md=program_text)
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
+
+    assembly_port = None
+    if kernel_backend == "assembly":
+        from kernelforge.assembly.port import prepare_assembly, seed_port_baseline
+
+        try:
+            assembly_port = asyncio.run(
+                prepare_assembly(
+                    config=config,
+                    kernel=kernel,
+                    driver=driver,
+                    sources=source_files_list,
+                    base_commit=campaign.base_commit,
+                    threshold=snr_threshold,
+                    deadline=deadline_unix - finalize_reserve_sec,
+                    resume=resume,
+                    program=program_md,
+                    permission_mode=permission_mode,
+                    usage=usage,
+                )
+            )
+            if not resume:
+                seed_port_baseline(iter_config, assembly_port)
+        except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
+            raise click.ClickException(f"assembly PORT failed; optimization was not started: {error}") from error
+        source_files_list = [str(workspace / assembly_port["assembly"])]
+        iter_config.source_files = source_files_list
+        iter_config.commit_new_paths = []
+        commit_new_paths = []
+        # A cached whole-implementation patch could replace the launcher PORT just verified.
+        kb_warmstart_enabled = False
+        program_md += (
+            "\n\nAssembly PORT is complete. Optimize only "
+            + source_files_list[0]
+            + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
+        )
 
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
@@ -1851,6 +1889,8 @@ def forge_loop(
             "agent_model": effective_implementer_model,
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
+        if assembly_port is not None:
+            result["assembly_port"] = assembly_port
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)

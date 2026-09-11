@@ -130,7 +130,9 @@ class HipKernel:
                 low, high = _INTEGER_RANGES[kind]
                 if not isinstance(value, int) or not low <= value < high:
                     raise ValueError(f"Argument {value!r} does not fit {kind}")
-            packed.append(_ARGUMENT_TYPES[kind](value))
+                packed.append(_ARGUMENT_TYPES[kind](value))
+            else:
+                packed.append(ctypes.c_float(value) if kind == "f32" else ctypes.c_double(value))
         pointers = (ctypes.c_void_p * len(packed))(
             *(ctypes.cast(ctypes.byref(value), ctypes.c_void_p) for value in packed)
         )
