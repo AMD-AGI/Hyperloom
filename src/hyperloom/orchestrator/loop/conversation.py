@@ -750,21 +750,7 @@ class ConversationCollaborator:
         target = _research_hints.load_competitor_target(self.session_dir)
         if not target:
             return ""
-        best = getattr(state, "current_best", None)
-        if not isinstance(best, dict):
-            return ""
-        tput = best.get("tput")
-        tpot = best.get("tpot_mean_ms")
-        tp = int(getattr(state, "tp", 0) or 0)
-        our_tput_per_gpu = float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp > 0 else None
-        our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
-        conc = int(getattr(state, "conc", 0) or 0) or None
-        gap = _research_hints.gap_analysis(
-            target,
-            our_tput_per_gpu=our_tput_per_gpu,
-            our_tpot_ms=our_tpot_ms,
-            conc=conc,
-        )
+        gap = _research_hints.gap_for_state(target, state)
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
@@ -778,21 +764,7 @@ class ConversationCollaborator:
             target = _research_hints.load_competitor_target(self.session_dir)
             if not target:
                 return None
-            best = getattr(state, "current_best", None)
-            if not isinstance(best, dict):
-                return None
-            tput = best.get("tput")
-            tpot = best.get("tpot_mean_ms")
-            tp = int(getattr(state, "tp", 0) or 0)
-            our_tput_per_gpu = float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp > 0 else None
-            our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
-            conc = int(getattr(state, "conc", 0) or 0) or None
-            gap = _research_hints.gap_analysis(
-                target,
-                our_tput_per_gpu=our_tput_per_gpu,
-                our_tpot_ms=our_tpot_ms,
-                conc=conc,
-            )
+            gap = _research_hints.gap_for_state(target, state)
         except Exception:  # noqa: BLE001 — defensive
             return None
         if not isinstance(gap, dict):

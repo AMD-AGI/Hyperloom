@@ -520,7 +520,7 @@ def _build_summary_dict(
         "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
     }
     if external_baseline:
-        summary["external_baseline"] = external_baseline
+        summary["external_baseline"] = _external_baseline_with_comparison(state, external_baseline)
     # Roofline comparison: emit only when at least one snapshot exists.
     from ...kernel.roofline_snapshot import build_roofline_comparison_from_history
 
@@ -925,6 +925,40 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _external_baseline_with_comparison(state: SharedState, external: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot the same AgentX comparison used by the advisory, without changing the reference."""
+    from hyperloom.common.env import env_bool
+    from hyperloom.common.perf_metric import is_agentx_mode
+    from ...knowledge.research_hints import gap_for_state
+
+    query = external.get("query") or {}
+    agentx = is_agentx_mode(getattr(state, "benchmark_mode", "")) or env_bool("HYPERLOOM_AGENTX")
+    if not agentx and query.get("benchmark_mode") != "agentx":
+        return external
+    result = deepcopy(external)
+    result["comparison"] = {
+        "benchmark_mode": "agentx",
+        "status": "unavailable",
+        "reason": external.get("reason") or "reference_unavailable",
+    }
+    if external.get("status") != "ok":
+        return result
+    if not agentx:
+        result["comparison"]["reason"] = "benchmark_mode_mismatch"
+        return result
+    target = {
+        **query,
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [{**point, "source": external.get("source")} for point in external.get("all_concurrencies") or []],
+    }
+    gap = gap_for_state(target, state, for_report=True)
+    if gap is not None:
+        result["comparison"] = gap
+    else:
+        result["comparison"]["reason"] = "no_measurement"
+    return result
+
+
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     """Render the advisory external-baseline section (report-only)."""
     lines: list[str] = []
@@ -968,6 +1002,23 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     warning = ext.get("warning") or ""
     if warning:
         lines.append(f"- Warning: {warning}")
+
+    comparison = ext.get("comparison")
+    if isinstance(comparison, dict) and comparison.get("benchmark_mode") == "agentx":
+        from ...knowledge.research_hints import full_gap_summary
+
+        lines.extend(["", full_gap_summary(comparison)])
+        for key, label, unit in (
+            ("total_tput_per_gpu", "total throughput/GPU", "tok/s/GPU"),
+            ("e2e_norm_intvty_p90", "E2E normalized interactivity P90", "tok/s/user"),
+        ):
+            local, reference = comparison.get(f"local_{key}"), comparison.get(f"reference_{key}")
+            if local is not None or reference is not None:
+                ours = f"{local:.3f}" if local is not None else "unavailable"
+                theirs = f"{reference:.3f}" if reference is not None else "unavailable"
+                lines.append(f"- {label}: ours={ours}, reference={theirs} {unit}")
+        lines.append("")
+        return lines
 
     best = ext.get("best")
     if status == "ok" and isinstance(best, dict):

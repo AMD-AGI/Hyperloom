@@ -850,6 +850,45 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
     assert coord._current_primary_gap() == "throughput"
 
 
+def test_agentx_advisory_and_primary_gap_share_exact_measurement(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
+    from hyperloom.orchestrator.knowledge import research_hints as rh
+
+    target = {
+        "benchmark_mode": "agentx",
+        "model": "GLM-5.2",
+        "precision": "fp4",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [
+            {"conc": 4, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "benchmark_id": "2", "source": "api"}
+        ],
+    }
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: target)
+    monkeypatch.setattr(
+        local_measurement,
+        "load_local_measurement",
+        lambda best: {
+            "status": "ok",
+            "reason": "",
+            "conc": 4,
+            "total_tput_per_gpu": 400.0,
+            "e2e_norm_intvty_p90": 5.0,
+            "precision": "mxfp4",
+        },
+    )
+    state = coord.shared_state
+    state.benchmark_mode = "agentx"
+    state.model_path = "/models/GLM-5.2-MXFP4"
+    state.precision = "mxfp4"
+    state.current_best = {"tput": 99999.0, "tpot_mean_ms": 0.001}
+    state.tp = 8
+    state.conc = 99
+    text = coord._target_gap_advisory_block()
+    assert "total throughput/GPU gap vs target: +50.0%" in text
+    assert "E2E normalized interactivity P90 gap vs target: +75.0%" in text
+    assert coord._current_primary_gap() == "interactivity"
+
+
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.knowledge import research_hints as rh
 

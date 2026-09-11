@@ -25,6 +25,94 @@ from hyperloom.inference_optimizer.session.session_paths import (
 )
 
 
+def _agentx_reference():
+    return {
+        "status": "ok",
+        "reason": "ok",
+        "source": "https://reference.test/api/v1",
+        "query": {"benchmark_mode": "agentx", "model": "GLM-5.2", "gpu": "b300", "precision": "fp4"},
+        "best": {"conc": 8, "tput_per_gpu": 9999.0, "e2e_norm_intvty_p90": 99.0, "benchmark_id": "other-conc"},
+        "all_concurrencies": [
+            {"conc": 4, "decode_tp": 8, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "benchmark_id": "42"},
+            {
+                "conc": 8,
+                "decode_tp": 8,
+                "tput_per_gpu": 9999.0,
+                "e2e_norm_intvty_p90": 99.0,
+                "benchmark_id": "other-conc",
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize("advisory_enabled", [True, False])
+def test_report_agentx_comparison_uses_same_state_gap_as_advisory(
+    report_performance_state, monkeypatch, advisory_enabled
+):
+    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
+
+    state = report_performance_state
+    state.model_path = "/models/GLM-5.2-MXFP4"
+    state.precision = "mxfp4"
+    state.conc = 99
+    state.target_advisory_enabled = advisory_enabled
+    monkeypatch.setattr(
+        local_measurement,
+        "load_local_measurement",
+        lambda best: {
+            "status": "ok",
+            "reason": "",
+            "conc": 4,
+            "total_tput_per_gpu": 400.0,
+            "e2e_norm_intvty_p90": 5.0,
+            "precision": "mxfp4",
+        },
+    )
+    reference = _agentx_reference()
+    before = deepcopy(reference)
+    summary = rp._build_summary_dict(state, {}, [], external_baseline=reference)
+    comparison = summary["external_baseline"]["comparison"]
+    assert comparison["benchmark_id"] == "42"
+    assert comparison["target_conc"] == 4
+    assert comparison["throughput_gap_pct"] == 50.0
+    assert comparison["interactivity_gap_pct"] == 75.0
+    assert comparison["local_total_tput_per_gpu"] == 400.0
+    assert reference == before
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "E2E normalized interactivity P90" in md
+    assert "total throughput/GPU" in md
+    assert "400.000" in md and "800.000" in md
+    assert "+75.0%" in md
+    assert "9999" not in md
+    assert "mean TPOT" not in md
+    assert "cross-system" in md
+
+
+def test_agentx_report_rejects_old_synthetic_reference(report_performance_state):
+    reference = _agentx_reference()
+    reference["query"]["benchmark_mode"] = "synthetic"
+    summary = rp._build_summary_dict(report_performance_state, {}, [], external_baseline=reference)
+    comparison = summary["external_baseline"]["comparison"]
+    assert comparison["reason"] == "benchmark_mode_mismatch"
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "benchmark_mode_mismatch" in md
+    assert "9999" not in md
+
+
+def test_agentx_report_keeps_no_data_reason_without_computing_gap(report_performance_state):
+    reference = {
+        **_agentx_reference(),
+        "status": "no_match",
+        "reason": "fetch_error",
+        "best": None,
+        "all_concurrencies": [],
+    }
+    summary = rp._build_summary_dict(report_performance_state, {}, [], external_baseline=reference)
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "fetch_error" in md
+    assert "gap vs target" not in md
+
+
 # ---- _format_completeness_annotations ----
 def test_completeness_annotations_empty():
     assert rp._format_completeness_annotations({}) == []

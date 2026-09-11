@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.knowledge import research_hints as rh
 from hyperloom.inference_optimizer.session import session_paths
@@ -388,3 +391,253 @@ def test_summarise_for_prompt_extra_more(tmp_path):
     rh.append_hints(tmp_path, incoming)
     out = rh.summarise_for_prompt(tmp_path, max_entries=3)
     assert "... and 7 more in research_hints.md." in out
+
+
+def _agentx_target():
+    return {
+        "benchmark_mode": "agentx",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "model": "GLM-5.2",
+        "framework": "sglang",
+        "gpu": "b300",
+        "precision": "fp4",
+        "notes": "cross-system reference",
+        "per_conc": [
+            {
+                "conc": 4,
+                "decode_tp": 8,
+                "benchmark_id": "1",
+                "tput_per_gpu": 1000.0,
+                "e2e_norm_intvty_p90": 10.0,
+                "source": "api",
+            },
+            {
+                "conc": 4,
+                "decode_tp": 4,
+                "benchmark_id": "2",
+                "tput_per_gpu": 800.0,
+                "e2e_norm_intvty_p90": 20.0,
+                "source": "api",
+            },
+            {
+                "conc": 8,
+                "decode_tp": 8,
+                "benchmark_id": "3",
+                "tput_per_gpu": 2000.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "source": "api",
+            },
+        ],
+    }
+
+
+def test_agentx_target_roundtrip_preserves_metric_mode_and_benchmark_id(tmp_path):
+    target = _agentx_target()
+    assert rh.write_competitor_target(tmp_path, target)
+    assert rh.load_competitor_target(tmp_path) == target
+
+
+def test_agentx_gap_uses_same_concurrency_and_single_p90_selected_row():
+    gap = rh.gap_analysis(
+        _agentx_target(),
+        benchmark_mode="agentx",
+        our_tput_per_gpu=400.0,
+        our_tpot_ms=0.001,
+        our_e2e_norm_intvty_p90=5.0,
+        conc=4,
+    )
+    assert gap["throughput_gap_pct"] == 50.0
+    assert gap["interactivity_gap_pct"] == 75.0
+    assert gap["tpot_ratio"] is None
+    assert gap["benchmark_id"] == "2"
+    assert gap["primary_gap"] == "interactivity"
+    assert gap["reference_total_tput_per_gpu"] == 800.0
+    assert gap["reference_e2e_norm_intvty_p90"] == 20.0
+    text = rh.full_gap_summary(gap)
+    assert "E2E normalized interactivity P90" in text
+    assert "total throughput/GPU" in text
+    assert "LLM-authored" not in text
+    assert "decode-kernel" not in text
+
+
+@pytest.mark.parametrize("conc", [None, 3])
+def test_agentx_does_not_substitute_nearest_concurrency(conc):
+    gap = rh.gap_analysis(
+        _agentx_target(),
+        benchmark_mode="agentx",
+        our_tput_per_gpu=400.0,
+        our_tpot_ms=10.0,
+        our_e2e_norm_intvty_p90=5.0,
+        conc=conc,
+    )
+    assert gap["status"] == "unavailable"
+    assert gap["reason"] == ("concurrency_missing" if conc is None else "concurrency_mismatch")
+    assert gap["throughput_gap_pct"] is None
+    assert gap["primary_gap"] is None
+
+
+def test_agentx_does_not_compare_legacy_target_and_synthetic_does_not_use_agentx():
+    gap = rh.gap_analysis(_target(), benchmark_mode="agentx", our_tput_per_gpu=10.0, our_tpot_ms=10.0, conc=8)
+    assert gap["reason"] == "benchmark_mode_mismatch"
+    assert rh.gap_analysis(_agentx_target(), our_tput_per_gpu=10.0, our_tpot_ms=10.0, conc=4) is None
+
+
+@pytest.mark.parametrize("p90", [None, 0, float("nan"), True])
+def test_missing_exact_p90_does_not_use_tpot_or_disable_total(p90):
+    gap = rh.gap_analysis(
+        _agentx_target(),
+        benchmark_mode="agentx",
+        our_tput_per_gpu=400.0,
+        our_tpot_ms=0.001,
+        our_e2e_norm_intvty_p90=p90,
+        conc=4,
+    )
+    assert gap["throughput_gap_pct"] == 50.0
+    assert gap["interactivity_gap_pct"] is None
+    assert gap["tpot_ratio"] is None
+    assert "unavailable" in rh.full_gap_summary(gap)
+
+
+def test_agentx_missing_local_throughput_keeps_interactivity_gap():
+    gap = rh.gap_analysis(
+        _agentx_target(),
+        benchmark_mode="agentx",
+        our_tput_per_gpu=None,
+        our_tpot_ms=None,
+        our_e2e_norm_intvty_p90=5.0,
+        conc=4,
+    )
+    assert gap["throughput_gap_pct"] is None
+    assert gap["interactivity_gap_pct"] == 75.0
+
+
+def _agentx_state(**overrides):
+    return SimpleNamespace(
+        **{
+            "benchmark_mode": "agentx",
+            "model_path": "/models/GLM-5.2-MXFP4",
+            "precision": "mxfp4",
+            "target_advisory_enabled": True,
+            "compute_partition": {"mode": "SPX", "partitions": 1},
+            "tp": 8,
+            "conc": 99,
+            "current_best": {"tput": 99999.0, "tpot_mean_ms": 0.001},
+            **overrides,
+        }
+    )
+
+
+def _mock_local_view(monkeypatch, **overrides):
+    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
+
+    value = {
+        "status": "ok",
+        "reason": "",
+        "conc": 4,
+        "total_tput_per_gpu": 400.0,
+        "e2e_norm_intvty_p90": 5.0,
+        "throughput_reason": "",
+        "interactivity_reason": "",
+        "precision": "mxfp4",
+        **overrides,
+    }
+    monkeypatch.setattr(local_measurement, "load_local_measurement", lambda best: value)
+
+
+def test_state_gap_uses_accepted_measurement_not_ambient_state_axes(monkeypatch):
+    _mock_local_view(monkeypatch)
+    gap = rh.gap_for_state(_agentx_target(), _agentx_state())
+    assert gap["throughput_gap_pct"] == 50.0
+    assert gap["interactivity_gap_pct"] == 75.0
+    assert gap["target_conc"] == 4
+
+
+@pytest.mark.parametrize(
+    "overrides,reason",
+    [
+        ({"model_path": "/models/MiniMax-M3"}, "model_mismatch"),
+        ({"model_path": "/models/unknown"}, "model_mismatch"),
+        ({"precision": "fp8"}, "precision_mismatch"),
+    ],
+)
+def test_state_gap_refuses_other_model_or_precision(monkeypatch, overrides, reason):
+    _mock_local_view(monkeypatch, precision=overrides.get("precision", "mxfp4"))
+    gap = rh.gap_for_state(_agentx_target(), _agentx_state(**overrides))
+    assert gap["reason"] == reason
+    assert gap["throughput_gap_pct"] is None
+    assert gap["interactivity_gap_pct"] is None
+
+
+@pytest.mark.parametrize("missing_from", ["local", "reference"])
+def test_state_gap_does_not_claim_precision_match_when_unknown(monkeypatch, missing_from):
+    _mock_local_view(monkeypatch)
+    target = _agentx_target()
+    state = _agentx_state()
+    if missing_from == "local":
+        _mock_local_view(monkeypatch, precision="")
+    else:
+        target["precision"] = ""
+    gap = rh.gap_for_state(target, state)
+    assert gap["reason"] == "precision_unknown"
+    assert gap["throughput_gap_pct"] is None
+    assert gap["interactivity_gap_pct"] is None
+
+
+@pytest.mark.parametrize("partition", [{"mode": "CPX", "partitions": 8}, {"mode": "QPX", "partitions": 4}])
+def test_partitioned_device_keeps_p90_but_not_physical_gpu_gap(monkeypatch, partition):
+    _mock_local_view(monkeypatch)
+    gap = rh.gap_for_state(_agentx_target(), _agentx_state(compute_partition=partition))
+    assert gap["throughput_gap_pct"] is None
+    assert gap["local_total_tput_per_gpu"] is None
+    assert gap["throughput_reason"] == "partitioned_gpu"
+    assert gap["interactivity_gap_pct"] == 75.0
+
+
+def test_resume_precision_override_uses_accepted_recipe_not_stale_state(monkeypatch):
+    _mock_local_view(monkeypatch, precision="bf16")
+    state = _agentx_state(precision="fp8")
+    target = _agentx_target()
+    target["precision"] = "fp8"
+    assert rh.gap_for_state(target, state)["reason"] == "precision_mismatch"
+    target["precision"] = "bf16"
+    gap = rh.gap_for_state(target, state)
+    assert gap["throughput_gap_pct"] == 50.0
+    assert gap["interactivity_gap_pct"] == 75.0
+    assert state.precision == "fp8"
+
+
+def test_state_gap_respects_disabled_advisory():
+    assert rh.gap_for_state(_agentx_target(), _agentx_state(target_advisory_enabled=False)) is None
+
+
+def test_state_gap_does_not_fall_back_when_local_measurement_is_unavailable(monkeypatch):
+    _mock_local_view(
+        monkeypatch,
+        status="unavailable",
+        reason="measurement_mismatch",
+        total_tput_per_gpu=None,
+        e2e_norm_intvty_p90=None,
+    )
+    gap = rh.gap_for_state(_agentx_target(), _agentx_state())
+    assert gap["reason"] == "measurement_mismatch"
+    assert gap["throughput_gap_pct"] is None
+    assert gap["primary_gap"] is None
+
+
+def test_synthetic_state_gap_keeps_output_and_mean_tpot_contract(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    state = SimpleNamespace(
+        benchmark_mode="synthetic", current_best={"tput": 200.0, "tpot_mean_ms": 40.0}, tp=2, conc=8
+    )
+    expected = rh.gap_analysis(_target(), our_tput_per_gpu=100.0, our_tpot_ms=40.0, conc=8)
+    assert rh.gap_for_state(_target(), state) == expected
+
+
+def test_agentx_rejects_unlabelled_throughput_basis():
+    target = _agentx_target()
+    target.pop("throughput_basis")
+    gap = rh.gap_analysis(
+        target, benchmark_mode="agentx", our_tput_per_gpu=400.0, our_tpot_ms=None, our_e2e_norm_intvty_p90=5.0, conc=4
+    )
+    assert gap["throughput_gap_pct"] is None
+    assert gap["interactivity_gap_pct"] == 75.0
