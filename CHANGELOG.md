@@ -28,6 +28,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **Operator note**: affects the conversation warm-start block and the
   `warm_start` MCP context tool, in both local and remote Recipe modes.
 
+- **Lessons and pitfalls recorded by the Recipe KB reach the specialist again —
+  every one of them was rendering as `(none)`.** Sections 5b and 5c read
+  `point["attrs"]["statement"]` / `point["attrs"]["description"]`, but nothing in
+  the system writes an `attrs`-wrapped experience row. `Recipe.to_dict`,
+  `_normalise_lessons` and `_normalise_str_dicts` all write flat rows, `writeback`
+  appends `{statement, measured_impact}` flat, and
+  `test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row` already
+  asserted `state.warm_start_lessons[0]["statement"]`. A flat row therefore
+  resolved `attrs` to `{}`, produced an empty statement, and hit the
+  `if not statement: continue` guard, so both sections fell through to their
+  `(none)` placeholder no matter how much a prior session had learned.
+
+  The wrapped form survived only in hand-written test fixtures, so it is deleted
+  rather than accommodated: the renderers read the flat fields directly, and the
+  one place a legacy wrapped row is unwrapped is `recipe_kb_t0._experience_rows`,
+  where `warm_start_lessons` / `warm_start_pitfalls` are assigned. No reader
+  downstream knows about two shapes.
+
+  That normalisation is also where an unusable row is now dropped, with a
+  warning naming the field and the count. The silence is what let this run for so
+  long: a non-empty list could render as `(none)` with no log and no error, so
+  neither the prompt nor the operator had any signal. Rejecting at the boundary
+  puts the complaint where the shape is known, instead of adding a warning to a
+  renderer that should not be inspecting shapes at all.
+
+  The contract docs that caused the drift are corrected too — the section
+  docstrings ("KB `kind=lesson` points"), `_render_measured_impact`
+  ("`attrs.measured_impact`"), `_format_version_note`'s `lesson_attrs`
+  parameter, and the `SharedState.warm_start_pitfalls` / `warm_start_lessons`
+  field comments ("list of KB point dicts") all described a wrapped row.
+  Fixtures are flat, and two of them are built by calling the writer so the
+  reader and the stored shape cannot drift apart again.<br/>
+  **Operator note**: sessions lost no recorded knowledge, but until now none of
+  it was being shown to the agent.
+
 ### Removed
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the
