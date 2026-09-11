@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""InferSim projection bridge.
+"""InferaSim projection bridge.
 
 Maps a Hyperloom benchmark spec (the ``benchmark`` block of a materialized
 Magpie YAML: framework/model/precision + TP/CONC/ISL/OSL envs) onto Infera's
-``infersim`` serving projection and returns the same throughput/latency
+``inferasim`` serving projection and returns the same throughput/latency
 measurements a real serving benchmark would produce -- without booting a
 server or touching a GPU.
 
@@ -23,8 +23,8 @@ Design notes
   inherit its argument defaults and stay forward-compatible with new flags
   instead of hand-constructing its config dataclasses.
 * Model selection is deliberately explicit: the operator points us at an
-  InferSim model preset (``HYPERLOOM_INFERSIM_MODEL``) or a full workload YAML
-  (``HYPERLOOM_INFERSIM_WORKLOAD``); a best-effort heuristic maps common HF
+  InferaSim model preset (``HYPERLOOM_INFERASIM_MODEL``) or a full workload YAML
+  (``HYPERLOOM_INFERASIM_WORKLOAD``); a best-effort heuristic maps common HF
   model paths to presets so the common cases work with zero extra config.
 """
 
@@ -40,25 +40,25 @@ from typing import Any
 
 # Env knobs (all optional unless noted). Documented in the module docstring and
 # the runner --help.
-ENV_ROOT = "HYPERLOOM_INFERSIM_ROOT"  # path to the Infera checkout (added to sys.path)
-ENV_WORKLOAD = "HYPERLOOM_INFERSIM_WORKLOAD"  # explicit InferSim workload YAML
-ENV_MODEL = "HYPERLOOM_INFERSIM_MODEL"  # InferSim model preset name (e.g. gpt_oss_120B)
-ENV_GPU_ARCH = "HYPERLOOM_INFERSIM_GPU_ARCH"  # e.g. mi355x (default)
-ENV_HBM_GB = "HYPERLOOM_INFERSIM_HBM_GB"  # per-GPU HBM capacity, GB
-ENV_EP = "HYPERLOOM_INFERSIM_EP"  # expert parallelism override
-ENV_PP = "HYPERLOOM_INFERSIM_PP"  # pipeline parallelism override
-ENV_KV_DTYPE = "HYPERLOOM_INFERSIM_KV_DTYPE"  # kv-cache dtype override
-ENV_ANCHOR = "HYPERLOOM_INFERSIM_ANCHOR"  # single GPU anchor JSON (calibration)
-ENV_ANCHOR_SCALING = "HYPERLOOM_INFERSIM_ANCHOR_SCALING"  # comma-sep TP-scaling anchors
-ENV_ANCHOR_STORE = "HYPERLOOM_INFERSIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
-ENV_SERVING_MODEL = "HYPERLOOM_INFERSIM_SERVING_MODEL"  # continuous (default) | static
+ENV_ROOT = "HYPERLOOM_INFERASIM_ROOT"  # path to the Infera checkout (added to sys.path)
+ENV_WORKLOAD = "HYPERLOOM_INFERASIM_WORKLOAD"  # explicit InferaSim workload YAML
+ENV_MODEL = "HYPERLOOM_INFERASIM_MODEL"  # InferaSim model preset name (e.g. gpt_oss_120B)
+ENV_GPU_ARCH = "HYPERLOOM_INFERASIM_GPU_ARCH"  # e.g. mi355x (default)
+ENV_HBM_GB = "HYPERLOOM_INFERASIM_HBM_GB"  # per-GPU HBM capacity, GB
+ENV_EP = "HYPERLOOM_INFERASIM_EP"  # expert parallelism override
+ENV_PP = "HYPERLOOM_INFERASIM_PP"  # pipeline parallelism override
+ENV_KV_DTYPE = "HYPERLOOM_INFERASIM_KV_DTYPE"  # kv-cache dtype override
+ENV_ANCHOR = "HYPERLOOM_INFERASIM_ANCHOR"  # single GPU anchor JSON (calibration)
+ENV_ANCHOR_SCALING = "HYPERLOOM_INFERASIM_ANCHOR_SCALING"  # comma-sep TP-scaling anchors
+ENV_ANCHOR_STORE = "HYPERLOOM_INFERASIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
+ENV_SERVING_MODEL = "HYPERLOOM_INFERASIM_SERVING_MODEL"  # continuous (default) | static
 
 _DEFAULT_GPU_ARCH = "mi355x"
 # Per-GPU HBM by arch (GB); only used when HBM is not supplied explicitly.
 _ARCH_HBM_GB = {"mi300x": 192.0, "mi325x": 256.0, "mi355x": 288.0}
 
-# Best-effort HF-path/name substring -> InferSim megatron preset. First match
-# wins; extend freely. Override any time with HYPERLOOM_INFERSIM_MODEL.
+# Best-effort HF-path/name substring -> InferaSim megatron preset. First match
+# wins; extend freely. Override any time with HYPERLOOM_INFERASIM_MODEL.
 _MODEL_HEURISTICS: tuple[tuple[str, str], ...] = (
     ("gpt-oss-120b", "gpt_oss_120B"),
     ("gpt-oss-20b", "gpt_oss_20B"),
@@ -95,12 +95,12 @@ _TEMPLATE_WORKLOAD = (
     Path(__file__).resolve().parents[3]
     / "inference_optimizer"
     / "assets"
-    / "infersim"
-    / "infersim_workload.yaml"
+    / "inferasim"
+    / "inferasim_workload.yaml"
 )
 
 
-class InfersimBridgeError(RuntimeError):
+class InferasimBridgeError(RuntimeError):
     """Raised for any recoverable bridge failure (bad config, import, etc.)."""
 
 
@@ -238,7 +238,7 @@ def _parse_server_arg_str(server_args: str, *flags: str) -> str | None:
 
 
 def _parse_kv_cache_dtype(server_args: str) -> str | None:
-    """KV-cache dtype from a framework's server args, normalised for InferSim.
+    """KV-cache dtype from a framework's server args, normalised for InferaSim.
 
     vLLM spells it ``--kv-cache-dtype fp8_e4m3`` (or ``fp8``, ``fp8_e5m2``) and
     sglang ``--kv-cache-dtype fp8_e4m3``; both mean the cache is stored in a
@@ -384,7 +384,7 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
 
 
 def resolve_preset(model_path: str) -> str | None:
-    """Best-effort map a model path/name to an InferSim preset name."""
+    """Best-effort map a model path/name to an InferaSim preset name."""
     explicit = os.environ.get(ENV_MODEL)
     if explicit and explicit.strip():
         return explicit.strip()
@@ -399,7 +399,7 @@ def resolve_preset(model_path: str) -> str | None:
 class AnchorChoice:
     """The warmup anchor selected for a candidate, plus why it was chosen.
 
-    ``regime_distance`` is the Hamming distance over InferSim's regime-defining
+    ``regime_distance`` is the Hamming distance over InferaSim's regime-defining
     axes (model/dtypes/attention-backend/cudagraph/aiter). Distance 0 means the
     candidate only moves along *transport* axes (TP/EP/PP, batch, concurrency,
     sequence lengths) and is fully reconstructable from this anchor -- i.e. no
@@ -416,7 +416,7 @@ class AnchorChoice:
 
 
 def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
-    """Canonical InferSim recipe dict for a Hyperloom serving spec."""
+    """Canonical InferaSim recipe dict for a Hyperloom serving spec."""
     attn = _parse_server_arg_str(spec.extra_server_args, "--attention-backend")
     method, k = parse_speculative(spec.extra_server_args)
     return {
@@ -445,7 +445,7 @@ def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
 def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     """Pick the closest in-regime warmup anchor for ``spec``.
 
-    Precedence: an explicit ``HYPERLOOM_INFERSIM_ANCHOR`` always wins; otherwise
+    Precedence: an explicit ``HYPERLOOM_INFERASIM_ANCHOR`` always wins; otherwise
     an anchor store directory is searched for the nearest anchor in regime space.
     Returns ``None`` when neither is configured (pure-analytical projection).
     """
@@ -467,7 +467,7 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
             AnchorStore,
         )
     except Exception as exc:  # noqa: BLE001
-        raise InfersimBridgeError(f"cannot import InferSim AnchorStore: {exc}") from exc
+        raise InferasimBridgeError(f"cannot import InferaSim AnchorStore: {exc}") from exc
 
     store = AnchorStore(store_root)
     recipe = recipe_from_spec(spec)
@@ -610,9 +610,9 @@ def _anchor_is_real_weights(path: str) -> bool:
 def _resolve_workload_and_env(spec: ServingSpec) -> tuple[str, dict[str, str]]:
     """Return (workload_yaml_path, extra_env) for the projection.
 
-    Precedence: an explicit ``HYPERLOOM_INFERSIM_WORKLOAD`` wins; otherwise a
+    Precedence: an explicit ``HYPERLOOM_INFERASIM_WORKLOAD`` wins; otherwise a
     resolved preset name is fed to the bundled env-driven template via
-    ``INFERSIM_MODEL``.
+    ``INFERASIM_MODEL``.
     """
     extra_env: dict[str, str] = {}
     explicit = os.environ.get(ENV_WORKLOAD)
@@ -621,15 +621,15 @@ def _resolve_workload_and_env(spec: ServingSpec) -> tuple[str, dict[str, str]]:
 
     preset = resolve_preset(spec.model_path)
     if not preset:
-        raise InfersimBridgeError(
-            f"could not resolve an InferSim model preset for model={spec.model_path!r}; "
+        raise InferasimBridgeError(
+            f"could not resolve an InferaSim model preset for model={spec.model_path!r}; "
             f"set {ENV_MODEL}=<preset> or {ENV_WORKLOAD}=<workload.yaml>"
         )
     if not _TEMPLATE_WORKLOAD.is_file():
-        raise InfersimBridgeError(f"bundled workload template missing: {_TEMPLATE_WORKLOAD}")
-    # The template reads INFERSIM_MODEL/TP/PP/EP; parallelism is *also* forced via
+        raise InferasimBridgeError(f"bundled workload template missing: {_TEMPLATE_WORKLOAD}")
+    # The template reads INFERASIM_MODEL/TP/PP/EP; parallelism is *also* forced via
     # CLI overrides below so an explicit workload YAML is honored too.
-    extra_env["INFERSIM_MODEL"] = preset
+    extra_env["INFERASIM_MODEL"] = preset
     return str(_TEMPLATE_WORKLOAD), extra_env
 
 
@@ -640,7 +640,7 @@ def _purge_foreign_infera(root: str) -> None:
     (and may lack the ``projection`` subpackage). Once imported it is cached in
     ``sys.modules``, so a later ``sys.path`` insert cannot override the
     top-level package. Purge any cached ``infera`` whose file is outside our
-    root so the re-import resolves against ``HYPERLOOM_INFERSIM_ROOT``.
+    root so the re-import resolves against ``HYPERLOOM_INFERASIM_ROOT``.
     """
     root_resolved = str(Path(root).resolve())
     for name in list(sys.modules):
@@ -655,9 +655,9 @@ def _purge_foreign_infera(root: str) -> None:
 
 
 def _ensure_infera_importable() -> None:
-    """Make ``infera.projection`` importable, honoring HYPERLOOM_INFERSIM_ROOT.
+    """Make ``infera.projection`` importable, honoring HYPERLOOM_INFERASIM_ROOT.
 
-    When ``HYPERLOOM_INFERSIM_ROOT`` is set it takes precedence over any other
+    When ``HYPERLOOM_INFERASIM_ROOT`` is set it takes precedence over any other
     ``infera`` on the path so the pinned Infera checkout is the one projected
     against.
     """
@@ -673,14 +673,14 @@ def _ensure_infera_importable() -> None:
         import infera.projection  # noqa: F401
         return
     except Exception as exc:  # noqa: BLE001
-        raise InfersimBridgeError(
+        raise InferasimBridgeError(
             f"cannot import Infera 'infera.projection' (set {ENV_ROOT} to the Infera "
             f"checkout or pip install amd-infera[projection]): {exc}"
         ) from exc
 
 
 def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = None) -> list[str]:
-    """Build the ``infersim inference`` argv for this serving spec."""
+    """Build the ``inferasim inference`` argv for this serving spec."""
     gpu_arch = str(os.environ.get(ENV_GPU_ARCH) or _DEFAULT_GPU_ARCH).lower()
     hbm_gb = os.environ.get(ENV_HBM_GB) or _ARCH_HBM_GB.get(gpu_arch)
     serving_model = str(os.environ.get(ENV_SERVING_MODEL) or "continuous").lower()
@@ -721,7 +721,7 @@ def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = 
 
 
 def project(spec: ServingSpec) -> ProjMetrics:
-    """Run the InferSim projection for ``spec`` and return mapped metrics."""
+    """Run the InferaSim projection for ``spec`` and return mapped metrics."""
     _ensure_infera_importable()
     workload, extra_env = _resolve_workload_and_env(spec)
 
@@ -732,23 +732,23 @@ def project(spec: ServingSpec) -> ProjMetrics:
 
     anchor = select_anchor(spec)
     argv = _build_argv(spec, workload, anchor)
-    # Template reads INFERSIM_* env; also expose TP/PP/EP for template default
+    # Template reads INFERASIM_* env; also expose TP/PP/EP for template default
     # interpolation (overrides above still win for explicit workloads).
     prev_env: dict[str, str | None] = {}
     inject = dict(extra_env)
-    inject.setdefault("INFERSIM_TP", str(spec.tp))
-    inject.setdefault("INFERSIM_PP", str(spec.pp))
-    inject.setdefault("INFERSIM_EP", str(spec.ep))
+    inject.setdefault("INFERASIM_TP", str(spec.tp))
+    inject.setdefault("INFERASIM_PP", str(spec.pp))
+    inject.setdefault("INFERASIM_EP", str(spec.ep))
     for key, val in inject.items():
         prev_env[key] = os.environ.get(key)
         os.environ[key] = val
     try:
         args, overrides = build_parser().parse_known_args(argv)
         results = launch_projection_from_cli(args, overrides)
-    except InfersimBridgeError:
+    except InferasimBridgeError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise InfersimBridgeError(f"InferSim projection failed: {exc}") from exc
+        raise InferasimBridgeError(f"InferaSim projection failed: {exc}") from exc
     finally:
         for key, val in prev_env.items():
             if val is None:
@@ -758,7 +758,7 @@ def project(spec: ServingSpec) -> ProjMetrics:
 
     perf = results.get("performance")
     if perf is None:
-        raise InfersimBridgeError("InferSim returned no performance projection")
+        raise InferasimBridgeError("InferaSim returned no performance projection")
     mem = results.get("memory")
 
     return _metrics_from_results(spec, perf, mem, anchor)
@@ -767,7 +767,7 @@ def project(spec: ServingSpec) -> ProjMetrics:
 def _metrics_from_results(
     spec: ServingSpec, perf: Any, mem: Any, anchor: AnchorChoice | None = None
 ) -> ProjMetrics:
-    """Map InferSim result objects onto benchmark measurement fields."""
+    """Map InferaSim result objects onto benchmark measurement fields."""
     output_tps = float(getattr(perf, "decode_throughput_tps", 0.0) or 0.0)
     osl = max(1, spec.osl)
     isl = max(1, spec.isl)
@@ -847,12 +847,12 @@ def raw_result_from_metrics(spec: ServingSpec, m: ProjMetrics) -> dict[str, Any]
         "p99_e2el_ms": m.e2el_ms,
         "std_e2el_ms": 0.0,
         # Non-Magpie diagnostics, carried for inspection/reporting.
-        "infersim_decode_tps_per_gpu": m.decode_tps_per_gpu,
-        "infersim_memory_per_gpu_gb": m.memory_per_gpu_gb,
-        "infersim_calibrated": m.calibrated,
-        "infersim_extrapolation": list(m.extras.get("extrapolation") or []),
-        "infersim_replica_gpus": m.replica_gpus,
-        "infersim_tp": spec.tp,
-        "infersim_ep": spec.ep,
-        "infersim_pp": spec.pp,
+        "inferasim_decode_tps_per_gpu": m.decode_tps_per_gpu,
+        "inferasim_memory_per_gpu_gb": m.memory_per_gpu_gb,
+        "inferasim_calibrated": m.calibrated,
+        "inferasim_extrapolation": list(m.extras.get("extrapolation") or []),
+        "inferasim_replica_gpus": m.replica_gpus,
+        "inferasim_tp": spec.tp,
+        "inferasim_ep": spec.ep,
+        "inferasim_pp": spec.pp,
     }
