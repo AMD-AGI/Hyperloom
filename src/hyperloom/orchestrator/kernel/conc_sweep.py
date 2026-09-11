@@ -207,10 +207,20 @@ def _build_roofline_ceiling(
     if not gpu_type or num_gpus <= 0:
         return None
 
+    # Rescale weights to the dtype the run actually serves, matching the main
+    # ceiling (compute_roofline_breakdown_from_state) so the native sweep curve
+    # and the headroom gate agree for quantized runs. No-op when serving at the
+    # checkpoint dtype. ``precision`` (reported) stays the run's precision.
+    from .roofline_ceiling import apply_runtime_dtype, resolve_runtime_dtype
+
+    rt = resolve_runtime_dtype(state, meta)
+    meta = apply_runtime_dtype(meta, rt)
+    precision_tag = rt.compute_precision_tag or precision
+
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
-        precision_tag=precision,
+        precision_tag=precision_tag,
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,

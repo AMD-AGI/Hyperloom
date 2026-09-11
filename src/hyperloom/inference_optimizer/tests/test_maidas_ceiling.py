@@ -92,6 +92,24 @@ def test_match_is_on_gbs_not_nbs(tmp_path):
     assert miss.peak_tok_per_sec == 0.0  # nbs=8 must not be matched
 
 
+def test_precision_alias_mxfp4_matches_MX4(tmp_path):
+    # MAIDAS emits bfp='MX4'; a Hyperloom run reporting precision='mxfp4' (as in
+    # the Llama-405B-MXFP4 benchmark) must still match, not silently fall back.
+    xlsx = _write_xlsx(tmp_path / "l.xlsx", bfp="MX4", nbs=16, avg_lat=23.32)
+    bd = compute_roofline_breakdown_from_state(
+        _state(maidas_path=xlsx, bfp="mxfp4", conc=16))
+    assert bd.bound_kind == "memory"
+    assert bd.peak_tok_per_sec == pytest.approx(16 * 1000.0 / 23.32)
+
+
+def test_precision_alias_fp8_variants_match(tmp_path):
+    # fp8_e4m3 (a common serving tag) must match MAIDAS 'FP8'.
+    xlsx = _write_xlsx(tmp_path / "l.xlsx", bfp="FP8", nbs=16, avg_lat=23.32)
+    bd = compute_roofline_breakdown_from_state(
+        _state(maidas_path=xlsx, bfp="fp8_e4m3", conc=16))
+    assert bd.bound_kind == "memory"
+
+
 def _write_multi(path, rows):
     """AllScenarios sheet with several uct_decode rows; gbs defaults to nbs."""
     base = dict(workload="llama405b", soc="mi355x", prefill=1024, decode=1024,

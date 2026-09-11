@@ -50,6 +50,26 @@ def _load_allscenarios(path: str):
     return pd.concat(frames, ignore_index=True)
 
 
+#: Normalize Hyperloom precision strings AND MAIDAS ``bfp`` tokens to a common
+#: key, so e.g. Hyperloom ``mxfp4`` matches MAIDAS ``MX4``, and ``fp8_e4m3``
+#: matches ``FP8``. Unknown values pass through lowercased.
+_PRECISION_ALIASES = {
+    "mxfp4": "mx4", "mx4": "mx4",
+    "mxfp6": "mx6", "mx6": "mx6",
+    "mxfp8": "mx8", "mx8": "mx8",
+    "fp8": "fp8", "fp8_e4m3": "fp8", "fp8_e5m2": "fp8",
+    "float8_e4m3fn": "fp8", "float8_e5m2": "fp8", "w8a8": "fp8",
+    "bf16": "bf16", "bfloat16": "bf16",
+    "fp16": "fp16", "float16": "fp16",
+    "fp6": "fp6", "fp4": "fp4",
+}
+
+
+def _bfp_token(precision: str) -> str:
+    p = (precision or "").strip().lower()
+    return _PRECISION_ALIASES.get(p, p)
+
+
 def _soc_token(gpu_type: str) -> str:
     """Normalize the run's GPU name to a MAIDAS ``soc`` token.
 
@@ -76,6 +96,12 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
     ``--max-concurrency``), i.e. the global batch — not the per-replica ``nbs``.
     ``gbs`` is 0 for spilled/infeasible rows, so a ``concurrency > 0`` never
     matches one; feasibility falls out of the match for free.
+
+    Matching is EXACT on ``gbs`` (and precision is alias-normalized so e.g.
+    ``mxfp4`` matches ``MX4``). If ``concurrency`` is not a swept ``gbs`` value,
+    no row matches and we return ``None`` -> native fallback. We deliberately do
+    NOT interpolate/nearest-match: the ceiling is not linear in batch, so a
+    fabricated value would be worse than the native estimate.
     """
     df = _load_allscenarios(path)
     if df is None or getattr(df, "empty", True):
@@ -87,7 +113,7 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
         return None
 
     soc = _soc_token(runtime.gpu_type)
-    prec = (runtime.precision or "").strip().lower()
+    prec = _bfp_token(runtime.precision)
     conc = int(runtime.concurrency or 0)
     if conc <= 0:
         return None  # degenerate concurrency cannot map to a global batch
@@ -97,7 +123,7 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
     try:
         cfg = df[
             (df["soc"].astype(str).str.lower() == soc)
-            & (df["bfp"].astype(str).str.lower() == prec)
+            & (df["bfp"].astype(str).str.lower().map(_bfp_token) == prec)
             & (df["hp"] == int(runtime.tp or 0))
             & (df["prefill"] == int(runtime.isl or 0))
             & (df["decode"] == int(runtime.osl or 0))
