@@ -7,6 +7,7 @@ the prompt/transcript/heartbeat/done writers."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from types import SimpleNamespace
@@ -237,7 +238,7 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
-async def _finalize(r, tmp_path, payload):
+def _finalize(r, tmp_path, payload):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
@@ -245,7 +246,7 @@ async def _finalize(r, tmp_path, payload):
         workspace=tmp_path,
     )
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    result = await r._finalize(
+    result = r._finalize(
         ctx=ctx,
         prep=prep,
         specialist_done_payload=payload,
@@ -258,12 +259,11 @@ async def _finalize(r, tmp_path, payload):
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.asyncio
-async def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
+def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
     """The Critic is told to reject a proposal_set carrying self-reported gain
     fields, which costs the round every idea in it. Dropping them makes that
     verdict unreachable; the audit note still records what was there."""
-    result, written = await _finalize(
+    result, written = _finalize(
         _runner(),
         tmp_path,
         {
@@ -281,9 +281,8 @@ async def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(t
     assert "expected_gain" in joined and "score" in joined
 
 
-@pytest.mark.asyncio
-async def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
-    _, written = await _finalize(
+def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
+    _, written = _finalize(
         _runner(),
         tmp_path,
         {"proposal_set": [{"name": "v1"}], "confidence": 0.6},
@@ -294,7 +293,7 @@ async def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_p
 
 @pytest.mark.asyncio
 async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
-    """``vet_patches`` serialises ``git apply --check``; that must not freeze the loop."""
+    """Production wraps ``_finalize`` in ``asyncio.to_thread``; vetting must not freeze the loop."""
     seen: dict[str, int] = {}
     loop_ident = threading.get_ident()
     orig = sr._patch_safety.vet_patches
@@ -304,7 +303,24 @@ async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatc
         return orig(*args, **kwargs)
 
     monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
-    await _finalize(_runner(), tmp_path, {"proposal_set": [{"name": "v1"}], "summary": "s"})
+    r = _runner()
+    prep = sr._PreparedRun(
+        domain=SimpleNamespace(key="serving_specialist"),
+        gap="gap-1",
+        workspace=tmp_path,
+    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    await asyncio.to_thread(
+        r._finalize,
+        ctx=ctx,
+        prep=prep,
+        specialist_done_payload={"proposal_set": [{"name": "v1"}], "summary": "s"},
+        turns_used=1,
+        tool_violations=[],
+        backend_error="",
+        extra_notes=[],
+        patches_written=[],
+    )
     assert "ident" in seen
     assert seen["ident"] != loop_ident
 

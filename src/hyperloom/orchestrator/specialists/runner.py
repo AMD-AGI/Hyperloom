@@ -579,7 +579,8 @@ class SpecialistRunner:
             notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
-        worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
+        worktree, worktree_base, worktree_err = await asyncio.to_thread(
+            self._maybe_setup_worktree,
             ctx,
             workspace=workspace,
             profile=profile,
@@ -1079,7 +1080,8 @@ class SpecialistRunner:
             status="finished",
         )
 
-        return await self._finalize(
+        return await asyncio.to_thread(
+            self._finalize,
             ctx=ctx,
             prep=prep,
             specialist_done_payload=(
@@ -1247,7 +1249,8 @@ class SpecialistRunner:
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
-        return await self._finalize(
+        return await asyncio.to_thread(
+            self._finalize,
             ctx=ctx,
             prep=prep,
             specialist_done_payload=sub_result.done_payload,
@@ -1260,7 +1263,7 @@ class SpecialistRunner:
         )
 
     # Finalize phase (shared)
-    async def _finalize(
+    def _finalize(
         self,
         *,
         ctx: RunnerContext,
@@ -1274,6 +1277,8 @@ class SpecialistRunner:
         patch_roots: dict[str, str] | None = None,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
+
+        Blocking (``git apply --check`` per patch); call via ``asyncio.to_thread``.
 
         Synthesises an empty payload when none was produced, sanitises the
         proposal set, merges discovered patches and writes the on-disk
@@ -1412,8 +1417,7 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, ungrounded, grounding, spans_roots = await asyncio.to_thread(
-            _patch_safety.vet_patches,
+        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
@@ -1479,6 +1483,8 @@ class SpecialistRunner:
         profile: SpecialistProfile | None = None,
     ) -> tuple[Path | None, Path | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
+
+        Blocking (``git worktree add``, 60s); call via ``asyncio.to_thread``.
 
         Best-effort: the specialist still dispatches without isolation and the
         reason lands in ``notes``.

@@ -969,6 +969,8 @@ def vet_patches(
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
     """Ground each patch against the candidate checkouts, one root per patch.
 
+    Blocking (``git apply --check`` per patch); call via ``asyncio.to_thread``.
+
     Structural rejects, task-owned work artifacts and grounded Python
     comment-only patches are dropped. Each survivor resolves its own root.
     Unresolved or ambiguous roots and stale-but-valid patches are kept with

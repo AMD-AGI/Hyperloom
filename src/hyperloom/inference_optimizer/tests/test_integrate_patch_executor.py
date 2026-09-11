@@ -1299,6 +1299,30 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
     assert (tmp_path / "logs" / "enablement_setup.log").exists()
 
 
+def test_run_setup_commands_stops_between_commands_on_cancel(tmp_path: Path, monkeypatch):
+    """Cancel is cooperative between commands; an in-flight subprocess.run is not killed."""
+    from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+
+    ran: list[str] = []
+    scope = CancelScope()
+
+    def _fake_run(cmd, *args, **kwargs):
+        ran.append(cmd)
+        scope.cancel(reason="test")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    with use_cancel_scope(scope):
+        out = _run_setup_commands(
+            ["pip install -U transformers", "pip install -U torch"],
+            cwd=tmp_path,
+            log_dir=tmp_path / "logs",
+        )
+    assert ran == ["pip install -U transformers"]
+    assert out["applied"] == ["pip install -U transformers"]
+    assert out["failed"] == []
+
+
 def test_skipped_setup_commands_are_named_in_the_round_reason():
     """A rejected command must reach the conclusion, not just a log line.
 

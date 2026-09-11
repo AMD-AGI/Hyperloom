@@ -53,6 +53,7 @@ from ...bringup import load_boot_observation, observation_summary, verdict_of, w
 from ...delivery import file_digest, load_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
+from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -377,6 +378,11 @@ def _resolve_setup_commands(
 def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
+    Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
+    Cancel is checked between commands; a command already in ``subprocess.run``
+    is not killed. Cancelling the await unwinds integrate and does not continue
+    to apply patches.
+
     Runs each allowlisted command non-interactively with a per-command timeout,
     appending combined output to ``<log_dir>/enablement_setup.log``. Commands
     that fail the allowlist are skipped (never executed). A non-zero install is
@@ -406,48 +412,52 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    for cmd in commands:
-        if not _is_allowlisted_setup_command(cmd):
-            # Sanitised HERE, not at the reporting sites. This list is copied
-            # verbatim into every result payload that carries
-            # ``setup_commands_skipped``, and a rejected command is LLM-written
-            # text that can hold a bearer token or a credentialed URL. Doing it
-            # at the four call sites protects those four; doing it at the source
-            # protects the fifth as well.
-            safe_cmd = _sanitize_setup_command(cmd)
-            skipped.append(safe_cmd)
-            # Also carried into the round's ``reason`` by
-            # _with_skipped_setup_reason: a warning alone left the caller with an
-            # outcome and no link to the cause, so the same proposal was
-            # re-authored and re-dropped until the budget ran out. The log is a
-            # disk-backed surface too, so it gets the sanitised form as well.
-            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-            continue
-        log.info("integrate_patch: enablement setup replay: %s", cmd)
-        try:
-            proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
-                cmd,
-                shell=True,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_SETUP_CMD_TIMEOUT_SEC,
-            )
+    with cancel_scope_listener():
+        for cmd in commands:
+            if stop_was_asked_for():
+                log.info("integrate_patch: enablement setup replay stopped after cancel")
+                break
+            if not _is_allowlisted_setup_command(cmd):
+                # Sanitised HERE, not at the reporting sites. This list is copied
+                # verbatim into every result payload that carries
+                # ``setup_commands_skipped``, and a rejected command is LLM-written
+                # text that can hold a bearer token or a credentialed URL. Doing it
+                # at the four call sites protects those four; doing it at the source
+                # protects the fifth as well.
+                safe_cmd = _sanitize_setup_command(cmd)
+                skipped.append(safe_cmd)
+                # Also carried into the round's ``reason`` by
+                # _with_skipped_setup_reason: a warning alone left the caller with an
+                # outcome and no link to the cause, so the same proposal was
+                # re-authored and re-dropped until the budget ran out. The log is a
+                # disk-backed surface too, so it gets the sanitised form as well.
+                log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
+                continue
+            log.info("integrate_patch: enablement setup replay: %s", cmd)
             try:
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-            except OSError:
-                # Logging is best-effort.
-                pass
-            if proc.returncode == 0:
-                applied.append(cmd)
-            else:
+                proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+                    cmd,
+                    shell=True,
+                    cwd=str(cwd),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=_SETUP_CMD_TIMEOUT_SEC,
+                )
+                try:
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
+                except OSError:
+                    # Logging is best-effort.
+                    pass
+                if proc.returncode == 0:
+                    applied.append(cmd)
+                else:
+                    failed.append(cmd)
+                    log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 failed.append(cmd)
-                log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            failed.append(cmd)
-            log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
+                log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
@@ -1970,6 +1980,8 @@ class IntegratePatchExecutor:
 
         No-op when no candidate is present or in multi-node mode.
         Runs a disk preflight, delegates provision+probe to the framework
+        adapter (off the event loop; an in-flight pip install is not killed
+        if the await is cancelled), and on success stores the resolved runtime on
         adapter, and on success stores the resolved runtime on
         ``ctx._ip_provision_result`` / ``ctx._ip_stack_action`` for the gate to
         activate via the YAML-layer ``runtime_override``. Returns an early-exit
@@ -2019,12 +2031,17 @@ class IntegratePatchExecutor:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
-        try:
-            result = adapter.provision(action, attempt_dir)
-            if result.ok and not adapter.probe(result, action):
+
+        def _provision_and_probe():
+            provisioned = adapter.provision(action, attempt_dir)
+            if provisioned.ok and not adapter.probe(provisioned, action):
                 from ...framework.stack_actions import ProvisionResult as _PR
 
-                result = _PR(ok=False, log_path=result.log_path, error="adapter probe failed after provision")
+                return _PR(ok=False, log_path=provisioned.log_path, error="adapter probe failed after provision")
+            return provisioned
+
+        try:
+            result = await asyncio.to_thread(_provision_and_probe)
         except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
@@ -2123,7 +2140,8 @@ class IntegratePatchExecutor:
             }
 
         try:
-            diff_text, touched_paths, verdict = build_localization_diff(
+            diff_text, touched_paths, verdict = await asyncio.to_thread(
+                build_localization_diff,
                 action,
                 fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
                 fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
@@ -3148,6 +3166,8 @@ class IntegratePatchExecutor:
         provision_result: Any,
     ) -> dict[str, Any]:
         """Editable-refresh a localized closure and snapshot its manifest.
+
+        Blocking (editable-refresh up to 600s); call via ``asyncio.to_thread``.
 
         Runs the framework adapter's editable-refresh argv against the attempt
         interpreter (best-effort; skipped when there is no attempt runtime or no
