@@ -11,6 +11,7 @@ about the cases where the gate must decline to fire: missing inputs, unusable
 inputs, and anything close enough to the bar that the trace's own error in
 ``gpu_pct`` could account for the gap.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.kernel._kernel_decisions import (
 
 
 # ── the arithmetic ────────────────────────────────────────────────────────────
+
 
 def test_ceiling_matches_amdahl():
     """10% of GPU time made 2x faster caps the whole thing at 1/(0.9+0.05)."""
@@ -44,16 +46,26 @@ def test_ceiling_rises_with_share_and_with_speedup():
     assert amdahl_e2e_ceiling_pct(10.0, 2.0) > amdahl_e2e_ceiling_pct(10.0, 1.5)
 
 
-@pytest.mark.parametrize("pct,spd", [
-    (0.0, 1.5), (-5.0, 1.5), (101.0, 1.5),
-    (10.0, 0.0), (10.0, -1.0),
-    (None, 1.5), (10.0, None), ("x", 1.5), (10.0, "x"),
-])
+@pytest.mark.parametrize(
+    "pct,spd",
+    [
+        (0.0, 1.5),
+        (-5.0, 1.5),
+        (101.0, 1.5),
+        (10.0, 0.0),
+        (10.0, -1.0),
+        (None, 1.5),
+        (10.0, None),
+        ("x", 1.5),
+        (10.0, "x"),
+    ],
+)
 def test_unusable_inputs_give_no_ceiling(pct, spd):
     assert amdahl_e2e_ceiling_pct(pct, spd) is None
 
 
 # ── the gate ──────────────────────────────────────────────────────────────────
+
 
 def test_the_documented_dead_zone_is_caught():
     """The minimum-share, minimum-speedup kernel cannot clear a 1% bar.
@@ -114,6 +126,7 @@ def test_gate_is_monotone_in_speedup():
 
 
 # ── the switch ────────────────────────────────────────────────────────────────
+
 
 def test_gate_is_on_by_default(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_KERNEL_AMDAHL_GATE", raising=False)

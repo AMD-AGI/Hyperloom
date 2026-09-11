@@ -130,8 +130,9 @@ def _target_kernels(session_dir: Path | None) -> dict[str, str]:
     """
     if session_dir is None:
         return {}
-    logs = sorted(Path(session_dir).rglob("server.log"),
-                  key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    logs = sorted(
+        Path(session_dir).rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True
+    )
     for path in logs[:8]:
         try:
             kernels = kernels_from_log(path.read_text(errors="ignore"))
@@ -160,8 +161,7 @@ def _target_backend(bench: dict[str, Any], session_dir: Path | None) -> str | No
     return _target_kernels(session_dir).get("attention")
 
 
-def _probe_command(variant: GridVariant, bench: dict[str, Any], out_path: str,
-                   backend: str | None) -> list[str]:
+def _probe_command(variant: GridVariant, bench: dict[str, Any], out_path: str, backend: str | None) -> list[str]:
     """The ``benchmark_vllm`` invocation that screens one variant."""
     envs = bench.get("envs") or {}
     root = os.environ.get(ENV_INFERA_ROOT, "")
@@ -169,20 +169,32 @@ def _probe_command(variant: GridVariant, bench: dict[str, Any], out_path: str,
     layers = os.environ.get(ENV_LAYERS, "").strip()
 
     cmd = [
-        "python", str(Path(root) / BENCH_REL),
-        "--model", model,
-        "--tp", str(_as_int(envs.get("TP"), 1)),
-        "--benchmark-gpus", str(_probe_gpus(envs)),
-        "--batches", str(_as_int(envs.get("CONC"), 32)),
-        "--input-len", str(_as_int(envs.get("ISL"), 1024)),
-        "--decode-steps", str(DECODE_STEPS),
-        "--seeds", SEEDS,
-        "--load-format", "auto", "--routing-dist", "none",
+        "python",
+        str(Path(root) / BENCH_REL),
+        "--model",
+        model,
+        "--tp",
+        str(_as_int(envs.get("TP"), 1)),
+        "--benchmark-gpus",
+        str(_probe_gpus(envs)),
+        "--batches",
+        str(_as_int(envs.get("CONC"), 32)),
+        "--input-len",
+        str(_as_int(envs.get("ISL"), 1024)),
+        "--decode-steps",
+        str(DECODE_STEPS),
+        "--seeds",
+        SEEDS,
+        "--load-format",
+        "auto",
+        "--routing-dist",
+        "none",
         # The screen is a ranking probe, not an anchor, and it depends on things
         # only the offline entrypoint offers: truncated layers, a fixed decode
         # step count and a seed sweep. Anchors take the serving default instead.
         "--offline",
-        "--save", out_path,
+        "--save",
+        out_path,
     ]
     if layers:
         cmd += ["--num-hidden-layers", layers]
@@ -218,8 +230,9 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def _probe(variant: GridVariant, bench: dict[str, Any], timeout_sec: int,
-           backend: str | None) -> tuple[float | None, dict[str, str]]:
+def _probe(
+    variant: GridVariant, bench: dict[str, Any], timeout_sec: int, backend: str | None
+) -> tuple[float | None, dict[str, str]]:
     """One variant's decode step latency (ms) and the kernels that produced it.
 
     A reading of None means the probe could not answer, which is always resolved
@@ -238,15 +251,19 @@ def _probe(variant: GridVariant, bench: dict[str, Any], timeout_sec: int,
             # vLLM raises rather than falling back when a pinned backend is not
             # valid for the probe's shape, so this is also how a screen that
             # could not hold the target's regime fails.
-            log.warning("explore screen: probe for %r failed rc=%s: %s",
-                        variant.name, proc.returncode, (proc.stderr or "")[-400:])
+            log.warning(
+                "explore screen: probe for %r failed rc=%s: %s",
+                variant.name,
+                proc.returncode,
+                (proc.stderr or "")[-400:],
+            )
             return None, kernels
         try:
-            sweep = json.load(open(out_path))["sweep"]
+            with open(out_path) as fh:
+                sweep = json.load(fh)["sweep"]
             return float(sweep[0]["decode_ms"]), kernels
         except (OSError, ValueError, KeyError, IndexError) as exc:
-            log.warning("explore screen: probe for %r produced no reading (%s)",
-                        variant.name, exc)
+            log.warning("explore screen: probe for %r produced no reading (%s)", variant.name, exc)
             return None, kernels
 
 
@@ -284,9 +301,11 @@ def screen_variants(
 
     target = _target_kernels(session_dir)
     if not target:
-        log.warning("explore screen: no benchmark in this session says which kernels "
-                    "the deployment runs, so a probe cannot be checked against it; "
-                    "skipping the screen")
+        log.warning(
+            "explore screen: no benchmark in this session says which kernels "
+            "the deployment runs, so a probe cannot be checked against it; "
+            "skipping the screen"
+        )
         return list(variants), []
 
     timeout_sec = _as_int(os.environ.get(ENV_TIMEOUT), DEFAULT_TIMEOUT_SEC)
@@ -301,7 +320,8 @@ def screen_variants(
         log.warning(
             "explore screen: the probe is not running the deployment's kernels "
             "(%s), so its ordering is about a different stack; skipping the screen",
-            ", ".join(f"{k}: target {t}, probe {p}" for k, (t, p) in mismatch.items()))
+            ", ".join(f"{k}: target {t}, probe {p}" for k, (t, p) in mismatch.items()),
+        )
         return list(variants), []
 
     margin = margin_pct if margin_pct is not None else _margin_pct()
@@ -311,18 +331,23 @@ def screen_variants(
     for variant in variants:
         reading, _ = _probe(variant, bench, timeout_sec, backend)
         if reading is not None and reading > cut_at:
-            dropped.append({
-                "name": variant.name,
-                "reason": "screen_decisively_slower",
-                "detail": f"probe decode {reading:.3f} ms vs baseline "
-                          f"{baseline:.3f} ms (+{(reading / baseline - 1) * 100:.0f}%)",
-            })
+            dropped.append(
+                {
+                    "name": variant.name,
+                    "reason": "screen_decisively_slower",
+                    "detail": f"probe decode {reading:.3f} ms vs baseline "
+                    f"{baseline:.3f} ms (+{(reading / baseline - 1) * 100:.0f}%)",
+                }
+            )
         else:
             survivors.append(variant)
 
-    log.info("explore screen: %d/%d variants forwarded to benchmark; cut %s",
-             len(survivors), len(variants),
-             ", ".join(d["name"] for d in dropped) or "nothing")
+    log.info(
+        "explore screen: %d/%d variants forwarded to benchmark; cut %s",
+        len(survivors),
+        len(variants),
+        ", ".join(d["name"] for d in dropped) or "nothing",
+    )
     return survivors, dropped
 
 

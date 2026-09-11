@@ -97,8 +97,8 @@ def test_spec_parses_ep_from_server_args(monkeypatch):
         ("--kv-cache-dtype fp8_e4m3", "fp8"),
         ("--kv-cache-dtype fp8", "fp8"),
         ("--kv-cache-dtype=fp8_e5m2", "fp8"),
-        ("--kv-cache-dtype auto", "bf16"),   # auto follows the weights
-        ("--foo 1", "bf16"),                 # absent
+        ("--kv-cache-dtype auto", "bf16"),  # auto follows the weights
+        ("--foo 1", "bf16"),  # absent
     ],
 )
 def test_spec_parses_kv_cache_dtype_from_server_args(monkeypatch, flag, expected):
@@ -109,41 +109,49 @@ def test_spec_parses_kv_cache_dtype_from_server_args(monkeypatch, flag, expected
     candidate as bf16 -- a candidate whose whole point is halving KV traffic.
     """
     monkeypatch.delenv(ib.ENV_KV_DTYPE, raising=False)
-    spec = ib.spec_from_benchmark({
-        "framework": "vllm",
-        "model": "/models/gpt-oss-120b",
-        "envs": {"TP": 8, "EXTRA_VLLM_ARGS": flag},
-    })
+    spec = ib.spec_from_benchmark(
+        {
+            "framework": "vllm",
+            "model": "/models/gpt-oss-120b",
+            "envs": {"TP": 8, "EXTRA_VLLM_ARGS": flag},
+        }
+    )
     assert spec.kv_cache_dtype == expected
 
 
 def test_kv_dtype_env_overrides_the_server_arg(monkeypatch):
     monkeypatch.setenv(ib.ENV_KV_DTYPE, "bf16")
-    spec = ib.spec_from_benchmark({
-        "framework": "vllm",
-        "model": "/models/gpt-oss-120b",
-        "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"},
-    })
+    spec = ib.spec_from_benchmark(
+        {
+            "framework": "vllm",
+            "model": "/models/gpt-oss-120b",
+            "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"},
+        }
+    )
     assert spec.kv_cache_dtype == "bf16"
 
 
 def test_max_num_seqs_caps_the_running_batch(monkeypatch):
     """A scheduler cap below the offered load is the batch the step actually runs."""
-    spec = ib.spec_from_benchmark({
-        "framework": "vllm",
-        "model": "/models/gpt-oss-120b",
-        "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 32"},
-    })
+    spec = ib.spec_from_benchmark(
+        {
+            "framework": "vllm",
+            "model": "/models/gpt-oss-120b",
+            "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 32"},
+        }
+    )
     assert spec.conc == 32
 
 
 def test_max_num_seqs_above_the_load_changes_nothing(monkeypatch):
     """Raising a cap nobody reaches is a no-op, and must not be reported as a win."""
-    spec = ib.spec_from_benchmark({
-        "framework": "vllm",
-        "model": "/models/gpt-oss-120b",
-        "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 512"},
-    })
+    spec = ib.spec_from_benchmark(
+        {
+            "framework": "vllm",
+            "model": "/models/gpt-oss-120b",
+            "envs": {"TP": 8, "CONC": 64, "EXTRA_VLLM_ARGS": "--max-num-seqs 512"},
+        }
+    )
     assert spec.conc == 64
 
 
@@ -284,8 +292,9 @@ def test_resolve_workload_uses_template_for_preset(monkeypatch):
     assert extra_env["INFERASIM_MODEL"] == "gpt_oss_120B"
 
 
-def _write_anchor(path: Path, *, model: str, real_weights: bool, decode_ms: float,
-                  quant=None, kv="bf16", aiter=True) -> None:
+def _write_anchor(
+    path: Path, *, model: str, real_weights: bool, decode_ms: float, quant=None, kv="bf16", aiter=True
+) -> None:
     """Minimal benchmark artifact in the shape benchmark_vllm.py emits."""
     path.write_text(
         json.dumps(
@@ -352,9 +361,7 @@ def _write_curve(path: Path, points: list[tuple[int, float]]) -> None:
         json.dumps(
             {
                 "backend": "vllm",
-                "sweep": [
-                    {"batch": b, "prefill_ms": 10.0, "decode_ms": d} for b, d in points
-                ],
+                "sweep": [{"batch": b, "prefill_ms": 10.0, "decode_ms": d} for b, d in points],
                 "meta": {"model": "m", "tp": 1, "input_len": 1024},
             }
         )
@@ -364,13 +371,13 @@ def _write_curve(path: Path, points: list[tuple[int, float]]) -> None:
 @pytest.mark.parametrize(
     "points, sane",
     [
-        ([(1, 4.0), (8, 6.4), (32, 12.0)], True),      # ordinary rising curve
-        ([(16, 12.0)], True),                          # single point: narrow, valid
-        ([(8, 6.0), (16, 5.7)], True),                 # -5%: run-to-run noise
-        ([(16, 16.3), (64, 1.4)], False),              # differencing degenerated
-        ([(4, 11.6), (32, 9.5)], False),               # decode faster at 8x batch
-        ([(8, 0.0)], False),                           # non-positive timing
-        ([], False),                                   # nothing measured
+        ([(1, 4.0), (8, 6.4), (32, 12.0)], True),  # ordinary rising curve
+        ([(16, 12.0)], True),  # single point: narrow, valid
+        ([(8, 6.0), (16, 5.7)], True),  # -5%: run-to-run noise
+        ([(16, 16.3), (64, 1.4)], False),  # differencing degenerated
+        ([(4, 11.6), (32, 9.5)], False),  # decode faster at 8x batch
+        ([(8, 0.0)], False),  # non-positive timing
+        ([], False),  # nothing measured
     ],
 )
 def test_anchor_curve_sanity_gate(tmp_path, points, sane):
@@ -400,8 +407,7 @@ def test_anchor_curve_sanity_gate_rejects_non_object_json(tmp_path, payload):
     [
         ("", (None, 0)),
         ("--attention-backend triton", (None, 0)),
-        ('--speculative-config \'{"method": "deepseek_mtp", '
-         '"num_speculative_tokens": 3}\'', ("deepseek_mtp", 3)),
+        ('--speculative-config \'{"method": "deepseek_mtp", "num_speculative_tokens": 3}\'', ("deepseek_mtp", 3)),
         ("--speculative-algorithm NEXTN --speculative-num-steps 3", ("NEXTN", 3)),
         ("--speculative-algorithm EAGLE3", ("EAGLE3", 1)),
         ("--method mtp --num-speculative-tokens 3", ("mtp", 3)),
