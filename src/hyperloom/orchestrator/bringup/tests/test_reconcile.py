@@ -158,7 +158,7 @@ async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, l
 async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
     """The pass is the one thing that runs when the session is already stopping."""
     state = _State()
-    state.stop_reason = "enablement_stalled"
+    state.stop_reason = "enablement_attempts_exhausted"
     rec, rounds, tasks, _ = _build(db, state=state)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 

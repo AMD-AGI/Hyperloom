@@ -20,7 +20,7 @@ from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, lo
 from ..collaborator import CoordinatorCollaborator
 from ..delivery.archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
+from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
@@ -44,18 +44,22 @@ _MIN_LEASE_SEC = 300.0
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
-    async def _on_enter_enablement(self, *, from_phase: str) -> None:
-        """ENABLEMENT entry hook: log the transition."""
-        log.info("ENABLEMENT entry (from=%s)", from_phase or "<unknown>")
+    def _enablement_admitted(self) -> bool:
+        """Whether this run and host admit the enablement lane at all."""
+        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return False
+        state = self.shared_state
+        if state.enablement.origin == "eval":
+            return eval_enablement_allowed(state)
+        return launch_enablement_allowed(state)
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
-        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
-
         state = self.shared_state
-        origin = state.enablement.origin
-        admitted = eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
-        if not admitted:
+        if not self._enablement_admitted():
             return ""
         if state.enablement.succeeded:
             return ""
@@ -66,16 +70,14 @@ class EnablementLane(CoordinatorCollaborator):
             # which runs ahead of this pump, ends a round nobody is working on.
             await self._enablement_in_flight()
             return ""
-        # Both terminal helpers write stop_reason; the phase machine reads it on the
-        # next tick and routes to CLOSE.  Returning here prevents opening a new round.
+        # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
+        # next tick; returning keeps a new round from opening in the meantime.
         if self._check_argv_terminal():
             return ""
         if self._check_environment_terminal():
             return ""
         stalled = await self.rounds.consecutive_stalled()
         if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
-            # The phase machine will route to CLOSE on the next tick through stop_reason;
-            # do not open another round in the meantime.
             if not state.stop_reason:
                 state.set_stop_reason("enablement_attempts_exhausted")
                 state.save(self.session_dir)
@@ -103,10 +105,6 @@ class EnablementLane(CoordinatorCollaborator):
         # auto-escalation when the residual gap is a compiled miss. Both are
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            return ""
         try:
             await self._maybe_enqueue_specialist_requested_build()
             await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
@@ -637,10 +635,7 @@ class EnablementLane(CoordinatorCollaborator):
         Args:
             caller: Label identifying the caller ("tick" / "run"), for logs.
         """
-
-        from ..phases.machine_state import PHASE_ENABLEMENT as _PHASE_ENABLEMENT
-
-        if (self.shared_state.phase or "").strip().upper() != _PHASE_ENABLEMENT:
+        if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.

@@ -713,6 +713,7 @@ class PhaseBreakdown(TypedDict, total=False):
     """Per-phase gain attribution."""
 
     prelude: PhaseBreakdownExplore  # always 0 by definition
+    enablement: PhaseBreakdownExplore  # always 0 (graded on runnability, not throughput)
     framework: PhaseBreakdownFramework
     explore: PhaseBreakdownExplore
     kernel_agent: PhaseBreakdownKernel

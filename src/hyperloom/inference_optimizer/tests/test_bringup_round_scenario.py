@@ -177,6 +177,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (Coordinator, "_maybe_record_enablement_human_review"),
         (Coordinator, "_maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
+        (EnablementLane, "_enablement_admitted"),
         (EnablementLane, "_check_argv_terminal"),
         (EnablementLane, "_check_environment_terminal"),
         (EnablementLane, "_environment_verdict"),

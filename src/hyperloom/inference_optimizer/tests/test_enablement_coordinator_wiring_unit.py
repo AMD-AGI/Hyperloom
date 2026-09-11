@@ -362,6 +362,7 @@ def _enqueue_self(**state_kw):
     from hyperloom.orchestrator.enablement.lane import EnablementLane
 
     for name in (
+        "_enablement_admitted",
         "_enablement_in_flight",
         "_check_argv_terminal",
         "_check_environment_terminal",
