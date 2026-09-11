@@ -83,6 +83,10 @@ async def test_resumable_classification_survives_state_save_failure(tmp_path: Pa
         encoding="utf-8",
     )
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # _run_optimize pins these process-wide for in-process executors; route them
+    # through monkeypatch so the run does not leak strict paths into later tests.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_PATHS", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "")
     monkeypatch.setattr(
         ocli,
         "clean_stale_aiter_locks",
