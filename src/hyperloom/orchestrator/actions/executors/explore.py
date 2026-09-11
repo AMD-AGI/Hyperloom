@@ -1390,6 +1390,7 @@ class ExploreExecutor:
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
                             "single_workspace": r.workspace,
+                            "raw_result_path": r.raw_result_path,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
                             "round_id": round_id,
