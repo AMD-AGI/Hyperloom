@@ -27,27 +27,17 @@ carries the sections below. This is the subset most consumers use, not the full 
 `breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` are
 authoritative.
 
-| Section              | What it carries                                                                                          |
-|----------------------|----------------------------------------------------------------------------------------------------------|
-| `session`            | Internal `session_id`, Claw `claw_session_id`, sandbox user, start/end ts, stop_reason, host, code SHA.  |
-| `workload`           | Framework, model, GPU, TP, CONC/ISL/OSL/precision, objective.                                            |
-| `baseline`           | Baseline throughput / accuracy / latency, config path, benchmark report path, failure streak.            |
-| `final`              | `current_best` throughput, validated cumulative gain, action path, extra args/envs.                      |
-| `phase_timeline`     | Chronological list of every action attempt + kernel_opt + integrate event.                               |
-| `capability_summary` | One row per live capability: geak / forge / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
-| `geak`               | GEAK route diagnostics, normalized result, accepted artifacts, and recovery evidence when the route ran outside the native kernel-agent layout. |
-| `optimizations`      | Canonical adopted-optimization API, projected from author-time recorder streams. **Read `available` first**: `false` means the records are missing, not that nothing was adopted. `attempts[]` holds every attempt, `entries[]` the adopted ledger, `validation` the reconciliation. |
-| `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
-| `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
-| `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
-| `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
-| `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. `telemetry.orchestration_context` carries the compaction-loop health: `seed_prompts`, `delta_prompts`, `compactions`, `degenerate_compactions`, `tick_count`, `compactions_per_tick`, `delta_ratio`, `context_tokens_at_compaction`. See `docs/reference/session-breakdown.md §telemetry.orchestration_context`. |
-| `metadata`           | Additive V6 schema/version, session, launch configuration, Langfuse, and warning metadata.                |
-| `outcome`            | Additive V6 terminal status, reached stage, stop reason, and final measured result.                       |
-| `timeline`           | Additive V6 ordered stage events; startup source events live under `reports/sbd_v6/timeline/`.            |
-| `close`              | Additive V6 close-stage payload; currently empty until the close-stage collector is implemented.          |
-| `warnings`           | Best-effort caveats (missing files, partial sections, reconstructed fields).                             |
-| `source_files`       | Mapping from logical section to relative path under `session_dir`.                                       |
+| Section             | What it carries                                                                                          |
+|---------------------|----------------------------------------------------------------------------------------------------------|
+| `schema_version`    | The wire contract. Gate features on the **major** version, not the exact string.                         |
+| `exported_at_utc`   | When this export was built.                                                                              |
+| `exporter_version`  | Which exporter built it.                                                                                 |
+| `metadata`          | Session identity, launch configuration, component versions, Langfuse receipt, and `warnings` -- how the export itself went, reported once and only here. |
+| `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results, and the `validation` that reconciles the stack's parts against its total. |
+| `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
+| `close`             | What the session settled at close: the steps the sequencer ran, the artifacts it published, the robustness findings it collected. |
+| `critic`            | The critic agent's own run, iteration by iteration: what it was asked about, how its rulings fell (`verdict_counts`), and the four artifacts each pass left behind. Per-proposal verdicts stay with the proposals, on the timeline. |
+| `robustness`        | What the robustness agent raised, turn by turn. Read `outcome` before counting `intents`: a turn that produced no envelope and a turn with nothing to raise are different findings. |
 
 ## Who reads it
 
@@ -130,19 +120,14 @@ collectors are pure functions; failure in one section never poisons
 another (each becomes a `warnings[]` entry instead). Like the table above,
 this reference is partial — `breakdown/exporter.py` is authoritative.
 
-| Section              | Reads from                                                                                                            |
-|----------------------|----------------------------------------------------------------------------------------------------------------------|
-| `session`            | `manifest.json` + `state.{session_id, stop_reason, stop_ts, max_minutes, tick, start_ts, resumed_ts}`                |
-| `workload`           | `manifest.{framework, model_*, gpu_type, tp, workload, objective}` + `state.{model_class, framework, gpu_type}`      |
-| `baseline`           | `state.{baseline_tput, baseline_accuracy, last_baseline.workspace, baseline_attempts}` + `<workspace>/benchmark_*/benchmark_report.json` |
-| `final`              | `state.{current_best, cumulative_gain_validated, cumulative_gain_validated_*, optimization_stack}`                  |
-| `phase_timeline`     | `state.{<action>_attempts, kernel_opt_attempts.history, kernel_integrate_attempts.attempts}` sorted by `ts`           |
-| `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 8 rows: geak / forge / explore / sweep / specialist plus the backends / params / validate_stack compatibility rows |
-| `optimizations`      | The recorder's own streams only — `operations` / `adoptions` / `measurements` / `artifacts`, as the producers wrote them. Never rebuilt from `state.json`; when the records are absent the section reports `available: false` instead. |
-| `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
-| `param_search`       | `state.{explore_search, discovered_flags}` (`synergy_attempted` now comes from `explore_search`; `winner_history` / `backend_winners_history` are emitted empty); `params` / `backends` ledgers are historical aliases only |
-| `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
-| `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |
+| Section     | Read from                                                                                                       |
+|-------------|-----------------------------------------------------------------------------------------------------------------|
+| `metadata`  | `manifest.json` + `state.json`, overlaid by the recorder's own `session` / `task_config` / `versions` fragments  |
+| `outcome`   | The recorder's `close` and stack fragments, plus `state.{current_best, cumulative_gain_validated, optimization_stack}` for the sessions that predate them |
+| `timeline`  | The event fragments in the spool, closed and assembled per event; orphans left open by a killed phase are closed on first build |
+| `close`     | The CLOSE sequencer's own `close` / `close_step` fragments                                                        |
+| `critic`    | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json`, recorded as each pass returns                     |
+| `robustness`| The robustness agent's per-turn envelopes, recorded as each turn returns                                          |
 
 ## What is NOT in scope
 

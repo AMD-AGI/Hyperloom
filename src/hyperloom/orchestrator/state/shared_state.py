@@ -649,8 +649,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
     policy_denial_streak: dict[str, int] = field(default_factory=dict)
-    # Set when AST flag discovery cannot locate framework source files.
-    discovered_flags_error: str = ""
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
     # Per-kernel GPU time breakdown JSON from the most recent profile.
@@ -834,11 +832,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Unix time an inline kernel request (``integrate``, ``run_optimization``, ...) last reported itself running.
     kernel_inline_step_seen_unix: float = 0.0
 
-    # Which macro cycle's kernel nomination pass has run to completion.
-
-    # Search-space expansion ledger surfaced in the Orchestration prompt.
-    discovered_flags: dict[str, Any] = field(default_factory=dict)
-
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
     # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
@@ -882,11 +875,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Recipe KB integration fields — Coordinator-only writers.
     recipe_kb_session_id: str = ""
-    # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output (parsed dict); empty on first session for a (workload, hw) pair.
+    # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output, the ``{workload, hw, tier, confidence, recipe}`` envelope where ``recipe`` is the matched row; empty on first session for a (workload, hw) pair. Bookkeeping, not a prompt input — the model-facing view is ``warm_start_context``.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
+    # Snapshot of the recipe row's ``pitfalls`` (negative priors), flat ``{description, severity, ...}`` rows as written by ``Recipe.to_dict``; consumed by the specialist prompt. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
+    # T0 snapshot of the recipe row's ``lessons`` (positive priors), flat ``{statement, measured_impact, ...}`` rows, symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
@@ -1223,7 +1216,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         out.setdefault("tested", {})
         out.setdefault("accepted", [])
         out.setdefault("rejected", [])
-        out.setdefault("discovered_flags", [])
         out.setdefault("domains_round_summary", [])
         out.setdefault("name_index", {})
         out.setdefault("cursor", len(out.get("tested") or {}))
@@ -1272,27 +1264,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
-        # synergy_attempted: normalize executor-side combos, deduped.
-        sa_set: set[tuple[str, ...]] = set()
-
-        def _normalize_combo(c: Any) -> tuple[str, ...] | None:
-            """Normalize a synergy combo to a sorted tuple of flag names."""
-            if isinstance(c, list):
-                items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
-                return items if items else None
-            if isinstance(c, str) and c.strip():
-                parts = tuple(sorted(p for p in c.split("+") if p))
-                return parts if parts else None
-            return None
-
-        for source in (existing.get("synergy_attempted") or [],):
-            if not isinstance(source, list):
-                continue
-            for c in source:
-                norm = _normalize_combo(c)
-                if norm:
-                    sa_set.add(norm)
-        out["synergy_attempted"] = [list(c) for c in sorted(sa_set)]
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -1805,16 +1776,65 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         keep_threshold_pct: float = 1.0,
         max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`.
+
+        Also the one seam every integrate settlement passes through, so the
+        author-time capture of the gate's verdict is taken here rather than at
+        each of the three callers.
+        """
         from ..kernel import _kernel_decisions as _m
 
-        return _m.record_kernel_integrate_result(
+        entry = _m.record_kernel_integrate_result(
             self,
             result,
             max_attempts=max_attempts,
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
+        self._record_integrate_verdict_on_timeline(entry)
+        return entry
+
+    def _record_integrate_verdict_on_timeline(self, entry: dict[str, Any] | None) -> None:
+        """Mirror one settled integrate verdict onto the KERNEL timeline.
+
+        Args:
+            entry (dict[str, Any] | None): The attempts entry the settlement
+                produced, or ``None`` when nothing settled.
+        """
+        if not isinstance(entry, dict):
+            return
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+
+            last = (entry.get("attempts") or [{}])[-1]
+            last = last if isinstance(last, dict) else {}
+            rejected = entry.get("rejected")
+            record_integrate_verdict(
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                integration_id=str(entry.get("integration_id") or ""),
+                kernel_id=str(entry.get("kernel_id") or ""),
+                decision=str(entry.get("last_decision") or ""),
+                status=str(entry.get("last_status") or ""),
+                attempt_count=entry.get("attempt_count"),
+                fault_count=entry.get("fault_count"),
+                gain_pct=entry.get("best_gain_pct"),
+                accuracy_pass=last.get("accuracy_pass"),
+                validation_tier=str(last.get("validation_tier") or ""),
+                patch_path=str(entry.get("patch_path") or ""),
+                target_file=str(entry.get("target_file") or ""),
+                error_class=str(entry.get("last_error_class") or ""),
+                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+                retryable=bool(entry.get("retryable")),
+                settled_at=str(entry.get("updated_at") or ""),
+                extra_server_args=str(entry.get("extra_server_args") or ""),
+                basis=str(entry.get("basis") or ""),
+                alignment_status=str(entry.get("alignment_status") or ""),
+                # Absent means attributable: every writer that cannot pin the
+                # gain on this one kernel says so explicitly.
+                gain_attributed=bool(entry.get("validated", True)),
+            )
+        except Exception:  # noqa: BLE001 — author-time capture must never block record
+            log.debug("integrate verdict capture failed", exc_info=True)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2003,36 +2023,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             history = history[-max_history:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
-        # Author-time breakdown capture: one phase_timeline event per attempt.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        if action == "baseline":
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-            capture_result = dict(result)
-            capture_result.setdefault(
-                "workload",
-                {
-                    "framework": str(getattr(self, "framework", "") or ""),
-                    "model_name": str(getattr(self, "model_name", "") or ""),
-                    "gpu_type": str(getattr(self, "gpu_type", "") or ""),
-                    "precision": str(getattr(self, "precision", "") or ""),
-                    "tp": int(getattr(self, "tp", 0) or 0),
-                    "ep": int(getattr(self, "ep", 0) or 0),
-                    "conc": int(getattr(self, "conc", 0) or 0),
-                    "isl": int(getattr(self, "isl", 0) or 0),
-                    "osl": int(getattr(self, "osl", 0) or 0),
-                },
-            )
-            instrument.record_phase_event(
-                getattr(self, "_session_dir", None),
-                action=action,
-                entry=entry,
-                result=capture_result,
-                phase=str(getattr(self, "phase", "") or ""),
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                tick=int(getattr(self, "tick", 0) or 0),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("record_phase_event capture failed", exc_info=True)
+                record_action_decision(
+                    phase=str(getattr(self, "phase", "") or "unphased"),
+                    macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                    task_id=str(entry.get("task_id") or ""),
+                    decision=str(entry.get("decision") or ""),
+                )
+            except Exception:  # noqa: BLE001 — author-time capture must never block record
+                log.debug("baseline decision capture failed", exc_info=True)
         return entry
 
     def record_action_failure(

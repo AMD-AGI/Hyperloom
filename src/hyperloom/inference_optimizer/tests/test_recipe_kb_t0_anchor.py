@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
+    _experience_rows,
     _warm_recipe_source,
     run_t0_anchor,
 )
@@ -188,8 +190,102 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
     assert state.warm_start_pitfalls[0]["description"] == "watch for X"
     assert len(state.warm_start_lessons) == 1
     assert state.warm_start_lessons[0]["statement"] == "Y is the answer"
+    # The snapshot is the contract the prompt renderers read; it is flat.
+    assert "attrs" not in state.warm_start_pitfalls[0]
+    assert "attrs" not in state.warm_start_lessons[0]
     assert state.warm_start_recipe["tier"] == "exact"
     assert state.warm_start_recipe["confidence"] == 1.0
+
+
+def test_t0_anchor_drops_an_unparseable_row_on_disk_and_says_so(
+    kb: RecipeKB,
+    session_dir: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A row the schema cannot parse is dropped loudly, not rendered as nothing.
+
+    ``Recipe.from_dict`` reads ``statement`` off each lesson, so a row on disk in
+    any other shape comes back empty rather than wrapped — the local store cannot
+    hand T0 something to unwrap. What matters here is the difference from before:
+    the empty row is dropped with a log naming the field, instead of reaching the
+    prompt and rendering as ``(none)`` with no signal anywhere.
+    """
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    kb.put_recipe(
+        canonical_id=cid,
+        model="M",
+        hardware="MI300X",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+        lessons=[{"statement": "placeholder", "measured_impact": "+1%"}],
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    recipe_path = next((tmp_path / "kb").rglob("recipe.json"))
+    row = json.loads(recipe_path.read_text(encoding="utf-8"))
+    row["lessons"] = [{"attrs": {"statement": "wrapped", "measured_impact": "+9%"}}]
+    recipe_path.write_text(json.dumps(row), encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        run_t0_anchor(
+            kb,
+            state,
+            workload="M",
+            hw="MI300X",
+            extra_attrs={"framework_name": "sglang"},
+            session_dir=session_dir,
+        )
+    assert state.warm_start_lessons == []
+    assert "warm_start_lessons: dropped 1 row(s) missing 'statement'" in caplog.text
+
+
+def test_experience_rows_passes_through_the_stored_flat_shape() -> None:
+    """The stored shape is flat; normalisation must not restructure it."""
+    rows = _experience_rows(
+        [{"statement": "Y is the answer", "measured_impact": "+15%"}],
+        "statement",
+        "lessons",
+    )
+    assert rows == [{"statement": "Y is the answer", "measured_impact": "+15%"}]
+
+
+def test_experience_rows_unwraps_a_wrapped_row_once() -> None:
+    """The remote projection passes rows through unnormalised, so unwrap here.
+
+    ``knowledge_to_warm_recipe`` copies ``lessons`` straight out of the remote
+    record without going through ``Recipe.from_dict``, which is the one way a
+    wrapped row reaches T0. Unwrapping at this boundary keeps every downstream
+    reader on a single shape.
+    """
+    rows = _experience_rows(
+        [{"canonical_id": "lesson:x", "attrs": {"statement": "wrapped", "measured_impact": "+1%"}}],
+        "statement",
+        "lessons",
+    )
+    assert rows == [{"statement": "wrapped", "measured_impact": "+1%"}]
+
+
+def test_experience_rows_drops_unusable_rows_loudly(caplog: pytest.LogCaptureFixture) -> None:
+    """A row the renderer could not have used is dropped here, with a log.
+
+    The renderer used to emit "(none)" off a non-empty list with no log and no
+    error, which is why a wrong shape went unnoticed for so long.
+    """
+    with caplog.at_level("WARNING"):
+        rows = _experience_rows(
+            [
+                {"statement": "kept"},
+                {"measured_impact": "no statement"},
+                "not-a-row",
+            ],
+            "statement",
+            "lessons",
+        )
+    assert rows == [{"statement": "kept"}]
+    assert "dropped 2 row(s)" in caplog.text
+    assert "warm_start_lessons" in caplog.text
 
 
 def test_t0_anchor_no_prior_recipe_means_warm_miss(
@@ -453,3 +549,87 @@ def test_cascade_l2_skips_same_cid_and_nonactionable():
     point, tier, conf = _cascade(kb)
     assert tier == "same_arch_class"
     assert point["canonical_id"] == "CID:l2"
+
+
+# ---------------------------------------------------------------------------
+# warm_start event wiring
+# ---------------------------------------------------------------------------
+
+
+def _warm_start_events(session_dir: Path) -> list[dict[str, Any]]:
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_start"]
+
+
+def test_t0_anchor_records_its_own_lookup_as_a_timeline_event(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """A cold KB is a completed lookup, not a failure.
+
+    What it matches is its own freshly-stamped anchor row, which demotes to
+    ``seed_only`` -- so this is also the case that pins the status apart from
+    the finding: every first-ever session lands here.
+    """
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    state = _FakeSharedState()
+    with session_scope(session_dir):
+        run_t0_anchor(
+            kb,
+            state,
+            workload="DeepSeek-R1",
+            hw="MI300X",
+            extra_attrs={"framework_name": "sglang"},
+            session_dir=session_dir,
+        )
+
+    events = _warm_start_events(session_dir)
+    assert len(events) == 1
+    event = events[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"]["match_status"] == "seed_only"
+    # The identity is recorded as T0 queries it, not rebuilt afterwards.
+    assert event["ext"]["request"]["canonical_id"] == _expected_cid(state, "DeepSeek-R1", "mi300x")
+
+
+def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """``_kb_amend_recipe`` reads the same store later through the same hook."""
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    kb.audit_hook = lambda event: warm_start_event.record_read(session_dir, event)
+    state = _FakeSharedState()
+    with session_scope(session_dir):
+        run_t0_anchor(
+            kb,
+            state,
+            workload="DeepSeek-R1",
+            hw="MI300X",
+            extra_attrs={"framework_name": "sglang"},
+            session_dir=session_dir,
+        )
+        cid = _expected_cid(state, "DeepSeek-R1", "mi300x")
+        # A mid-session amendment read, after the anchor settled.
+        kb.get_authoritative_recipe(canonical_id=cid)
+
+    reads = _warm_start_events(session_dir)[0]["ext"]["reads"]
+    assert reads is not None
+    # T0's exact-identity probe, then the degradation cascade behind it.
+    assert reads["by_method"]["get_recipe"] == 1
+    assert reads["by_method"]["search"] > 1
+    # The row T0 stamps is a write. The audit log carries a successful write
+    # with ``hit: True``, which is what let the projection count it twice over.
+    assert "put_recipe" not in reads["by_method"]
+    # T0 makes exactly one authority read, at the top of the anchor; the
+    # amendment read issued after the event settled is not this one.
+    assert reads["by_method"]["get_authoritative_recipe"] == 1
+    assert reads["count"] == len(reads["rows"]) == sum(reads["by_method"].values())
+    # Every read lands in the same second, so service order is carried
+    # explicitly: the exact probe has to be readable as having missed before
+    # the ladder was walked.
+    assert [row["method"] for row in reads["rows"]][:2] == ["get_authoritative_recipe", "get_recipe"]

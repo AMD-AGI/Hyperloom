@@ -20,6 +20,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
@@ -69,6 +70,51 @@ def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
     """Return the source tag for a Recipe warm-start row."""
     del row
     return str(getattr(kb, "backend_name", "") or "recipe-kb")
+
+
+def _experience_rows(raw: Any, required_key: str, label: str) -> list[dict[str, Any]]:
+    """Normalise a recipe row's ``lessons`` / ``pitfalls`` into flat rows.
+
+    The stored shape is flat — ``Recipe.to_dict`` and the ``_normalise_*``
+    helpers write ``{statement, ...}`` / ``{description, ...}``. The remote
+    projection (``knowledge_to_warm_recipe``) copies rows out of the record
+    without going through ``Recipe.from_dict``, so a wrapped row can still arrive
+    that way; this is the single place it is unwrapped, and no reader downstream
+    has to know about two shapes.
+
+    Rows missing *required_key* are dropped here rather than silently vanishing
+    in the prompt renderer, which is what let a wrong shape pass unnoticed: the
+    section rendered "(none)" off a non-empty list with no log and no error.
+
+    Args:
+        raw: The row list as read off the recipe.
+        required_key: The field a usable row must carry.
+        label: Field name for the warning.
+
+    Returns:
+        The flat rows that carry *required_key*.
+    """
+    out: list[dict[str, Any]] = []
+    dropped = 0
+    for item in raw or []:
+        if not isinstance(item, Mapping):
+            dropped += 1
+            continue
+        wrapped = item.get("attrs")
+        row = dict(wrapped) if isinstance(wrapped, Mapping) and wrapped else dict(item)
+        if not str(row.get(required_key) or "").strip():
+            dropped += 1
+            continue
+        out.append(row)
+    if dropped:
+        log.warning(
+            "warm_start_%s: dropped %d row(s) missing %r; kept %d",
+            label,
+            dropped,
+            required_key,
+            len(out),
+        )
+    return out
 
 
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
@@ -244,6 +290,64 @@ def _select_remote_candidate(kb: Any, row: Mapping[str, Any]) -> bool:
             exc,
         )
         return False
+
+
+def _warm_start_scope(shared_state: Any) -> dict[str, Any]:
+    """The workload dimensions the lookup was issued under (RecipeScope)."""
+    return {
+        "kernel_optimizer": str(getattr(shared_state, "kernel_optimizer", "") or ""),
+        "tp": getattr(shared_state, "tp", None),
+        "conc": getattr(shared_state, "conc", None),
+        "isl": getattr(shared_state, "isl", None),
+        "osl": getattr(shared_state, "osl", None),
+    }
+
+
+def _settle_warm_start_event(
+    recorder: Any,
+    *,
+    match_status: str,
+    tier: str,
+    confidence: Any,
+    source: str,
+    canonical_id: str,
+    recipe: Mapping[str, Any] | None,
+    context: Any,
+    lessons: list[dict[str, Any]],
+    pitfalls: list[dict[str, Any]],
+) -> None:
+    """Close the warm_start event. Best-effort: the anchor outranks its record.
+
+    Args:
+        recorder (Any): The open warm-start recorder.
+        match_status (str): T0's own ``hit`` / ``seed_only`` / ``miss`` verdict.
+        tier (str): The tier the match was served at.
+        confidence (Any): The match confidence.
+        source (str): Which store served the match.
+        canonical_id (str): The identity that was queried.
+        recipe (Mapping[str, Any] | None): The matched recipe row, if any.
+        context (Any): The built ``warm_start_context``, read for the gain the
+            matched record claims.
+        lessons (list[dict[str, Any]]): The record's lessons.
+        pitfalls (list[dict[str, Any]]): The record's pitfalls.
+    """
+    try:
+        matched = None
+        if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
+            replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
+            matched = _warm_start_event.matched_block(
+                tier=tier,
+                confidence=confidence,
+                source=source,
+                canonical_id=canonical_id,
+                recipe=recipe,
+                expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
+                lessons=lessons,
+                pitfalls=pitfalls,
+            )
+        recorder.finish(match_status=match_status, matched=matched)
+    except Exception:  # noqa: BLE001 — defensive; the record is advisory
+        log.debug("warm_start event settle failed", exc_info=True)
 
 
 def _find_config_donor(
@@ -941,6 +1045,21 @@ def run_t0_anchor(
     if _fw_version:
         shared_state.framework_version = _fw_version
 
+    # Open the warm_start event before the KB is consulted: the identity is
+    # resolved now, and the event's open interval is what tells the audit hook
+    # which reads were T0's. Only on the anchoring pass -- a resume that
+    # re-runs T0 must not reopen an event the first pass already settled.
+    ws_recorder = (
+        _warm_start_event.make_warm_start_recorder(
+            macro_cycle=getattr(shared_state, "macro_cycle", 0) or 0,
+            requested_canonical_id=cid,
+            scope=_warm_start_scope(shared_state),
+            start_time=str(getattr(shared_state, "warm_start_ts", "") or ""),
+        )
+        if began_now
+        else None
+    )
+
     if getattr(kb, "mode", "") != "remote":
         # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
         # broad remote warm-start scan.
@@ -994,20 +1113,6 @@ def run_t0_anchor(
                 new = str(fp.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
-
-        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
-        # row, which under AgentX are the inert 1024/1024 placeholders -- so anchoring here mis-tags the cross-session
-        # row exactly as the CLOSE-time write would.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_blocked,
-        )
-
-        if agentx_kb_blocked(shared_state):
-            log.info(
-                "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
-                "mode or workload dimension and isl/osl are placeholders here."
-            )
-            return
 
         try:
             kb.put_recipe(
@@ -1159,8 +1264,8 @@ def run_t0_anchor(
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     exact_history = warm_point.get("exact_history")
     history_source = exact_history if isinstance(exact_history, Mapping) else warm_point
-    pitfalls_list: list[dict[str, Any]] = list(history_source.get("pitfalls") or [])
-    lessons_list: list[dict[str, Any]] = list(history_source.get("lessons") or [])
+    pitfalls_list = _experience_rows(history_source.get("pitfalls"), "description", "pitfalls")
+    lessons_list = _experience_rows(history_source.get("lessons"), "statement", "lessons")
     try:
         pit_path = recipe_kb_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1199,6 +1304,23 @@ def run_t0_anchor(
             shared_state.warm_start_lessons = lessons_list
     except OSError as exc:
         log.warning("warm_start_lessons snapshot write failed: %s", exc)
+
+    # Settle the event now that the lookup, the match and the experience rows
+    # are all known. Recorded before the state save so the event stands even if
+    # the save fails: the lookup happened either way.
+    if ws_recorder is not None:
+        _settle_warm_start_event(
+            ws_recorder,
+            match_status=wsc_status,
+            tier=warm_tier,
+            confidence=warm_conf,
+            source=warm_source,
+            canonical_id=cid,
+            recipe=warm_point,
+            context=getattr(shared_state, "warm_start_context", None),
+            lessons=lessons_list,
+            pitfalls=pitfalls_list,
+        )
 
     if save_state:
         try:

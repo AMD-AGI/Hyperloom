@@ -15,6 +15,7 @@ from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.rewrite_by_flydsl.prompts import build_port_program_md
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.tracker import UsageAccumulator
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def run_port_loop(
     max_attempts: int = 3,
     permission_mode: str | None = None,
     validate_stage_timeout_sec: int = 1800,
-    usage=None,
+    usage: UsageAccumulator | None = None,
     stop_at_unix: float | None = None,
     pre_task_context: str = "",
 ) -> PortResult:
