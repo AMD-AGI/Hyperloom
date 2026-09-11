@@ -19,7 +19,7 @@ def test_established_success_reasons_still_exit_zero():
 def test_failure_reasons_exit_nonzero():
     for reason in (
         "prelude_baseline_failed",
-        "enablement_stalled",
+        "enablement_attempts_exhausted",
         "sweep_failed",
         "crash_threshold_exceeded",
         "",

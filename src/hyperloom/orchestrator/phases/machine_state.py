@@ -38,10 +38,8 @@ PHASE_NAMES: tuple[str, ...] = (
 )
 PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
 
-# Enablement attempt cap: consecutive *failed* settled rounds before the phase
-# terminates with enablement_attempts_exhausted.  Neutral outcomes (abandoned,
-# expired) are not counted by consecutive_stalled, so this value is the true
-# high-water mark for FAILED rounds in a row.
+# Consecutive FAILED rounds before the lane stops with enablement_attempts_exhausted;
+# abandoned and expired rounds are neutral and do not count towards it.
 ENABLEMENT_MAX_ATTEMPTS: int = 8
 
 
@@ -62,10 +60,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    # Authoring specialists + integration + build escalation + revalidation baselines.
-    # ``specialist`` and ``integrate_patch`` are proposed by the LLM; ``targeted_build``
-    # and ``baseline`` are Coordinator-internal (kept out of the proposable set by
-    # ``_NOT_LLM_PROPOSABLE`` / ``COORDINATOR_INTERNAL_ACTIONS``).
+    # ``targeted_build`` and ``baseline`` are Coordinator-internal; the LLM only
+    # proposes ``specialist`` and ``integrate_patch`` from this set.
     PHASE_ENABLEMENT: frozenset(
         {
             "target_analysis",
@@ -1930,7 +1926,6 @@ def compute_next_phase(
     now_unix: float | None = None,
     optimize_enabled: bool = True,
     enablement_enabled: bool = False,
-    enablement_stalled: int = 0,
     enablement_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``."""
@@ -1962,7 +1957,6 @@ def compute_next_phase(
         cold = exit_cold_anchor_prelude(state)
         if cold is not None:
             return PHASE_CLOSE, cold[0], {"terminal": True, **cold[1]}
-        # Route into ENABLEMENT when admitted and at least one baseline has failed.
         streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
         if enablement_enabled and streak >= 1:
             return PHASE_ENABLEMENT, "enablement_entered", {"baseline_failure_streak": streak}
@@ -1984,17 +1978,13 @@ def compute_next_phase(
         return None
 
     if current == PHASE_ENABLEMENT:
-        # Terminal exits first.
-        enablement = getattr(state, "enablement", None)
-        env_fault_stop = (getattr(state, "stop_reason", "") or "").strip() in ("environment_fault", "server_argv_invalid")
-        if env_fault_stop:
-            sr = (getattr(state, "stop_reason", "") or "").strip()
-            return PHASE_CLOSE, sr, {"terminal": True}
-        if enablement_stalled >= ENABLEMENT_MAX_ATTEMPTS:
-            return PHASE_CLOSE, "enablement_attempts_exhausted", {"terminal": True, "consecutive_stalled": enablement_stalled}
-        # Normal exit: the combo is runnable, the revalidation window is closed, and no in-flight enablement work remains.
+        # The three terminals (server_argv_invalid, environment_fault,
+        # enablement_attempts_exhausted) are written to stop_reason by the lane and
+        # routed by ``_global_terminal`` above, so only the normal exit is decided here.
+        # Draining in-flight work is what keeps ``validation_pending`` inside the phase:
+        # a build outliving the round would otherwise reopen it from a later phase.
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-        validation_pending = bool(getattr(enablement, "validation_pending", False)) if enablement is not None else False
+        validation_pending = bool(getattr(getattr(state, "enablement", None), "validation_pending", False))
         if tput > 0.0 and not validation_pending and not enablement_in_flight:
             target = _post_prelude_target(
                 optimize_enabled=optimize_enabled,
