@@ -577,6 +577,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
     tmp_path,
     monkeypatch,
 ):
+    monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_mtime(base)
     output_root = tmp_path / "out"
