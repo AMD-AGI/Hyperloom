@@ -62,6 +62,33 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
+def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
+    """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
+
+    The resolution reads ``HYPERLOOM_PERF_METRIC`` and ``HYPERLOOM_PERF_NOISE_PCT``. Deriving it again later -- in a
+    resumed process, a re-baseline subprocess, or the breakdown export CLOSE drives from a subprocess that often did
+    not inherit them -- can name an axis the session never graded on. This is the same reasoning that put
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
+        GRADED_OUTPUT,
+        intvty_serving_grading_enabled,
+        parse_intvty_noise_pct,
+    )
+
+    from .. import framework_registry
+
+    on_intvty = intvty_serving_grading_enabled(
+        scriptable=framework_registry.is_scriptable(framework),
+        benchmark_mode=benchmark_mode,
+    )
+    return {
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        "noise_pct": parse_intvty_noise_pct(),
+    }
+
+
 def agentx_state_is_stale(state: Any) -> str:
     """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
     want_mode = "agentx" if _agentx_enabled() else "synthetic"
@@ -322,6 +349,7 @@ def _seed_shared_state(
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
