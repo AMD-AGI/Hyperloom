@@ -159,11 +159,39 @@ existing fused path for these cases. Artifacts are under
 `/shared_nfs/chenyi/forge-neha-repro-20260911/recovery-134141/`, in
 `full-pipeline/`, `model-candidate/` and `wrapper-ablation/`.
 
-An eight-GPU model baseline and trace confirmed that the original model uses
-`_agg_kernel`. This establishes the integration point, not ASM dispatch or an
-E2E gain. The candidate needs its own model trace and matched serving A/B/A
-measurements; small savings at a subset of aggregation points may be below
-model timing variability.
+An eight-MI355X SGLang 0.5.19 / Kimi-K3 serving A/B/A experiment subsequently
+completed with identical 1024-token inputs, 128-token outputs, temperature
+zero, `ignore_eos`, disabled radix cache and three repeats per batch. Medians
+include prefill and decode; profiling ran separately from timing:
+
+| Request batch | Original before | ASM candidate | Original restored |
+| --- | --- | --- | --- |
+| 1 | 2.2958 s | 2.2878 s | 2.2894 s |
+| 16 | 3.8222 s | 3.8215 s | 3.8055 s |
+| 64 | 7.6426 s | 7.6070 s | 7.6468 s |
+
+All eight model workers loaded the candidate, and model traces contain
+`kimik3_attnres_score`, `kimik3_attnres_combine` and the separate output norm.
+One complete candidate decode graph contains 176 original `_agg_kernel`
+calls and ten ASM score/combine/norm groups, replacing only ten of 186
+aggregation points. This proves actual model dispatch.
+
+It does **not** establish a reproducible E2E speedup. At the target batch 16,
+the candidate is 0.018% faster than the first baseline median and 0.42%
+slower than the restored baseline median, within run-to-run variation. Batch
+64's approximately 0.5% median difference also overlaps the repeated sample
+ranges. Warm isolated caller timings do not capture the model's complete
+memory and scheduling context; diagnostic trace attribution is not a paired
+benchmark or proof of the exact cause.
+
+Generation text was not bitwise repeatable even within the original baseline
+at batches 16 and 64. Candidate text differences alone are therefore not an
+accuracy regression measurement; the fixed kernel oracle and model-quality
+evaluation are separate requirements. Raw requests, responses, worker records,
+traces and timings are preserved in `e2e-aba/` and the sibling
+`model-*-result.json` / `model-*-profile/` paths under the artifact directory.
+The original implementation was restored after the experiment. Retain this
+as a negative E2E result, not a production optimization recommendation.
 
 ## What the source actually does
 
