@@ -1052,7 +1052,8 @@ def compute_roofline_breakdown_from_state(
             if maidas_bd is not None and maidas_bd.peak_tok_per_sec > 0:
                 return maidas_bd
         except Exception:  # noqa: BLE001 - never let the file break a run
-            log.debug("MAIDAS ceiling lookup failed; using native", exc_info=True)
+            log.warning("MAIDAS ceiling lookup failed for %s; using native "
+                        "ceiling", maidas_path, exc_info=True)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
         return _compute_diffusion_breakdown_from_state(state, runtime)

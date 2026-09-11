@@ -29,7 +29,8 @@ def _load_allscenarios(path: str):
     try:
         import pandas as pd
     except Exception:  # noqa: BLE001 - pandas is optional at runtime
-        logger.debug("pandas unavailable; MAIDAS ceiling disabled")
+        logger.warning("pandas unavailable; MAIDAS projection %s cannot be read "
+                       "-> using native ceiling", path)
         return None
 
     if os.path.isdir(path):
@@ -109,7 +110,8 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
 
     needed = {"soc", "bfp", "hp", "gbs", "prefill", "decode", "avg_lat", "scenario"}
     if not needed.issubset(set(df.columns)):
-        logger.debug("MAIDAS xlsx missing required columns; skipping")
+        logger.warning("MAIDAS xlsx %s missing required columns %s -> using "
+                       "native ceiling", path, sorted(needed - set(df.columns)))
         return None
 
     soc = _soc_token(runtime.gpu_type)
@@ -135,8 +137,11 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
 
     if q.empty:
         spills = (not cfg.empty) and bool((cfg["gbs"] == 0).any())
-        logger.debug(
-            "no feasible MAIDAS row for soc=%s bfp=%s hp=%s gbs(conc)=%s isl=%s osl=%s%s",
+        # INFO (not debug): the adapter only runs when a projection path was
+        # provided, so the operator wants to know it didn't apply here.
+        logger.info(
+            "MAIDAS projection provided but no feasible row for soc=%s bfp=%s "
+            "hp=%s gbs(conc)=%s isl=%s osl=%s%s -> using native ceiling",
             soc, prec, runtime.tp, conc, runtime.isl, runtime.osl,
             " (config spills/infeasible at this batch)" if spills else "",
         )
