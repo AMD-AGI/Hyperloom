@@ -62,8 +62,6 @@ from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
-    kernel_shape_tool_dir,
-    resolve_sglang_shape_mode,
 )
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
@@ -1307,7 +1305,12 @@ def materialize_config_with_envs(
         tracelens_patch_ok = False
         # SGLang >= 0.5.18 uses the no-patch kernel_shape_tool (PYTHONPATH +
         # sitecustomize + TRACELENS_SHAPE_DISCOVERY) instead of git-apply; older
-        # versions keep the patch mechanism.
+        # versions keep the patch mechanism. Imported function-locally (not at
+        # module top) so these symbols stay out of the module-level import cycle
+        # ``_workload_envs`` -> executors package __init__ -> baseline ->
+        # ``_workload_envs`` (matches ``_multi_node_server_lifecycle``).
+        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
+
         is_sglang = not is_atom and "vllm" not in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
