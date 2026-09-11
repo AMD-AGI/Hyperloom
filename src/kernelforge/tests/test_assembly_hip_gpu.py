@@ -23,6 +23,7 @@ pytest.importorskip("triton")
 from kernelforge.assembly.port import prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.mcp_server.tools.bench import bench_wallclock
 from kernelforge.orchestrator import agent
 
 
@@ -86,3 +87,14 @@ def test_attnres_port_graph_rebinding_wrong_result_and_clean_export(tmp_path, mo
     assert (replay / "kernel.s").read_text() == original
     assert not (replay / "forge_experiments").exists()
     assert asyncio.run(run_validation_pipeline(str(replay / "driver.py"))).all_passed
+    bench = asyncio.run(
+        bench_wallclock(
+            str(replay / "driver.py"),
+            driver_args=["--bench-case", "random"],
+            warmup_iters=2,
+            bench_iters=10,
+            repeat=2,
+        )
+    )
+    assert bench["success"], bench
+    assert set(bench["case_times"]) == {"random"}
