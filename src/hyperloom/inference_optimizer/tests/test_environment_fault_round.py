@@ -31,7 +31,7 @@ def _lane(session: Path, verdict, *, observation_path: str = ""):
     state.set_stop_reason = lambda value, **_kw: setattr(state, "stop_reason", str(value or ""))
     shim = types.SimpleNamespace(shared_state=state, session_dir=str(session))
     shim._environment_verdict = lambda: verdict
-    shim._environment_fault_is_terminal = types.MethodType(EnablementLane._environment_fault_is_terminal, shim)
+    shim._check_environment_terminal = types.MethodType(EnablementLane._check_environment_terminal, shim)
     return shim
 
 
@@ -41,28 +41,28 @@ def test_a_host_fault_stops_the_run_before_a_round_is_opened(tmp_path):
         tmp_path,
         ep.EnvVerdict(status=ep.FAULT, fault=ep.CHECKPOINT_UNRESOLVED, detail="/weights/absent does not exist"),
     )
-    assert lane._environment_fault_is_terminal() is True
+    assert lane._check_environment_terminal() is True
     assert lane.shared_state.stop_reason == ENV_FAULT
 
 
 def test_a_healthy_host_opens_the_round_as_before(tmp_path):
     """Nothing about a host that can serve stops the lane."""
     lane = _lane(tmp_path, ep.EnvVerdict(status=ep.OK))
-    assert lane._environment_fault_is_terminal() is False
+    assert lane._check_environment_terminal() is False
     assert lane.shared_state.stop_reason == ""
 
 
 def test_a_check_that_could_not_be_made_never_stops_the_run(tmp_path):
     """An unavailable verdict is not evidence of a healthy host, nor of a broken one."""
     lane = _lane(tmp_path, ep.EnvVerdict(status=ep.UNAVAILABLE, fault=ep.INTERPRETER_UNPROVEN))
-    assert lane._environment_fault_is_terminal() is False
+    assert lane._check_environment_terminal() is False
     assert lane.shared_state.stop_reason == ""
 
 
 def test_a_preflight_that_raises_does_not_end_the_run(tmp_path):
     """A broken check must not be able to terminate a session on its own."""
     lane = _lane(tmp_path, None)
-    assert lane._environment_fault_is_terminal() is False
+    assert lane._check_environment_terminal() is False
     assert lane.shared_state.stop_reason == ""
 
 
@@ -73,7 +73,7 @@ def test_a_preflight_that_raises_does_not_end_the_run(tmp_path):
 def test_a_condition_a_later_round_could_change_never_ends_the_run(tmp_path, fault):
     """An extension still compiling, or a port an orphan still holds, is not a fault."""
     lane = _lane(tmp_path, ep.EnvVerdict(status=ep.UNAVAILABLE, fault=fault, detail="undefined symbol"))
-    assert lane._environment_fault_is_terminal() is False
+    assert lane._check_environment_terminal() is False
     assert lane.shared_state.stop_reason == ""
 
 
@@ -93,7 +93,7 @@ def test_a_fault_a_round_already_recorded_is_read_back_rather_than_re_derived(tm
 
     lane = _lane(tmp_path, None, observation_path=path)
     lane._environment_verdict = _never_called
-    assert lane._environment_fault_is_terminal() is True
+    assert lane._check_environment_terminal() is True
     assert lane.shared_state.stop_reason == ENV_FAULT
 
 
