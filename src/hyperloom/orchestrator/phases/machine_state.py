@@ -692,7 +692,7 @@ def redistribute_budget_pct(
     """Move disabled work-phase shares to enabled work phases.
 
     FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
-    1.0; PRELUDE and CLOSE never absorb.
+    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb.
     """
     out = dict(base)
     disabled: list[str] = []
@@ -1910,7 +1910,7 @@ def exit_normal_optimize(
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE: OPTIMIZE, else KERNEL, else SWEEP (``--no-framework-agent`` / ``--no-kernel`` collapse the chain)."""
+    """First active work phase after PRELUDE or ENABLEMENT exits (``--no-framework-agent`` / ``--no-kernel`` collapse the chain)."""
     if optimize_enabled:
         return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:
