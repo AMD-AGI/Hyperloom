@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""InferSim benchmark runner (CLI).
+"""InferaSim benchmark runner (CLI).
 
 A simulate-only, GPU-free stand-in for ``python -m Magpie -v benchmark ...
 --run-mode local``. It accepts the same CLI flags and writes the same
 Magpie-compatible workspace + ``benchmark_report.json`` (via
-:mod:`bypass_report`), but the numbers come from Infera's ``infersim`` serving
+:mod:`bypass_report`), but the numbers come from Infera's ``inferasim`` serving
 projection instead of a real server + client.
 
-Selected with ``HYPERLOOM_BENCHMARK_BACKEND=infersim``. Because it emits the
+Selected with ``HYPERLOOM_BENCHMARK_BACKEND=inferasim``. Because it emits the
 same report contract as Magpie/bypass, every executor, collector, and the
 optimizer's gain math consume simulated runs unchanged -- so an entire
 optimization session can run without a GPU, and real GPU time is spent only on
@@ -31,13 +31,13 @@ from typing import Any
 import yaml
 
 from . import bypass_report
-from . import infersim_bridge
+from . import inferasim_bridge
 
 _FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
 def run_benchmark(config_path: Path, output_dir: Path) -> int:
-    """Project a serving config with InferSim and write a Magpie-style report.
+    """Project a serving config with InferaSim and write a Magpie-style report.
 
     Args:
         config_path: Materialized benchmark config YAML (the Magpie contract).
@@ -57,16 +57,16 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
     model = str(bench.get("model") or "")
 
     try:
-        spec = infersim_bridge.spec_from_benchmark(bench)
-        metrics = infersim_bridge.project(spec)
-    except infersim_bridge.InfersimBridgeError as exc:
+        spec = inferasim_bridge.spec_from_benchmark(bench)
+        metrics = inferasim_bridge.project(spec)
+    except inferasim_bridge.InferasimBridgeError as exc:
         return _emit_failure(output_dir, framework, model, str(exc), start)
     except Exception as exc:  # noqa: BLE001 - never crash the optimizer loop
-        return _emit_failure(output_dir, framework, model, f"unexpected InferSim error: {exc}", start)
+        return _emit_failure(output_dir, framework, model, f"unexpected InferaSim error: {exc}", start)
 
     workspace = bypass_report.create_workspace(output_dir, framework)
     _snapshot_config(workspace, cfg)
-    raw = infersim_bridge.raw_result_from_metrics(spec, metrics)
+    raw = inferasim_bridge.raw_result_from_metrics(spec, metrics)
     # Persist the raw InferenceX-style result so the workspace matches a real
     # bypass/Magpie run (collectors that rescan raw json stay consistent).
     try:
@@ -83,7 +83,7 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
         execution_time=time.time() - start,
         errors=[],
         analysis={
-            "backend": "infersim",
+            "backend": "inferasim",
             "source": "calibrated" if metrics.calibrated else "simulation",
             "extrapolation": list(metrics.extras.get("extrapolation") or []),
             "decode_tps_per_gpu": metrics.decode_tps_per_gpu,
@@ -128,10 +128,10 @@ def _emit_failure(output_dir: Path, framework: str, model: str, error: str, star
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the InferSim runner parser (Magpie-compatible flags)."""
-    parser = argparse.ArgumentParser(prog="hyperloom-infersim-benchmark")
+    """Build the InferaSim runner parser (Magpie-compatible flags)."""
+    parser = argparse.ArgumentParser(prog="hyperloom-inferasim-benchmark")
     sub = parser.add_subparsers(dest="mode", required=True)
-    bench = sub.add_parser("benchmark", help="Project a serving config with InferSim")
+    bench = sub.add_parser("benchmark", help="Project a serving config with InferaSim")
     bench.add_argument("--benchmark-config", required=True)
     bench.add_argument("--output-dir", required=True)
     bench.add_argument("--run-mode", default="local")
@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unsupported mode: {args.mode}", file=sys.stderr)
         return 2
     if args.run_mode != "local":
-        print(f"infersim runner supports --run-mode local only, got {args.run_mode}", file=sys.stderr)
+        print(f"inferasim runner supports --run-mode local only, got {args.run_mode}", file=sys.stderr)
         return 2
     if args.phase == "server":
         # No persistent server exists for a projection; a lone server phase is a
