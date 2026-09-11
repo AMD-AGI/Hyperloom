@@ -159,6 +159,11 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HTTP_PROXY",
         "LANG",
         "LC_ALL",
+        # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor
+        # REQUESTS_CA_BUNDLE; behind a TLS-intercepting gateway these are the only
+        # trust knobs that reach them.
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
         "NO_PROXY",
         "OPENAI_BASE_URL",
         "PATH",
