@@ -1256,11 +1256,16 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
 
 def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
     """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
     res = _drive_installer(
         tmp_path,
         importable={"atom"},
-        dotenv=tmp_path / ".env",
-        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+        dotenv=dotenv,
+        body=(
+            "running_in_container() { return 1; }\n"
+            "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
+        ),
     )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -1977,6 +1982,7 @@ def _drive_hotfix_gate(
     run_mode: str,
     importable: set[str],
     in_container: bool = False,
+    sglang_rocm_extra: str = "rocm720",
 ):
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"HYPERLOOM_RUN_MODE={run_mode}\n", encoding="utf-8")
@@ -1987,6 +1993,7 @@ def _drive_hotfix_gate(
         body=(
             # Pinned so the result does not depend on whether the test host itself is a container.
             f"running_in_container() {{ return {0 if in_container else 1}; }}\n"
+            f'export SGLANG_ROCM_EXTRA="{sglang_rocm_extra}"\n'
             "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
         ),
     )
@@ -2001,7 +2008,47 @@ def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
 
 
 def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
-    res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"sglang"})
+    res = _drive_hotfix_gate(
+        tmp_path,
+        run_mode="docker",
+        importable={"sglang"},
+        sglang_rocm_extra="rocm720",
+    )
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+
+
+def test_docker_run_mode_skips_the_hotfix_for_an_sglang_rocm724_image(tmp_path: Path):
+    res = _drive_hotfix_gate(
+        tmp_path,
+        run_mode="docker",
+        importable={"sglang"},
+        sglang_rocm_extra="rocm724",
+    )
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "sglang on ROCm 7.2.4+" in res.stderr
+
+
+def test_baremetal_run_mode_skips_the_hotfix_for_sglang_rocm724(tmp_path: Path):
+    res = _drive_hotfix_gate(
+        tmp_path,
+        run_mode="baremetal",
+        importable={"sglang"},
+        sglang_rocm_extra="rocm724",
+    )
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "sglang on ROCm 7.2.4+" in res.stderr
+
+
+def test_baremetal_run_mode_applies_the_hotfix_for_sglang_rocm720(tmp_path: Path):
+    res = _drive_hotfix_gate(
+        tmp_path,
+        run_mode="baremetal",
+        importable={"sglang"},
+        sglang_rocm_extra="rocm720",
+    )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
 

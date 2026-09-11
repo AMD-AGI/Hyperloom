@@ -47,7 +47,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
-| Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
+| Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
 | ROCm Version        | 7.2.x                                                  |
 +---------------------+--------------------------------------------------------+
@@ -170,6 +170,9 @@ Hyperloom does not install ROCm or torch itself.
    * - Item
      - Recommended
      - Notes
+   * - Operating System
+     - Ubuntu 24.04
+     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead. SGLang on ROCm 7.2.4 (``rocm724``) does not need the ROCm 7.2.0 profiler hotfix; SGLang on ROCm 7.2.0 (``rocm720``) still does.
    * - ROCm
      - 7.2.x
      - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
@@ -184,7 +187,7 @@ Hyperloom does not install ROCm or torch itself.
      - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.4 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm724``), so the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
    * - vLLM
      - v0.28.0 (rocm723), isolated venv
-     - Installs ``vllm==0.28.0+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - Installs ``vllm==0.28.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework, and each one matches its
 container image. The vLLM stack installs the ``rocm723`` variant (ROCm

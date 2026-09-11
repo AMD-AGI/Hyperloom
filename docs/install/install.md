@@ -103,6 +103,9 @@ directly.
 
 Requirements:
 
+- Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
+  requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
+  ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
 - ROCm runtime and ROCm torch are already installed.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup might install one.

@@ -943,6 +943,26 @@ install_requested_framework() {
   esac
 }
 
+# ROCm 7.2.4+ / rocm724 SGLang stacks ship fixed profiler libs; only 7.2.0/rocm720
+# SGLang hosts still need the overlay. vLLM bare-metal hosts still need it too.
+sglang_stack_needs_rocm_hotfix() {
+  case "${SGLANG_ROCM_EXTRA:-}" in
+    rocm724) return 1 ;;
+    rocm720|rocm700) return 0 ;;
+  esac
+  local rocm_ver=""
+  [ -r /opt/rocm/.info/version ] && rocm_ver="$(cat /opt/rocm/.info/version 2>/dev/null)"
+  case "$rocm_ver" in
+    7.2.[4-9]*|7.[3-9]*|8.*|9.*|10.*) return 1 ;;
+    7.2.0*|7.2.1*|7.2.2*|7.2.3*) return 0 ;;
+  esac
+  case "$1" in
+    7.2.4*|7.2.5*|7.2.6*|7.2.7*|7.2.8*|7.2.9*) return 1 ;;
+    7.2.0*|7.2.1*|7.2.2*|7.2.3*) return 0 ;;
+  esac
+  return 0
+}
+
 rocm_profiler_hotfix_compatible() {
   local py hip
   py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
@@ -971,18 +991,38 @@ PY
   [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
 
-  # Container images: sglang needs the overlay; vLLM ships its own workaround.
+  # Container images: vLLM ships its own workaround; SGLang on rocm724 does not
+  # need the overlay; SGLang on rocm720 still does.
   local run_mode
   run_mode="$(read_dotenv_var HYPERLOOM_RUN_MODE | tr -d '[:space:]')"
   if running_in_container || [ "$run_mode" = "docker" ]; then
     case " ${found} " in
-      *" sglang "*) log "container run with sglang; ROCm profiler hotfix is eligible" ;;
+      *" sglang "*)
+        if sglang_stack_needs_rocm_hotfix "$hip"; then
+          log "container run with sglang on ROCm 7.2.0/rocm720; ROCm profiler hotfix is eligible"
+        else
+          warn "container run with sglang on ROCm 7.2.4+; skipping ROCm profiler hotfix"
+          return 1
+        fi
+        ;;
       *) warn "container run without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
     esac
   else
     case " ${found} " in
-      *" sglang "*) ;;
-      *) warn "bare-metal run without sglang (found: ${found}); applying the hotfix anyway, unlike the container path" ;;
+      *" vllm "*)
+        warn "bare-metal run with vllm (found: ${found}); applying the ROCm profiler hotfix"
+        ;;
+      *" sglang "*)
+        if sglang_stack_needs_rocm_hotfix "$hip"; then
+          log "bare-metal run with sglang on ROCm 7.2.0/rocm720; ROCm profiler hotfix is eligible"
+        else
+          warn "bare-metal run with sglang on ROCm 7.2.4+; skipping ROCm profiler hotfix"
+          return 1
+        fi
+        ;;
+      *)
+        log "bare-metal run without sglang/vllm (found: ${found}); applying the ROCm profiler hotfix"
+        ;;
     esac
   fi
 }
