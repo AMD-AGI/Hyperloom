@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `=== Warm start ===` block told the model it was starting cold on top of
+  a matched recipe.** `to_warm_start_summary` read three fields no writer
+  produces — `recipe.get("raw")`, and `raw`/`symptom` on each pitfall — so an
+  exact hit carrying a full config printed
+  `(no recipe text — first session for this workload/hw)`, and a `pitfalls (N):`
+  header could appear with nothing under it. That is not a silent omission; it
+  asserts the opposite of what the KB found, on the line the model reads to
+  decide whether it has prior work to build on.
+
+  The block now renders `warm_start_context`, the model-facing view
+  `recipe_kb_t0` already builds and persists on every anchor, instead of
+  re-deriving a second one from the raw row. That view answers what this block
+  exists to answer and the row cannot: `status` distinguishes a hit from a
+  seed-only first session, `match.tier`/`confidence` qualify the match, and
+  `recommended_replay` carries the config already split into server args and
+  envs with its donor attached. A borrowed config is now labelled with the model
+  it came from, so another workload's throughput can no longer read as this
+  session's own history, and the pitfall header counts the rows it prints.<br/>
+  **Operator note**: affects the conversation warm-start block and the
+  `warm_start` MCP context tool, in both local and remote Recipe modes.
+
 ### Removed
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the

@@ -39,6 +39,14 @@ _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _as_float(value: Any) -> float:
+    """Coerce a warm-start context number, 0.0 when absent or unparseable."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Forwarding shim — implementation in :mod:`.policy`."""
@@ -291,42 +299,97 @@ class _RenderMixin:
         return "\n".join(lines)
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls."""
-        recipe = self.warm_start_recipe or {}
-        pitfalls = self.warm_start_pitfalls or []
-        if not recipe and not pitfalls:
+        """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
+
+        ``recipe_kb_t0._build_warm_start_context`` already computes the
+        model-facing view on every anchor and persists it, so this renders that
+        rather than re-deriving a second one off the raw row. The three states
+        come from its ``status``; ``match`` supplies tier and confidence, and
+        ``recommended_replay`` the config — already split into args and envs, and
+        attributed to its donor, which the row itself cannot tell you.
+
+        Empty when T0 never ran (``--degraded-kb``, or a resume from before the
+        context existed).
+        """
+        ctx = self.warm_start_context or {}
+        if not isinstance(ctx, dict) or not ctx:
             return ""
-        out: list[str] = []
-        workload = str(recipe.get("workload") or "") if isinstance(recipe, dict) else ""
-        hw = str(recipe.get("hw") or "") if isinstance(recipe, dict) else ""
-        if workload or hw:
-            out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
-        raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
-        # Trim recipe raw text to at most 5 lines, 240 chars each.
-        if raw.strip():
-            kept = 0
-            for line in raw.splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                out.append(f"  · {stripped[:240]}")
-                kept += 1
-                if kept >= 5:
-                    break
-            if kept == 0:
-                out.append("  · (recipe present but text was empty)")
-        else:
-            out.append("  · (no recipe text — first session for this workload/hw)")
-        if pitfalls:
-            out.append(f"pitfalls ({len(pitfalls)}):")
-            for entry in pitfalls[:5]:
-                if not isinstance(entry, dict):
-                    continue
-                snippet = str(entry.get("raw") or entry.get("symptom") or "")
-                if not snippet.strip():
-                    continue
-                first_line = snippet.splitlines()[0].strip()
-                out.append(f"  · {first_line[:240]}")
+        status = str(ctx.get("status") or "").strip()
+        if status == "miss":
+            return "recipe: none — first session for this workload/hw"
+        if status == "seed_only":
+            # T0 seeds a row for every session, so this — not ``miss`` — is what a
+            # genuine first session looks like: a row exists, nothing measured it.
+            return "recipe: seed only — first session for this workload/hw"
+
+        match = ctx.get("match")
+        match = match if isinstance(match, dict) else {}
+        head = [f"recipe: {status or 'hit'}"]
+        tier = str(match.get("tier") or "").strip()
+        if tier:
+            head.append(f"tier={tier}")
+        confidence = _as_float(match.get("confidence"))
+        if confidence > 0:
+            head.append(f"confidence={confidence:.2f}")
+        out: list[str] = [" ".join(head)]
+
+        replay = ctx.get("recommended_replay")
+        replay = replay if isinstance(replay, dict) else {}
+        best_tput = _as_float(replay.get("best_throughput"))
+        if best_tput > 0:
+            out.append(f"  · best_throughput={best_tput:.1f}")
+        args = str(replay.get("extra_server_args") or "").strip()
+        if args:
+            out.append(f"  · extra_server_args={args[:240]}")
+        envs = replay.get("extra_envs")
+        if isinstance(envs, dict) and envs:
+            rendered = " ".join(f"{k}={v}" for k, v in envs.items())
+            out.append(f"  · extra_envs={rendered[:240]}")
+        gain = _as_float(replay.get("expected_gain_pct"))
+        if gain > 0:
+            out.append(f"  · expected_gain={gain:.2f}%")
+        # A borrowed config is another workload's measurement; say so, or the
+        # numbers above read as this session's own history.
+        config_tier = str(replay.get("config_tier") or "").strip()
+        if replay and config_tier and config_tier != "self":
+            donor = str(replay.get("donor_model") or replay.get("donor_canonical_id") or "?")
+            donor_conf = _as_float(replay.get("config_confidence"))
+            suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
+            out.append(f"  · borrowed from {donor} (config_tier={config_tier}{suffix})")
+        if not replay:
+            # Remote Recipe hits replay through the section SDKs, so the context
+            # carries no config; the priors below are still real.
+            out.append("  · (no replayable config on this match)")
+
+        counts = [
+            (label, len(ctx.get(key) or []))
+            for label, key in (("proven", "proven_prior"), ("avoid", "do_not_repeat"), ("lessons", "lessons"))
+        ]
+        live = [f"{label}={n}" for label, n in counts if n]
+        if live:
+            out.append(f"  · priors: {' '.join(live)}")
+
+        # Count the rows that render, not the rows that exist: a header claiming
+        # "pitfalls (3)" above nothing is the same class of lie this block had.
+        rendered: list[str] = []
+        elided = 0
+        for entry in ctx.get("pitfalls") or []:
+            if not isinstance(entry, dict):
+                continue
+            description = str(entry.get("description") or "").strip()
+            if not description:
+                continue
+            if len(rendered) >= 5:
+                elided += 1
+                continue
+            severity = str(entry.get("severity") or "").strip()
+            suffix = f" (severity={severity})" if severity else ""
+            rendered.append(f"  · {description.splitlines()[0].strip()[:240]}{suffix}")
+        if rendered:
+            out.append(f"pitfalls ({len(rendered)}):")
+            out.extend(rendered)
+            if elided:
+                out.append(f"  · (+{elided} more elided; see state.json `warm_start_context`)")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
             out.append(f"  · (truncated to {max_lines} lines)")
