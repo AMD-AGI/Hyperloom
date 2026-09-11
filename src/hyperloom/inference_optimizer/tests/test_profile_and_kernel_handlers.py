@@ -2260,12 +2260,18 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
-def _capture_trace_dir(tmp_path, *, cpu_ops: int, with_input_dims: int) -> object:
+def _capture_trace_dir(
+    tmp_path,
+    *,
+    cpu_ops: int,
+    with_input_dims: int,
+    dirname: str = "capture_traces",
+) -> object:
     """Write a capture file carrying a chosen number of cpu_op events."""
     import gzip
     import json as _json
 
-    capture = tmp_path / "capture_traces"
+    capture = tmp_path / dirname
     capture.mkdir()
     events = [{"name": "cpu_op", "cat": "cpu_op"} for _ in range(cpu_ops)]
     for index in range(with_input_dims):
@@ -2314,6 +2320,24 @@ def test_a_healthy_input_dims_fraction_passes_the_check(tmp_path):
     health = pf._validate_trace_structure(tmp_path, "sglang")
 
     assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
+
+
+def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    capture = _capture_trace_dir(
+        tmp_path,
+        cpu_ops=10,
+        with_input_dims=10,
+        dirname="graph_capture_profile",
+    )
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    row = _check_row(health, pf.CHECK_CAPTURE_TRACES_PRESENT)
+    assert row["status"] == "passed"
+    assert row["detail"]["capture_dir"] == str(capture)
+    assert health["capture_traces_present"] is True
+    assert not any("subdirectory missing" in issue for issue in health["issues"])
 
 
 # kernel_request_handlers — direct unit

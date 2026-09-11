@@ -2199,6 +2199,23 @@ def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
 
 
+def test_discover_capture_folder_accepts_capture_directory_as_input(tmp_path):
+    capture_dir = tmp_path / "graph_capture_profile"
+    capture_dir.mkdir()
+    capture = _rank_trace(capture_dir / "cuda_graph_capture-ModelRunner-TP-0.json.gz", kernels=4)
+
+    assert tlr.discover_capture_folder(capture_dir, [capture]) == capture_dir
+
+
+def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    for name in ("graph_capture", "graph_capture_profile", "capture_traces"):
+        (trace_dir / name).mkdir(parents=True)
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+
+    assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "capture_traces"
+
+
 def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)
