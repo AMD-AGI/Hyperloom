@@ -33,8 +33,6 @@ import yaml
 from . import bypass_report
 from . import inferasim_bridge
 
-_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 
 def run_benchmark(config_path: Path, output_dir: Path) -> int:
     """Project a serving config with InferaSim and write a Magpie-style report.
@@ -72,6 +70,8 @@ def run_benchmark(config_path: Path, output_dir: Path) -> int:
     try:
         (workspace / "inferencex_result.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
     except OSError:
+        # Best-effort artifact: keep the run successful even if this auxiliary
+        # file cannot be written; benchmark_report.json remains the source of truth.
         pass
 
     report = bypass_report.build_report(
@@ -107,6 +107,7 @@ def _snapshot_config(workspace: Path, cfg: dict[str, Any]) -> None:
     try:
         (workspace / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     except OSError:
+        # Best-effort snapshot: reporting must continue even if config persistence fails.
         pass
 
 

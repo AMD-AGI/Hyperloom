@@ -11,6 +11,7 @@ tests pin the two things that make it safe: it must be short enough to matter,
 and it must fall back to the long warmup rather than to a broken one whenever
 the concurrency cannot be established.
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -31,41 +32,50 @@ def _cfg(tmp_path, body: str):
 
 
 def test_warmup_is_one_wave_of_the_concurrency(tmp_path):
-    cfg = _cfg(tmp_path, """
+    cfg = _cfg(
+        tmp_path,
+        """
         benchmark:
           envs:
             TP: 8
             CONC: 64
             ISL: 1024
             OSL: 1024
-    """)
+    """,
+    )
     assert _warmup_num_prompts(cfg) == 64 * WARMUP_WAVES
 
 
 def test_warmup_is_shorter_than_the_measured_round(tmp_path):
     """A measured round at ISL+OSL=2048 is CONC*5; the warmup must be well under."""
-    cfg = _cfg(tmp_path, """
+    cfg = _cfg(
+        tmp_path,
+        """
         benchmark:
           envs:
             CONC: 64
             ISL: 1024
             OSL: 1024
-    """)
+    """,
+    )
     measured_num_prompts = 64 * 5
     assert _warmup_num_prompts(cfg) < measured_num_prompts
 
 
-@pytest.mark.parametrize("body", [
-    # No concurrency key at all.
-    "benchmark:\n  envs:\n    TP: 8\n",
-    # Concurrency present but unusable.
-    "benchmark:\n  envs:\n    CONC: 0\n",
-    "benchmark:\n  envs:\n    CONC: 'not-a-number'\n",
-    # No benchmark section.
-    "something_else: 1\n",
-    # Empty file.
-    "",
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        # No concurrency key at all.
+        "benchmark:\n  envs:\n    TP: 8\n",
+        # Concurrency present but unusable.
+        "benchmark:\n  envs:\n    CONC: 0\n",
+        "benchmark:\n  envs:\n    CONC: 'not-a-number'\n",
+        # No benchmark section.
+        "something_else: 1\n",
+        # Empty file.
+        "",
+    ],
+)
 def test_unreadable_concurrency_keeps_the_long_warmup(tmp_path, body):
     """Falling back must mean the warmup we already run, never a shorter one."""
     assert _warmup_num_prompts(_cfg(tmp_path, body)) is None

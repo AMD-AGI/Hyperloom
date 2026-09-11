@@ -92,11 +92,7 @@ _MODEL_HEURISTICS: tuple[tuple[str, str], ...] = (
 
 # Bundled env-driven workload template used when only a preset name is known.
 _TEMPLATE_WORKLOAD = (
-    Path(__file__).resolve().parents[3]
-    / "inference_optimizer"
-    / "assets"
-    / "inferasim"
-    / "inferasim_workload.yaml"
+    Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "inferasim" / "inferasim_workload.yaml"
 )
 
 
@@ -134,8 +130,7 @@ VALIDATED_CONTEXT_TOKENS = 65536
 SINGLE_NODE_GPUS = 8
 
 
-def extrapolation_notes(spec: "ServingSpec", replica_gpus: int,
-                        calibrated: bool) -> list[str]:
+def extrapolation_notes(spec: "ServingSpec", replica_gpus: int, calibrated: bool) -> list[str]:
     """Where this projection is being asked to work outside its evidence.
 
     Returned on every projection so a search cannot quietly trust a number that
@@ -158,8 +153,7 @@ def extrapolation_notes(spec: "ServingSpec", replica_gpus: int,
         )
     if not calibrated:
         notes.append(
-            "no warmup anchor matched this model, so this is pure simulation "
-            "with no measurement pinning its scale"
+            "no warmup anchor matched this model, so this is pure simulation with no measurement pinning its scale"
         )
     return notes
 
@@ -342,12 +336,16 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
 
     tp = _as_int(_first_env_or(envs, "TP", 1), 1)
     # EP/PP: explicit bridge env, else parse from server args, else 1.
-    ep = _as_int(os.environ.get(ENV_EP) or "", 0) or _parse_server_arg_int(
-        extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size"
-    ) or 1
-    pp = _as_int(os.environ.get(ENV_PP) or "", 0) or _parse_server_arg_int(
-        extra_args, "--pp-size", "--pipeline-parallel-size"
-    ) or 1
+    ep = (
+        _as_int(os.environ.get(ENV_EP) or "", 0)
+        or _parse_server_arg_int(extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size")
+        or 1
+    )
+    pp = (
+        _as_int(os.environ.get(ENV_PP) or "", 0)
+        or _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size")
+        or 1
+    )
 
     weight_dtype = _precision_to_weight_dtype(str(bench.get("precision") or "bf16"))
     # KV dtype: explicit bridge env wins, else the server arg the variant sets,
@@ -355,11 +353,7 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
     # dtype by passing this flag and nothing else -- and the projection prices KV
     # dtype perfectly well, so ignoring the flag made a lever the model *can*
     # see look like one it cannot, and projected an fp8 candidate as bf16.
-    kv_dtype = str(
-        os.environ.get(ENV_KV_DTYPE)
-        or _parse_kv_cache_dtype(extra_args)
-        or "bf16"
-    ).lower()
+    kv_dtype = str(os.environ.get(ENV_KV_DTYPE) or _parse_kv_cache_dtype(extra_args) or "bf16").lower()
 
     conc = max(1, _as_int(_first_env_or(envs, "CONC", 64), 64))
     # A running batch cannot exceed the scheduler's cap on concurrent sequences,
@@ -492,8 +486,7 @@ def select_anchor(spec: ServingSpec) -> AnchorChoice | None:
     # on that would reject R1's own warmup.
     names = [n for n in (spec.model_path, resolve_preset(spec.model_path)) if n]
     entries = [
-        e for e in store.entries()
-        if not e.get("model") or any(regime.models_match(n, e["model"]) for n in names)
+        e for e in store.entries() if not e.get("model") or any(regime.models_match(n, e["model"]) for n in names)
     ]
     if not entries:
         return None
@@ -584,8 +577,6 @@ def _anchor_is_served(path: str) -> bool:
     better than not calibrating at all, where a served anchor scored 2.2%.
     """
     try:
-        import json
-
         with open(path) as fh:
             meta = (json.load(fh) or {}).get("meta") or {}
     except (OSError, ValueError):
@@ -596,8 +587,6 @@ def _anchor_is_served(path: str) -> bool:
 def _anchor_is_real_weights(path: str) -> bool:
     """True when an anchor artifact was measured with real checkpoint weights."""
     try:
-        import json
-
         with open(path) as fh:
             meta = (json.load(fh) or {}).get("meta") or {}
     except (OSError, ValueError):
@@ -671,6 +660,7 @@ def _ensure_infera_importable() -> None:
 
     try:
         import infera.projection  # noqa: F401
+
         return
     except Exception as exc:  # noqa: BLE001
         raise InferasimBridgeError(
@@ -687,17 +677,28 @@ def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = 
 
     argv: list[str] = [
         "inference",
-        "--config", workload,
-        "--inference-mode", "both",
-        "--profiling-mode", "simulate",
-        "--serving-model", serving_model,
-        "--input-len", str(spec.isl),
-        "--output-len", str(spec.osl),
-        "--inference-batch-size", str(spec.conc),
-        "--max-concurrency", str(spec.conc),
-        "--weight-dtype", spec.weight_dtype,
-        "--kv-cache-dtype", spec.kv_cache_dtype,
-        "--gpu-arch", gpu_arch,
+        "--config",
+        workload,
+        "--inference-mode",
+        "both",
+        "--profiling-mode",
+        "simulate",
+        "--serving-model",
+        serving_model,
+        "--input-len",
+        str(spec.isl),
+        "--output-len",
+        str(spec.osl),
+        "--inference-batch-size",
+        str(spec.conc),
+        "--max-concurrency",
+        str(spec.conc),
+        "--weight-dtype",
+        spec.weight_dtype,
+        "--kv-cache-dtype",
+        spec.kv_cache_dtype,
+        "--gpu-arch",
+        gpu_arch,
     ]
     if hbm_gb:
         argv += ["--hbm-capacity-gb", str(hbm_gb)]
@@ -764,9 +765,7 @@ def project(spec: ServingSpec) -> ProjMetrics:
     return _metrics_from_results(spec, perf, mem, anchor)
 
 
-def _metrics_from_results(
-    spec: ServingSpec, perf: Any, mem: Any, anchor: AnchorChoice | None = None
-) -> ProjMetrics:
+def _metrics_from_results(spec: ServingSpec, perf: Any, mem: Any, anchor: AnchorChoice | None = None) -> ProjMetrics:
     """Map InferaSim result objects onto benchmark measurement fields."""
     output_tps = float(getattr(perf, "decode_throughput_tps", 0.0) or 0.0)
     osl = max(1, spec.osl)
@@ -777,7 +776,7 @@ def _metrics_from_results(
     mem_gb = 0.0
     if mem is not None:
         total_bytes = float(getattr(mem, "total_bytes", 0) or 0)
-        mem_gb = total_bytes / (1024.0 ** 3)
+        mem_gb = total_bytes / (1024.0**3)
     extras = dict(getattr(perf, "extras", {}) or {})
     max_conc = int(extras.get("concurrency_used", 0) or extras.get("concurrency", 0) or spec.conc)
     if anchor is not None:
@@ -790,9 +789,7 @@ def _metrics_from_results(
         extras["anchor_served"] = anchor.served
 
     replica_gpus = int(getattr(perf, "replica_gpus", 0) or 0)
-    extras["extrapolation"] = extrapolation_notes(
-        spec, replica_gpus, bool(extras.get("benchmark_calibrated", 0.0))
-    )
+    extras["extrapolation"] = extrapolation_notes(spec, replica_gpus, bool(extras.get("benchmark_calibrated", 0.0)))
 
     return ProjMetrics(
         output_throughput=output_tps,
