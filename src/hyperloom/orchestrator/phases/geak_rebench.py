@@ -20,6 +20,7 @@ INCOMPARABLE_REVALIDATION = "incomparable"
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
         "kernel_event_id",
+        "final_validation",
         "revalidation_status",
         "revalidation_error",
         "revalidation_error_class",
