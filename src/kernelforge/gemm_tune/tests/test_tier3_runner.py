@@ -449,7 +449,7 @@ class TestShapesComeFromTheDemandDocument:
 
         # ``_attempt_tier3`` imports it inside the function, so the module
         # attribute is the patch point.
-        import kernelforge.gemm_tune.tier3 as tier3
+        from kernelforge.gemm_tune import tier3
 
         original = tier3.attempt_generated_tuner
         tier3.attempt_generated_tuner = fake_attempt

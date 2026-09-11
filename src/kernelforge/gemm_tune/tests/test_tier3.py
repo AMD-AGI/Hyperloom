@@ -646,7 +646,7 @@ class TestTheVocabularyIsOneObject:
         import sys
         import types
 
-        import kernelforge.gemm_tune.tier3.dispatch as d
+        from kernelforge.gemm_tune.tier3 import dispatch as d
 
         # Enough of aiter to be imported; the branches are reached and then
         # bail on their own missing config, which is the point.

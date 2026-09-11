@@ -179,19 +179,28 @@ def _attempt_tier3(
                     return demand_shapes(entry)
             return []
 
-        outcome = attempt_generated_tuner(
-            gaps,
-            shapes_for,
-            output_dir,
-            model_name=model_name,
-            gpu=gpu_type,
-            framework=framework,
-            decision=decision,
-            make_baseline=adapter.make_baseline if adapter else None,
-            make_dispatch=adapter.make_dispatch if adapter else None,
-            make_correctness=adapter.make_correctness if adapter else None,
-            sync=adapter.sync() if adapter else None,
-        )
+        try:
+            outcome = attempt_generated_tuner(
+                gaps,
+                shapes_for,
+                output_dir,
+                model_name=model_name,
+                gpu=gpu_type,
+                framework=framework,
+                decision=decision,
+                make_baseline=adapter.make_baseline if adapter else None,
+                make_dispatch=adapter.make_dispatch if adapter else None,
+                make_correctness=adapter.make_correctness if adapter else None,
+                sync=adapter.sync() if adapter else None,
+            )
+        finally:
+            # An adapter steers the library under test through process-wide state, so the
+            # attempt has to be closed before anything else in this process runs -- the
+            # report and the e2e validation that follow must not be served by whatever
+            # candidate happened to be dispatched last.
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
         log.info("tier3: %s -- %s", outcome.stage, outcome.reason)
         (output_dir / "tier3_outcome.json").write_text(
             json.dumps(outcome.to_dict(), indent=2),

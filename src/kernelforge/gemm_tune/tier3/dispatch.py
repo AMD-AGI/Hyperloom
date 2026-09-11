@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -294,6 +295,41 @@ class _FusedMoeAdapter:
         fm.cfg_2stages = None
         fm.get_2stage_cfgs.cache_clear()
 
+    def close(self) -> None:
+        """Put ``AITER_CONFIG_FMOE`` back, and take the scratch tables with it.
+
+        The adapter steers aiter by writing a one-row CSV and pointing the
+        process-wide variable at it, so the last candidate it tried is still
+        selected when it stops -- inside the same process that then writes the
+        report and may run e2e validation. Leaving it there would have the run
+        served by a config chosen by a tuner whose verdict was possibly
+        "rejected", attributed to whatever the report says was deployed.
+
+        Restoring the variable is not enough on its own: aiter memoizes the
+        parsed table three ways, so the caches have to be dropped as well or the
+        candidate stays live behind a variable that no longer names it.
+        """
+        if self._restore is None:
+            os.environ.pop("AITER_CONFIG_FMOE", None)
+        else:
+            os.environ["AITER_CONFIG_FMOE"] = self._restore
+        try:
+            from aiter.jit.core import AITER_CONFIGS
+
+            fm = self._fused_moe()
+            AITER_CONFIGS.get_config_file.cache_clear()
+            fm.cfg_2stages = None
+            fm.get_2stage_cfgs.cache_clear()
+        except Exception:  # noqa: BLE001 - off-GPU, or aiter already torn down
+            pass
+        shutil.rmtree(self._workdir, ignore_errors=True)
+
+    def __enter__(self) -> "_FusedMoeAdapter":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
     # ------------------------------------------------------------- operands --
     def _ops(self, shape: str) -> dict[str, Any] | None:
         """Build operands with aiter's tuner, or return None without its sources."""
@@ -503,8 +539,6 @@ class _FusedMoeAdapter:
 
     def _resolved_kernels(self, run: Callable[[], Any]) -> tuple[str, str] | None:
         """Read the kernel pair aiter actually chose from its own log."""
-        import re
-
         records: list[str] = []
 
         class _Catch(logging.Handler):

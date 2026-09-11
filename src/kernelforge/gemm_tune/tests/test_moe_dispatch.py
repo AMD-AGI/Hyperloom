@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -252,7 +253,7 @@ class TestReadingBackWhatAiterServed:
 
     def test_it_finds_the_kernel_pair_aiter_named(self, monkeypatch):
         adapter = dp._FusedMoeAdapter()
-        monkeypatch.setattr(adapter, "_torch", staticmethod(lambda: _FakeTorch()))
+        monkeypatch.setattr(adapter, "_torch", staticmethod(_FakeTorch))
         served = adapter._resolved_kernels(
             self._emitting(f"[fused_moe] using 2stage (kernelName1='{_KN1}', kernelName2='{_KN2}') for (...)")
         )
@@ -262,7 +263,7 @@ class TestReadingBackWhatAiterServed:
         # This is the line the baseline produces. Reading it as a match would
         # make every unreachable key look like a candidate that ran.
         adapter = dp._FusedMoeAdapter()
-        monkeypatch.setattr(adapter, "_torch", staticmethod(lambda: _FakeTorch()))
+        monkeypatch.setattr(adapter, "_torch", staticmethod(_FakeTorch))
         assert (
             adapter._resolved_kernels(
                 self._emitting("[fused_moe] no tuned FlyDSL config for (...), using heuristic FlyDSL fallback")
@@ -272,7 +273,7 @@ class TestReadingBackWhatAiterServed:
 
     def test_the_last_dispatch_wins_over_an_earlier_one(self, monkeypatch):
         adapter = dp._FusedMoeAdapter()
-        monkeypatch.setattr(adapter, "_torch", staticmethod(lambda: _FakeTorch()))
+        monkeypatch.setattr(adapter, "_torch", staticmethod(_FakeTorch))
         served = adapter._resolved_kernels(
             self._emitting(
                 "[fused_moe] using 2stage (kernelName1='stale1', kernelName2='stale2') for (...)",
@@ -283,11 +284,53 @@ class TestReadingBackWhatAiterServed:
 
     def test_it_leaves_the_aiter_logger_as_it_found_it(self, monkeypatch):
         adapter = dp._FusedMoeAdapter()
-        monkeypatch.setattr(adapter, "_torch", staticmethod(lambda: _FakeTorch()))
+        monkeypatch.setattr(adapter, "_torch", staticmethod(_FakeTorch))
         aiter_log = logging.getLogger("aiter")
         before = (aiter_log.level, list(aiter_log.handlers))
         adapter._resolved_kernels(self._emitting("nothing to see"))
         assert (aiter_log.level, list(aiter_log.handlers)) == before
+
+
+class TestTheAttemptPutsTheProcessBack:
+    """The adapter steers aiter with a process-wide variable; it has to give it back."""
+
+    @staticmethod
+    def _dirty(adapter):
+        """Leave the variable where an attempt would leave it.
+
+        ``_point_at`` also drops aiter's three dispatch caches, which needs aiter
+        importable; the part that outlives the attempt is this assignment.
+        """
+        os.environ["AITER_CONFIG_FMOE"] = str(adapter._workdir / "candidate.csv")
+
+    def test_a_variable_that_was_set_comes_back(self, monkeypatch):
+        monkeypatch.setenv("AITER_CONFIG_FMOE", "/etc/production.csv")
+        adapter = dp._FusedMoeAdapter()
+        self._dirty(adapter)
+        adapter.close()
+        assert os.environ["AITER_CONFIG_FMOE"] == "/etc/production.csv"
+
+    def test_a_variable_that_was_unset_stays_unset(self, monkeypatch):
+        monkeypatch.delenv("AITER_CONFIG_FMOE", raising=False)
+        adapter = dp._FusedMoeAdapter()
+        self._dirty(adapter)
+        adapter.close()
+        assert "AITER_CONFIG_FMOE" not in os.environ
+
+    def test_the_scratch_tables_go_with_it(self, monkeypatch):
+        monkeypatch.delenv("AITER_CONFIG_FMOE", raising=False)
+        adapter = dp._FusedMoeAdapter()
+        workdir = adapter._workdir
+        assert workdir.is_dir()
+        adapter.close()
+        assert not workdir.exists()
+
+    def test_it_works_as_a_context_manager(self, monkeypatch):
+        monkeypatch.setenv("AITER_CONFIG_FMOE", "/etc/production.csv")
+        with dp._FusedMoeAdapter() as adapter:
+            self._dirty(adapter)
+            assert os.environ["AITER_CONFIG_FMOE"] != "/etc/production.csv"
+        assert os.environ["AITER_CONFIG_FMOE"] == "/etc/production.csv"
 
 
 class TestTheErrorMeasure:

@@ -123,10 +123,8 @@ class TestWhatItUnblocks:
         (shape,) = ev.demand_shapes(entry, limit=1)
         assert shape["token"] == "16"
 
-    def test_the_router_selects_the_ck_tuner_off_the_demand(self):
-        # The demand branch adds a tuner the framework branch left out. Before
-        # this, no demand ever named fmoe_ck, so that branch could not reach it
-        # however many times the runtime had missed its table.
+    @staticmethod
+    def _select(report):
         from kernelforge.gemm_tune.model_analyzer import ModelProfile
         from kernelforge.gemm_tune.router import select_tuners
 
@@ -136,9 +134,29 @@ class TestWhatItUnblocks:
             precision="bf16",
             quant_type="none",
             gpu_type="mi355x",
-            demand_report=_log(_MISS.format(tok=16)),
+            demand_report=report,
         )
-        assert "fmoe_ck" in [s.name for s in specs if not s.skip_reason]
+        return [s.name for s in specs if not s.skip_reason]
+
+    def test_the_router_selects_the_ck_tuner_off_the_demand(self):
+        # The demand branch adds a tuner the framework branch left out. Before
+        # this, no demand ever named fmoe_ck, so that branch could not reach it
+        # however many times the runtime had missed its table.
+        from kernelforge.gemm_tune.router import DEMAND_MIN_MISSES
+
+        report = _log(*[_MISS.format(tok=16)] * DEMAND_MIN_MISSES)
+        assert "fmoe_ck" in self._select(report)
+
+    def test_a_handful_of_misses_does_not_book_a_quarter_of_an_hour(self):
+        # fmoe_ck is added at priority 10, ahead of everything else, and runs
+        # for about fifteen minutes. A run that missed the table a few times is
+        # not evidence enough to spend that, and the floor is the same one
+        # tier3's gate applies to the same demand report.
+        from kernelforge.gemm_tune.router import DEMAND_MIN_MISSES
+
+        report = _log(*[_MISS.format(tok=16)] * (DEMAND_MIN_MISSES - 1))
+        assert _fmoe(report) is not None, "the demand is still recorded"
+        assert "fmoe_ck" not in self._select(report)
 
     def test_a_dense_tuner_does_not_borrow_moe_shapes(self):
         # vllm_dense_tunableop borrows shapes from every table in
