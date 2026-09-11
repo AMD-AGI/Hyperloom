@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
-import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common import io as common_io
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import now_iso
 
@@ -22,6 +23,9 @@ from .inferencex_client import (
     find_reference_rows,
 )
 from .types import BaselinePoint, BaselineQuery, BaselineSummary, BenchmarkMode
+
+
+log = logging.getLogger(__name__)
 
 
 # --- InferenceX model name mapping -------------------------------------------
@@ -189,7 +193,7 @@ def _persist(
     *,
     session_dir: Path,
 ) -> tuple[Path, Path]:
-    """Write JSON + MD into ``<session_dir>/target_analysis/``."""
+    """Atomically commit the JSON summary and best-effort render its Markdown projection."""
     from ..session.session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
@@ -200,11 +204,11 @@ def _persist(
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = target_baseline_json(session_dir)
     md_path = target_analysis_report_md(session_dir)
-    json_path.write_text(
-        json.dumps(summary.to_dict(), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    md_path.write_text(_format_report_md(summary), encoding="utf-8")
+    common_io.atomic_write_json(json_path, summary.to_dict())
+    try:
+        md_path.write_text(_format_report_md(summary), encoding="utf-8")
+    except OSError:
+        log.warning("target_analysis: could not render %s", md_path, exc_info=True)
     return json_path, md_path
 
 
@@ -324,6 +328,19 @@ def analyze(
     )
     now = now_iso(timespec="seconds", z_suffix=True)
     source = base_url()
+    _persist(
+        BaselineSummary(
+            query=query,
+            fetched_at=now,
+            row_count=0,
+            best=None,
+            status="in_progress",
+            reason="analysis_in_progress",
+            source=source,
+        ),
+        session_dir=session_dir,
+    )
+    _clear_competitor_target(session_dir)
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
         """Persist and return a no-data summary (skipped / no_match cases)."""

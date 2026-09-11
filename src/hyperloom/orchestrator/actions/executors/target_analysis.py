@@ -129,6 +129,8 @@ class TargetAnalysisExecutor:
                     compare_against_gpu="",
                     benchmark_mode=benchmark_mode,
                 )
+            except OSError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 log.exception("target_analysis_executor: analyze() raised: %s", exc)
                 return self._analyzer_failure(ctx, session_dir, model_path, "", benchmark_mode, exc)
@@ -150,6 +152,8 @@ class TargetAnalysisExecutor:
                 osl=osl,
                 benchmark_mode=benchmark_mode,
             )
+        except OSError:
+            raise
         except Exception as exc:  # noqa: BLE001
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
             return self._analyzer_failure(ctx, session_dir, model_path, compare_against_gpu, benchmark_mode, exc)

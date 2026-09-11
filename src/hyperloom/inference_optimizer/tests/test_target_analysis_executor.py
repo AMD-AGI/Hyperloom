@@ -385,6 +385,179 @@ async def test_analyzer_exception_replaces_previous_reference_artifacts(session_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gpu", ["b300", ""])
+async def test_initial_analysis_state_write_failure_keeps_history_and_skips_fetch(session_dir, monkeypatch, gpu):
+    from hyperloom.common import io as common_io
+
+    baseline = session_dir / "target_analysis/target_baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        json.dumps({"status": "ok", "fetched_at": "2026-01-01T00:00:00Z", "best": {"tput_per_gpu": 42.0}}),
+        encoding="utf-8",
+    )
+    fetched = False
+    previous = baseline.read_bytes()
+    real_write_text = Path.write_text
+
+    def fetch(_model):
+        nonlocal fetched
+        fetched = True
+        return []
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("state volume is read-only")
+
+    def fail_baseline_write(path, text, **kwargs):
+        if path == baseline:
+            return fail_write()
+        return real_write_text(path, text, **kwargs)
+
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.baseline_comparison.target_analyzer.fetch_rows",
+        fetch,
+    )
+    monkeypatch.setattr(common_io, "atomic_write_json", fail_write)
+    monkeypatch.setattr(Path, "write_text", fail_baseline_write)
+
+    with pytest.raises(OSError, match="state volume is read-only"):
+        await TargetAnalysisExecutor(compare_against_gpu=gpu, session_dir=session_dir)(
+            _ctx(session_dir, {"model_path": "MiniMax-M2.5"})
+        )
+
+    assert fetched is False
+    assert baseline.read_bytes() == previous
+    persisted = json.loads(baseline.read_text(encoding="utf-8"))
+    assert persisted["best"]["tput_per_gpu"] == 42.0
+    assert persisted["fetched_at"] == "2026-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_analysis_and_failure_write_errors_never_report_previous_reference(session_dir, monkeypatch):
+    from hyperloom.common import io as common_io
+    from hyperloom.inference_optimizer.session import session_paths
+    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_RESULTS_SERVICE_URL", raising=False)
+    monkeypatch.delenv("HYPERLOOM_RESULTS_AUTO_PUBLISH", raising=False)
+    SharedState(session_id=session_dir.name, benchmark_mode="agentx", model_name="GLM-5.2").save(session_dir)
+    baseline = session_paths.target_baseline_json(session_dir)
+    baseline.parent.mkdir()
+    baseline.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "query": {"model": "GLM-5.2", "gpu": "b300", "benchmark_mode": "agentx", "precision": "fp4"},
+                "best": {"tput_per_gpu": 9999, "benchmark_id": "old-benchmark"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    competitor = session_paths.competitor_target_json(session_dir)
+    competitor.write_text('{"old":true}', encoding="utf-8")
+    real_write = common_io.atomic_write_json
+    writes = 0
+    fetched = False
+
+    def fail_after_pending(path, value, **kwargs):
+        nonlocal writes
+        if Path(path) == baseline:
+            writes += 1
+            if writes > 1:
+                raise OSError("failure summary cannot be written")
+        return real_write(path, value, **kwargs)
+
+    def fail_fetch(_model):
+        nonlocal fetched
+        fetched = True
+        pending = json.loads(baseline.read_text(encoding="utf-8"))
+        assert pending["status"] == "in_progress"
+        assert pending["best"] is None
+        assert pending["all_concurrencies"] == []
+        assert not competitor.exists()
+        raise ValueError("invalid upstream schema")
+
+    monkeypatch.setattr(common_io, "atomic_write_json", fail_after_pending)
+    monkeypatch.setattr("hyperloom.inference_optimizer.baseline_comparison.target_analyzer.fetch_rows", fail_fetch)
+    result = await TargetAnalysisExecutor(compare_against_gpu="b300")(
+        _ctx(session_dir, {"model_path": "GLM-5.2", "precision": "fp4"})
+    )
+    assert fetched is True
+    assert result["reason"] == "analyzer_crash"
+    assert writes == 2
+    assert json.loads(baseline.read_text(encoding="utf-8"))["status"] == "in_progress"
+
+    report = await ReportExecutor()(_ctx(session_dir))
+    final = json.loads(Path(report["json_path"]).read_text(encoding="utf-8"))
+    assert final["external_baseline"]["status"] == "in_progress"
+    assert final["external_baseline"]["best"] is None
+    assert final["external_baseline"]["comparison"]["status"] == "unavailable"
+    assert "old-benchmark" not in json.dumps(final["external_baseline"])
+    assert "9999" not in Path(report["md_path"]).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_terminal_state_write_failure_leaves_in_progress_reference(session_dir, monkeypatch):
+    from hyperloom.common import io as common_io
+
+    real_write = common_io.atomic_write_json
+    writes = 0
+
+    def fail_terminal_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("terminal write failed")
+        return real_write(*args, **kwargs)
+
+    _patch_fetch_rows(monkeypatch, [])
+    monkeypatch.setattr(common_io, "atomic_write_json", fail_terminal_write)
+
+    with pytest.raises(OSError, match="terminal write failed"):
+        await TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)(
+            _ctx(session_dir, {"model_path": "MiniMax-M2.5"})
+        )
+
+    persisted = json.loads((session_dir / "target_analysis/target_baseline.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "in_progress"
+    assert persisted["best"] is None
+    assert writes == 2
+
+
+@pytest.mark.asyncio
+async def test_markdown_write_failure_keeps_authoritative_json(session_dir, monkeypatch):
+    real_write = Path.write_text
+
+    def fail_markdown(path, text, **kwargs):
+        if path.suffix == ".md":
+            raise OSError("markdown projection failed")
+        return real_write(path, text, **kwargs)
+
+    _patch_fetch_rows(monkeypatch, _ifx_rows())
+    monkeypatch.setattr(Path, "write_text", fail_markdown)
+
+    result = await TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)(
+        _ctx(
+            session_dir,
+            {
+                "model_path": "MiniMax-M2.5",
+                "precision": "fp8",
+                "isl": 1024,
+                "osl": 1024,
+            },
+        )
+    )
+
+    persisted = json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))
+    assert result["baseline_status"] == "ok"
+    assert persisted["status"] == "ok"
+    assert persisted["best"]["tput_per_gpu"] == pytest.approx(2781.5)
+    assert not Path(result["md_path"]).exists()
+
+
+@pytest.mark.asyncio
 async def test_agentx_request_records_to_external_reference_and_final_report(session_dir, monkeypatch):
     import yaml
 

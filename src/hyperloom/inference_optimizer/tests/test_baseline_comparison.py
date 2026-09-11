@@ -165,6 +165,37 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
     assert "6624.1" in md_text
 
 
+def test_summary_replace_failure_preserves_previous_json(tmp_path, monkeypatch):
+    from hyperloom.common import io as common_io
+    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer
+    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery, BaselineSummary
+
+    baseline = tmp_path / "target_analysis/target_baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text('{"status":"in_progress","best":null}', encoding="utf-8")
+    previous = baseline.read_bytes()
+
+    def fail_replace(source, destination):
+        assert Path(destination) == baseline
+        assert json.loads(Path(source).read_text(encoding="utf-8"))["status"] == "fetch_error"
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(common_io.os, "replace", fail_replace)
+    summary = BaselineSummary(
+        query=BaselineQuery(model="GLM-5.2", gpu="b300", benchmark_mode="agentx"),
+        fetched_at="2026-01-01T00:00:00Z",
+        row_count=0,
+        best=None,
+        status="fetch_error",
+        reason="analyzer_crash",
+    )
+    with pytest.raises(OSError, match="replace failed"):
+        target_analyzer._persist(summary, session_dir=tmp_path)
+
+    assert baseline.read_bytes() == previous
+    assert list(baseline.parent.iterdir()) == [baseline]
+
+
 def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
     """A disaggregated / multinode row with inflated per-GPU throughput must not be promoted to ``best`` — only single-node aggregated rows are comparable."""
     rows = _make_rows()
