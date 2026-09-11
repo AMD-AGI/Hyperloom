@@ -46,6 +46,11 @@ def is_agentx_mode(benchmark_mode: Any) -> bool:
     return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
 
 
+def agentx_active(*, benchmark_mode: Any = "") -> bool:
+    """Whether either persisted workload identity or the environment enables AgentX."""
+    return env_bool(_AGENTX_ENV) or is_agentx_mode(benchmark_mode)
+
+
 def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
@@ -244,6 +249,7 @@ __all__ = [
     "VERDICT_KEEP",
     "VERDICT_RECORDED",
     "VERDICT_REVERT",
+    "agentx_active",
     "graded_axes_of",
     "graded_metric_key",
     "intvty_grading_enabled",

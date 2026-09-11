@@ -9,6 +9,18 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 BenchmarkMode = Literal["synthetic", "agentx"]
+BaselineReason = Literal[
+    "",
+    "ok",
+    "model_mapping_miss",
+    "no_target_gpu_configured",
+    "fetch_error",
+    "no_inferencex_data",
+    "unsupported_target_gpu",
+    "precision_mismatch",
+    "dimension_mismatch",
+    "no_valid_rows",
+]
 
 
 @dataclass
@@ -79,7 +91,7 @@ class BaselineSummary:
     status: str = "ok"
     warning: str = ""
     source: str = ""
-    reason: str = ""
+    reason: BaselineReason = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the summary (and its nested points) to a JSON-safe dict."""
@@ -98,6 +110,7 @@ class BaselineSummary:
 
 __all__ = [
     "BenchmarkMode",
+    "BaselineReason",
     "BaselineQuery",
     "BaselinePoint",
     "BaselineSummary",

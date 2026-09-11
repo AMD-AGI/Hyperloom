@@ -150,11 +150,11 @@ def fetch_rows(model_api_name: str) -> list[dict] | None:
     return None
 
 
-def _benchmark_id(value: object) -> str:
+def normalize_benchmark_id(value: object) -> str:
     """Normalize API IDs without accepting floats or query fragments."""
-    if type(value) not in (str, int):
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise ValueError("benchmark ID must be a positive integer")
-    text = str(value).strip()
+    text = str(int(value) if isinstance(value, int) else value).strip()
     if not text.isascii() or not text.isdecimal() or int(text) <= 0:
         raise ValueError("benchmark ID must be a positive integer")
     return str(int(text))
@@ -162,7 +162,7 @@ def _benchmark_id(value: object) -> str:
 
 def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, float | None] | None:
     """Fetch exact P90 by benchmark ID; None means fetch/schema failure, not missing data."""
-    ids = list(dict.fromkeys(_benchmark_id(value) for value in benchmark_ids))
+    ids = list(dict.fromkeys(normalize_benchmark_id(value) for value in benchmark_ids))
     result: dict[str, float | None] = {}
     attempts = _max_attempts()
     for start in range(0, len(ids), _DERIVED_BATCH_SIZE):
@@ -186,7 +186,7 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
                 if key not in data:
                     continue
                 row = data[key]
-                if not isinstance(row, dict) or _benchmark_id(row.get("id")) != key:
+                if not isinstance(row, dict) or normalize_benchmark_id(row.get("id")) != key:
                     raise ValueError("derived metric benchmark ID does not match its key")
                 value = row.get("p90_e2e_norm_intvty")
                 result[key] = (
@@ -228,8 +228,7 @@ def find_reference_rows(
         matched = [
             r
             for r in matched
-            if r.get("benchmark_type") in (None, "single_turn")
-            and isl is not None
+            if isl is not None
             and osl is not None
             and _to_int(r.get("isl")) == int(isl)
             and _to_int(r.get("osl")) == int(osl)
@@ -249,4 +248,5 @@ __all__ = [
     "fetch_rows",
     "fetch_agentic_interactivity",
     "find_reference_rows",
+    "normalize_benchmark_id",
 ]

@@ -11,15 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env import env_str
-from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.baseline_comparison.inferencex_client import base_url
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
-    _clear_competitor_target,
-    _persist,
     analyze,
-    to_inferencex_name,
+    clear_competitor_target,
 )
-from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery, BaselineSummary, BenchmarkMode
+from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -105,7 +101,7 @@ class TargetAnalysisExecutor:
         if session_dir is None:
             cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
             if cleanup_dir is not None:
-                _clear_competitor_target(cleanup_dir)
+                clear_competitor_target(cleanup_dir)
             log.warning(
                 "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
             )
@@ -118,24 +114,6 @@ class TargetAnalysisExecutor:
             }
 
         compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
-        if not compare_against_gpu:
-            log.info(
-                "target_analysis_executor: no compare_against_gpu set; writing skipped summary and returning",
-            )
-            try:
-                summary = analyze(
-                    session_dir=session_dir,
-                    model_path=model_path,
-                    compare_against_gpu="",
-                    benchmark_mode=benchmark_mode,
-                )
-            except OSError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.exception("target_analysis_executor: analyze() raised: %s", exc)
-                return self._analyzer_failure(ctx, session_dir, model_path, "", benchmark_mode, exc)
-            return self._format_result(ctx, summary, session_dir)
-
         framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
         precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))
         isl = int(params.get("isl") or _env_int("ISL", 0))
@@ -152,46 +130,17 @@ class TargetAnalysisExecutor:
                 osl=osl,
                 benchmark_mode=benchmark_mode,
             )
-        except OSError:
-            raise
         except Exception as exc:  # noqa: BLE001
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
-            return self._analyzer_failure(ctx, session_dir, model_path, compare_against_gpu, benchmark_mode, exc)
+            clear_competitor_target(session_dir)
+            return {
+                "status": "succeeded",
+                "kind": ctx.task.kind,
+                "note": f"analyzer crashed: {exc}",
+                "baseline_status": "fetch_error",
+                "reason": "analyzer_crash",
+            }
         return self._format_result(ctx, summary, session_dir)
-
-    def _analyzer_failure(
-        self,
-        ctx: RunnerContext,
-        session_dir: Path,
-        model_path: str,
-        gpu: str,
-        benchmark_mode: BenchmarkMode,
-        exc: Exception,
-    ) -> dict[str, Any]:
-        _clear_competitor_target(session_dir)
-        summary = BaselineSummary(
-            query=BaselineQuery(
-                model=to_inferencex_name(model_path) or "",
-                gpu=gpu,
-                benchmark_mode=benchmark_mode,
-                isl=None if benchmark_mode == "agentx" else 0,
-                osl=None if benchmark_mode == "agentx" else 0,
-            ),
-            fetched_at=now_iso(timespec="seconds", z_suffix=True),
-            row_count=0,
-            best=None,
-            status="fetch_error",
-            reason="analyzer_crash",
-            warning=str(exc),
-            source=base_url(),
-        )
-        try:
-            _persist(summary, session_dir=session_dir)
-        except OSError:
-            log.warning("target_analysis_executor: could not persist failed analysis", exc_info=True)
-        result = self._format_result(ctx, summary, session_dir)
-        result["note"] = f"analyzer crashed: {exc}"
-        return result
 
     def _format_result(
         self,

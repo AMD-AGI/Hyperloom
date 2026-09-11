@@ -3,7 +3,26 @@
 
 """Stable comparison schemas for synthetic and agentic reference data."""
 
+from typing import get_args, get_type_hints
+
 from hyperloom.inference_optimizer.baseline_comparison.types import BaselinePoint, BaselineQuery, BaselineSummary
+
+
+def test_reason_annotation_covers_all_summary_outcomes():
+    hints = get_type_hints(BaselineSummary)
+    assert set(get_args(hints["reason"])) == {
+        "",
+        "ok",
+        "model_mapping_miss",
+        "no_target_gpu_configured",
+        "fetch_error",
+        "no_inferencex_data",
+        "unsupported_target_gpu",
+        "precision_mismatch",
+        "dimension_mismatch",
+        "no_valid_rows",
+    }
+    assert hints["status"] is str
 
 
 def test_query_defaults_preserve_synthetic_dimensions():

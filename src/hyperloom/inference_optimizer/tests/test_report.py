@@ -46,122 +46,45 @@ def _agentx_reference():
 
 
 @pytest.mark.parametrize("advisory_enabled", [True, False])
-def test_report_agentx_comparison_uses_same_state_gap_as_advisory(
-    report_performance_state, monkeypatch, advisory_enabled
-):
-    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
+def test_report_agentx_comparison_reads_persisted_target(report_performance_state, tmp_path, advisory_enabled):
+    from hyperloom.orchestrator.knowledge import research_hints
 
     state = report_performance_state
-    state.model_path = "/models/GLM-5.2-MXFP4"
-    state.precision = "mxfp4"
-    state.conc = 99
+    state.benchmark_mode = "agentx"
+    state.tp, state.conc = 2, 4
+    state.current_best.update(total_throughput=800.0, e2e_norm_intvty_p90=5.0)
     state.target_advisory_enabled = advisory_enabled
-    monkeypatch.setattr(
-        local_measurement,
-        "load_local_measurement",
-        lambda best: {
-            "status": "ok",
-            "reason": "",
-            "conc": 4,
-            "total_tput_per_gpu": 400.0,
-            "e2e_norm_intvty_p90": 5.0,
-            "precision": "mxfp4",
-        },
-    )
+    target = {
+        "benchmark_mode": "agentx",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [{"conc": 4, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "source": "measured"}],
+    }
+    assert research_hints.write_competitor_target(tmp_path, target)
     reference = _agentx_reference()
+    reference["all_concurrencies"] = []
     before = deepcopy(reference)
-    summary = rp._build_summary_dict(state, {}, [], external_baseline=reference)
+    summary = rp._build_summary_dict(state, {}, [], external_baseline=reference, session_dir=tmp_path)
     comparison = summary["external_baseline"]["comparison"]
-    assert comparison["benchmark_id"] == "42"
-    assert comparison["target_conc"] == 4
+    assert comparison == research_hints.gap_for_state(research_hints.load_competitor_target(tmp_path), state)
     assert comparison["throughput_gap_pct"] == 50.0
     assert comparison["interactivity_gap_pct"] == 75.0
-    assert comparison["local_total_tput_per_gpu"] == 400.0
+    assert comparison["primary_gap"] == "latency"
     assert reference == before
     md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
-    assert "E2E normalized interactivity P90" in md
-    assert "total throughput/GPU" in md
-    assert "400.000" in md and "800.000" in md
     assert "+75.0%" in md
     assert "9999" not in md
-    assert "mean TPOT" not in md
-    assert "cross-system" in md
 
 
-@pytest.mark.parametrize(
-    "missing_axis,reason,explanation,valid_gap_line,valid_values_line",
-    [
-        (
-            "throughput",
-            "partitioned_gpu",
-            "physical GPU normalization unavailable due to partitioning",
-            "- E2E normalized interactivity P90 gap vs target: +75.0%",
-            "- E2E normalized interactivity P90: ours=5.000, reference=20.000 tok/s/user",
-        ),
-        (
-            "interactivity",
-            "request_records_missing",
-            "request records missing",
-            "- total throughput/GPU gap vs target: +50.0%",
-            "- total throughput/GPU: ours=400.000, reference=800.000 tok/s/GPU",
-        ),
-    ],
-)
-def test_report_agentx_axis_reason_is_readable_and_independent_of_advisory(
-    report_performance_state, monkeypatch, missing_axis, reason, explanation, valid_gap_line, valid_values_line
-):
-    from hyperloom.inference_optimizer.baseline_comparison import local_measurement
-
-    state = report_performance_state
-    state.model_path = "/models/GLM-5.2-MXFP4"
-    local = {
-        "status": "ok",
-        "reason": "",
-        "conc": 4,
-        "total_tput_per_gpu": 400.0,
-        "e2e_norm_intvty_p90": 5.0,
-        "precision": "mxfp4",
-    }
-    if missing_axis == "throughput":
-        state.compute_partition = {"mode": "CPX", "partitions": 8}
-    else:
-        local.update(e2e_norm_intvty_p90=None, interactivity_reason=reason)
-    monkeypatch.setattr(local_measurement, "load_local_measurement", lambda best: local)
-    reference = _agentx_reference()
-    before = deepcopy(reference)
-    summaries = []
-    rendered = []
-    for enabled in (True, False):
-        state.target_advisory_enabled = enabled
-        summary = json.loads(json.dumps(rp._build_summary_dict(state, {}, [], external_baseline=reference)))
-        summary["report_generated_at"] = "2026-09-11T00:00:00+00:00"
-        comparison = summary["external_baseline"]["comparison"]
-        assert comparison[f"{missing_axis}_gap_pct"] is None
-        assert comparison[f"{missing_axis}_reason"] == reason
-        assert comparison["primary_gap"] == ("interactivity" if missing_axis == "throughput" else "throughput")
-        md = rp._format_md(summary)
-        missing_label = "total throughput/GPU" if missing_axis == "throughput" else "E2E normalized interactivity P90"
-        assert f"- {missing_label}: unavailable ({explanation})" in md.splitlines()
-        assert valid_gap_line in md.splitlines()
-        assert valid_values_line in md.splitlines()
-        assert reason not in md
-        assert "9999" not in md
-        summaries.append(summary)
-        rendered.append(md)
-    assert reference == before
-    assert summaries[0] == summaries[1]
-    assert rendered[0] == rendered[1]
-
-
-def test_agentx_report_rejects_old_synthetic_reference(report_performance_state):
-    reference = _agentx_reference()
-    reference["query"]["benchmark_mode"] = "synthetic"
-    summary = rp._build_summary_dict(report_performance_state, {}, [], external_baseline=reference)
+def test_report_does_not_rebuild_missing_competitor_target(report_performance_state, tmp_path, caplog):
+    summary = rp._build_summary_dict(
+        report_performance_state, {}, [], external_baseline=_agentx_reference(), session_dir=tmp_path
+    )
     comparison = summary["external_baseline"]["comparison"]
-    assert comparison["reason"] == "benchmark_mode_mismatch"
-    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
-    assert "benchmark_mode_mismatch" in md
-    assert "9999" not in md
+    assert comparison["status"] == "unavailable"
+    assert comparison["reason"] == "target_unavailable"
+    assert "gap vs target" not in "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "target_unavailable" in caplog.text
+    assert str(tmp_path) in caplog.text
 
 
 def test_agentx_report_keeps_no_data_reason_without_computing_gap(report_performance_state):

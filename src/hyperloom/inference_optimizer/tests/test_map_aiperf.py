@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -101,7 +103,7 @@ def test_map_total_tput_fallback_from_in_plus_out():
 
 
 def test_e2e_norm_intvty_p90_reads_p10_slow_tail():
-    """Must read P10 (slow tail) not P90: P10 of OSL/E2EL_s is 1/P90(E2EL/OSL), upstream's definition."""
+    """Scoring and comparison use the summary rate P10, not P90."""
     s = _sample()
     r = map_aiperf(s)
     assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)  # p10, not p90=447.2
@@ -238,157 +240,58 @@ def test_a_non_list_invalid_reason_is_coerced_to_one():
     assert map_aiperf(export)["submission_invalid_reasons"] == ["unsafe_override"]
 
 
-@pytest.fixture(params=[False, True], ids=["installed-package", "standalone-fallback"])
-def asset_mapper(monkeypatch, request):
+@pytest.mark.parametrize("standalone", [False, True], ids=["installed-package", "standalone-fallback"])
+@pytest.mark.parametrize(
+    "records",
+    [
+        None,
+        '{"metrics": {"request_latency": 1000, "time_to_first_token": 10, '
+        '"input_sequence_length": 128, "output_sequence_length": 10}}\n',
+        '{"metrics":\n',
+    ],
+    ids=["missing-records", "valid-records", "malformed-records"],
+)
+def test_file_mapper_uses_only_summary(monkeypatch, tmp_path, capsys, standalone, records):
     from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
 
-    if request.param:
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    if standalone:
         monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
-    path = agentx_asset_dir() / "map_aiperf.py"
-    spec = importlib.util.spec_from_file_location("_comparison_asset_mapper", path)
+    spec = importlib.util.spec_from_file_location("_summary_asset_mapper", agentx_asset_dir() / "map_aiperf.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
 
-
-def _request_record(latency_ms, output_tokens, *, phase="profiling", **overrides):
-    record = {
-        "metadata": {"benchmark_phase": phase},
-        "metrics": {
-            "request_latency": {"value": latency_ms, "unit": "ms"},
-            "time_to_first_token": {"value": 10.0, "unit": "ms"},
-            "input_sequence_length": {"value": 128, "unit": "tokens"},
-            "output_sequence_length": {"value": output_tokens, "unit": "tokens"},
-        },
-        "error": None,
-    }
-    record.update(overrides)
-    return record
-
-
-def _run_asset_mapper(mapper, tmp_path, records, *, summary=None):
-    source = tmp_path / "aiperf_artifacts" / "profile_export_aiperf.json"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text(json.dumps(_sample() if summary is None else summary), encoding="utf-8")
+    source = tmp_path / "profile_export_aiperf.json"
+    source.write_text(json.dumps(_sample()), encoding="utf-8")
+    records_path = source.with_name("profile_export.jsonl")
     if records is not None:
-        (source.parent / "profile_export.jsonl").write_text(
-            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
-        )
-    destination = tmp_path / "inferencex_result.json"
-    mapper.main(str(source), str(destination))
-    return json.loads(destination.read_text(encoding="utf-8"))
+        records_path.write_text(records, encoding="utf-8")
+    output = tmp_path / "inferencex_result.json"
+    with patch("builtins.open", wraps=open) as builtin_open, patch("io.open", wraps=io.open) as io_open:
+        module.main(str(source), str(output))
+    for call in builtin_open.call_args_list + io_open.call_args_list:
+        assert Path(call.args[0]) != records_path
 
-
-def test_file_mapper_adds_exact_comparison_p90_without_changing_grading(asset_mapper, tmp_path, monkeypatch):
-    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
-    records = [_request_record(1000, 10), _request_record(20000, 20)]
-    result = _run_asset_mapper(asset_mapper, tmp_path, records)
-    comparison = result.pop("comparison_metrics")
-
-    assert result == map_aiperf(_sample())
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert "comparison_metrics" not in result
     assert result["e2e_norm_intvty_p90"] == 22.6
-    assert comparison["status"] == "ok"
-    assert comparison["e2e_norm_intvty_p90"] == pytest.approx(1.0 / 0.91)
-    assert comparison["e2e_norm_intvty_p90"] != pytest.approx(1.9)
-    assert comparison["metric_basis"] == "inverse_linear_p90_e2el_per_output_token"
-    assert comparison["unit"] == "tok/s/user"
-    assert comparison["sample_count"] == 2
-    assert comparison["source"] == "profile_export.jsonl"
-    records_path = tmp_path / "aiperf_artifacts/profile_export.jsonl"
-    assert comparison["source_sha256"] == hashlib.sha256(records_path.read_bytes()).hexdigest()
-
-
-@pytest.mark.parametrize("ratios,expected", [([0.1], 10.0), ([1.0, 1.0], 1.0), ([3.0, 1.0, 2.0], 1.0 / 2.8)])
-def test_comparison_p90_uses_linear_quantile_over_request_ratios(asset_mapper, tmp_path, ratios, expected):
-    result = _run_asset_mapper(asset_mapper, tmp_path, [_request_record(ratio * 10000, 10) for ratio in ratios])
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] == pytest.approx(expected)
-
-
-def test_comparison_samples_match_upstream_phase_and_turn_filter(asset_mapper, tmp_path):
-    missing_ttft = _request_record(100000, 1)
-    missing_ttft["metrics"].pop("time_to_first_token")
-    zero_isl = _request_record(100000, 1)
-    zero_isl["metrics"]["input_sequence_length"]["value"] = 0
-    records = [
-        _request_record(100000, 1, phase="warmup"),
-        missing_ttft,
-        zero_isl,
-        _request_record(1000, 0),
-        _request_record(1000, 10),
-        _request_record(1000, 10, phase=None),
-        _request_record(1000, 10, error={"message": "record still has all metrics"}),
-    ]
-    result = _run_asset_mapper(asset_mapper, tmp_path, records)
-    assert result["comparison_metrics"]["sample_count"] == 3
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] == pytest.approx(10.0)
-
-
-def test_comparison_supports_upstream_bare_numeric_metrics(asset_mapper, tmp_path):
-    record = _request_record(1000, 10)
-    record["metrics"] = {key: metric["value"] for key, metric in record["metrics"].items()}
-    result = _run_asset_mapper(asset_mapper, tmp_path, [record])
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] == pytest.approx(10.0)
-
-
-@pytest.mark.parametrize(
-    "records,reason",
-    [
-        (None, "request_records_missing"),
-        ([], "no_eligible_requests"),
-        ([_request_record(1000, 10, phase="warmup")], "no_eligible_requests"),
-    ],
-)
-def test_missing_comparison_evidence_does_not_fail_the_benchmark(asset_mapper, tmp_path, records, reason):
-    result = _run_asset_mapper(asset_mapper, tmp_path, records)
-    comparison = result.pop("comparison_metrics")
     assert result == map_aiperf(_sample())
-    assert comparison["status"] == "unavailable"
-    assert comparison["reason"] == reason
-    assert comparison["e2e_norm_intvty_p90"] is None
+    assert json.loads(capsys.readouterr().out) == result
 
 
-@pytest.mark.parametrize("bad_line", ['{"metrics":', "[]", '{"metadata": "wrong"}', '{"metrics": []}'])
-def test_malformed_request_records_do_not_publish_partial_p90(asset_mapper, tmp_path, bad_line):
-    _run_asset_mapper(asset_mapper, tmp_path, [_request_record(1000, 10)])
-    source = tmp_path / "aiperf_artifacts/profile_export_aiperf.json"
-    records = source.with_name("profile_export.jsonl")
-    with records.open("a", encoding="utf-8") as handle:
-        handle.write(bad_line + "\n")
-    destination = tmp_path / "second_result.json"
-    asset_mapper.main(str(source), str(destination))
-    result = json.loads(destination.read_text(encoding="utf-8"))
-    assert result["comparison_metrics"]["status"] == "unavailable"
-    assert result["comparison_metrics"]["reason"] == "request_records_invalid"
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] is None
-    assert result["output_throughput"] == 500.0
-
-
-def test_unknown_metric_unit_does_not_silently_scale_p90(asset_mapper, tmp_path):
-    record = _request_record(1000, 10)
-    record["metrics"]["request_latency"]["unit"] = "seconds"
-    result = _run_asset_mapper(asset_mapper, tmp_path, [record])
-    assert result["comparison_metrics"]["reason"] == "request_records_invalid"
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] is None
-
-
-def test_comparison_reads_only_the_matching_summary_directory(asset_mapper, tmp_path):
-    other = tmp_path / "old-run"
-    _run_asset_mapper(asset_mapper, other, [_request_record(1000, 10)])
-    result = _run_asset_mapper(asset_mapper, tmp_path / "new-run", None)
-    assert result["comparison_metrics"]["reason"] == "request_records_missing"
-
-
-def test_deployed_mapper_computes_comparison_without_installed_hyperloom(tmp_path):
+def test_deployed_mapper_maps_summary_without_installed_hyperloom(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
 
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
     deployed = deploy_agentx_assets(tmp_path / "benchmarks")
     script = next(path for path in deployed if path.name == "map_aiperf.py")
     source = tmp_path / "profile_export_aiperf.json"
     source.write_text(json.dumps(_sample()), encoding="utf-8")
-    source.with_name("profile_export.jsonl").write_text(json.dumps(_request_record(1000, 10)) + "\n", encoding="utf-8")
     output = tmp_path / "result.json"
     proc = subprocess.run([sys.executable, "-I", str(script), str(source), str(output)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(output.read_text(encoding="utf-8"))
-    assert result["comparison_metrics"]["e2e_norm_intvty_p90"] == pytest.approx(10.0)
+    assert "comparison_metrics" not in result
     assert result["e2e_norm_intvty_p90"] == 22.6
+    assert result == map_aiperf(_sample())
+    assert json.loads(proc.stdout) == result

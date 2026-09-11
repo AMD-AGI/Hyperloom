@@ -131,7 +131,6 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
             },
             "launch_evidence_path": "/baseline/launch_evidence.json",
             "server_log_path": "/baseline/server.log",
-            "raw_result_path": "/baseline/inferencex_result.json",
         },
         task=_task("baseline"),
     )
@@ -144,7 +143,6 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
     assert s.current_best["tput"] == 100.0
     assert s.current_best_measurement["launch_evidence_path"] == "/baseline/launch_evidence.json"
     assert s.current_best_measurement["server_log_path"] == "/baseline/server.log"
-    assert s.current_best_measurement["raw_result_path"] == "/baseline/inferencex_result.json"
     assert s.current_best_measurement["observed_server_identity"] == {
         "model_path": "/models/Qwen",
         "tp_size": 1,
@@ -596,7 +594,6 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
     measurement = s.current_best_measurement
     assert measurement["tput"] == bench["output_throughput"]
     assert measurement["benchmark_workspace"] == bench["workspace"]
-    assert measurement["raw_result_path"] == bench["raw_result_path"]
     for key in ("launch_evidence", "launch_evidence_path", "server_log_path"):
         assert measurement[key] == bench[key]
     assert measurement["identity_verification_status"] == "verified_observed"

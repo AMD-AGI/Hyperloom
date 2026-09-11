@@ -5103,7 +5103,6 @@ class WritebackCollaborator:
         measurement = {
             "schema_version": 2,
             "tput": float(cb.get("tput") or 0.0),
-            "raw_result_path": str(evidence.get("raw_result_path") or ""),
             "benchmark_workspace": str(
                 evidence.get("workspace") or evidence.get("single_workspace") or cb.get("workspace") or ""
             ),

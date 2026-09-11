@@ -76,9 +76,7 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
-    # E2E normalised interactivity slow tail. aiperf's ``e2e_output_token_throughput`` is the per-request rate
-    # OSL/E2EL_s and is LARGER_IS_BETTER, so its P10 is 1/P90 of the E2EL/OSL ratio -- upstream's slow-tail
-    # definition (MODELS.md:78). pct() not stat(): avg and P10 differ by an order of magnitude on this corpus.
+    # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
     intvty_p90 = pct(m, "e2e_output_token_throughput", "p10")
 
     return {

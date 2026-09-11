@@ -7,35 +7,17 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hyperloom.common import io as _common_io
-
+from hyperloom.common.coerce import to_float
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.session import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
-
-_AGENTX_AXIS_REASON_TEXT = {
-    "partitioned_gpu": "physical GPU normalization unavailable due to partitioning",
-    "exact_p90_missing": "exact P90 measurement missing",
-    "request_records_missing": "request records missing",
-    "request_records_unreadable": "request records could not be read",
-    "request_records_invalid": "request records invalid",
-    "request_records_changed": "request records changed while being read",
-    "no_eligible_requests": "no eligible requests for exact P90",
-    "topology_unverified": "GPU topology unverified",
-    "topology_mismatch": "GPU topology mismatch",
-    "unsupported_topology": "GPU topology unsupported",
-    "gpu_count_missing": "physical GPU count missing",
-    "total_throughput_missing": "total token throughput missing",
-    "recipe_missing": "accepted measurement recipe missing",
-    "recipe_unreadable": "accepted measurement recipe could not be read",
-    "recipe_mismatch": "accepted measurement recipe does not match recorded digest",
-    "recipe_invalid": "accepted measurement recipe invalid",
-}
+ComparisonReason = Literal["target_unavailable", "concurrency_mismatch", "measurement_unavailable"]
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
@@ -191,10 +173,8 @@ def write_competitor_target(
         "precision": str(target.get("precision") or "").strip(),
         "per_conc": per_conc,
         "notes": str(target.get("notes") or "").strip(),
+        **{key: target[key] for key in ("benchmark_mode", "throughput_basis") if target.get(key)},
     }
-    for key in ("benchmark_mode", "throughput_basis"):
-        if target.get(key):
-            out[key] = str(target[key])
     try:
         _common_io.atomic_write_text(
             session_paths.competitor_target_json(session_dir),
@@ -231,7 +211,7 @@ def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
         "precision": str(data.get("precision") or "").strip(),
         "per_conc": per_conc,
         "notes": str(data.get("notes") or "").strip(),
-        **{key: str(data[key]) for key in ("benchmark_mode", "throughput_basis") if data.get(key)},
+        **{key: data[key] for key in ("benchmark_mode", "throughput_basis") if data.get(key)},
     }
 
 
@@ -241,12 +221,14 @@ def _match_target_row(
 ) -> dict[str, Any] | None:
     """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown)."""
     rows = target.get("per_conc") or []
-    if not rows:
+    if not rows or (target.get("benchmark_mode") == "agentx" and conc is None):
         return None
     if conc is not None:
         exact = [r for r in rows if _to_num(r.get("conc")) == conc]
         if exact:
             return max(exact, key=lambda r: _to_num(r.get("tput_per_gpu")) or 0.0)
+        if target.get("benchmark_mode") == "agentx":
+            return None
         rows_with_conc = [r for r in rows if _to_num(r.get("conc")) is not None]
         if rows_with_conc:
             return min(
@@ -254,77 +236,6 @@ def _match_target_row(
                 key=lambda r: abs((_to_num(r.get("conc")) or 0) - conc),
             )
     return max(rows, key=lambda r: _to_num(r.get("tput_per_gpu")) or 0.0)
-
-
-def _positive_metric(value: Any) -> float | None:
-    number = _to_num(value)
-    return (
-        number if not isinstance(value, bool) and number is not None and math.isfinite(number) and number > 0 else None
-    )
-
-
-def _agentx_gap(target, our_total, our_p90, conc):
-    gap = {
-        "benchmark_mode": "agentx",
-        "status": "unavailable",
-        "reason": "",
-        "throughput_gap_pct": None,
-        "interactivity_gap_pct": None,
-        "tpot_ratio": None,
-        "primary_gap": None,
-        "target_conc": None,
-        "source": None,
-    }
-    if target.get("benchmark_mode") != "agentx":
-        gap["reason"] = "benchmark_mode_mismatch"
-        return gap
-    if conc is None or conc <= 0:
-        gap["reason"] = "concurrency_missing"
-        return gap
-    rows = [row for row in target.get("per_conc", []) if _to_num(row.get("conc")) == conc]
-    if not rows:
-        gap["reason"] = "concurrency_mismatch"
-        return gap
-    row = max(
-        rows,
-        key=lambda r: (
-            _positive_metric(r.get("e2e_norm_intvty_p90")) or 0.0,
-            _positive_metric(r.get("tput_per_gpu")) or 0.0,
-            str(r.get("benchmark_id") or ""),
-        ),
-    )
-    target_p90 = _positive_metric(row.get("e2e_norm_intvty_p90"))
-    target_total = (
-        _positive_metric(row.get("tput_per_gpu"))
-        if target.get("throughput_basis") == "total_token_throughput_per_gpu"
-        else None
-    )
-    our_total, our_p90 = _positive_metric(our_total), _positive_metric(our_p90)
-    gap.update(
-        target_conc=conc,
-        source=row.get("source"),
-        benchmark_id=row.get("benchmark_id"),
-        reference_total_tput_per_gpu=target_total,
-        reference_e2e_norm_intvty_p90=target_p90,
-        local_total_tput_per_gpu=our_total,
-        local_e2e_norm_intvty_p90=our_p90,
-    )
-    if target_total is not None and our_total is not None:
-        gap["throughput_gap_pct"] = (target_total - our_total) / target_total * 100.0
-    if target_p90 is not None and our_p90 is not None:
-        gap["interactivity_gap_pct"] = (target_p90 - our_p90) / target_p90 * 100.0
-    candidates = {
-        name: value
-        for name, value in (("interactivity", gap["interactivity_gap_pct"]), ("throughput", gap["throughput_gap_pct"]))
-        if value is not None and value > 0
-    }
-    if candidates:
-        gap["primary_gap"] = max(candidates, key=candidates.get)
-    if gap["throughput_gap_pct"] is not None or gap["interactivity_gap_pct"] is not None:
-        gap["status"] = "ok"
-    else:
-        gap["reason"] = "comparison_metrics_unavailable"
-    return gap
 
 
 def gap_analysis(
@@ -336,19 +247,33 @@ def gap_analysis(
     benchmark_mode: str = "synthetic",
     our_e2e_norm_intvty_p90: float | None = None,
 ) -> dict[str, Any] | None:
-    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is \"latency\" when TPOT ratio outweighs throughput gap."""
-    if not target:
+    """Compute advisory gaps; synthetic uses nearest concurrency, AgentX requires an exact match.
+
+    Args:
+        target: Source-backed competitor target.
+        our_tput_per_gpu: Accepted output/GPU (synthetic) or total/GPU (AgentX).
+        our_tpot_ms: Synthetic mean time per output token, in milliseconds.
+        conc: Requested concurrency; AgentX cannot compare without it.
+        benchmark_mode: Select synthetic throughput/TPOT or AgentX axes.
+        our_e2e_norm_intvty_p90: Accepted AgentX summary-rate P10; never recomputed.
+    """
+    if not target or target.get("benchmark_mode", "synthetic") != benchmark_mode:
         return None
-    if benchmark_mode == "agentx":
-        return _agentx_gap(target, our_tput_per_gpu, our_e2e_norm_intvty_p90, conc)
-    if target.get("benchmark_mode", "synthetic") != "synthetic":
-        return None
+    agentx = benchmark_mode == "agentx"
     row = _match_target_row(target, conc)
-    if row is None:
+    if row is None and not agentx:
         return None
+    row = row or {}
     tgt_tput = _to_num(row.get("tput_per_gpu"))
     tgt_tpot = _to_num(row.get("tpot_ms"))
-    tgt_inter = _to_num(row.get("interactivity"))
+    tgt_inter = _to_num(row.get("e2e_norm_intvty_p90" if agentx else "interactivity"))
+    our_inter = 1000.0 / our_tpot_ms if our_tpot_ms and our_tpot_ms > 0 else None
+    if agentx:
+        tgt_tput, tgt_inter, our_tput_per_gpu, our_inter = [
+            value if value is not None and value > 0 else None
+            for value in (tgt_tput, tgt_inter, to_float(our_tput_per_gpu), to_float(our_e2e_norm_intvty_p90))
+        ]
+        our_tpot_ms = None
 
     throughput_gap_pct: float | None = None
     if tgt_tput and our_tput_per_gpu and tgt_tput > 0:
@@ -359,18 +284,22 @@ def gap_analysis(
         tpot_ratio = our_tpot_ms / tgt_tpot
 
     interactivity_gap_pct: float | None = None
-    if tgt_inter and our_tpot_ms and our_tpot_ms > 0:
-        our_inter = 1000.0 / our_tpot_ms
+    if tgt_inter and our_inter:
         interactivity_gap_pct = (tgt_inter - our_inter) / tgt_inter * 100.0
 
-    primary_gap = "throughput"
+    primary_gap: str | None = "throughput"
     if tpot_ratio is not None and throughput_gap_pct is not None:
         if (tpot_ratio - 1.0) * 100.0 > throughput_gap_pct:
             primary_gap = "latency"
     elif tpot_ratio is not None and tpot_ratio > 1.0:
         primary_gap = "latency"
 
-    return {
+    if agentx:
+        primary_gap = None
+        if max(throughput_gap_pct or 0, interactivity_gap_pct or 0) > 0:
+            primary_gap = "latency" if (interactivity_gap_pct or 0) >= (throughput_gap_pct or 0) else "throughput"
+
+    gap: dict[str, Any] = {
         "throughput_gap_pct": throughput_gap_pct,
         "tpot_ratio": tpot_ratio,
         "interactivity_gap_pct": interactivity_gap_pct,
@@ -379,61 +308,41 @@ def gap_analysis(
         "source": row.get("source"),
     }
 
+    if agentx:
+        available = throughput_gap_pct is not None or interactivity_gap_pct is not None
+        reason: ComparisonReason | None = (
+            None if available else "measurement_unavailable" if row else "concurrency_mismatch"
+        )
+        if throughput_gap_pct is None or interactivity_gap_pct is None:
+            log.warning(
+                "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
+                reason,
+                conc,
+                [r.get("conc") for r in target.get("per_conc", [])],
+                throughput_gap_pct,
+                interactivity_gap_pct,
+            )
+        gap.update(benchmark_mode="agentx", status="ok" if available else "unavailable", reason=reason)
+    return gap
 
-def gap_for_state(target: dict[str, Any] | None, state: Any, *, for_report: bool = False) -> dict[str, Any] | None:
-    """Use the accepted run's metrics for AgentX and preserve the synthetic advisory contract."""
-    if not target or (not for_report and not bool(getattr(state, "target_advisory_enabled", True))):
-        return None
+
+def gap_for_state(target: dict[str, Any] | None, state: Any) -> dict[str, Any] | None:
+    """Compare accepted state metrics without rereading benchmark artifacts."""
     best = getattr(state, "current_best", None)
     if not isinstance(best, dict):
         return None
-    from hyperloom.common.env import env_bool
-    from hyperloom.common.perf_metric import is_agentx_mode
-
-    if is_agentx_mode(getattr(state, "benchmark_mode", "")) or env_bool("HYPERLOOM_AGENTX"):
-        from hyperloom.inference_optimizer.baseline_comparison.local_measurement import load_local_measurement
-        from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
-
-        unavailable = _agentx_gap(target, None, None, None)
-        if target.get("benchmark_mode") != "agentx":
-            return unavailable
-        model = to_inferencex_name(str(getattr(state, "model_path", "") or getattr(state, "model_name", "")))
-        if not model or model.casefold() != str(target.get("model") or "").casefold():
-            unavailable["reason"] = "model_mismatch"
-            return unavailable
-        local = load_local_measurement(best)
-        if local["status"] != "ok":
-            unavailable["reason"] = local["reason"]
-            return unavailable
-        precision = str(local.get("precision") or "").strip().casefold()
-        if precision in {"mxfp4", "nvfp4"}:
-            precision = "fp4"
-        target_precision = str(target.get("precision") or "").strip().casefold()
-        if not precision or not target_precision:
-            unavailable["reason"] = "precision_unknown"
-            return unavailable
-        if precision != target_precision:
-            unavailable["reason"] = "precision_mismatch"
-            return unavailable
-        partition = getattr(state, "compute_partition", None) or {}
-        if (
-            str(partition.get("mode") or "").upper() in {"DPX", "QPX", "CPX"}
-            or (_to_num(partition.get("partitions")) or 1) > 1
-        ):
-            local = {**local, "total_tput_per_gpu": None, "throughput_reason": "partitioned_gpu"}
-        gap = _agentx_gap(target, local["total_tput_per_gpu"], local["e2e_norm_intvty_p90"], local["conc"])
-        for key in ("throughput_reason", "interactivity_reason"):
-            if local.get(key):
-                gap[key] = local[key]
-        return gap
-    tput = best.get("tput")
-    tpot = best.get("tpot_mean_ms")
-    tp = int(getattr(state, "tp", 0) or 0)
+    agentx = agentx_active(benchmark_mode=getattr(state, "benchmark_mode", ""))
+    tput = best.get("total_throughput" if agentx else "tput")
+    tput = to_float(tput) if agentx else tput
+    tpot = None if agentx else best.get("tpot_mean_ms")
+    tp = to_float(getattr(state, "tp", None)) if agentx else int(getattr(state, "tp", 0) or 0)
     return gap_analysis(
         target,
-        our_tput_per_gpu=float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp > 0 else None,
+        our_tput_per_gpu=float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp and tp > 0 else None,
         our_tpot_ms=float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None,
-        conc=int(getattr(state, "conc", 0) or 0) or None,
+        conc=getattr(state, "conc", None) if agentx else int(getattr(state, "conc", 0) or 0) or None,
+        benchmark_mode="agentx" if agentx else "synthetic",
+        our_e2e_norm_intvty_p90=best.get("e2e_norm_intvty_p90") if agentx else None,
     )
 
 
@@ -445,42 +354,27 @@ def full_gap_summary(
     """Render an advisory \"External target gap\" block (empty when no gap; advisory only, never gates)."""
     if not gap:
         return ""
-    if gap.get("benchmark_mode") == "agentx":
-        lines = ["External AgentX reference (cross-system advisory, not a KEEP/REVERT gate)."]
-        if gap.get("reason"):
-            lines.append(f"- comparison unavailable: {gap['reason']}")
-        if gap.get("target_conc") is not None:
-            lines.append(f"- matched concurrency: {gap['target_conc']}")
-        for axis, label in (
-            ("throughput", "total throughput/GPU"),
-            ("interactivity", "E2E normalized interactivity P90"),
-        ):
-            value = gap.get(f"{axis}_gap_pct")
-            if value is not None:
-                lines.append(f"- {label} gap vs target: {value:+.1f}%")
-            else:
-                reason = gap.get(f"{axis}_reason")
-                explanation = (
-                    _AGENTX_AXIS_REASON_TEXT.get(reason, "comparison evidence could not be validated") if reason else ""
-                )
-                suffix = f" ({explanation})" if explanation else ""
-                lines.append(f"- {label}: unavailable{suffix}")
-        if gap.get("source"):
-            lines.append(f"- target source: {gap['source']} (benchmark {gap.get('benchmark_id') or 'unknown'})")
-        return "\n".join(lines)
+    agentx = gap.get("benchmark_mode") == "agentx"
     lines = [
-        "External target gap (advisory) — competitor numbers are "
+        "External AgentX reference (advisory, not a KEEP/REVERT gate)."
+        if agentx
+        else "External target gap (advisory) — competitor numbers are "
         + "LLM-authored with sources; treat as direction, not a gate."
     ]
-    tg = gap.get("throughput_gap_pct")
+    if agentx:
+        lines.append(f"- matched concurrency: {gap.get('target_conc')}; status: {gap.get('reason') or 'ok'}")
     tr = gap.get("tpot_ratio")
-    ig = gap.get("interactivity_gap_pct")
-    if tg is not None:
-        lines.append(f"- throughput gap vs target: {tg:+.1f}%")
-    if tr is not None:
-        lines.append(f"- TPOT ratio (ours/target): {tr:.2f}x")
-    if ig is not None:
-        lines.append(f"- interactivity gap vs target: {ig:+.1f}%")
+    for axis, label in (
+        ("throughput", "total throughput/GPU" if agentx else "throughput"),
+        ("interactivity", "E2E normalized interactivity P90" if agentx else "interactivity"),
+    ):
+        value = gap.get(f"{axis}_gap_pct")
+        if value is not None:
+            lines.append(f"- {label} gap vs target: {value:+.1f}%")
+        elif agentx:
+            lines.append(f"- {label}: unavailable")
+        if axis == "throughput" and tr is not None:
+            lines.append(f"- TPOT ratio (ours/target): {tr:.2f}x")
     if gap.get("source"):
         lines.append(f"- target source: {gap['source']}")
     if tr is not None and tr > tpot_ratio_threshold:
@@ -494,10 +388,7 @@ def full_gap_summary(
 
 def _to_num(value: Any) -> float | None:
     """Coerce a value to ``float``, returning ``None`` on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return to_float(value)
 
 
 # Direction keywords for cutting per-output-token latency (advisory).
@@ -661,6 +552,7 @@ def summarise_for_prompt(
 
 
 __all__ = [
+    "ComparisonReason",
     "append_hints",
     "full_gap_summary",
     "gap_analysis",

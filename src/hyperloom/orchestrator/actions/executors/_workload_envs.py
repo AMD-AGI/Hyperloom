@@ -35,7 +35,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.perf_metric import (
     intvty_grading_enabled,
-    is_agentx_mode,
+    agentx_active as _agentx_active,
     parse_intvty_noise_pct,
 )
 from hyperloom.common.env_safety import (
@@ -165,9 +165,7 @@ def agentx_active(shared_state: Any = None) -> bool:
     Returns:
         True when AgentX is enabled for this session, by either signal.
     """
-    if agentx_enabled():
-        return True
-    return is_agentx_mode(getattr(shared_state, "benchmark_mode", ""))
+    return _agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
 
 
 def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":

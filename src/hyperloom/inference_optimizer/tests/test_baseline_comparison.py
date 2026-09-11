@@ -12,6 +12,14 @@ from typing import Any
 import pytest
 
 
+def test_shared_helpers_are_exported():
+    from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
+
+    assert {"persist_summary", "clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
+    assert "normalize_benchmark_id" in inferencex_client.__all__
+    assert target_analyzer.normalize_benchmark_id is inferencex_client.normalize_benchmark_id
+
+
 # name_mapping
 def test_name_mapping_known_display_name_passthrough():
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
@@ -163,37 +171,6 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
     md_text = md_path.read_text()
     assert "## Reference best" in md_text
     assert "6624.1" in md_text
-
-
-def test_summary_replace_failure_preserves_previous_json(tmp_path, monkeypatch):
-    from hyperloom.common import io as common_io
-    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer
-    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery, BaselineSummary
-
-    baseline = tmp_path / "target_analysis/target_baseline.json"
-    baseline.parent.mkdir()
-    baseline.write_text('{"status":"in_progress","best":null}', encoding="utf-8")
-    previous = baseline.read_bytes()
-
-    def fail_replace(source, destination):
-        assert Path(destination) == baseline
-        assert json.loads(Path(source).read_text(encoding="utf-8"))["status"] == "fetch_error"
-        raise OSError("replace failed")
-
-    monkeypatch.setattr(common_io.os, "replace", fail_replace)
-    summary = BaselineSummary(
-        query=BaselineQuery(model="GLM-5.2", gpu="b300", benchmark_mode="agentx"),
-        fetched_at="2026-01-01T00:00:00Z",
-        row_count=0,
-        best=None,
-        status="fetch_error",
-        reason="analyzer_crash",
-    )
-    with pytest.raises(OSError, match="replace failed"):
-        target_analyzer._persist(summary, session_dir=tmp_path)
-
-    assert baseline.read_bytes() == previous
-    assert list(baseline.parent.iterdir()) == [baseline]
 
 
 def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
@@ -378,6 +355,9 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
     assert summary.status == "no_match"
     assert summary.reason == "fetch_error"
     assert summary.best is None
+    report = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
+    assert "only feeds the final report" not in report
+    assert "prompt advisory or final-report comparison" in report
 
 
 def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
@@ -526,10 +506,10 @@ def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path,
     from hyperloom.inference_optimizer.session import session_paths
 
     rows = [
-        _agentic_row("10", tput=3000.0),
+        _agentic_row("10", tput=1000.0),
         _agentic_row("20", tput=2000.0),
         _agentic_row("20", tput=2000.0),
-        _agentic_row("30", tput=4000.0, conc=2),
+        _agentic_row("30", tput=1500.0, conc=2),
         _agentic_row("90", hardware="h100"),
         _agentic_row("91", precision="fp8"),
         _agentic_row("92", is_multinode=True),
@@ -565,11 +545,8 @@ def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path,
     assert saved["best"]["benchmark_id"] == "20"
     assert saved["best"]["e2e_norm_intvty_p90"] == 40.0
     md = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
-    assert "E2E normalized interactivity P90" in md
-    assert "40.000" in md
-    assert "Total throughput/GPU" in md
+    assert "agentic_traces" in md
     assert "cross-system" in md
-    assert "same-concurrency" in md
     from hyperloom.orchestrator.knowledge import research_hints
 
     target = research_hints.load_competitor_target(tmp_path)
@@ -604,11 +581,10 @@ def test_agentx_analysis_preserves_total_when_p90_is_unavailable(tmp_path, monke
     assert "P90 unavailable" in summary.warning
     assert ("fetch failed" in summary.warning) is (derived is None)
     md = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
-    assert "P90: unavailable" in md
-    assert "throughput-only" in md
+    assert "P90 unavailable" in md
 
 
-def test_agentx_p90_selection_is_stable_and_never_prefers_missing_metric(tmp_path, monkeypatch):
+def test_agentx_highest_throughput_selection_keeps_p90_from_the_same_row(tmp_path, monkeypatch):
     import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
 
     rows = [_agentic_row("1", tput=999999.0), _agentic_row("2", tput=100.0), _agentic_row("3", tput=100.0)]
@@ -618,8 +594,10 @@ def test_agentx_p90_selection_is_stable_and_never_prefers_missing_metric(tmp_pat
         _patch_fetch_rows(monkeypatch, order)
         summary = _analyze_agentx(tmp_path)
         winners.append(summary.best.benchmark_id)
-        assert summary.best.tput_per_gpu == 100.0
-    assert winners[0] == winners[1]
+        assert summary.best.tput_per_gpu == 999999.0
+        assert summary.best.e2e_norm_intvty_p90 is None
+        assert summary.all_concurrencies[0].benchmark_id == "1"
+    assert winners == ["1", "1"]
 
 
 @pytest.mark.parametrize("benchmark_id", [None, "invalid", 0, True])

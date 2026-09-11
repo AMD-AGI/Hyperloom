@@ -826,7 +826,7 @@ class ConversationCollaborator:
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve the dominant external gap direction ('latency'/'throughput') from the competitor target, or None when advisory is off / no target. Fail-soft."""
+        """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return None

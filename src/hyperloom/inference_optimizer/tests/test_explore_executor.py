@@ -465,7 +465,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
             tput = 800.4  # +0.05% — below 1.0% threshold
         else:
             tput = 800.0
-        _fake_workspace(slot, tput=tput, perf_axes={"total_token_throughput": tput * 2})
+        _fake_workspace(slot, tput=tput)
         call_counter["i"] += 1
         return subprocess.CompletedProcess(
             args=cmd,
@@ -520,10 +520,6 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert outcomes["v_keep"] == "KEEP"
     assert outcomes["v_revert"] == "REVERT"
     assert out["best_variant"]["name"] == "v_keep"
-    raw_path = Path(out["best_variant"]["raw_result_path"])
-    assert raw_path == Path(out["best_variant"]["single_workspace"]) / "inferencex_result.json"
-    assert json.loads(raw_path.read_text())["output_throughput"] == 840.0
-    assert out["winners"][0]["raw_result_path"] == str(raw_path)
     assert out["best_gain_pct"] >= 4.0
     rejected_provenance = {r["provenance"] for r in ledger["rejected"]}
     assert rejected_provenance == {"llm_direct"}

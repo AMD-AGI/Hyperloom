@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from enum import IntEnum
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -274,12 +275,10 @@ def test_agentx_still_filters_hardware_precision_and_topology():
     ) == [matching]
 
 
-def test_synthetic_keeps_legacy_rows_but_excludes_other_workloads():
-    legacy = _bench_row()
-    single_turn = _bench_row(benchmark_type="single_turn")
-    rows = [legacy, single_turn, _bench_row(benchmark_type="agentic_traces"), _bench_row(benchmark_type="unknown")]
-
-    assert ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024) == [legacy, single_turn]
+def test_synthetic_preserves_shape_filter_without_workload_type_restriction():
+    rows = [_bench_row(), _bench_row(benchmark_type="single_turn"), _bench_row(benchmark_type="unknown")]
+    different_shape = _bench_row(benchmark_type="agentic_traces", isl=None, osl=None)
+    assert ix.find_reference_rows([*rows, different_shape], hardware="b300", isl=1024, osl=1024) == rows
 
 
 # ---- fetch_agentic_interactivity -------------------------------------------
@@ -331,7 +330,20 @@ def test_agentic_interactivity_empty_input_does_not_fetch(monkeypatch):
     assert ix.fetch_agentic_interactivity([]) == {}
 
 
-@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "1.0", "1,2", "", "abc"])
+class _BenchmarkID(IntEnum):
+    POSITIVE = 7
+
+
+class _StringID(str):
+    pass
+
+
+@pytest.mark.parametrize("value", [7, " 007 ", _BenchmarkID.POSITIVE, _StringID(" 007 ")])
+def test_normalize_benchmark_id_accepts_integer_and_string_subclasses(value):
+    assert ix.normalize_benchmark_id(value) == "7"
+
+
+@pytest.mark.parametrize("value", [True, False, None, b"1", 0, -1, 1.0, 1.5, "1.0", "1,2", "", "abc", "１２"])
 def test_agentic_interactivity_rejects_invalid_request_ids(monkeypatch, value):
     monkeypatch.setattr(ix, "_fetch_raw", lambda url: pytest.fail("invalid IDs must not request the API"))
     with pytest.raises(ValueError, match="benchmark ID"):

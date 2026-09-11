@@ -5,27 +5,23 @@
 
 from __future__ import annotations
 
-import logging
+import json
 import re
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as common_io
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import now_iso
 
 from .inferencex_client import (
     DEFAULT_BASE_URL,
-    _benchmark_id,
     base_url,
     fetch_agentic_interactivity,
     fetch_rows,
     find_reference_rows,
+    normalize_benchmark_id,
 )
-from .types import BaselinePoint, BaselineQuery, BaselineSummary, BenchmarkMode
-
-
-log = logging.getLogger(__name__)
+from .types import BaselinePoint, BaselineQuery, BaselineReason, BaselineSummary, BenchmarkMode
 
 
 # --- InferenceX model name mapping -------------------------------------------
@@ -74,25 +70,17 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
     return None
 
 
-def _reference_rank(point: BaselinePoint, benchmark_mode: BenchmarkMode) -> tuple:
-    if benchmark_mode == "agentx":
-        return (
-            point.e2e_norm_intvty_p90 is not None,
-            point.e2e_norm_intvty_p90 or 0.0,
-            point.tput_per_gpu,
-            point.date,
-            point.benchmark_id or "",
-        )
-    return (point.tput_per_gpu,)
+def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
+    """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo.
 
-
-def _dedup_by_conc(points: list[BaselinePoint], benchmark_mode: BenchmarkMode = "synthetic") -> list[BaselinePoint]:
-    """Keep one measured row per (conc, decode_tp), ranking AgentX by exact P90."""
+    Args:
+        points: Reference points; ties keep the first point in input order.
+    """
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
         key = (p.conc, p.decode_tp)
         cur = best.get(key)
-        if cur is None or _reference_rank(p, benchmark_mode) > _reference_rank(cur, benchmark_mode):
+        if cur is None or p.tput_per_gpu > cur.tput_per_gpu:
             best[key] = p
     return sorted(best.values(), key=lambda p: (p.conc, p.decode_tp))
 
@@ -122,29 +110,15 @@ def _format_report_md(summary: BaselineSummary) -> str:
 
     if summary.status != "ok" or summary.best is None:
         lines.append(
-            "> No reference data point is available — the orchestrator was "
-            "**not** affected by this step (target_analysis only feeds the "
-            "final report)."
+            "> No reference data point is available for prompt advisory or final-report comparison. "
+            "Objective, scoring, and KEEP/REVERT gates do not depend on this reference."
         )
         return "\n".join(lines) + "\n"
 
     b = summary.best
-    agentx = q.benchmark_mode == "agentx"
-    if agentx:
-        selection = "E2E normalized interactivity P90" if b.e2e_norm_intvty_p90 is not None else "throughput-only"
-        lines.append(f"## Reference best ({selection})")
-    else:
-        lines.append("## Reference best (per-GPU throughput)")
+    lines.append("## Reference best (per-GPU throughput)")
     lines.append("")
-    throughput_label = "Total throughput/GPU" if agentx else "Throughput/GPU"
-    lines.append(f"- {throughput_label}: **{b.tput_per_gpu:.1f}** tok/s/GPU")
-    if agentx:
-        if b.e2e_norm_intvty_p90 is None:
-            lines.append("- E2E normalized interactivity P90: unavailable")
-        else:
-            lines.append(f"- E2E normalized interactivity P90: **{b.e2e_norm_intvty_p90:.3f}** tok/s/user")
-        if b.benchmark_id is not None:
-            lines.append(f"- Reference benchmark ID: {b.benchmark_id}")
+    lines.append(f"- Throughput/GPU: **{b.tput_per_gpu:.1f}** tok/s/GPU")
     lines.append(f"  - at concurrency {b.conc}, decode TP {b.decode_tp}")
     if b.output_tput_per_gpu:
         lines.append(f"- Output Throughput/GPU: {b.output_tput_per_gpu:.1f} tok/s/GPU")
@@ -161,39 +135,26 @@ def _format_report_md(summary: BaselineSummary) -> str:
     if summary.all_concurrencies:
         lines.append("## All matched concurrencies")
         lines.append("")
-        if agentx:
-            lines.append("| conc | decode_tp | total tput/GPU | E2E normalized interactivity P90 | benchmark ID |")
-            lines.append("| ---: | ---: | ---: | ---: | --- |")
-            for p in summary.all_concurrencies:
-                p90 = f"{p.e2e_norm_intvty_p90:.3f}" if p.e2e_norm_intvty_p90 is not None else "unavailable"
-                lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p90} | {p.benchmark_id or '-'} |")
-        else:
-            lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
-            lines.append("| ---: | ---: | ---: | ---: |")
-            for p in summary.all_concurrencies:
-                lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
+        lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
+        lines.append("| ---: | ---: | ---: | ---: |")
+        for p in summary.all_concurrencies:
+            lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
         lines.append("")
 
-    if agentx:
-        lines.append(
-            "> Cross-system reference for same-concurrency advisory comparison. "
-            "These measurements do not feed Objective, scoring, or KEEP/REVERT gates."
-        )
-    else:
-        lines.append(
-            "> Advisory only. This InferenceX-measured reference never feeds the "
-            "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
-            "surfaced to the gap advisory as direction only."
-        )
+    lines.append(
+        "> Advisory only. This InferenceX-measured reference never feeds the "
+        "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
+        "surfaced to the gap advisory as direction only."
+    )
     return "\n".join(lines) + "\n"
 
 
-def _persist(
+def persist_summary(
     summary: BaselineSummary,
     *,
     session_dir: Path,
 ) -> tuple[Path, Path]:
-    """Atomically commit the JSON summary and best-effort render its Markdown projection."""
+    """Write JSON + MD into ``<session_dir>/target_analysis/``."""
     from ..session.session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
@@ -204,11 +165,11 @@ def _persist(
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = target_baseline_json(session_dir)
     md_path = target_analysis_report_md(session_dir)
-    common_io.atomic_write_json(json_path, summary.to_dict())
-    try:
-        md_path.write_text(_format_report_md(summary), encoding="utf-8")
-    except OSError:
-        log.warning("target_analysis: could not render %s", md_path, exc_info=True)
+    json_path.write_text(
+        json.dumps(summary.to_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    md_path.write_text(_format_report_md(summary), encoding="utf-8")
     return json_path, md_path
 
 
@@ -241,55 +202,35 @@ def _write_measured_competitor_target(
     source: str,
 ) -> bool:
     """Persist a measured ``competitor_target.json`` (``source`` = live API URL)."""
-    agentx = query.benchmark_mode == "agentx"
     per_conc: list[dict[str, Any]] = []
     for p in points:
-        if agentx:
-            per_conc.append(
-                {
-                    "conc": p.conc,
-                    "decode_tp": p.decode_tp,
-                    "tput_per_gpu": p.tput_per_gpu,
-                    "e2e_norm_intvty_p90": p.e2e_norm_intvty_p90,
-                    "benchmark_id": p.benchmark_id,
-                    "source": source,
-                }
-            )
+        row = {"conc": p.conc, "tput_per_gpu": p.tput_per_gpu, "source": source}
+        if query.benchmark_mode == "agentx":
+            row.update(e2e_norm_intvty_p90=p.e2e_norm_intvty_p90, benchmark_id=p.benchmark_id, decode_tp=p.decode_tp)
         else:
-            interactivity = (1000.0 / p.mean_tpot_ms) if p.mean_tpot_ms > 0 else 0.0
-            per_conc.append(
-                {
-                    "conc": p.conc,
-                    "tput_per_gpu": p.tput_per_gpu,
-                    "tpot_ms": p.mean_tpot_ms,
-                    "interactivity": interactivity,
-                    "source": source,
-                }
-            )
+            row.update(tpot_ms=p.mean_tpot_ms, interactivity=1000.0 / p.mean_tpot_ms if p.mean_tpot_ms > 0 else 0.0)
+        per_conc.append(row)
     if not per_conc:
         return False
     try:
         from hyperloom.orchestrator.knowledge import research_hints
 
-        return research_hints.write_competitor_target(
-            Path(session_dir),
-            {
-                "gpu": query.gpu,
-                "model": query.model,
-                "framework": query.framework,
-                "precision": query.precision,
-                "per_conc": per_conc,
-                "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
-                **(
-                    {"benchmark_mode": "agentx", "throughput_basis": "total_token_throughput_per_gpu"} if agentx else {}
-                ),
-            },
-        )
+        target = {
+            "gpu": query.gpu,
+            "model": query.model,
+            "framework": query.framework,
+            "precision": query.precision,
+            "per_conc": per_conc,
+            "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
+        }
+        if query.benchmark_mode == "agentx":
+            target.update(benchmark_mode="agentx", throughput_basis="total_token_throughput_per_gpu")
+        return research_hints.write_competitor_target(Path(session_dir), target)
     except Exception:  # noqa: BLE001 — advisory feed is best-effort
         return False
 
 
-def _clear_competitor_target(session_dir: Path) -> None:
+def clear_competitor_target(session_dir: Path) -> None:
     """Remove any existing ``competitor_target.json``. Best-effort, never raises."""
     try:
         from ..session import session_paths
@@ -311,7 +252,18 @@ def analyze(
     osl: int | None = 0,
     benchmark_mode: BenchmarkMode = "synthetic",
 ) -> BaselineSummary:
-    """Build the target-analysis summary from live InferenceX measurements."""
+    """Build the target-analysis summary from live InferenceX measurements.
+
+    Args:
+        session_dir: Destination for the summary and measured competitor target.
+        model_path: Local path or model name to map to InferenceX.
+        compare_against_gpu: Target hardware; empty skips the lookup.
+        framework: Query metadata only, not a row filter.
+        precision: Optional filter; agentx maps MXFP4/NVFP4 to FP4.
+        isl: Synthetic input length; ignored in agentx mode.
+        osl: Synthetic output length; ignored in agentx mode.
+        benchmark_mode: Synthetic fixed-shape or agentx agentic-trace matching.
+    """
     canonical_model = to_inferencex_name(model_path) or ""
     agentx = benchmark_mode == "agentx"
     query_precision = precision.strip()
@@ -328,21 +280,8 @@ def analyze(
     )
     now = now_iso(timespec="seconds", z_suffix=True)
     source = base_url()
-    _persist(
-        BaselineSummary(
-            query=query,
-            fetched_at=now,
-            row_count=0,
-            best=None,
-            status="in_progress",
-            reason="analysis_in_progress",
-            source=source,
-        ),
-        session_dir=session_dir,
-    )
-    _clear_competitor_target(session_dir)
 
-    def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
+    def _skip(status: str, reason: BaselineReason, warning: str) -> BaselineSummary:
         """Persist and return a no-data summary (skipped / no_match cases)."""
         summary = BaselineSummary(
             query=query,
@@ -354,8 +293,8 @@ def analyze(
             warning=warning,
             source=source,
         )
-        _persist(summary, session_dir=session_dir)
-        _clear_competitor_target(session_dir)
+        persist_summary(summary, session_dir=session_dir)
+        clear_competitor_target(session_dir)
         return summary
 
     if not canonical_model:
@@ -423,9 +362,9 @@ def analyze(
             continue
         if agentx:
             try:
-                point.benchmark_id = _benchmark_id(row.get("id"))
+                point.benchmark_id = normalize_benchmark_id(row.get("id"))
             except ValueError:
-                pass
+                pass  # Keep the row as a throughput-only reference.
             if point.benchmark_id is not None:
                 if point.benchmark_id in by_id:
                     continue
@@ -450,8 +389,8 @@ def analyze(
         if missing_p90:
             warnings.append(f"P90 unavailable for {missing_p90} of {len(points)} reference rows")
 
-    all_points = _dedup_by_conc(points, benchmark_mode)
-    best = max(points, key=lambda p: _reference_rank(p, benchmark_mode))
+    all_points = _dedup_by_conc(points)
+    best = max(points, key=lambda p: p.tput_per_gpu)
     dates = sorted({p.date for p in points if p.date})
     if dates:
         warnings.append("reference dates: " + ", ".join(dates))
@@ -466,12 +405,15 @@ def analyze(
         warning="; ".join(warnings),
         source=source,
     )
-    _persist(summary, session_dir=session_dir)
+    persist_summary(summary, session_dir=session_dir)
     if not _write_measured_competitor_target(Path(session_dir), query, all_points, source):
-        _clear_competitor_target(session_dir)
+        clear_competitor_target(session_dir)
     return summary
 
 
 __all__ = [
     "analyze",
+    "clear_competitor_target",
+    "persist_summary",
+    "to_inferencex_name",
 ]

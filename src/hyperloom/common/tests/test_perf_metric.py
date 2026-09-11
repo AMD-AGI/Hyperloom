@@ -50,6 +50,25 @@ def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float
     return gain_pct(intvty_of(cand), intvty_of(base))
 
 
+@pytest.mark.parametrize(
+    "mode,env,expected",
+    [
+        ("", "", False),
+        ("synthetic", "0", False),
+        ("agentx", "0", True),
+        (" AgentX ", "", True),
+        ("synthetic", "true", True),
+        (None, "1", True),
+    ],
+)
+def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, mode, env, expected):
+    from hyperloom.common.perf_metric import agentx_active
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", env)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    assert agentx_active(benchmark_mode=mode) is expected
+
+
 def test_snapshot_carries_both_graded_axes():
     snap = perf_snapshot_from_mapping(_BASELINE)
     assert snap is not None

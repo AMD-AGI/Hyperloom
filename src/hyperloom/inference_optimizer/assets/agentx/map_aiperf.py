@@ -4,12 +4,9 @@
 
 """CLI wrapper: aiperf ``profile_export_aiperf.json`` -> ``inferencex_result.json``."""
 
-import hashlib
 import json
-import math
 import os
 import sys
-from pathlib import Path
 
 
 def _noncanonical_reasons():
@@ -69,8 +66,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
-        # E2E normalised interactivity slow tail: P10 of the per-request rate OSL/E2EL_s equals 1/P90 of the
-        # E2EL/OSL ratio, which is the definition upstream uses (MODELS.md:78).
+        # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
         intvty_p90 = _pct(m, "e2e_output_token_throughput", "p10")
         return {
             "request_throughput": _stat(m, "request_throughput"),
@@ -109,90 +105,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         }
 
 
-def _request_metric(metrics, name, unit):
-    value = metrics.get(name)
-    if isinstance(value, dict):
-        if value.get("unit", unit) != unit:
-            raise ValueError(f"unexpected unit for {name}")
-        value = value.get("value")
-    return float(value) if type(value) in (int, float) and math.isfinite(value) and value > 0 else None
-
-
-def comparison_metrics(src):
-    """Read the summary's request records once without changing the optimization metric."""
-    records_path = Path(src).with_name("profile_export.jsonl")
-    result = {
-        "status": "unavailable",
-        "reason": "",
-        "metric_basis": "inverse_linear_p90_e2el_per_output_token",
-        "unit": "tok/s/user",
-        "e2e_norm_intvty_p90": None,
-        "sample_count": 0,
-        "source": records_path.name,
-    }
-    digest = hashlib.sha256()
-    ratios = []
-    try:
-        with records_path.open("rb") as handle:
-            before = os.fstat(handle.fileno())
-            for line in handle:
-                digest.update(line)
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError("request record must be an object")
-                metadata = record.get("metadata") or {}
-                if not isinstance(metadata, dict):
-                    raise ValueError("request metadata must be an object")
-                if metadata.get("benchmark_phase") and metadata["benchmark_phase"] != "profiling":
-                    continue
-                metrics = record.get("metrics", {})
-                if not isinstance(metrics, dict):
-                    raise ValueError("request metrics must be an object")
-                latency = _request_metric(metrics, "request_latency", "ms")
-                ttft = _request_metric(metrics, "time_to_first_token", "ms")
-                isl = _request_metric(metrics, "input_sequence_length", "tokens")
-                osl = _request_metric(metrics, "output_sequence_length", "tokens")
-                # Match InferenceX's turn eligibility, including the two fields outside the ratio.
-                if any(value is None for value in (latency, ttft, isl, osl)):
-                    continue
-                ratio = latency / 1000.0 / osl
-                if math.isfinite(ratio) and ratio > 0:
-                    ratios.append(ratio)
-            after = os.fstat(handle.fileno())
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            result["reason"] = "request_records_changed"
-            return result
-    except FileNotFoundError:
-        result["reason"] = "request_records_missing"
-        return result
-    except OSError:
-        result["reason"] = "request_records_unreadable"
-        return result
-    except (ValueError, OverflowError):
-        result["reason"] = "request_records_invalid"
-        return result
-    result["source_sha256"] = digest.hexdigest()
-    result["sample_count"] = len(ratios)
-    if not ratios:
-        result["reason"] = "no_eligible_requests"
-        return result
-    ratios.sort()
-    position = 0.9 * (len(ratios) - 1)
-    lower = int(position)
-    upper = min(lower + 1, len(ratios) - 1)
-    p90 = ratios[lower] + (ratios[upper] - ratios[lower]) * (position - lower)
-    result["e2e_norm_intvty_p90"] = 1.0 / p90
-    result["status"] = "ok"
-    return result
-
-
 def main(src, dst):
     with open(src, encoding="utf-8") as f:
         data = json.load(f)
     res = map_aiperf(data, noncanonical_reasons=_noncanonical_reasons())
-    res["comparison_metrics"] = comparison_metrics(src)
     with open(dst, "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2)
     print(json.dumps(res, indent=2))
