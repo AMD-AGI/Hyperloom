@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the infersim benchmark backend + projection bridge.
+"""Tests for the inferasim benchmark backend + projection bridge.
 
 No GPU and no Infera install: the projection call is monkeypatched, so these
 verify backend selection, argv construction, benchmark-spec parsing, model
@@ -18,19 +18,19 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
-from hyperloom.orchestrator.actions.executors import infersim_bridge as ib
-from hyperloom.orchestrator.actions.executors import infersim_runner
+from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+from hyperloom.orchestrator.actions.executors import inferasim_runner
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
 )
 
 
-def test_infersim_backend_selected(monkeypatch):
-    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "infersim")
-    assert bb.resolve_backend_name() == "infersim"
+def test_inferasim_backend_selected(monkeypatch):
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "inferasim")
+    assert bb.resolve_backend_name() == "inferasim"
     backend = bb.resolve_backend()
-    assert backend.name == "infersim"
+    assert backend.name == "inferasim"
     cmd = backend.build_command(
         python_exe="PY",
         config_path=Path("/cfg.yaml"),
@@ -39,7 +39,7 @@ def test_infersim_backend_selected(monkeypatch):
     assert cmd == [
         "PY",
         "-m",
-        "hyperloom.orchestrator.actions.executors.infersim_runner",
+        "hyperloom.orchestrator.actions.executors.inferasim_runner",
         "benchmark",
         "--benchmark-config",
         "/cfg.yaml",
@@ -50,16 +50,16 @@ def test_infersim_backend_selected(monkeypatch):
     ]
 
 
-def test_infersim_backend_lifecycle_ineligible():
-    backend = bb.InfersimBackend()
+def test_inferasim_backend_lifecycle_ineligible():
+    backend = bb.InferasimBackend()
     verdict = backend.lifecycle_eligibility({"framework": "sglang"})
     assert verdict is not None
     assert verdict["eligible"] is False
 
 
-def test_infersim_interpreter_prefers_env(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_INFERSIM_PYTHON", "/opt/infera/bin/python")
-    assert bb.InfersimBackend().resolve_interpreter() == "/opt/infera/bin/python"
+def test_inferasim_interpreter_prefers_env(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_INFERASIM_PYTHON", "/opt/infera/bin/python")
+    assert bb.InferasimBackend().resolve_interpreter() == "/opt/infera/bin/python"
 
 
 def test_spec_from_benchmark_parses_envs(monkeypatch):
@@ -181,7 +181,7 @@ def test_raw_result_from_metrics_shape():
     assert raw["mean_tpot_ms"] == 6.5
     assert raw["mean_e2el_ms"] == 6650.0
     assert raw["total_output_tokens"] == 64 * 1024
-    assert raw["infersim_decode_tps_per_gpu"] == 9000.0
+    assert raw["inferasim_decode_tps_per_gpu"] == 9000.0
 
 
 def _write_bench(tmp_path: Path) -> Path:
@@ -204,7 +204,7 @@ def test_runner_end_to_end_with_mocked_projection(tmp_path, monkeypatch):
     monkeypatch.setattr(ib, "project", lambda spec: _fake_metrics())
 
     cfg_path = _write_bench(tmp_path)
-    rc = infersim_runner.run_benchmark(cfg_path, tmp_path / "out")
+    rc = inferasim_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
 
     workspaces = list((tmp_path / "out").glob("benchmark_sglang_*"))
@@ -212,7 +212,7 @@ def test_runner_end_to_end_with_mocked_projection(tmp_path, monkeypatch):
     ws = workspaces[0]
     report = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
     assert report["success"] is True
-    assert report["bypass_analysis"]["backend"] == "infersim"
+    assert report["bypass_analysis"]["backend"] == "inferasim"
 
     m = extract_benchmark_measurement(report, workspace=ws)
     assert is_valid_measurement(m) is True
@@ -222,11 +222,11 @@ def test_runner_end_to_end_with_mocked_projection(tmp_path, monkeypatch):
 
 def test_runner_projection_failure_emits_failed_report(tmp_path, monkeypatch):
     def boom(spec):
-        raise ib.InfersimBridgeError("no preset resolvable")
+        raise ib.InferasimBridgeError("no preset resolvable")
 
     monkeypatch.setattr(ib, "project", boom)
     cfg_path = _write_bench(tmp_path)
-    rc = infersim_runner.run_benchmark(cfg_path, tmp_path / "out")
+    rc = inferasim_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 1
 
     ws = sorted((tmp_path / "out").glob("benchmark_sglang_*"))[-1]
@@ -236,7 +236,7 @@ def test_runner_projection_failure_emits_failed_report(tmp_path, monkeypatch):
 
 
 def test_runner_cli_rejects_non_local(tmp_path):
-    rc = infersim_runner.main(
+    rc = inferasim_runner.main(
         [
             "benchmark",
             "--benchmark-config",
@@ -251,7 +251,7 @@ def test_runner_cli_rejects_non_local(tmp_path):
 
 
 def test_runner_server_phase_is_noop_success(tmp_path):
-    rc = infersim_runner.main(
+    rc = inferasim_runner.main(
         [
             "benchmark",
             "--benchmark-config",
@@ -272,7 +272,7 @@ def test_resolve_workload_prefers_explicit_env(tmp_path, monkeypatch):
     spec = ib.ServingSpec(framework="sglang", model_path="/m")
     workload, extra_env = ib._resolve_workload_and_env(spec)
     assert workload == str(wl.resolve())
-    assert "INFERSIM_MODEL" not in extra_env
+    assert "INFERASIM_MODEL" not in extra_env
 
 
 def test_resolve_workload_uses_template_for_preset(monkeypatch):
@@ -280,8 +280,8 @@ def test_resolve_workload_uses_template_for_preset(monkeypatch):
     monkeypatch.setenv(ib.ENV_MODEL, "gpt_oss_120B")
     spec = ib.ServingSpec(framework="sglang", model_path="/models/gpt-oss-120b")
     workload, extra_env = ib._resolve_workload_and_env(spec)
-    assert Path(workload).name == "infersim_workload.yaml"
-    assert extra_env["INFERSIM_MODEL"] == "gpt_oss_120B"
+    assert Path(workload).name == "inferasim_workload.yaml"
+    assert extra_env["INFERASIM_MODEL"] == "gpt_oss_120B"
 
 
 def _write_anchor(path: Path, *, model: str, real_weights: bool, decode_ms: float,

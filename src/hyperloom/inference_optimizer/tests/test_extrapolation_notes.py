@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.infersim_bridge import (
+from hyperloom.orchestrator.actions.executors.inferasim_bridge import (
     SINGLE_NODE_GPUS,
     VALIDATED_CONTEXT_TOKENS,
     ServingSpec,
