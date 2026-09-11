@@ -2,7 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
-updated: 2026-09-11
+updated: 2026-09-12
 ---
 
 <!--
@@ -66,6 +66,12 @@ For AITER's INT4/BF16 MoE, read the
 FlyDSL launcher adapter, weight/scale layouts, negative controls, and a packed
 multiply experiment that passed correctness but produced no useful speedup.
 This is Forge validation evidence, separate from the Evolve source cases.
+
+For the FP8/MXFP4 SiTUv2 path, read the
+[Kimi-K3 MoE stage1 screening case](cases/kimi_k3_moe_a8w4_gfx950.md).
+It validates one FlyDSL 0.3.2 roundtrip, explains the required sorted activation
+scale layout, and records five instruction candidates with no stable winner.
+Its routing holdouts show why a warm-cache gain can reverse after eviction.
 
 ## Case knowledge: Qwen3 model integration
 
