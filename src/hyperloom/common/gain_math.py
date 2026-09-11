@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, passes_tput_guard
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -37,8 +38,18 @@ def conc_pair_comparison(
     optimized_points: list[dict[str, Any]],
     *,
     metric_key: str = "output_throughput",
+    guard_noise_pct: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Pair curve points by CONC (outer join), compute per-conc speedup, and aggregate."""
+    """Pair curve points by CONC (outer join), compute per-conc speedup on *metric_key*, and aggregate.
+
+    Under the interactivity objective each pair also reports whether throughput held within the noise band the
+    session grades under. It is reported, not enforced: InferenceX publishes a 2-D frontier with no fixed
+    interactivity target, so a rung that traded throughput for interactivity moved along that frontier rather than
+    violating a constraint -- and a sweep exists to draw the frontier. Gating on the guard here would drop half the
+    curve. The KEEP path enforces it because a stack promotion at one concurrency is a different question.
+    """
+    # The guard belongs to the interactivity objective; on the output axis there is no second axis to hold.
+    guard_axis = GRADED_TOTAL if metric_key == GRADED_INTVTY else ""
 
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
         raw = p.get("conc")
@@ -68,23 +79,42 @@ def conc_pair_comparison(
             successful_pairs += 1
         else:
             failed_pairs += 1
+        # ``graded_axes_of`` is what normalises the sweep's ``total_token_throughput`` onto GRADED_TOTAL, so the
+        # guard cannot read a differently-named axis as an absent one.
+        base_axes = graded_axes_of(b) if guard_axis else {}
+        opt_axes = graded_axes_of(o) if guard_axis else {}
+        guard_holds: bool | None = None
+        if guard_axis and base_axes.get(guard_axis) and opt_axes.get(guard_axis):
+            guard_holds = passes_tput_guard(opt_axes, base_axes, noise_pct=guard_noise_pct)
         rows.append(
             {
                 "conc": c,
-                "baseline_tput": bt,
-                "optimized_tput": ot,
+                # Named for the axis rather than for throughput: under the interactivity objective these hold a
+                # slow-tail percentile, and ``summary.metric`` is what says which.
+                "baseline_value": bt,
+                "optimized_value": ot,
                 "speedup": speedup,
                 "delta_pct": delta_pct,
                 "baseline_status": b.get("status"),
                 "optimized_status": o.get("status"),
+                # The guard axis beside the objective, so the frontier this rung sits on is readable rather than
+                # only the one number it was ranked by. Null off the interactivity objective, and null when a side
+                # did not measure the axis -- which is not the same as a rung that measured it and fell outside.
+                "baseline_guard": base_axes.get(guard_axis) if guard_axis else None,
+                "optimized_guard": opt_axes.get(guard_axis) if guard_axis else None,
+                "guard_holds": guard_holds,
             }
         )
     summary: dict[str, Any] = {
         "metric": metric_key,
+        # The axis held beside the objective, empty off the interactivity objective. Named here so a reader of
+        # ``best_conc_guard_holds`` does not have to infer which axis the verdict is about.
+        "guard_axis": guard_axis,
         "successful_pairs": successful_pairs,
         "failed_pairs": failed_pairs,
         "best_conc": None,
         "best_speedup": None,
+        "best_conc_guard_holds": None,
         "median_speedup": None,
         "mean_speedup": None,
     }
@@ -100,6 +130,9 @@ def conc_pair_comparison(
             {
                 "best_conc": rows[best_idx]["conc"],
                 "best_speedup": round(best_val, 4),
+                # The headline rung is the best on the objective alone. Whether the session's own KEEP rule would
+                # have accepted it is a second fact, and the two disagreeing is worth seeing rather than resolving.
+                "best_conc_guard_holds": rows[best_idx]["guard_holds"],
                 "median_speedup": round(median, 4),
                 "mean_speedup": round(sum(speedups) / len(speedups), 4),
             }

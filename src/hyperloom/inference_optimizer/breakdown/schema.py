@@ -586,7 +586,7 @@ class V6ConcSweepPoint(TypedDict, total=False):
     request_throughput: float | None
     total_token_throughput: float | None
     input_throughput: float | None
-    intvty_p90: float | None
+    e2e_norm_intvty_p90: float | None
     tpot_p90_ms: float | None
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
@@ -633,13 +633,25 @@ class V6ConcSweepArm(TypedDict, total=False):
 
 
 class V6ConcSweepPair(TypedDict, total=False):
-    """The two arms joined at one concurrency."""
+    """The two arms joined at one concurrency.
+
+    The pair is ranked on one axis and reports a second. ``*_value`` is on the
+    axis ``result.metric`` names -- a slow-tail interactivity percentile
+    whenever the session grades on one, which is why these are not named for
+    throughput. ``*_guard`` and ``guard_holds`` carry the throughput the
+    session would have held a promotion to, reported rather than enforced: a
+    sweep exists to draw the interactivity/throughput frontier, so a rung that
+    moved along it is a result and not a failure. They are null off the
+    interactivity objective, where there is no second axis to hold."""
 
     conc: int
-    baseline_throughput: float | None
-    optimized_throughput: float | None
+    baseline_value: float | None
+    optimized_value: float | None
     speedup: float | None
     delta_pct: float | None
+    baseline_guard: float | None
+    optimized_guard: float | None
+    guard_holds: bool | None
     baseline_status: str
     optimized_status: str
     error: str | None
