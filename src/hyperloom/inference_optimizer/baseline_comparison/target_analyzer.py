@@ -15,11 +15,13 @@ from hyperloom.common.timeutil import now_iso
 
 from .inferencex_client import (
     DEFAULT_BASE_URL,
+    _benchmark_id,
     base_url,
+    fetch_agentic_interactivity,
     fetch_rows,
     find_reference_rows,
 )
-from .types import BaselinePoint, BaselineQuery, BaselineSummary
+from .types import BaselinePoint, BaselineQuery, BaselineSummary, BenchmarkMode
 
 
 # --- InferenceX model name mapping -------------------------------------------
@@ -27,11 +29,13 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 KNOWN_INFERENCEX_MODELS: tuple[str, ...] = (
     "DeepSeek-R1-0528",
     "GLM-5",
+    "GLM-5.2",
     "gpt-oss-120b",
     "Llama-3.3-70B-Instruct-FP8",
     "Qwen-3.5-397B-A17B",
     "Kimi-K2.5",
     "MiniMax-M2.5",
+    "MiniMax-M3",
 )
 
 _VENDOR_PREFIX_RE = re.compile(
@@ -59,17 +63,32 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
         for known in KNOWN_INFERENCEX_MODELS:
             if known.casefold() == needle:
                 return known
+        for known in ("GLM-5.2", "MiniMax-M3"):
+            if needle in {f"{known.casefold()}-{suffix}" for suffix in ("fp4", "fp8", "mxfp4", "nvfp4")}:
+                return known
 
     return None
 
 
-def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
-    """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo."""
+def _reference_rank(point: BaselinePoint, benchmark_mode: BenchmarkMode) -> tuple:
+    if benchmark_mode == "agentx":
+        return (
+            point.e2e_norm_intvty_p90 is not None,
+            point.e2e_norm_intvty_p90 or 0.0,
+            point.tput_per_gpu,
+            point.date,
+            point.benchmark_id or "",
+        )
+    return (point.tput_per_gpu,)
+
+
+def _dedup_by_conc(points: list[BaselinePoint], benchmark_mode: BenchmarkMode = "synthetic") -> list[BaselinePoint]:
+    """Keep one measured row per (conc, decode_tp), ranking AgentX by exact P90."""
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
         key = (p.conc, p.decode_tp)
         cur = best.get(key)
-        if cur is None or p.tput_per_gpu > cur.tput_per_gpu:
+        if cur is None or _reference_rank(p, benchmark_mode) > _reference_rank(cur, benchmark_mode):
             best[key] = p
     return sorted(best.values(), key=lambda p: (p.conc, p.decode_tp))
 
@@ -90,6 +109,8 @@ def _format_report_md(summary: BaselineSummary) -> str:
         f"precision=`{q.precision or '(any)'}`  "
         f"ISL/OSL=`{q.isl or '(any)'}/{q.osl or '(any)'}`"
     )
+    if q.benchmark_mode == "agentx":
+        lines.append("- Workload: agentic_traces (variable request lengths)")
     lines.append(f"- Rows matched: {summary.row_count}")
     if summary.warning:
         lines.append(f"- Warning: {summary.warning}")
@@ -104,9 +125,22 @@ def _format_report_md(summary: BaselineSummary) -> str:
         return "\n".join(lines) + "\n"
 
     b = summary.best
-    lines.append("## Reference best (per-GPU throughput)")
+    agentx = q.benchmark_mode == "agentx"
+    if agentx:
+        selection = "E2E normalized interactivity P90" if b.e2e_norm_intvty_p90 is not None else "throughput-only"
+        lines.append(f"## Reference best ({selection})")
+    else:
+        lines.append("## Reference best (per-GPU throughput)")
     lines.append("")
-    lines.append(f"- Throughput/GPU: **{b.tput_per_gpu:.1f}** tok/s/GPU")
+    throughput_label = "Total throughput/GPU" if agentx else "Throughput/GPU"
+    lines.append(f"- {throughput_label}: **{b.tput_per_gpu:.1f}** tok/s/GPU")
+    if agentx:
+        if b.e2e_norm_intvty_p90 is None:
+            lines.append("- E2E normalized interactivity P90: unavailable")
+        else:
+            lines.append(f"- E2E normalized interactivity P90: **{b.e2e_norm_intvty_p90:.3f}** tok/s/user")
+        if b.benchmark_id is not None:
+            lines.append(f"- Reference benchmark ID: {b.benchmark_id}")
     lines.append(f"  - at concurrency {b.conc}, decode TP {b.decode_tp}")
     if b.output_tput_per_gpu:
         lines.append(f"- Output Throughput/GPU: {b.output_tput_per_gpu:.1f} tok/s/GPU")
@@ -123,17 +157,30 @@ def _format_report_md(summary: BaselineSummary) -> str:
     if summary.all_concurrencies:
         lines.append("## All matched concurrencies")
         lines.append("")
-        lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
-        lines.append("| ---: | ---: | ---: | ---: |")
-        for p in summary.all_concurrencies:
-            lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
+        if agentx:
+            lines.append("| conc | decode_tp | total tput/GPU | E2E normalized interactivity P90 | benchmark ID |")
+            lines.append("| ---: | ---: | ---: | ---: | --- |")
+            for p in summary.all_concurrencies:
+                p90 = f"{p.e2e_norm_intvty_p90:.3f}" if p.e2e_norm_intvty_p90 is not None else "unavailable"
+                lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p90} | {p.benchmark_id or '-'} |")
+        else:
+            lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
+            lines.append("| ---: | ---: | ---: | ---: |")
+            for p in summary.all_concurrencies:
+                lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
         lines.append("")
 
-    lines.append(
-        "> Advisory only. This InferenceX-measured reference never feeds the "
-        "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
-        "surfaced to the gap advisory as direction only."
-    )
+    if agentx:
+        lines.append(
+            "> Cross-system reference for same-concurrency advisory comparison. "
+            "These measurements do not feed Objective, scoring, or KEEP/REVERT gates."
+        )
+    else:
+        lines.append(
+            "> Advisory only. This InferenceX-measured reference never feeds the "
+            "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
+            "surfaced to the gap advisory as direction only."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -190,18 +237,31 @@ def _write_measured_competitor_target(
     source: str,
 ) -> bool:
     """Persist a measured ``competitor_target.json`` (``source`` = live API URL)."""
+    agentx = query.benchmark_mode == "agentx"
     per_conc: list[dict[str, Any]] = []
     for p in points:
-        interactivity = (1000.0 / p.mean_tpot_ms) if p.mean_tpot_ms > 0 else 0.0
-        per_conc.append(
-            {
-                "conc": p.conc,
-                "tput_per_gpu": p.tput_per_gpu,
-                "tpot_ms": p.mean_tpot_ms,
-                "interactivity": interactivity,
-                "source": source,
-            }
-        )
+        if agentx:
+            per_conc.append(
+                {
+                    "conc": p.conc,
+                    "decode_tp": p.decode_tp,
+                    "tput_per_gpu": p.tput_per_gpu,
+                    "e2e_norm_intvty_p90": p.e2e_norm_intvty_p90,
+                    "benchmark_id": p.benchmark_id,
+                    "source": source,
+                }
+            )
+        else:
+            interactivity = (1000.0 / p.mean_tpot_ms) if p.mean_tpot_ms > 0 else 0.0
+            per_conc.append(
+                {
+                    "conc": p.conc,
+                    "tput_per_gpu": p.tput_per_gpu,
+                    "tpot_ms": p.mean_tpot_ms,
+                    "interactivity": interactivity,
+                    "source": source,
+                }
+            )
     if not per_conc:
         return False
     try:
@@ -216,6 +276,9 @@ def _write_measured_competitor_target(
                 "precision": query.precision,
                 "per_conc": per_conc,
                 "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
+                **(
+                    {"benchmark_mode": "agentx", "throughput_basis": "total_token_throughput_per_gpu"} if agentx else {}
+                ),
             },
         )
     except Exception:  # noqa: BLE001 — advisory feed is best-effort
@@ -240,18 +303,24 @@ def analyze(
     compare_against_gpu: str,
     framework: str = "",
     precision: str = "",
-    isl: int = 0,
-    osl: int = 0,
+    isl: int | None = 0,
+    osl: int | None = 0,
+    benchmark_mode: BenchmarkMode = "synthetic",
 ) -> BaselineSummary:
     """Build the target-analysis summary from live InferenceX measurements."""
     canonical_model = to_inferencex_name(model_path) or ""
+    agentx = benchmark_mode == "agentx"
+    query_precision = precision.strip()
+    if agentx and query_precision.casefold() in {"mxfp4", "nvfp4"}:
+        query_precision = "fp4"
     query = BaselineQuery(
         model=canonical_model,
         gpu=compare_against_gpu.strip(),
         framework=framework.strip(),
-        precision=precision.strip(),
-        isl=int(isl or 0),
-        osl=int(osl or 0),
+        precision=query_precision,
+        isl=None if agentx else int(isl or 0),
+        osl=None if agentx else int(osl or 0),
+        benchmark_mode=benchmark_mode,
     )
     now = now_iso(timespec="seconds", z_suffix=True)
     source = base_url()
@@ -294,6 +363,7 @@ def analyze(
         isl=query.isl,
         osl=query.osl,
         precision=query.precision,
+        benchmark_mode=query.benchmark_mode,
     )
     if not matched:
         hw = query.gpu.strip().casefold()
@@ -312,6 +382,7 @@ def analyze(
                 isl=query.isl,
                 osl=query.osl,
                 precision="",
+                benchmark_mode=query.benchmark_mode,
             )
             if shape_rows:
                 return _skip(
@@ -327,13 +398,46 @@ def analyze(
             f"precision={query.precision or '(any)'}",
         )
 
-    points = [p for p in (_row_to_point(r) for r in matched) if p is not None]
+    points: list[BaselinePoint] = []
+    by_id: dict[str, BaselinePoint] = {}
+    for row in matched:
+        point = _row_to_point(row)
+        if point is None:
+            continue
+        if agentx:
+            try:
+                point.benchmark_id = _benchmark_id(row.get("id"))
+            except ValueError:
+                pass
+            if point.benchmark_id is not None:
+                if point.benchmark_id in by_id:
+                    continue
+                by_id[point.benchmark_id] = point
+        points.append(point)
     if not points:
         return _skip("no_match", "no_valid_rows", "matched InferenceX rows had no positive tput_per_gpu")
 
-    all_points = _dedup_by_conc(points)
-    best = max(points, key=lambda p: p.tput_per_gpu)
+    warnings: list[str] = []
+    if agentx:
+        warnings.append(
+            "cross-system reference, not a GPU-only comparison; precision bucket does not prove identical "
+            "quantization, corpus or deployment configuration"
+        )
+        derived = fetch_agentic_interactivity(list(by_id)) if by_id else {}
+        if derived is None:
+            warnings.append("P90 fetch failed; total throughput remains available")
+        else:
+            for key, point in by_id.items():
+                point.e2e_norm_intvty_p90 = derived.get(key)
+        missing_p90 = sum(p.e2e_norm_intvty_p90 is None for p in points)
+        if missing_p90:
+            warnings.append(f"P90 unavailable for {missing_p90} of {len(points)} reference rows")
+
+    all_points = _dedup_by_conc(points, benchmark_mode)
+    best = max(points, key=lambda p: _reference_rank(p, benchmark_mode))
     dates = sorted({p.date for p in points if p.date})
+    if dates:
+        warnings.append("reference dates: " + ", ".join(dates))
     summary = BaselineSummary(
         query=query,
         fetched_at=now,
@@ -342,7 +446,7 @@ def analyze(
         all_concurrencies=all_points,
         status="ok",
         reason="ok",
-        warning=("reference dates: " + ", ".join(dates) if dates else ""),
+        warning="; ".join(warnings),
         source=source,
     )
     _persist(summary, session_dir=session_dir)
