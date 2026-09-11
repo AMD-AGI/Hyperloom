@@ -33,6 +33,7 @@ from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.tracker import UsageAccumulator
 
 # Framework apply-back artifacts live beside, never inside, the artifact paths the nested standalone FlyDSL forge-loop
 # owns (``forge_experiments/best*``).
@@ -326,6 +327,7 @@ async def _run_agent(
     timeout_sec: int,
     progress_log: list[str],
     prior_failure: str = "",
+    usage: UsageAccumulator | None = None,
 ) -> tuple[str, str]:
     runtime = config.agent_runtime()
     backend = create_registered_backend(
@@ -367,7 +369,7 @@ async def _run_agent(
         ),
     )
     result = await asyncio.wait_for(
-        backend.run(run_spec),
+        backend.run(run_spec, usage=usage),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
     # A turn cap or SDK error leaves a half-rewired integration that passes host validation and every gate after it,
@@ -724,6 +726,7 @@ def generate_applyback_patch(
     deadline_unix: float | None = None,
     import_modules: list[str] | tuple[str, ...] = (),
     max_attempts: int = 2,
+    usage: UsageAccumulator | None = None,
 ) -> ApplybackResult:
     """Run bounded clean-room agent attempts and publish a validated patch."""
     workspace = Path(spec.workspace).resolve()
@@ -856,6 +859,7 @@ def generate_applyback_patch(
                         timeout_sec=timeout_sec,
                         progress_log=progress_log,
                         prior_failure=prior_failure,
+                        usage=usage,
                     )
                 )
 

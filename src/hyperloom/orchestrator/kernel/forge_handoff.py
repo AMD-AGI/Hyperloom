@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from typing import Any
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
+from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
@@ -78,31 +78,11 @@ def _environment_overrides(
     return dict(sorted(merged.items()))
 
 
-def _source_repository_roots(state: Any) -> tuple[Path, ...]:
-    """Resolve configured source paths to distinct Git repository roots."""
-    raw_paths = [
-        getattr(state, "framework_repo_path", ""),
-        os.environ.get("FRAMEWORK_REPO_PATH", ""),
-    ]
-    raw_paths.extend(
-        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
-    )
-    roots: set[Path] = set()
-    for raw in raw_paths:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        path = Path(text).expanduser().resolve(strict=False)
-        if path.is_file():
-            path = path.parent
-        for candidate in (path, *path.parents):
-            if (candidate / ".git").exists():
-                roots.add(candidate)
-                break
-    return tuple(sorted(roots, key=str))
-
-
-def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = None) -> str:
+def build_serving_context_md(
+    state: Any,
+    env_spec: Mapping[str, Any] | None = None,
+    baselines: Mapping[str, Any] | None = None,
+) -> str:
     """Render the framework, serving arguments, and environment overrides."""
     context = _workload_context(state)
     spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
@@ -133,9 +113,18 @@ def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = No
         "## Source Repositories",
         "",
     ]
-    source_roots = _source_repository_roots(state)
+    # Taken from the seal that just ran rather than read back from Git: the
+    # commit it returned is the base every rewrite of that repository diffs
+    # from, and re-reading HEAD would both cost a subprocess per repository
+    # and leave a window in which the two could disagree.
+    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
+    source_roots = tuple(sorted(sealed)) or tuple(str(root) for root in campaign_repositories(state))
     if source_roots:
-        lines.extend(f"- `{root}`" for root in source_roots)
+        # Reported with the commit each one currently sits at, which the caller
+        # sealed just before this was written. That object id is the base every
+        # rewrite of this repository diffs from, so a task naming a path Git does
+        # not carry there is answerable from this document alone.
+        lines.extend(f"- `{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots)
     else:
         lines.append("- not available")
     lines.extend(
@@ -223,6 +212,7 @@ def write_forge_handoff(
     *,
     env_spec: Mapping[str, Any] | None = None,
     handoff_dir: Path | None = None,
+    baselines: Mapping[str, Any] | None = None,
 ) -> Path:
     """Atomically write one Forge handoff and return its directory."""
     if handoff_dir is None:
@@ -233,7 +223,7 @@ def write_forge_handoff(
     handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
-        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec),
+        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec, baselines),
         TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
     }
     for filename, text in documents.items():

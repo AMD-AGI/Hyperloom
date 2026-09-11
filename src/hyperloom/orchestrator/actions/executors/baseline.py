@@ -42,6 +42,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 )
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
+from ...measurement.integrate_performance import assess_integrate_performance
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
@@ -55,6 +56,7 @@ from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
+    is_aiter_jit_registry_mismatch,
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
@@ -2200,6 +2202,7 @@ class BaselineExecutor:
     async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
         """Open the baseline event, run the action, and close it either way."""
         params = ctx.task.params or {}
+        streak, total = self._failure_counters(ctx)
         recorder = make_baseline_recorder(
             self._resolve_sink(ctx),
             task_id=str(getattr(ctx.task, "task_id", "") or ""),
@@ -2208,6 +2211,8 @@ class BaselineExecutor:
             framework=self._resolve_framework(ctx),
             establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
             params=params,
+            failure_streak_before=streak,
+            total_failures_before=total,
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
@@ -2249,6 +2254,29 @@ class BaselineExecutor:
                 exc_info=True,
             )
             return None
+
+    def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
+        """The session's baseline failure counts as this measurement starts.
+
+        Read here, at the dispatch, because the counters are advanced by the
+        write-back once this action has returned -- so the event cannot see its
+        own effect on them, and the value it can see is the one that says what
+        this attempt was dispatched into.
+
+        Args:
+            ctx (RunnerContext): The runner context.
+
+        Returns:
+            tuple[int | None, int | None]: The consecutive-failure streak and
+                the session total, or ``(None, None)`` when no state is bound.
+        """
+        with suppress(Exception):
+            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+            return (
+                int(getattr(state, "baseline_failure_streak", 0) or 0),
+                int(getattr(state, "baseline_total_failures", 0) or 0),
+            )
+        return (None, None)
 
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Name the serving framework this measurement runs against."""
@@ -2754,8 +2782,34 @@ class BaselineExecutor:
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
             except Exception:  # noqa: BLE001 — runtime overlay is best-effort
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
-        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and capability-preflight aiperf before Magpie
-        # runs the materialized config.
+        # Report the invocation now, with the config final and the server not
+        # yet booted. This frame is the only one that knows the args as a fact:
+        # the one-shot eager fallback and the MoE-runner drop have both had
+        # their say by here, and after the launch the same answer can only be
+        # guessed at by parsing the server's own log back.
+        if recorder is not None:
+            with suppress(Exception):
+                recorder.record_invocation(
+                    run_index=run_index,
+                    framework_args=effective_extra_server_args,
+                    extra_envs=base_extra_envs,
+                    config_path=materialized_config_path,
+                    framework=fw,
+                    model_path=resolved_model,
+                    args_mode=str(params.get("args_mode") or "append"),
+                )
+        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
+        # capability-preflight aiperf before Magpie runs the materialized config.
+        # Baseline/profile shell out here (not via _run_magpie), so without this the
+        # materialize-time swap to aiperf_client.sh would point at a script that was
+        # never deployed. No-op when HYPERLOOM_AGENTX is off.
+        #
+        # Off-loop: this call can shell out to the installer (the runtime aiperf
+        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
+        # cross-process ``flock`` with no timeout of its own. Run inline it would
+        # freeze the whole orchestrator for as long as that takes -- heartbeats,
+        # cancellation, the wall-clock budget and every bus write stop with it.
+        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
@@ -3225,17 +3279,39 @@ class BaselineExecutor:
                     ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
                 )
                 if defer_accuracy_until_after_measure:
-                    try:
-                        min_tput = float(
-                            params.get(
-                                "post_measure_accuracy_min_tput",
-                                0.0,
-                            )
-                            or 0.0
-                        )
-                    except (TypeError, ValueError):
-                        min_tput = 0.0
-                    if float(_hot or 0.0) >= min_tput:
+                    keep_policy = params.get("post_measure_accuracy_keep_policy")
+                    if keep_policy is not None:
+                        performance = assess_integrate_performance(live_shared_state, result, **keep_policy)
+                        run_accuracy = performance.decision == "KEEP"
+                        graded = performance.graded
+                        skipped_accuracy = {
+                            "status": "skipped",
+                            "reason": (
+                                "intvty_regression"
+                                if graded.graded_on_intvty and graded.verdict == "REVERT"
+                                else "performance_keep_not_eligible"
+                            ),
+                            "graded_objective": graded.objective,
+                            "candidate": graded.candidate,
+                            "reference": graded.reference,
+                            "base_tput": keep_policy["base_tput"],
+                            "gain_pct": performance.gain_pct,
+                            "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
+                            "degrade_reason": graded.degrade_reason,
+                        }
+                    else:
+                        try:
+                            min_tput = float(params.get("post_measure_accuracy_min_tput", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            min_tput = 0.0
+                        run_accuracy = float(_hot or 0.0) >= min_tput
+                        skipped_accuracy = {
+                            "status": "skipped",
+                            "reason": "throughput_below_threshold",
+                            "minimum_tput": min_tput,
+                            "observed_tput": float(_hot or 0.0),
+                        }
+                    if run_accuracy:
                         accuracy_dir = output_dir / "accuracy_round"
                         accuracy_cfg = self._write_lifecycle_config(
                             materialized_config_path,
@@ -3282,12 +3358,7 @@ class BaselineExecutor:
                             result.setdefault("nonfatal_warnings", [])
                             result["nonfatal_warnings"].append("post_measure_accuracy_failed")
                     else:
-                        result["accuracy_stage"] = {
-                            "status": "skipped",
-                            "reason": "throughput_below_threshold",
-                            "minimum_tput": min_tput,
-                            "observed_tput": float(_hot or 0.0),
-                        }
+                        result["accuracy_stage"] = skipped_accuracy
             return result
         finally:
             # Defensive teardown so no persistent server leaks.
@@ -4012,6 +4083,11 @@ class BaselineExecutor:
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
 
+        registry_mismatch = is_aiter_jit_registry_mismatch(
+            server_log_text,
+            proc_stderr or "",
+            proc_stdout or "",
+        )
         # The same read that produced the observation answers whether the wall
         # is the recoverable cuda-graph capture one (OOM-rooted ones excluded)
         # that arms the one-shot eager retry below.
@@ -4056,6 +4132,18 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            # Registry mismatch is wrapped in "Capture cuda graph failed" and must win so we do not arm the
+            # disable-cuda-graph retry.
+            if registry_mismatch:
+                return {
+                    "status": "failed",
+                    "error_class": "aiter_jit_registry_mismatch",
+                    "returncode": proc_returncode,
+                    "error": redact_secret_values(
+                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
+                    ),
+                    **failure_extras,
+                }
             # cuda-graph capture failures take priority over server_init_dead: only this class arms the one-shot
             # disable-cuda-graph retry.
             if cuda_graph_capture_failed:
@@ -4117,9 +4205,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            # cuda-graph capture failure wins over server_init_dead so the one-shot disable-cuda-graph retry is armed
-            # even when both co-occur.
-            if cuda_graph_capture_failed:
+            if registry_mismatch:
+                error_class = "aiter_jit_registry_mismatch"
+                error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
+            elif cuda_graph_capture_failed:
                 error_class = "cuda_graph_capture_failed"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
             elif server_init_dead:

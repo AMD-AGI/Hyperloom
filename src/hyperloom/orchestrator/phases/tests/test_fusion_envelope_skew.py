@@ -37,13 +37,16 @@ def _phase(*, spent: int = 0, session_dir=None):
     async def _integrate_fusion(result):
         integrated.append(result)
 
-    return SimpleNamespace(
+    phase = SimpleNamespace(
         shared_state=state,
         bus=bus,
         session_dir=session_dir,
         integrated=integrated,
         _integrate_fusion=_integrate_fusion,
     )
+    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
+    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
+    return phase
 
 
 def _kept(**extra: Any) -> dict[str, Any]:

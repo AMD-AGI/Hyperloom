@@ -57,9 +57,45 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
     # ``config``/``cli`` carry the operator's value to the runtime, which is the
     # one direction that is allowed; they are matched by name, not by position,
     # so a new module cannot inherit the exemption by accident.
-    allowed = {"config.py", "cli.py", "orchestrator/agent.py", "orchestrator/supervisor.py"}
+    allowed = {
+        "config.py",
+        "cli.py",
+        "orchestrator/agent.py",
+        "orchestrator/supervisor.py",
+        "fusion/command.py",
+        "gemm_tune/tier3/generate.py",
+    }
     unexpected = [entry for entry in offenders if entry.rsplit(":", 1)[0] not in allowed]
     assert not unexpected, "call sites pinning a reasoning effort: " + ", ".join(unexpected)
+
+
+def test_every_runtime_is_built_where_the_switches_are_read() -> None:
+    """No module builds an agent runtime outside the list that reads the env.
+
+    Deleting a ``reasoning_effort="high"`` literal makes a call site *look*
+    like it defers to the runtime while it still builds its own, which is a
+    silently pinned session rather than a converged one. The property that
+    actually holds the convergence together is this one: the set of modules
+    that construct a runtime is closed, and every member has been checked to
+    read ``CLAUDE_MODEL``/``CODEX_MODEL`` and the effort variables. A new
+    construction site has to be added here, which is where that check happens.
+    """
+    builders = {"resolve_agent_runtime", "AgentRuntimeConfig"}
+    found: list[str] = []
+    for path in _python_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in builders:
+                found.append(str(path.relative_to(_SRC)))
+    allowed = {
+        "config.py",
+        "fusion/command.py",
+        "gemm_tune/tier3/generate.py",
+        "orchestrator/agent.py",
+        "orchestrator/supervisor.py",
+    }
+    unexpected = sorted(set(found) - allowed)
+    assert not unexpected, "runtimes built outside the switch-reading modules: " + ", ".join(unexpected)
 
 
 def test_runtime_effort_outranks_the_spec() -> None:
@@ -153,3 +189,39 @@ def test_effort_ceilings_are_confined_to_the_two_argued_call_sites() -> None:
                     if keyword.arg == "max_reasoning_effort":
                         offenders.add(str(path.relative_to(_SRC)))
     assert offenders == _CAPPED_CALL_SITES, sorted(offenders)
+
+
+def test_every_runtime_names_a_model_it_resolved_for_that_provider() -> None:
+    """A runtime is built with a model read for the provider being built.
+
+    Two ways to get this wrong, and the tree had one of each: pass no ``model``
+    at all and the registry default silently wins over ``CODEX_MODEL``; pass
+    the already-resolved ``config.agent_model`` across a provider switch and a
+    Claude id reaches the OpenAI-protocol gateway. Both are invisible to the
+    closed-set test above, which only says *where* runtimes are built.
+    """
+    offenders: list[str] = []
+    for path in _python_sources():
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            if node.func.id != "resolve_agent_runtime":
+                continue
+            model = next((kw.value for kw in node.keywords if kw.arg == "model"), None)
+            where = f"{path.relative_to(_SRC)}:{node.lineno}"
+            if model is None:
+                offenders.append(f"{where} (no model=)")
+                continue
+            text = ast.get_source_segment(source, model) or ""
+            # ``config.agent_model`` was resolved for whichever provider the
+            # config settled on, which is not the one being built here.
+            if "config.agent_model" in text:
+                offenders.append(f"{where} (carries {text} across a provider switch)")
+            elif "resolve_agent_model" not in text and "resolve_agent_model" not in source:
+                offenders.append(f"{where} ({text} is not read per-provider)")
+    # ``config.py`` holds the resolved value on the dataclass and reads the pair
+    # itself once the provider is settled, so it is the one legitimate hand-off.
+    offenders = [entry for entry in offenders if not entry.startswith("config.py:")]
+    assert not offenders, "runtimes built without a model resolved for their provider: " + ", ".join(offenders)

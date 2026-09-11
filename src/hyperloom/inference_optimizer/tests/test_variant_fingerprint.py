@@ -159,7 +159,6 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     assert es["accepted"] == []
     assert es["rejected"] == []
     assert "winners_history" in es
-    assert "synergy_attempted" in es
 
 
 def test_fingerprint_single_dash_flag_differs_from_missing_value() -> None:

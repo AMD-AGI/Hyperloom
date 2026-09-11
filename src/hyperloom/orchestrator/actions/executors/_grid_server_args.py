@@ -747,12 +747,13 @@ def inject_sglang_attention_backend(
     )
 
 
-# sglang MoE runner backend injection: sglang's default routes MoE models through aiter's CK 2-stage fused-MoE kernel,
-# whose JIT build is broken in some ROCm images.
-HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV = "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND"
-
-DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND = "triton"
-
+# sglang MoE runner backend: Hyperloom no longer forces a backend. sglang's own
+# ``--moe-runner-backend auto`` correctly follows ``SGLANG_USE_AITER`` (aiter
+# when the harness pre-shuffles MoE weights for it, triton otherwise) without
+# crashing on current sglang/ROCm images; verified end-to-end on a real MoE
+# checkpoint before this override was removed. ``moe_runner_requires_aiter``
+# below is still used to strip an *inherited* ``--moe-runner-backend`` that
+# would crash an aiter-only quant scheme (grid variants, baseline retries).
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
@@ -791,47 +792,6 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
     return _model_moe_runner_requires_aiter(path) or _online_quant_requires_aiter_moe_runner(
         str(server_args or ""),
         path,
-    )
-
-
-def inject_sglang_moe_runner_backend(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    gpu_type: str | None = None,
-) -> str:
-    """Append a ``--moe-runner-backend`` for MoE sglang models on AMD/ROCm."""
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
-        return args
-    from hyperloom.inference_optimizer.cli.model_gate import _model_is_moe
-    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-
-    if not _resolve_amd_gpu_type(gpu_type):
-        return args
-    if not _model_is_moe(str(model_path or "")):
-        return args
-    # An aiter-only MoE scheme has no triton runner: injecting one crashes the server on the first forward pass.
-    if moe_runner_requires_aiter(args, str(model_path or "")):
-        log.info(
-            "MoE model with an aiter-only quant scheme: skipping "
-            "--moe-runner-backend injection (the triton runner has no "
-            "implementation for it)."
-        )
-        return args
-    backend = (
-        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip() or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
-    )
-    log.info(
-        "MoE model on AMD/ROCm: injecting --moe-runner-backend %s (aiter CK "
-        "2-stage fused-MoE JIT build is broken in this image).",
-        backend,
-    )
-    return merge_server_args(
-        args,
-        f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
     )
 
 

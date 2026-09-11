@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 
 CONTROLLER_STATE_SCHEMA_VERSION = 1
 
+#: What the opportunity analysis's ledger row is filed against. It buys no
+#: operator, so it cannot borrow an operator id.
+ANALYSIS_LEDGER_ID = "opportunity-analysis"
+
 CONTROLLER_STATUS_RUNNING = "running"
 CONTROLLER_STATUS_COMPLETED = "completed"
 CONTROLLER_STATUS_NO_OPPORTUNITY = "no_opportunity"
@@ -87,6 +91,11 @@ class ControllerRunState:
     #: and the operator it bought, and it runs out of process, so the totals are
     #: recorded here for Hyperloom to append to its LLM ledger afterwards.
     forge_llm_usage: tuple[dict[str, Any], ...] = ()
+    #: What the opportunity analysis spent, in the same row shape. Kept apart
+    #: from the rows above because it buys no operator: a run that publishes
+    #: nothing still pays for the analysis, and filing it as a forge-loop would
+    #: make the per-operator accounting above answer for spend no operator owns.
+    analysis_llm_usage: tuple[dict[str, Any], ...] = ()
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -124,6 +133,25 @@ def _forge_llm_usage(results: Iterable[SingleTaskResult]) -> tuple[dict[str, Any
             }
         )
     return tuple(rows)
+
+
+def _analysis_llm_usage(analysis: Any) -> tuple[dict[str, Any], ...]:
+    """Render the analysis session's spend as one ledger row, or none.
+
+    ``ANALYSIS_ID`` stands in for the operator id the forge-loop rows carry:
+    the analysis is what chooses the operators, so it belongs to none of
+    them, and the ledger still needs something to file the row against.
+    """
+    usage = getattr(analysis, "llm_usage", None)
+    if not isinstance(usage, dict) or int(usage.get("calls") or 0) <= 0:
+        return ()
+    return (
+        {
+            "operator_id": ANALYSIS_LEDGER_ID,
+            "model": str(getattr(analysis, "agent_model", "") or ""),
+            **usage,
+        },
+    )
 
 
 def _validate_budget(budget_minutes: object) -> float:
@@ -285,6 +313,7 @@ def run_controller(
             analysis_published_task_count=analysis.published_task_count,
             analysis_rejected_task_count=analysis.rejected_task_count,
             analysis_rejected_tasks=analysis.rejected_tasks,
+            analysis_llm_usage=_analysis_llm_usage(analysis),
         )
         schedule = dispatch_prepared_tasks(
             layout,
@@ -340,6 +369,7 @@ def run_controller(
             "analysis_published_task_count": analysis.published_task_count,
             "analysis_rejected_task_count": analysis.rejected_task_count,
             "analysis_rejected_tasks": analysis.rejected_tasks,
+            "analysis_llm_usage": _analysis_llm_usage(analysis),
             "task_count": schedule.task_count,
             "patch_count": patch_count,
             "skipped_task_count": schedule.skipped_count,

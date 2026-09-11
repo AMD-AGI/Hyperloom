@@ -5,6 +5,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `=== Warm start ===` block told the model it was starting cold on top of
+  a matched recipe.** `to_warm_start_summary` read three fields no writer
+  produces — `recipe.get("raw")`, and `raw`/`symptom` on each pitfall — so an
+  exact hit carrying a full config printed
+  `(no recipe text — first session for this workload/hw)`, and a `pitfalls (N):`
+  header could appear with nothing under it. That is not a silent omission; it
+  asserts the opposite of what the KB found, on the line the model reads to
+  decide whether it has prior work to build on.
+
+  The block now renders `warm_start_context`, the model-facing view
+  `recipe_kb_t0` already builds and persists on every anchor, instead of
+  re-deriving a second one from the raw row. That view answers what this block
+  exists to answer and the row cannot: `status` distinguishes a hit from a
+  seed-only first session, `match.tier`/`confidence` qualify the match, and
+  `recommended_replay` carries the config already split into server args and
+  envs with its donor attached. A borrowed config is now labelled with the model
+  it came from, so another workload's throughput can no longer read as this
+  session's own history, and the pitfall header counts the rows it prints.<br/>
+  **Operator note**: affects the conversation warm-start block and the
+  `warm_start` MCP context tool, in both local and remote Recipe modes.
+
+- **Lessons and pitfalls recorded by the Recipe KB reach the specialist again —
+  every one of them was rendering as `(none)`.** Sections 5b and 5c read
+  `point["attrs"]["statement"]` / `point["attrs"]["description"]`, but nothing in
+  the system writes an `attrs`-wrapped experience row. `Recipe.to_dict`,
+  `_normalise_lessons` and `_normalise_str_dicts` all write flat rows, `writeback`
+  appends `{statement, measured_impact}` flat, and
+  `test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row` already
+  asserted `state.warm_start_lessons[0]["statement"]`. A flat row therefore
+  resolved `attrs` to `{}`, produced an empty statement, and hit the
+  `if not statement: continue` guard, so both sections fell through to their
+  `(none)` placeholder no matter how much a prior session had learned.
+
+  The wrapped form survived only in hand-written test fixtures, so it is deleted
+  rather than accommodated: the renderers read the flat fields directly, and the
+  one place a legacy wrapped row is unwrapped is `recipe_kb_t0._experience_rows`,
+  where `warm_start_lessons` / `warm_start_pitfalls` are assigned. No reader
+  downstream knows about two shapes.
+
+  That normalisation is also where an unusable row is now dropped, with a
+  warning naming the field and the count. The silence is what let this run for so
+  long: a non-empty list could render as `(none)` with no log and no error, so
+  neither the prompt nor the operator had any signal. Rejecting at the boundary
+  puts the complaint where the shape is known, instead of adding a warning to a
+  renderer that should not be inspecting shapes at all.
+
+  The contract docs that caused the drift are corrected too — the section
+  docstrings ("KB `kind=lesson` points"), `_render_measured_impact`
+  ("`attrs.measured_impact`"), `_format_version_note`'s `lesson_attrs`
+  parameter, and the `SharedState.warm_start_pitfalls` / `warm_start_lessons`
+  field comments ("list of KB point dicts") all described a wrapped row.
+  Fixtures are flat, and two of them are built by calling the writer so the
+  reader and the stored shape cannot drift apart again.<br/>
+  **Operator note**: sessions lost no recorded knowledge, but until now none of
+  it was being shown to the agent.
+
 ### Removed
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the
@@ -230,15 +288,26 @@ for the user-facing summary.
   variable carried it, rather than passing it through for the provider to
   reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
   keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
-  non-reasoning models and gateways that reject the field.
+  non-reasoning models and gateways that reject the field.<br/>
+  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
+  reaches the gateway.** Hyperloom's own chat.completions used to forward
+  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
+  drops it and the call runs at the gateway's default -- deeper and more
+  expensive, with no error to notice. Forge's side of the same variable is loud
+  (it refuses to start), but Hyperloom's cannot be without breaking
+  non-reasoning models, so **a deployment sitting on `minimal` has to move to
+  `low` by hand.**
 
 - **Forge reads Hyperloom's environment contract instead of its own.** Forge
   does not ship next to Hyperloom any more, it ships inside it, and an operator
   configuring one box was being asked to learn two vocabularies for the same
   decision. `Config.from_env` now walks the ladder
   `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
-  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it -- reimplemented rather
-  than imported, because this package does not depend on `hyperloom`. Reasoning effort falls back to
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
+  written out separately because they answer different questions -- Hyperloom's
+  picks the model for its own calls into a campaign, Forge's picks the model an
+  agent session runs -- and the part worth sharing is the variable names, which
+  this change makes identical. Reasoning effort falls back to
   the project-wide `HYPERLOOM_REASONING_EFFORT` when
   `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
   is not silently contradicted by the component doing most of the spending.<br/>
@@ -270,6 +339,30 @@ for the user-facing summary.
   relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
   through to the provider default rather than failing, so **check your
   deployment's env rather than waiting for an error.**
+
+- **`auto` resolves the model after the provider, not before.** The model
+  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
+  backend of `auto` answered before the question was settled: `auto` prefers
+  the Claude CLI but falls to codex when it is not installed, and the runtime
+  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
+  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
+  and `Config.agent_runtime` reads the pair once the provider is known. Two
+  further sites built their own runtime and so read neither switch:
+  `fusion/command.py` pinned every fusion session to the default depth
+  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
+  took the provider default model and the default effort. Both now read the
+  same pair and the same effort ladder as `forge-loop`, and a new test asserts
+  the set of modules that build a runtime is closed -- a fresh bypass fails the
+  suite rather than going unnoticed, which is how these two did.<br/>
+  The two provider-*switch* branches had the same defect on their far side.
+  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
+  provider other than the implementer's -- which is the ordinary case, since
+  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
+  all, so the supervisor ran the registry default however `CODEX_MODEL` was
+  set. `make_agent_fn` did the opposite, carrying the already-resolved
+  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
+  defect again one level up. Both now read the pair for the provider they are
+  about to build, and a second test asserts every construction site does.
 
 - **An agent session's reasoning effort is now the operator's decision, not the
   call site's.** `AgentRunSpec.resolved()` used to let a spec's own

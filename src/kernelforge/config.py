@@ -47,9 +47,12 @@ def resolve_agent_model(agent_backend: str) -> str:
     operator configuring a box should not have to learn a second vocabulary for
     the same decision. There is exactly one rung, and it is the platform's:
     ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
-    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. It is
-    reimplemented rather than imported because this package does not depend on
-    ``hyperloom``.
+    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. The two
+    are written out separately rather than sharing one helper because they
+    answer different questions -- that one picks the model for Hyperloom's own
+    calls into a Forge campaign, this one picks the model an agent session
+    runs -- and the shared piece worth deduplicating is the variable names,
+    which is exactly what this change makes identical.
 
     Forge used to consult private variables above that pair -- first
     ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``, then a provider-neutral
@@ -60,13 +63,18 @@ def resolve_agent_model(agent_backend: str) -> str:
     resolver never had them, so deleting them is what makes the two ladders the
     same ladder rather than two that agree by coincidence.
 
-    A backend of ``auto`` reads the Claude variable, matching both the default
-    provider selection here and what ``resolve_forge_llm_model`` does with a
-    backend it does not recognise.
+    Only a settled backend has an answer here. ``auto`` gets ``""``: which
+    provider runs is not known until :meth:`Config.agent_runtime` has checked
+    which CLI is actually installed, and answering early with ``CLAUDE_MODEL``
+    would hand a Claude model id to Codex on a box where the Claude CLI is
+    missing -- a 400 from the gateway, not a fallback.
     """
-    if (agent_backend or "").strip().lower() == "codex":
+    backend = (agent_backend or "").strip().lower()
+    if backend == "codex":
         return os.getenv("CODEX_MODEL", "").strip()
-    return os.getenv("CLAUDE_MODEL", "").strip()
+    if backend == "claude":
+        return os.getenv("CLAUDE_MODEL", "").strip()
+    return ""
 
 
 def resolve_agent_reasoning_effort() -> str:
@@ -272,9 +280,13 @@ class Config:
         provider = self.agent_backend
         if provider == "auto":
             provider = select_default_agent_provider(self.agent_model).name
+        # The model variable is per-provider, so it can only be read once the
+        # provider is settled -- reading it before ``auto`` resolves is how a
+        # Claude model id reaches Codex.
+        model = self.agent_model or resolve_agent_model(provider)
         return resolve_agent_runtime(
             provider,
-            model=self.agent_model,
+            model=model,
             executable=self.agent_cli,
             timeout_sec=self.agent_timeout_sec,
             reasoning_effort=self.agent_reasoning_effort,

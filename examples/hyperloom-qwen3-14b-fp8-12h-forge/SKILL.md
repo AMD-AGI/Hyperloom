@@ -29,8 +29,9 @@ Nothing else has to be installed or configured for this:
   no `FORGE_PATH` to point anywhere.
 - The runtime installer already installs the `claude` CLI that the forge
   backend drives, unconditionally — the backend is chosen per session, later.
-- Forge reuses the LLM credentials setup already wrote. `FORGE_CLAUDE_MODEL`
-  falls back to `CLAUDE_MODEL`, so no separate key or model id is needed.
+- Forge reuses the LLM credentials setup already wrote. It reads
+  `CLAUDE_MODEL` / `CODEX_MODEL`, the same pair every other Hyperloom
+  component reads, so no separate key or model id is needed.
 - `rocprof-compute` profiling deps are installed unconditionally too.
 
 Do **not** set the other `FORGE_*` variables. They are internal tuning knobs

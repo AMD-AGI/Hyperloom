@@ -317,12 +317,36 @@ class MachinePhase(PhaseHandler):
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged only.
         try:
-            await self._on_phase_entered(from_phase=prior or "", to_phase=target, reason=reason or "")
+            await self._on_phase_entered(
+                from_phase=prior or "",
+                to_phase=target,
+                reason=reason or "",
+                evidence=evidence if isinstance(evidence, dict) else None,
+            )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
-    async def _on_phase_entered(self, *, from_phase: str, to_phase: str, reason: str = "") -> None:
-        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done)."""
+    async def _on_phase_entered(
+        self,
+        *,
+        from_phase: str,
+        to_phase: str,
+        reason: str = "",
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done).
+
+        Args:
+            from_phase: The phase being left.
+            to_phase: The phase being entered; selects which per-phase entry
+                hook fires.
+            reason: The transition reason, recorded as the left phase's exit
+                reason when that phase owns a timeline event.
+            evidence: The transition evidence. Carried for the phase being
+                left, whose exit rule already read the values it decided on --
+                a phase that recomputed them at close would report counts over
+                a history that kept growing after the decision.
+        """
         try:
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort
@@ -335,6 +359,17 @@ class MachinePhase(PhaseHandler):
                 self._close_kernel_timeline(exit_reason=str(reason or ""))
             except Exception:  # noqa: BLE001 — observability cannot change the transition
                 log.debug("Coordinator: kernel timeline close failed", exc_info=True)
+        # FRAMEWORK closes on the same terms, and additionally needs the
+        # evidence: its exit rule already read both arms' plateau state, and
+        # that reading is what the phase acted on.
+        if (from_phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
+            try:
+                self._close_framework_timeline(
+                    exit_reason=str(reason or ""),
+                    evidence=evidence if isinstance(evidence, dict) else None,
+                )
+            except Exception:  # noqa: BLE001 — observability cannot change the transition
+                log.debug("Coordinator: framework timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:

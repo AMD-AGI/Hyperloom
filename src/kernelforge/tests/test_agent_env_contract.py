@@ -47,9 +47,9 @@ def test_orchestration_model_is_inherited(clean_env) -> None:
     clean_env.setenv("CODEX_MODEL", "gpt-5.6")
     assert resolve_agent_model("claude") == "claude-opus-5"
     assert resolve_agent_model("codex") == "gpt-5.6"
-    # An unrecognised backend reads the Claude ladder, which is both what
-    # ``auto`` resolves to here and what Hyperloom's resolver does.
-    assert resolve_agent_model("auto") == "claude-opus-5"
+    # ``auto`` has no answer yet: the model variable is per-provider and which
+    # provider runs is only known once the CLI check has run.
+    assert resolve_agent_model("auto") == ""
 
 
 def test_the_forge_private_model_vars_are_not_read(clean_env) -> None:
@@ -70,7 +70,7 @@ def test_the_forge_private_model_vars_are_not_read(clean_env) -> None:
     clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
     assert resolve_agent_model("claude") == "claude-opus-5"
     assert resolve_agent_model("codex") == "gpt-5.6"
-    assert resolve_agent_model("auto") == "claude-opus-5"
+    assert resolve_agent_model("auto") == ""
 
 
 def test_the_context_window_env_is_not_read(clean_env) -> None:
@@ -164,3 +164,36 @@ def test_an_explicit_effort_is_not_vetoed_by_a_stale_environment(clean_env) -> N
     clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "minimal")
     config = Config.from_env(agent_backend="claude", workspace="/tmp", agent_reasoning_effort="low")
     assert config.agent_reasoning_effort == "low"
+
+
+def test_auto_never_hands_a_claude_model_id_to_codex(clean_env) -> None:
+    """``auto`` resolves the model after the provider, not before.
+
+    On a box with only the Codex CLI installed, ``auto`` settles on codex.
+    Reading ``CLAUDE_MODEL`` before that happens would send ``claude-opus-5``
+    to the OpenAI-protocol gateway, which answers 400 rather than falling back.
+    """
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.6-sol")
+    config = Config.from_env(agent_backend="auto", workspace="/tmp")
+    assert config.agent_model == ""
+    assert resolve_agent_model("codex") == "gpt-5.6-sol"
+
+
+def test_a_backend_switch_reads_the_new_provider_s_model(clean_env, monkeypatch) -> None:
+    """Switching provider re-reads the pair; it never carries the old id over.
+
+    ``make_supervisor_fn`` and ``make_agent_fn`` rebuild the runtime when the
+    caller names a backend other than the resolved one -- the supervisor's
+    ``--supervisor-backend`` defaults to ``codex`` on ``forge-rewrite``, so a
+    Claude implementer takes this branch on an ordinary run. The model variable
+    is per-provider, so the switch has to read it again: passing nothing ran
+    the new provider on the registry default, and passing the old provider's id
+    sent a Claude model to the OpenAI-protocol gateway.
+    """
+    from kernelforge.agent_backends.registry import resolve_agent_runtime
+
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.5")
+    assert resolve_agent_runtime("codex", model=resolve_agent_model("codex")).model == "gpt-5.5"
+    assert resolve_agent_runtime("claude", model=resolve_agent_model("claude")).model == "claude-opus-5"

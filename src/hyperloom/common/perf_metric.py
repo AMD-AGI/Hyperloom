@@ -219,6 +219,16 @@ class GradedComparison:
     degrade_reason: str = ""
 
     @property
+    def comparable(self) -> bool:
+        """Whether both sides supplied the axes the session asked to be graded on.
+
+        A degraded pair still carries an output-axis figure, which is a useful diagnostic but not the objective the
+        session was configured for. Lanes that must not promote on a substitute axis read this rather than the
+        verdict, so an axis-less measurement fails closed instead of scoring as an output win.
+        """
+        return not self.degrade_reason
+
+    @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
         return self.objective == GRADED_INTVTY

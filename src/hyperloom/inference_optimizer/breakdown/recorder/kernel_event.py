@@ -1,13 +1,40 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The SBD V6 ``kernel`` event: one row per fact, assembled at the close."""
+"""The SBD V6 ``kernel`` event: one row per fact, assembled at the close.
+
+A KERNEL entry produces facts over minutes to hours -- lane runs, rebench
+verdicts, GEAK's whole delegated campaign -- and the reason they are written as
+one fragment per row rather than accumulated in memory is not write volume. It
+is that the row is the unit that gets updated: a lane run is recorded when it
+starts and again when its rebench settles, and a fragment keyed by that run
+merges the two without anyone reading the first write back. Held in memory, the
+same two-stage arrival needs a mutable object that only the writing process
+has, so a resumed process either loses the first half or re-derives it.
+
+Recording and assembly are therefore separate halves of this module, and only
+assembly ever sees a whole event. :class:`KernelEventRecorder` writes rows and
+knows nothing about arrays; :func:`assemble_kernel_ext` reads the rows back and
+decides every wire position, ordering and count. The split is what lets
+finalize rebuild the event of a session that was killed mid-phase from exactly
+the same rows, through exactly the same code, rather than through a second
+projection that agrees with this one only until one of them is edited.
+
+Two derivations stay in assembly for the same reason. Settlement -- which
+candidate was adopted -- is a join between a lane row and the rebench row that
+re-measured it, and neither exists yet when the other is written. The event
+status is read off what the rebenches measured, so it cannot be known before
+the last one lands. Both are computed once, from the rows, at the close.
+
+Every ``*_at`` argument in this module is an ISO timestamp.
+"""
 
 from __future__ import annotations
 
 import logging
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
@@ -56,23 +83,45 @@ SECTION_TRACE_ANALYZE = "kernel_trace_analyze"
 SECTION_GEAK_ATTEMPT = "kernel_geak_attempt"
 SECTION_GEAK_DISCOVERY = "kernel_geak_discovery"
 SECTION_GEAK_ACCEPTANCE = "kernel_geak_acceptance"
+#: One row per kernel the trace attributed during this visit, with the profiling
+#: fields the hot-kernel summary deliberately drops. Kept apart from the lane
+#: rows because discovery is a snapshot of what the analysis found, not an
+#: optimization attempt.
+SECTION_DISCOVERED = "kernel_discovered"
+
+#: One row per end-to-end integrate gate verdict, keyed by the integration id.
+#: The gate is the orchestrator's, not a lane's: a lane produces a candidate
+#: and rules on its own micro-benchmark, and whether the patch survives an
+#: end-to-end measurement is decided afterwards, by a step outside the phase
+#: that produced it. The verdict is its own row rather than a field on the
+#: lane's because one patch can be gated several times -- an integration fault
+#: is retried on its own budget -- and because the settling can land in a
+#: later cycle than the rewrite it rules on.
+SECTION_INTEGRATE = "kernel_integrate"
 
 ROW_LANE_RUN = "lane_run"
 ROW_REBENCH = "rebench"
 ROW_TRACE_ANALYZE = "trace_analyze"
+
+#: What asked for an analysis. The bus request is its own trigger because it
+#: is the one path with no roofline event of its own to account for it.
+TRACE_ANALYZE_TRIGGER_BUS_REQUEST = "bus_request"
+
 ROW_GEAK_ATTEMPT = "geak_attempt"
 ROW_GEAK_DISCOVERY = "geak_discovery"
 ROW_GEAK_ACCEPTANCE = "geak_acceptance"
+ROW_DISCOVERED = "discovered"
+ROW_INTEGRATE = "integrate"
+
+_ACTIVE: ContextVar["KernelEventRecorder | None"] = ContextVar("kernel_event_active", default=None)
 
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
-ROUTE_COLLECTIVE_ONLY = "collective_only"
 
-# The six candidate producers a KERNEL entry can adopt from.
+# The five candidate producers a KERNEL entry can adopt from.
 SOURCE_KERNEL_REWRITE = "kernel_rewrite"
 SOURCE_FUSION = "fusion"
 SOURCE_GEMM_TUNING = "gemm_tuning"
-SOURCE_COLLECTIVE = "collective"
 SOURCE_GEAK_AUTHORED_KERNEL = "geak_authored_kernel"
 SOURCE_GEAK_ENV_SELECTION = "geak_env_selection"
 
@@ -80,7 +129,6 @@ _SOURCE_KINDS = (
     SOURCE_KERNEL_REWRITE,
     SOURCE_FUSION,
     SOURCE_GEMM_TUNING,
-    SOURCE_COLLECTIVE,
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEAK_ENV_SELECTION,
 )
@@ -93,7 +141,6 @@ LANE_BY_SOURCE = {
     SOURCE_KERNEL_REWRITE: "kernel_rewrites",
     SOURCE_FUSION: "fusion_runs",
     SOURCE_GEMM_TUNING: "gemm_tuning_runs",
-    SOURCE_COLLECTIVE: "collective_runs",
 }
 
 #: The two rebench ledgers. They are separate wire arrays because they answer
@@ -143,32 +190,467 @@ __all__ = [
     "REBENCH_NO_MATERIAL",
     "REBENCH_NO_PROMOTE",
     "REBENCH_VALIDATED",
-    "ROUTE_COLLECTIVE_ONLY",
     "ROUTE_FORGE",
     "ROUTE_GEAK",
     "SECTION_EVENT",
     "SECTION_GEAK_ACCEPTANCE",
     "SECTION_GEAK_ATTEMPT",
     "SECTION_GEAK_DISCOVERY",
+    "SECTION_INTEGRATE",
     "SECTION_LANE_RUN",
     "SECTION_REBENCH",
     "SECTION_TRACE_ANALYZE",
-    "SOURCE_COLLECTIVE",
     "SOURCE_FUSION",
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEAK_ENV_SELECTION",
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
+    "TRACE_ANALYZE_TRIGGER_BUS_REQUEST",
     "KernelEventRecorder",
+    "active_kernel_recorder",
     "assemble_kernel_ext",
     "kernel_event_id",
     "make_kernel_recorder",
+    "record_integrate_verdict",
+    "record_trace_analyze_request",
 ]
 
 
+def active_kernel_recorder() -> "KernelEventRecorder | None":
+    """Return the KERNEL visit recorder currently open in this context, if any."""
+    return _ACTIVE.get()
+
+
 def kernel_event_id(macro_cycle: Any) -> str:
-    """Build the event id of the KERNEL entry in one macro cycle."""
+    """Build ``kernel_agent:{macro_cycle}:kernel``. Raises ``ValueError`` if
+    ``macro_cycle`` is not a non-negative integer."""
     return event_id(EVENT_PHASE, macro_cycle, EVENT_COMPONENT)
+
+
+def record_integrate_verdict(
+    *,
+    macro_cycle: Any,
+    integration_id: str,
+    kernel_id: str,
+    decision: str = "",
+    status: str = "",
+    attempt_count: Any = None,
+    fault_count: Any = None,
+    gain_pct: Any = None,
+    accuracy_pass: Any = None,
+    validation_tier: str = "",
+    patch_path: str = "",
+    target_file: str = "",
+    error_class: str = "",
+    rejected_reason: str = "",
+    retryable: bool = False,
+    settled_at: str = "",
+    extra_server_args: str = "",
+    basis: str = "",
+    alignment_status: str = "",
+    gain_attributed: Any = None,
+) -> None:
+    """Record the end-to-end integrate gate's verdict on one patch.
+
+    The gate runs outside the phase that produced the patch: the KERNEL visit
+    hands a KEEP to a queue and exits, and the queue is drained by a later
+    step which measures the patch end to end and rules on it. So the verdict
+    is not the visit's to state, and it does not exist yet when the visit
+    closes -- which is why this is a module function taking a cycle rather
+    than a method on the visit's recorder. A closed event still accepts row
+    fragments; nothing is assembled until the export reads the whole spool.
+
+    The row is attached to the event of the cycle the gate settled in, which
+    is the cycle that ran the gate rather than necessarily the one that
+    produced the patch: a patch whose integration faulted is retried on its
+    own budget and can settle a cycle or more later. ``kernel_id`` is on the
+    row so the two can be joined either way, and the row is only written when
+    that event exists, so a verdict never mints an event of its own.
+
+    Args:
+        decision: The gate's verdict (``KEEP`` / ``REVERT``).
+        fault_count: How many attempts never measured the patch fairly.
+        rejected_reason: Why the patch was rejected outright, when it was -- an
+            exhausted budget rather than a verdict on the code.
+        basis: Throughput basis the gain was measured on (``hot`` / ``cold``);
+            a gain is meaningless without the baseline behind it.
+        gain_attributed: Whether the measured gain is this one kernel's. A
+            rebench carrying several kernels measured all of them together, so
+            the gain is real but unattributable.
+    """
+    if not str(integration_id or ""):
+        return
+    try:
+        sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+        if not sink.has_row(SECTION_EVENT):
+            log.debug(
+                "kernel timeline: no event %s to hold the integrate verdict for %s",
+                sink.event_id,
+                integration_id,
+            )
+            return
+        sink.record(
+            SECTION_INTEGRATE,
+            {
+                "integration_id": str(integration_id),
+                "kernel_id": str(kernel_id or ""),
+                "decision": _text(decision),
+                "status": _text(status),
+                "attempt_count": _int_or_none(attempt_count),
+                "fault_count": _int_or_none(fault_count),
+                "gain_pct": _float_or_none(gain_pct),
+                "accuracy_pass": accuracy_pass if isinstance(accuracy_pass, bool) else None,
+                "validation_tier": _text(validation_tier),
+                "patch_path": _text(patch_path),
+                "target_file": _text(target_file),
+                "error_class": _text(error_class),
+                "rejected_reason": _text(rejected_reason),
+                "retryable": bool(retryable),
+                "settled_at": _text(settled_at),
+                "settled_in_macro_cycle": _int_or_none(macro_cycle),
+                "extra_server_args": _text(extra_server_args),
+                "basis": _text(basis),
+                "alignment_status": _text(alignment_status),
+                "gain_attributed": gain_attributed if isinstance(gain_attributed, bool) else None,
+            },
+            row_type=ROW_INTEGRATE,
+            natural_ids=str(integration_id),
+        )
+        _republish_closed_event(sink.event_id)
+    except Exception:  # noqa: BLE001 — observability cannot change KERNEL behavior
+        log.warning(
+            "kernel timeline: could not record the integrate verdict for %s",
+            integration_id,
+            exc_info=True,
+        )
+
+
+def _write_discovered_kernels(
+    sink: Any,
+    snapshot: Mapping[str, Any] | None,
+    *,
+    provenance: str,
+) -> None:
+    """Write the profiling-rich kernel table from one analysis cache.
+
+    Args:
+        sink (Any): The sink to write the rows to.
+        snapshot (Mapping[str, Any] | None): A ``last_trace_analyze``-shaped
+            cache, or any dict carrying ``hot_kernels_top15``.
+        provenance (str): Why this snapshot was taken.
+    """
+    produced = _as_dict(snapshot)
+    rows = _as_list(produced.get("hot_kernels_top15"))
+    if not rows:
+        rows = _as_list(produced.get("kernel_roofline_top15"))
+    if not rows:
+        return
+    snapshot_id = _int_or_none(produced.get("roofline_snapshot_id"))
+    reusable = {str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))}
+    for rank, entry in enumerate(rows):
+        if not isinstance(entry, Mapping):
+            continue
+        row = _discovered_kernel_row(
+            entry,
+            rank=rank,
+            snapshot_id=snapshot_id,
+            provenance=provenance,
+            reusable_ids=reusable,
+        )
+        if row is None:
+            continue
+        sink.record(
+            SECTION_DISCOVERED,
+            row,
+            row_type=ROW_DISCOVERED,
+            natural_ids=(str(snapshot_id or 0), str(row.get("kernel_id") or f"rank:{rank}")),
+        )
+
+
+def _write_trace_analyze_run(
+    sink: Any,
+    *,
+    run_id: str,
+    trigger: str,
+    status: str,
+    result: Any,
+    requested_by: str = "",
+    request_msg_id: str = "",
+    trace_input: str = "",
+    top_k: Any = None,
+    snapshot: dict[str, Any] | None = None,
+    cache_hit: bool = False,
+) -> None:
+    """Write one analysis row and the kernel table it produced.
+
+    ``status`` is ``ok`` or ``failed``.
+    """
+    produced = _as_dict(snapshot)
+    sink.record(
+        SECTION_TRACE_ANALYZE,
+        {
+            "run_id": str(run_id or ""),
+            "trigger": _text(trigger),
+            "requested_by": _text(requested_by),
+            "request_msg_id": _text(request_msg_id),
+            "ts": _now_iso(),
+            "status": str(status or ""),
+            "cache_hit": bool(cache_hit),
+            "trace_input": _text(trace_input),
+            "top_k": _int_or_none(top_k),
+            "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
+            "roofline_baseline_gain_at_snapshot": _float_or_none(produced.get("roofline_baseline_gain_at_snapshot")),
+            "steady_state_trace": _text(produced.get("steady_state_trace")),
+            "analysis_md_path": _text(produced.get("analysis_md_path")),
+            "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
+            "trace_validate_ref": None,
+            **_analysis_detail(result),
+        },
+        row_type=ROW_TRACE_ANALYZE,
+        natural_ids=str(run_id or ""),
+    )
+    if produced:
+        _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
+
+
+def record_trace_analyze_request(
+    *,
+    macro_cycle: Any,
+    run_id: str,
+    status: str,
+    result: Any,
+    requested_by: str = "",
+    request_msg_id: str = "",
+    trace_input: str = "",
+    top_k: Any = None,
+    snapshot: dict[str, Any] | None = None,
+    cache_hit: bool = False,
+) -> None:
+    """Record an analysis an agent requested through the bus, not a phase.
+
+    A ``trace_analyze`` dispatched this way advances the roofline snapshot
+    counter and replaces the analysis cache, but it opens no roofline event of
+    its own -- the counter simply incremented with nothing on the timeline to
+    explain it, and the kernel table the analysis produced reached the report
+    only by way of the state projection. The row is attached to the visit that
+    was running when the request landed, which is the only event that can
+    account for it, and is written only when that event exists so a bus
+    request never mints one.
+
+    ``status`` is ``ok`` or ``failed``.
+    """
+    if not str(run_id or ""):
+        return
+    try:
+        sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+        if not sink.has_row(SECTION_EVENT):
+            log.debug(
+                "kernel timeline: no event %s to hold the trace_analyze request %s",
+                sink.event_id,
+                run_id,
+            )
+            return
+        _write_trace_analyze_run(
+            sink,
+            run_id=run_id,
+            trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
+            status=status,
+            result=result,
+            requested_by=requested_by,
+            request_msg_id=request_msg_id,
+            trace_input=trace_input,
+            top_k=top_k,
+            snapshot=snapshot,
+            cache_hit=cache_hit,
+        )
+        _republish_closed_event(sink.event_id)
+    except Exception:  # noqa: BLE001 — observability cannot change KERNEL behavior
+        log.warning(
+            "kernel timeline: could not record the trace_analyze request %s",
+            run_id,
+            exc_info=True,
+        )
+
+
+def _republish_closed_event(event: str) -> None:
+    """Re-assemble a closed event so a fragment written after it is published.
+
+    The export reads the durable timeline rather than re-assembling it, so a
+    closed event's published ``ext`` is whatever the close assembled. A row
+    that lands afterwards is in the spool but not in the event, and would stay
+    that way. Re-assembling and updating the same storage sequence is what
+    puts it there -- the same write the close makes, made again.
+
+    An event still running is left alone: its own close will assemble the row
+    along with everything else, and publishing a half-finished event here
+    would show it closed.
+    """
+    from ...session.sbd_v6 import timeline_sequence
+
+    parts = event_parts(EVENT_SECTIONS, event=event)
+    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+    header = rows[0] if rows else {}
+    end_time = _text(header.get("end_time"))
+    if not end_time:
+        return
+    ext, derived = assemble_kernel_ext(parts, event=event)
+    finish_event(
+        event_type=EVENT_TYPE,
+        event=event,
+        sequence=timeline_sequence(header),
+        status=_text(header.get("closed_status")) or derived,
+        ext=ext,
+        kind=EVENT_KIND,
+        start_time=_text(header.get("start_time")) or "",
+        end_time=end_time,
+    )
+
+
+def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Project one kernel's integrate rows into the standing e2e sub-result.
+
+    A patch can be gated more than once, so the sub-result reports the verdict
+    that stands: the last one to settle. The best gain is taken across all of
+    them, because a fault that measured nothing does not un-measure what an
+    earlier attempt did.
+
+    Returns:
+        dict[str, Any] | None: The sub-result, or ``None`` when the kernel was
+            never gated -- which is not the same as being gated and rejected.
+    """
+    if not rows:
+        return None
+    ordered = sort_rows(rows, keys=("settled_at", "attempt_count"))
+    last = ordered[-1]
+    gains = [row.get("gain_pct") for row in ordered if isinstance(row.get("gain_pct"), (int, float))]
+    return {
+        "integrated": str(last.get("decision") or "").upper() == "KEEP",
+        "e2e_gain_pct": max(gains) if gains else None,
+        "validated": last.get("accuracy_pass") if isinstance(last.get("accuracy_pass"), bool) else None,
+        "decision": _text(last.get("decision")),
+        "patch_path": _text(last.get("patch_path")),
+        "target_file": _text(last.get("target_file")),
+    }
+
+
+def _fold_integrate_into_by_source(
+    by_source: dict[str, dict[str, Any]],
+    *,
+    lanes: Mapping[str, list[dict[str, Any]]],
+    acceptances: Mapping[str, list[dict[str, Any]]],
+    integrate_by_kernel: Mapping[str, list[dict[str, Any]]],
+) -> None:
+    """Settle each source's counters against the integrate gate.
+
+    ``adopted`` counts what the rebench validated, which is a different
+    question from what the E2E gate then kept: a candidate can clear the micro
+    benchmark and never be gated at all. Reporting only the first left a reader
+    unable to tell an adoption from a measurement that merely looked good, so
+    the gate's own verdict is folded in here as its own counters.
+
+    A kernel gated more than once counts once, under the verdict that stands.
+
+    """
+    for counters in by_source.values():
+        counters.update({"keeps": 0, "reverts": 0, "micro_only_keeps": 0, "e2e_gain_pct": None})
+
+    def _fold(source: str, kernel_id: str, outcome: str) -> None:
+        counters = by_source.get(source)
+        if counters is None:
+            return
+        verdict = _integrate_e2e(list(integrate_by_kernel.get(kernel_id, []))) if kernel_id else None
+        if verdict is None:
+            # Never gated. Only an adoption is a micro-only keep; a candidate
+            # the rebench rejected was not kept at any level.
+            if outcome == OUTCOME_ADOPTED:
+                counters["micro_only_keeps"] += 1
+            return
+        decision = str(verdict.get("decision") or "").upper()
+        if decision == "KEEP":
+            counters["keeps"] += 1
+        elif decision:
+            counters["reverts"] += 1
+        gain = verdict.get("e2e_gain_pct")
+        if isinstance(gain, (int, float)):
+            best = counters.get("e2e_gain_pct")
+            if best is None or gain > best:
+                counters["e2e_gain_pct"] = float(gain)
+
+    for lane in lanes.values():
+        for row in lane:
+            _fold(
+                str(row.get("source_kind") or ""),
+                str(row.get("kernel_id") or ""),
+                str(row.get("outcome") or ""),
+            )
+    for kind in (_ACCEPTANCE_AUTHORED, _ACCEPTANCE_ENV):
+        for entry in acceptances.get(kind, []):
+            _fold(
+                str(entry.get("source_kind") or ""),
+                str(entry.get("kernel_id") or entry.get("short_name") or ""),
+                str(entry.get("outcome") or ""),
+            )
+
+
+def _discovered_kernel_row(
+    entry: Mapping[str, Any],
+    *,
+    rank: int,
+    snapshot_id: int | None,
+    provenance: str,
+    reusable_ids: set[str],
+) -> dict[str, Any] | None:
+    """Normalize one hot-kernel row into the discovered-kernel view.
+
+    Returns the normalized row, or ``None`` without identity.
+    """
+    kernel_id = _text(entry.get("kernel_id"))
+    name = _text(entry.get("name"))
+    if not kernel_id and not name:
+        return None
+    duration = entry.get("duration_us")
+    if duration is None:
+        duration = entry.get("gpu_time_us")
+    call_count = entry.get("call_count")
+    if call_count is None:
+        call_count = entry.get("count")
+    bandwidth = entry.get("bandwidth_utilization_pct")
+    if bandwidth is None:
+        bandwidth = entry.get("bandwidth_util_pct")
+    compute = entry.get("compute_utilization_pct")
+    if compute is None:
+        compute = entry.get("compute_util_pct")
+    intensity = entry.get("arithmetic_intensity")
+    if intensity is None:
+        intensity = entry.get("flops_per_byte")
+    kid = str(kernel_id or "")
+    reusable = bool(entry.get("reusable_native_kernel")) or (kid and kid in reusable_ids)
+    recommended_backends = [str(item) for item in _as_list(entry.get("recommended_backends"))]
+    recommended_actions = [str(item) for item in _as_list(entry.get("recommended_actions"))]
+    return {
+        "kernel_id": kid,
+        "name": _clip(name or ""),
+        "rank": int(rank),
+        "snapshot_id": snapshot_id,
+        "provenance": str(provenance or ""),
+        "gpu_pct": _float_or_none(entry.get("gpu_pct")),
+        "duration_us": _float_or_none(duration),
+        "call_count": _int_or_none(call_count),
+        "kernel_category": str(entry.get("kernel_category") or ""),
+        "bottleneck": _text(entry.get("bottleneck")),
+        "bound_type": _text(entry.get("bound_type")),
+        "arithmetic_intensity": _float_or_none(intensity),
+        "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
+        "bandwidth_util_pct": _float_or_none(bandwidth),
+        "compute_util_pct": _float_or_none(compute),
+        "source_file": _text(entry.get("source_file")),
+        "optimization_notes": _clip(entry.get("optimization_notes") or entry.get("suggestion") or ""),
+        "recommended_backends": recommended_backends,
+        "recommended_actions": recommended_actions,
+        "reusable_native_kernel": reusable,
+        "selected": reusable or bool(recommended_backends) or bool(recommended_actions),
+    }
 
 
 def _empty_by_source() -> dict[str, dict[str, int]]:
@@ -188,7 +670,14 @@ def _lane_row(
     rebench_ref: str | None,
     failure_reason: str | None,
 ) -> dict[str, Any]:
-    """Build the fields every candidate lane row carries."""
+    """Build the fields every candidate lane row carries.
+
+    ``outcome`` is left at its unsettled value rather than accepted from the
+    caller: a row is adopted or rejected by the rebench that re-measured it, and
+    that verdict is a different row which may not have been written yet. It is
+    resolved at assembly, once both halves are on disk.
+
+    """
     return {
         "source_kind": str(source_kind),
         "run_id": str(run_id or ""),
@@ -220,7 +709,14 @@ def _rebench_row(
     status: str | None = None,
     engagement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one rebench attempt row."""
+    """Build one rebench attempt row.
+
+    ``engagement`` is the part the orchestrator already computed but never
+    persisted: the GEAK verdict path compares the config fingerprint and the
+    overlay digest to decide ``validated`` versus ``fallback``, and dropped both
+    booleans on the floor once the decision was made.
+
+    """
     verified = _as_dict(engagement)
     base = _float_or_none(base_tput)
     measured = _float_or_none(measured_tput)
@@ -290,13 +786,22 @@ def _acceptance_rows(specs: Any) -> list[dict[str, Any]]:
                 "lane": lane,
                 "e2e_delta_pct": delta,
                 "alias_collapsed": bool(row.get("alias_collapsed")),
+                # The names this acceptance was also written under. Collapsing
+                # a twin without keeping its name makes the surviving row
+                # unfindable by the name a reader has in hand.
+                "aliases": sorted({str(item) for item in _as_list(row.get("aliases")) if str(item)}),
             }
         )
     return rows
 
 
 def _acceptance_identity(row: Mapping[str, Any], ordinal: int) -> str:
-    """Name one acceptance stably enough to key its fragment."""
+    """Name one acceptance stably enough to key its fragment.
+
+    Returns:
+        str: The kernel or selection the acceptance names, falling back to its
+            reported position when GEAK named it nothing at all.
+    """
     for field in ("kernel_id", "short_name", "cand_tag", "selection"):
         value = str(row.get(field) or "").strip()
         if value:
@@ -324,6 +829,7 @@ class KernelEventRecorder:
         self._start_time = _now_iso()
         self._sequence: int | None = None
         self._closed = False
+        self._active_token: Token | None = None
         self._route = str(route or "")
         self._stage = "entry"
         self._sink.record(
@@ -388,9 +894,43 @@ class KernelEventRecorder:
             start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
+        self._active_token = _ACTIVE.set(self)
+
+    def _clear_active(self) -> None:
+        """Drop this recorder from the attribution window."""
+        token = self._active_token
+        if token is not None:
+            _ACTIVE.reset(token)
+            self._active_token = None
+
+    def record_discovered_kernels(
+        self,
+        snapshot: Mapping[str, Any] | None,
+        *,
+        provenance: str = "trace_analyze",
+    ) -> None:
+        """Record the profiling-rich kernel table this visit is targeting.
+
+        The hot-kernel summary on a roofline event is intentionally thin; the
+        KERNEL visit needs the per-kernel profiling fields that decide which
+        targets are worth rewriting. This is recorded as its own table rather
+        than folded into ``trace_analyze_runs`` so a reader does not have to
+        join against a capped top-15 summary missing ``kernel_id``.
+
+        Args:
+            snapshot (Mapping[str, Any] | None): A ``last_trace_analyze``-shaped
+                cache, or any dict carrying ``hot_kernels_top15``.
+            provenance (str): Why this snapshot was taken.
+        """
+        _write_discovered_kernels(self._sink, snapshot, provenance=provenance)
 
     def enter_stage(self, stage: str) -> None:
-        """Name the stage now in flight so a kill leaves it identifiable."""
+        """Name the stage now in flight so a kill leaves it identifiable.
+
+        This touches the fragment only. The timeline entry keeps the status it
+        opened with until the phase ends, and a session killed before then is
+        closed out of its fragments by finalize -- which reads this field.
+        """
         self._stage = str(stage or "")
         self._sink.record(SECTION_EVENT, {"in_flight_stage": _text(stage)})
 
@@ -441,34 +981,40 @@ class KernelEventRecorder:
         snapshot: dict[str, Any] | None = None,
         cache_hit: bool = False,
     ) -> None:
-        """Record an analysis the phase requested for itself."""
-        produced = _as_dict(snapshot)
-        self._sink.record(
-            SECTION_TRACE_ANALYZE,
-            {
-                "run_id": str(run_id or ""),
-                "trigger": _text(trigger),
-                "requested_by": _text(requested_by),
-                "request_msg_id": _text(request_msg_id),
-                "ts": _now_iso(),
-                "status": str(status or ""),
-                "cache_hit": bool(cache_hit),
-                "trace_input": _text(trace_input),
-                "top_k": _int_or_none(top_k),
-                "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
-                "roofline_baseline_gain_at_snapshot": _float_or_none(
-                    produced.get("roofline_baseline_gain_at_snapshot")
-                ),
-                "steady_state_trace": _text(produced.get("steady_state_trace")),
-                "analysis_md_path": _text(produced.get("analysis_md_path")),
-                "reusable_native_kernel_ids": [
-                    str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))
-                ],
-                "trace_validate_ref": None,
-                **_analysis_detail(result),
-            },
-            row_type=ROW_TRACE_ANALYZE,
-            natural_ids=str(run_id or ""),
+        """Record an analysis the phase requested for itself.
+
+        This section is normally empty. The entry re-profile dispatches a
+        ``roofline`` task by default, which analyses the trace it just captured,
+        so the phase's own request is skipped as cached. A non-empty section
+        therefore marks the case where the analysis behind a rewrite has no
+        roofline event of its own -- previously that request bumped the snapshot
+        counter and replaced the cache with nothing on the timeline to explain
+        the increment.
+
+        ``reusable_native_kernel_ids`` is recorded because it is the only legal
+        source of a ``kernel_id``: the hot-kernel ranking includes vendor
+        binaries that dispatch rejects as ``non_reusable_kernel``, so without
+        the admitted set there is no way to check afterwards whether the kernel
+        the phase went on to rewrite was ever a legitimate target.
+
+        Args:
+            run_id: Entry-stable identifier for this analysis.
+            trigger: ``pre_run_optimization`` or ``llm_explicit``.
+            status: ``ok`` or ``failed``.
+            snapshot: The ``last_trace_analyze`` cache the run produced.
+        """
+        _write_trace_analyze_run(
+            self._sink,
+            run_id=run_id,
+            trigger=trigger,
+            status=status,
+            result=result,
+            requested_by=requested_by,
+            request_msg_id=request_msg_id,
+            trace_input=trace_input,
+            top_k=top_k,
+            snapshot=snapshot,
+            cache_hit=cache_hit,
         )
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
@@ -501,14 +1047,18 @@ class KernelEventRecorder:
         micro_decision: str = "",
         rebench_ref: str = "",
         trace_analyze_ref: str = "",
-        e2e: dict[str, Any] | None = None,
         started_at: str = "",
         ended_at: str = "",
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one forge source-level kernel rewrite."""
-        integration = _as_dict(e2e)
+        """Record one forge source-level kernel rewrite.
+
+        ``adopted_backend`` and ``run_id`` are stated rather than derived. The
+        projection had to guess the backend from a speedup plus an artifact path
+        and to synthesize an identifier from ``kernel_id:backend:sequence``
+        whenever the real attempt id had been lost.
+        """
         self._record_lane_run(
             {
                 **_lane_row(
@@ -536,18 +1086,6 @@ class KernelEventRecorder:
                 "correctness": correctness if isinstance(correctness, bool) else None,
                 "artifact_path": _text(artifact_path),
                 "trace_analyze_ref": _text(trace_analyze_ref),
-                "e2e": {
-                    "integrated": bool(integration.get("integrated")),
-                    "e2e_gain_pct": _float_or_none(integration.get("e2e_gain_pct")),
-                    "validated": integration.get("validated")
-                    if isinstance(integration.get("validated"), bool)
-                    else None,
-                    "decision": _text(integration.get("decision")),
-                    "patch_path": _text(integration.get("patch_path")),
-                    "target_file": _text(integration.get("target_file")),
-                }
-                if integration
-                else None,
             }
         )
 
@@ -599,6 +1137,7 @@ class KernelEventRecorder:
         shapes_tuned: Any = None,
         config_path: str = "",
         gain_pct: Any = None,
+        graded_objective: str = "",
         tuner: str = "",
         micro_decision: str = "",
         rebench_ref: str = "",
@@ -607,7 +1146,13 @@ class KernelEventRecorder:
         duration_sec: Any = None,
         failure_reason: str = "",
     ) -> None:
-        """Record one GEMM shape-table tuning run."""
+        """Record one GEMM shape-table tuning run.
+
+        ``graded_objective`` names the axis ``gain_pct`` was measured on, so a
+        run graded on total throughput or interactivity is not later read as an
+        output gain. ``tuner`` names which backend produced the table, which is
+        a separate question from which axis judged it.
+        """
         self._record_lane_run(
             {
                 **_lane_row(
@@ -625,50 +1170,8 @@ class KernelEventRecorder:
                 "shapes_tuned": _int_or_none(shapes_tuned),
                 "config_path": _text(config_path),
                 "gain_pct": _float_or_none(gain_pct),
+                "graded_objective": _text(graded_objective),
                 "tuner": _text(tuner),
-            }
-        )
-
-    def record_collective_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        op: str = "",
-        algo: str = "",
-        size_bytes: Any = None,
-        world_size: Any = None,
-        gain_pct: Any = None,
-        withheld: bool = False,
-        withhold_reason: str = "",
-        micro_decision: str = "",
-        rebench_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-    ) -> None:
-        """Record one collective-tuning run."""
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_COLLECTIVE,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    rebench_ref=rebench_ref,
-                    failure_reason=failure_reason,
-                ),
-                "op": _text(op),
-                "algo": _text(algo),
-                "size_bytes": _int_or_none(size_bytes),
-                "world_size": _int_or_none(world_size),
-                "gain_pct": _float_or_none(gain_pct),
-                "withheld": bool(withheld),
-                "withhold_reason": _text(withhold_reason),
             }
         )
 
@@ -686,7 +1189,15 @@ class KernelEventRecorder:
     # ---- geak ------------------------------------------------------------
 
     def record_geak_handoff(self, handoff: dict[str, Any] | None) -> None:
-        """Record the conditions GEAK was asked to work under."""
+        """Record the conditions GEAK was asked to work under.
+
+        The handoff's ``accepted_flags`` is the orchestrator's current best --
+        GEAK's *starting* point -- while the ``accepted_flags`` GEAK later
+        reports is what it *produced*. The two are recorded under distinct names
+        because a single ``config`` block holding both under one key would be
+        read backwards, and their difference is the configuration surface this
+        delegation actually moved.
+        """
         payload = _as_dict(handoff)
         envs = payload.get("accepted_env")
         self._sink.record(
@@ -713,6 +1224,15 @@ class KernelEventRecorder:
                     "e2e_metric": _text(payload.get("e2e_metric")),
                     "bench_protocol_present": bool(payload.get("bench_protocol")),
                     "gpu_ids": _text(payload.get("gpu_ids")),
+                    # The cards GEAK was told to use. A baseline that reads
+                    # ``no_gain`` because its servers landed on a foreign
+                    # tenant's card is otherwise indistinguishable from a real
+                    # result (issue #1312). Both are stated even when the
+                    # handoff omits them: ``schema_version`` in this same row
+                    # separates a pre-v3 handoff from a genuinely unpinned run,
+                    # so an empty value here is not ambiguous.
+                    "gpu_ids_space": _text(payload.get("gpu_ids_space")),
+                    "gpu_pin": _as_dict(payload.get("gpu_pin")),
                     "exp_root": _text(payload.get("exp_root")),
                     "eval_dir": _text(payload.get("eval_dir")),
                 }
@@ -790,11 +1310,24 @@ class KernelEventRecorder:
             dispatch = _as_dict(row.get("dispatch"))
             backend = _as_dict(row.get("backend_result"))
             e2e = _as_dict(row.get("e2e"))
+            verification = _as_dict(backend.get("verification"))
             self._geak_sink.record(
                 SECTION_GEAK_ATTEMPT,
                 {
                     "ordinal": ordinal,
                     "kernel_id": kernel_id,
+                    "name": _text(row.get("name")) or kernel_id,
+                    # The journey states the op kind in whichever block resolved
+                    # it, so all three are read rather than only the kernel's.
+                    "op_kind": _text(row.get("op_kind")) or _text(dispatch.get("op_kind")) or _text(e2e.get("op_kind")),
+                    # Share of GPU time the kernel held in the profile that
+                    # nominated it -- what makes an attempt worth its cost.
+                    "gpu_pct": _float_or_none(row.get("gpu_pct")),
+                    # The isolated speedup, which the journey states on the
+                    # kernel or leaves to the backend's verification block.
+                    "micro_speedup": _float_or_none(row.get("micro_speedup"))
+                    if row.get("micro_speedup") is not None
+                    else _float_or_none(verification.get("micro_speedup")),
                     "dispatched": bool(dispatch.get("dispatched", True)),
                     "backends": [str(item) for item in _as_list(dispatch.get("backends"))],
                     "skip_reason": _text(dispatch.get("skip_reason")),
@@ -857,6 +1390,36 @@ class KernelEventRecorder:
                     _acceptance_identity(row, int(row["ordinal"])),
                 ),
             )
+
+    def record_geak_measurement(self, result: dict[str, Any] | None) -> None:
+        """Record the latency and parity GEAK's own harness measured.
+
+        These merge into the ``claim`` block rather than standing on their own,
+        because they are the same kind of fact as the throughput beside them:
+        GEAK's account of its own run, taken before the orchestrator re-measured
+        anything. They are recorded from the runner's result rather than from
+        the candidate slot because a run can measure a latency and still not
+        produce a candidate -- ``no_gain`` with nothing accepted is exactly that
+        -- and reading them off the slot would lose every such run.
+
+        Args:
+            result (dict[str, Any] | None): The runner's parsed ``result.json``.
+        """
+        row = _as_dict(result)
+        if not row:
+            return
+        self._sink.record(
+            SECTION_EVENT,
+            {
+                "geak_claim": {
+                    "metric_basis": _text(row.get("metric_basis")),
+                    "bench_client": _text(row.get("bench_client")),
+                    "ttft_mean_ms": _float_or_none(row.get("ttft_ms")),
+                    "tpot_mean_ms": _float_or_none(row.get("tpot_ms")),
+                    "output_parity": row.get("output_parity"),
+                }
+            },
+        )
 
     def record_geak_product(
         self,
@@ -966,7 +1529,7 @@ class KernelEventRecorder:
         )
         # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
         # fill the re-profile block.
-        ext, derived = assemble_kernel_ext(event_parts(EVENT_SECTIONS), event=self._event_id)
+        ext, derived = assemble_kernel_ext(event_parts(EVENT_SECTIONS, event=self._event_id), event=self._event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self._event_id,
@@ -977,6 +1540,7 @@ class KernelEventRecorder:
             start_time=self._start_time,
             end_time=end_time,
         )
+        self._clear_active()
 
     def finish_failed(self, *, stage: str, error_class: str = "", message: Any = "") -> None:
         """Close the event as failed, naming the stage that failed."""
@@ -1081,7 +1645,15 @@ def _settle(
 
 
 def _derive_status(attempts: list[dict[str, Any]], *, candidate_count: int) -> str:
-    """Read the event status off what the rebenches actually measured."""
+    """Read the event status off what the rebenches actually measured.
+
+    A rebench that concluded against its candidate still concluded, so it makes
+    the entry ``succeeded``; the distinction that matters is between measuring
+    and not measuring. A candidate that was built and never validated leaves the
+    entry ``degraded`` -- the work happened but nothing settled it -- while an
+    entry that produced no candidate at all and measured nothing is ``skipped``
+    rather than degraded, because there was nothing there to degrade.
+    """
     if any(_float_or_none(row.get("measured_tput")) is not None for row in attempts):
         return "succeeded"
     if attempts and all(str(row.get("status") or "").lower() in _REBENCH_FAULTED_STATUSES for row in attempts):
@@ -1090,7 +1662,18 @@ def _derive_status(attempts: list[dict[str, Any]], *, candidate_count: int) -> s
 
 
 def _geak_settlement(attempts: list[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Pick the GEAK verdict the acceptances may be settled against."""
+    """Pick the GEAK verdict the acceptances may be settled against.
+
+    GEAK may rebench the same candidate up to its per-cycle ceiling, so unlike a
+    forge lane it can end the entry holding several settled verdicts. Taking the
+    newest would let a KEEP after a REVERT read as an adoption; two settled
+    verdicts that disagree is a fact worth seeing, so the candidate stays
+    pending and neither verdict is honoured.
+
+    Returns:
+        tuple[str, list[str]]: The attempt id to settle against -- ``""`` when
+            none may be -- and the conflicting decisions, when they conflicted.
+    """
     settled = [row for row in attempts if str(row.get("decision") or "")]
     decisions = {str(row.get("decision")) for row in settled}
     if len(decisions) == 1:
@@ -1139,12 +1722,29 @@ def assemble_kernel_ext(
         rows_for_event(parts.get(SECTION_GEAK_ACCEPTANCE) or [], event),
         keys=("ordinal", "kernel_id", "selection"),
     )
+    discovered_rows = wire_rows(
+        sort_rows(
+            rows_for_event(parts.get(SECTION_DISCOVERED) or [], event),
+            keys=("snapshot_id", "rank"),
+        ),
+        drop=("event_id", "rank"),
+    )
+    recommended_rows = [row for row in discovered_rows if row.get("selected")]
+    integrate_rows = sort_rows(
+        rows_for_event(parts.get(SECTION_INTEGRATE) or [], event),
+        keys=("settled_at", "integration_id"),
+    )
 
     lanes: dict[str, list[dict[str, Any]]] = {lane: [] for lane in LANE_BY_SOURCE.values()}
     for source, rows in group_rows(lane_rows, "source_kind").items():
         lane = LANE_BY_SOURCE.get(source)
         if lane:
             lanes[lane] = rows
+    # The gate rules on a patch, and a patch belongs to a kernel -- the gate is
+    # handed no attempt id, so the kernel is the only thing the two sides share.
+    integrate_by_kernel = group_rows(integrate_rows, "kernel_id")
+    for row in lanes.get("kernel_rewrites", []):
+        row["e2e"] = _integrate_e2e(integrate_by_kernel.get(str(row.get("kernel_id") or ""), []))
     ledgers = group_rows(rebench_rows, "ledger")
     forge_ledger = ledgers.get(LEDGER_FORGE, [])
     geak_ledger = ledgers.get(LEDGER_GEAK, [])
@@ -1158,6 +1758,12 @@ def assemble_kernel_ext(
         acceptances,
         geak_ref=geak_ref,
         geak_conflicted=bool(conflicting),
+    )
+    _fold_integrate_into_by_source(
+        by_source,
+        lanes=lanes,
+        acceptances=acceptances,
+        integrate_by_kernel=integrate_by_kernel,
     )
 
     # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
@@ -1174,13 +1780,15 @@ def assemble_kernel_ext(
             **reprofile,
             "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
         }
-    forge_engaged = bool(reprofile or trace_runs or forge_ledger or any(lanes.values()))
+    forge_engaged = bool(reprofile or trace_runs or forge_ledger or any(lanes.values()) or discovered_rows)
     forge: dict[str, Any] | None = None
     if forge_engaged:
         forge = {
             "engaged": True,
             "reprofile": reprofile,
             "trace_analyze_runs": trace_runs,
+            "discovered_kernels": discovered_rows,
+            "recommended_kernels": recommended_rows,
             "lanes": {lane: wire_rows(rows) for lane, rows in lanes.items()},
             "rebench_ledger": wire_rows(forge_ledger),
         }
@@ -1262,6 +1870,10 @@ def assemble_kernel_ext(
         "entry": _as_dict(header.get("entry")),
         "geak": geak,
         "forge": forge,
+        # Sibling of the two routes rather than nested in either: the gate is
+        # the orchestrator's and rules on whatever the visit produced, so a
+        # patch from GEAK and one from forge go through the same one.
+        "integrate": wire_rows(integrate_rows, drop=("event_id",)),
         "outcome": outcome,
         "failure": _as_dict(header.get("failure")) or None,
     }
@@ -1303,7 +1915,17 @@ def make_kernel_recorder(
     resumed: bool = False,
     code_revision: str = "",
 ) -> KernelEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed."""
+    """Build a recorder, or ``None`` when one cannot be constructed.
+
+    KERNEL behavior must not depend on the recorder existing, so construction
+    failures degrade to "no event" rather than propagating. An unbound session
+    declines too: writing the timeline into whatever the working directory
+    happens to be is worse than not recording.
+
+    Returns:
+        KernelEventRecorder | None: The recorder, or ``None`` when it could not
+            be built.
+    """
     from ...session.session_binding import session_is_bound
 
     try:

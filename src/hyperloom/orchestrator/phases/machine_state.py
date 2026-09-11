@@ -1343,11 +1343,6 @@ def compute_kernel_progress_fingerprint(
     last_opt = last_opt if isinstance(last_opt, dict) else {}
     stack = getattr(state, "optimization_stack", None)
     pending = getattr(state, "pending_kernel_integrations", None)
-    last_collective = getattr(state, "last_collective", None)
-    if last_collective is None:
-        last_collective = {}
-    if not isinstance(last_collective, dict):
-        raise ValueError("last_collective must be a mapping")
     controller = getattr(state, "kernel_rewrite_controller_result", None)
     controller = controller if isinstance(controller, dict) else {}
     payload = {
@@ -1357,19 +1352,6 @@ def compute_kernel_progress_fingerprint(
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
         "rejected": sorted(str(kid) for kid in (getattr(state, "rejected_kernel_ids", None) or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
-        "last_collective": [
-            str(last_collective.get(field, ""))
-            for field in (
-                "collective_attempt_id",
-                "status",
-                "decision",
-                "patch_cleanup_status",
-                "integration_decision",
-                "patch_cleanup_action",
-                "integration_revert_status",
-                "integration_finalize_status",
-            )
-        ],
         "rewrite_controller": [
             str(controller.get("macro_cycle", "")),
             str(controller.get("status", "")),
@@ -1381,31 +1363,8 @@ def compute_kernel_progress_fingerprint(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
-def collective_integration_pending(state: Any) -> bool:
-    """Return whether a kept collective still requires terminal E2E handling."""
-    last = getattr(state, "last_collective", None)
-    if last in (None, {}):
-        return False
-    if not isinstance(last, dict):
-        raise ValueError("last_collective must be a mapping")
-    kept = last.get("kept", False)
-    requires_e2e = last.get("requires_e2e_validation", False)
-    if not isinstance(kept, bool) or not isinstance(requires_e2e, bool):
-        raise ValueError("collective E2E flags must be boolean")
-    if kept != requires_e2e:
-        raise ValueError("collective E2E flags are inconsistent")
-    # Fall back to legacy field name for --resume compat.
-    cleanup = str(last.get("patch_cleanup_status") or last.get("integration_status") or "")
-    return kept and cleanup != "complete"
-
-
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if collective_integration_pending(state):
-        return True
-    if bool(getattr(state, "collective_only_mode", False)):
-        return False
-
     try:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
             return True
@@ -1442,7 +1401,7 @@ def kernel_work_pending(state: Any) -> bool:
     for entry in getattr(state, "optimization_stack", None) or []:
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("action") or "") in {"integrate", "collective"}:
+        if str(entry.get("action") or "") == "integrate":
             integrated_entries.append(entry)
             source_file = str(entry.get("target_file") or entry.get("source_file") or "")
             if source_file:
@@ -1701,8 +1660,8 @@ def exit_normal_kernel(
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """KERNEL normal exit."""
-    # ``kernel_work_pending`` answers for both outstanding integrations before it short-circuits on a terminal
-    # Controller, so asking it here keeps this exit from stepping over a pending collective or an unintegrated KEEP.
+    # ``kernel_work_pending`` answers for outstanding integrations before it short-circuits on a terminal Controller,
+    # so asking it here keeps this exit from stepping over an unintegrated KEEP.
     if _controller_phase_terminal(state) and not kernel_work_pending(state):
         result = getattr(state, "kernel_rewrite_controller_result", None) or {}
         return "kernel_controller_done", {
@@ -2121,7 +2080,6 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "trace_analyze": "TraceLens",
     "run_gemm_tuning": "GEMM tuning",
     "run_optimization": "GEAK",
-    "run_collective": "Collective optimization",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
     "explore": "Validate (bench on the stack)",
@@ -2222,8 +2180,12 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
-    # Bank the finished segment for EVERY phase so the budget guards can charge a phase for the whole run instead of
-    # the current entry.
+    # Read before the loopback's bump can be observed here: it increments
+    # ``macro_cycle`` on the way out of a phase, so the cycle in scope at the
+    # transition is not always the one the outgoing phase ran in.
+    prev_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    # Bank the finished segment for EVERY phase so the budget guards can charge
+    # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
     row = make_history_row(
         from_phase=from_phase,
@@ -2248,35 +2210,32 @@ def record_phase_transition(
 
     set_current_phase(str(row["to_phase"] or ""))
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
-        transition_id = (
-            f"phase:{int(getattr(state, 'macro_cycle', 0) or 0)}:"
-            f"tick:{int(getattr(state, 'tick', 0) or 0)}:"
-            f"event:{len(history)}:"
-            f"{row.get('from_phase') or 'START'}:{row.get('to_phase') or ''}:"
-            f"{now_unix:.9f}"
-        )
-        instrument.record_phase_transition(
-            getattr(state, "_session_dir", None),
-            transition_id=transition_id,
-            from_phase=str(row.get("from_phase") or ""),
+        # The phase itself, as a timeline event: close the span being left on
+        # the exit that ended it, and open the one being entered. Recorded here
+        # because here is where the two facts exist -- export could only pair
+        # phase_history rows off two at a time to guess them back, and had no
+        # row at all to close the segment the session ended in.
+        if from_phase and from_phase != str(row.get("to_phase") or ""):
+            phase_event.record_exit(
+                phase=from_phase,
+                macro_cycle=prev_cycle,
+                to_phase=str(row.get("to_phase") or ""),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                exited_at=str(row.get("ts") or ""),
+                exited_unix=now_unix,
+            )
+        phase_event.record_entry(
             phase=str(row.get("to_phase") or ""),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            sequence=len(history),
+            from_phase=from_phase,
             reason=str(row.get("reason") or ""),
             evidence=dict(row.get("evidence") or {}),
-            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
-            tick=int(getattr(state, "tick", 0) or 0),
-            event_sequence=len(history),
-            ts=str(row.get("ts") or ""),
-        )
-        instrument.record_trace_event(
-            getattr(state, "_session_dir", None),
-            trace_event_id=f"trace:{transition_id}",
-            kind="phase_transition",
-            from_phase=str(row.get("from_phase") or ""),
-            phase=str(row.get("to_phase") or ""),
-            reason=str(row.get("reason") or ""),
-            ts=str(row.get("ts") or ""),
+            entered_at=str(row.get("ts") or ""),
+            entered_unix=now_unix,
         )
     except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
         pass
@@ -2313,6 +2272,19 @@ def append_phase_history_event(
     if len(history) > _PHASE_HISTORY_CAP:
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_marker(
+            phase=phase,
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            sequence=len(history),
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            ts=str(row.get("ts") or ""),
+        )
+    except Exception:  # noqa: BLE001 -- telemetry must never block the marker
+        pass
     return row
 
 
@@ -2431,7 +2403,6 @@ __all__ = [
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
     "compute_kernel_progress_fingerprint",
-    "collective_integration_pending",
     "kernel_work_pending",
     "make_history_row",
     "explore_elapsed_seconds",

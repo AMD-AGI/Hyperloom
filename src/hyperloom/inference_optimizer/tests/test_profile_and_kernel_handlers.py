@@ -2260,12 +2260,18 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
-def _capture_trace_dir(tmp_path, *, cpu_ops: int, with_input_dims: int) -> object:
+def _capture_trace_dir(
+    tmp_path,
+    *,
+    cpu_ops: int,
+    with_input_dims: int,
+    dirname: str = "capture_traces",
+) -> object:
     """Write a capture file carrying a chosen number of cpu_op events."""
     import gzip
     import json as _json
 
-    capture = tmp_path / "capture_traces"
+    capture = tmp_path / dirname
     capture.mkdir()
     events = [{"name": "cpu_op", "cat": "cpu_op"} for _ in range(cpu_ops)]
     for index in range(with_input_dims):
@@ -2314,6 +2320,24 @@ def test_a_healthy_input_dims_fraction_passes_the_check(tmp_path):
     health = pf._validate_trace_structure(tmp_path, "sglang")
 
     assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
+
+
+def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    capture = _capture_trace_dir(
+        tmp_path,
+        cpu_ops=10,
+        with_input_dims=10,
+        dirname="graph_capture_profile",
+    )
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    row = _check_row(health, pf.CHECK_CAPTURE_TRACES_PRESENT)
+    assert row["status"] == "passed"
+    assert row["detail"]["capture_dir"] == str(capture)
+    assert health["capture_traces_present"] is True
+    assert not any("subdirectory missing" in issue for issue in health["issues"])
 
 
 # kernel_request_handlers — direct unit
@@ -2703,15 +2727,13 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     # The bypass route dispatches its own tool, never TraceLens.
     assert any("bypass_trace_analysis.py" in c for c in captured["cmd"])
 
-    out = assemble_parts(session_dir)
-    runs = out["kernel_journey"]["discovery_runs"]
-    assert len(runs) == 1
-    run = runs[0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "ok"
-    assert run["hot_kernel_count"] == 2
-    assert {k["name"] for k in run["hot_kernels"]} == {"fused_moe", "rms_norm"}
-    assert run["scan"]["analysis_route"] == "bypass"
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert {k["name"] for k in res["hot_kernels"]} == {"fused_moe", "rms_norm"}
+    # The build of the reader that produced these kernels is in scope only
+    # here, so the handler records it rather than leaving it to a caller.
+    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2800,12 +2822,13 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     )
     assert res["status"] == "failed"
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "failed"
-    assert run["hot_kernel_count"] == 0
-    assert run["error"]
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert not res.get("hot_kernels")
+    assert res["error"]
+    # A failed read still identifies the build that failed.
+    assert "bypass" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio
@@ -2813,8 +2836,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     session_dir,
     monkeypatch,
 ):
-    """High-idle gate suppresses hot kernels but the run still succeeds -> a bypass discovery run with status=ok and hot_kernel_count=0."""
-    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+    """High-idle gate suppresses hot kernels but the run still succeeds -> a
+    bypass discovery run with status=ok and hot_kernel_count=0."""
 
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2841,11 +2864,10 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     )
     assert res["status"] == "ok"
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "bypass"
-    assert run["status"] == "ok"
-    assert run["hot_kernel_count"] == 0
+    meta = res["analysis_meta"]
+    assert meta["route"] == "bypass"
+    assert meta["tool"] == "bypass"
+    assert not res.get("hot_kernels")
 
 
 @pytest.mark.asyncio
@@ -2870,7 +2892,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
         return 0, json.dumps(payload), ""
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    await krh.trace_analyze_handler(
+    res = await krh.trace_analyze_handler(
         {
             "trace_input": str(fake_trace),
             "session_id": session_dir.name,
@@ -2879,10 +2901,10 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
         session_dir=session_dir,
     )
 
-    out = assemble_parts(session_dir)
-    run = out["kernel_journey"]["discovery_runs"][0]
-    assert run["source"] == "tracelens"
-    assert run["scan"]["analysis_route"] == "agent"
+    meta = res["analysis_meta"]
+    assert meta["tool"] == "tracelens"
+    assert meta["route"] == "agent"
+    assert "tracelens" in assemble_parts(session_dir)["metadata"]["versions"]["tools"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ from kernelforge.rewrite_by_flydsl.attempt import create_attempt_workspace
 from kernelforge.rewrite_by_flydsl.applyback import ApplybackResult
 from kernelforge.rewrite_by_flydsl.kb import RewriteKbReadResult
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.tracker import ExperimentTracker
 
 
 @pytest.fixture(autouse=True)
@@ -186,6 +188,238 @@ def test_optimize_falls_back_to_stdout_sentinel(tmp_path, monkeypatch, capsys):
     out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
     assert out["best_ms"] == 0.7
     assert "__FORGE_RESULT__" not in capsys.readouterr().out
+
+
+class _KeepingProc:
+    """A forge-loop double that records a new best on each supervisor tick.
+
+    forge-loop refreshes ``--result-json`` on every KEEP, so a run that improves several times rewrites that file
+    several times before it exits.
+    """
+
+    def __init__(self, result_json, commits, announced="EXP-KEEP"):
+        self.stdout = iter([f"Experiment: {announced}\n"])
+        self.returncode = None
+        self._result_json = Path(result_json)
+        self._commits = list(commits)
+        self._announced = announced
+
+    def poll(self):
+        if self._commits:
+            best_ms, commit = self._commits.pop(0)
+            self._result_json.write_text(
+                json.dumps(
+                    {
+                        "experiment_id": self._announced,
+                        "best_ms": best_ms,
+                        "best_commit": commit,
+                    }
+                )
+            )
+            return None
+        self.returncode = 0
+        return 0
+
+    def wait(self, timeout=None):
+        del timeout
+        self.returncode = 0
+        return 0
+
+
+def test_optimize_hands_over_every_new_best_exactly_once(tmp_path, monkeypatch):
+    """A KEEP the loop has already verified must not wait for the loop to end.
+
+    An OPTIMIZE session can be cut off at its deadline or killed outright, so a caller that only banks the final
+    result loses every improvement the session had already proven.
+    """
+    rj = tmp_path / "res.json"
+    # Two ticks report the same commit: a KEEP is handed over once, not per poll.
+    proc = _KeepingProc(rj, [(9.0, "c1"), (9.0, "c1"), (7.0, "c2"), (5.0, "c3")])
+    monkeypatch.setattr(optimize.subprocess, "Popen", lambda *a, **k: proc)
+    # Restoring the best kernel shells out to git, which cannot run while Popen
+    # is a double; it is not what this test is about.
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    seen = []
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append((payload["best_commit"], payload["best_ms"])),
+        new_best_poll_sec=0.0,
+    )
+
+    assert [commit for commit, _ms in seen] == ["c1", "c2", "c3"]
+    assert seen[-1] == ("c3", 5.0)
+    assert out["best_commit"] == "c3"
+
+
+def test_optimize_hands_over_a_best_recorded_after_the_last_poll(tmp_path, monkeypatch):
+    """The final KEEP can land between the last poll and the loop's exit."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "EXP-LATE", "best_ms": 4.0, "best_commit": "final"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-LATE\n"]),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    seen = []
+
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+    )
+
+    assert seen == ["final"]
+
+
+def test_optimize_never_hands_over_another_run_s_result(tmp_path, monkeypatch):
+    """A stale result file must not be published as this run's progress."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "PREVIOUS", "best_ms": 1.0, "best_commit": "stale"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-NOW\n"]),
+    )
+    seen = []
+
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+    )
+
+    assert seen == []
+
+
+def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch):
+    """Publishing is best-effort; it must not cost the optimization run."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "EXP-RAISE", "best_ms": 4.0, "best_commit": "c1"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-RAISE\n"]),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+
+    def explode(_payload):
+        raise RuntimeError("store unreachable")
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=explode,
+    )
+
+    assert out["best_ms"] == 4.0
+
+
+def _record_loop_usage(experiments_dir, experiment_id, usage):
+    """Stand in for the checkpoint forge-loop writes onto its own experiment record."""
+    tracker = ExperimentTracker(experiments_dir)
+    tracker.create(experiment_id=experiment_id)
+    tracker.set_llm_usage(experiment_id, usage)
+
+
+def test_optimize_recovers_the_loop_ledger_from_its_experiment_record(tmp_path, monkeypatch):
+    """A run that keeps nothing writes no result file, and its whole spend used to go unreported."""
+    _record_loop_usage(
+        str(tmp_path),
+        "EXP-NOKEEP",
+        {"input_tokens": 400, "output_tokens": 60, "total_cost_usd": 2.0, "calls": 4},
+    )
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-NOKEEP\n", "no keep here\n"], returncode=-15),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(tmp_path / "never-written.json"),
+    )
+
+    assert out["llm_usage"]["input_tokens"] == 400
+    assert out["llm_usage"]["calls"] == 4
+    assert "llm_usage_complete" not in out
+
+
+def test_optimize_prefers_the_furthest_along_ledger_snapshot(tmp_path, monkeypatch):
+    """The result file stops at the last KEEP; the experiment record keeps going, and the two never sum."""
+    rj = tmp_path / "res.json"
+    rj.write_text(
+        json.dumps(
+            {
+                "experiment_id": "EXP-KEEP",
+                "best_ms": 0.5,
+                "llm_usage": {"input_tokens": 100, "calls": 1},
+            }
+        )
+    )
+    _record_loop_usage(str(tmp_path), "EXP-KEEP", {"input_tokens": 300, "calls": 3})
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-KEEP\n"], returncode=-15),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+    )
+
+    assert out["llm_usage"] == {"input_tokens": 300, "calls": 3}
+    assert "llm_usage_complete" not in out
+
+
+def test_optimize_marks_a_cleanly_finished_ledger_complete(tmp_path, monkeypatch):
+    rj = tmp_path / "res.json"
+    rj.write_text(
+        json.dumps(
+            {
+                "experiment_id": "EXP-DONE",
+                "best_ms": 0.5,
+                "llm_usage": {"input_tokens": 500, "calls": 5},
+            }
+        )
+    )
+    _record_loop_usage(str(tmp_path), "EXP-DONE", {"input_tokens": 500, "calls": 5})
+    monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP-DONE\n"]))
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+    )
+
+    assert out["llm_usage"] == {"input_tokens": 500, "calls": 5}
+    assert out["llm_usage_complete"] is True
 
 
 def test_optimize_argv_falls_back_to_console_script(monkeypatch):
@@ -763,6 +997,182 @@ def test_run_rewrite_happy_path_reports_speedup(tmp_path, monkeypatch, capsys):
     assert rj.exists()
 
 
+def test_run_rewrite_reports_total_usage_across_local_and_forge_loop_agents(
+    tmp_path,
+    monkeypatch,
+):
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen_usage = []
+
+    async def counted_port(spec, driver_path, config, **kwargs):
+        del spec, driver_path, config
+        usage = kwargs["usage"]
+        seen_usage.append(usage)
+        usage.add_usage(
+            {"input_tokens": 10, "output_tokens": 2},
+            total_cost_usd=0.1,
+        )
+        return port_loop.PortResult(ok=True, attempts=1, snr_db=143.0)
+
+    def counted_applyback(*args, **kwargs):
+        del args
+        usage = kwargs["usage"]
+        seen_usage.append(usage)
+        usage.add_usage(
+            {"input_tokens": 20, "output_tokens": 4},
+            total_cost_usd=0.2,
+        )
+        return ApplybackResult(ok=True)
+
+    monkeypatch.setattr(runner, "run_port_loop", counted_port)
+    monkeypatch.setattr(
+        runner,
+        "run_optimize",
+        lambda *args, **kwargs: {
+            "best_ms": 0.5,
+            "experiment_id": "E",
+            "llm_usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "cache_creation_input_tokens": 8,
+                "cache_read_input_tokens": 40,
+                "total_cost_usd": 1.0,
+                "cost_available": True,
+                "cost_source": "provider",
+                "calls": 3,
+            },
+            "llm_usage_complete": True,
+        },
+    )
+    monkeypatch.setattr(runner, "generate_applyback_patch", counted_applyback)
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert seen_usage[0] is seen_usage[1]
+    assert out["llm_usage"] == {
+        "input_tokens": 130,
+        "output_tokens": 36,
+        "cache_creation_input_tokens": 8,
+        "cache_read_input_tokens": 40,
+        "total_cost_usd": 1.3,
+        "cost_available": True,
+        "cost_source": "provider",
+        "calls": 5,
+    }
+
+
+def test_run_rewrite_publishes_partial_usage_when_the_forge_loop_ledger_is_truncated(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """A killed forge-loop reports what it checkpointed, so the run must not claim a complete priced total."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+
+    async def counted_port(spec, driver_path, config, **kwargs):
+        del spec, driver_path, config
+        kwargs["usage"].add_usage({"input_tokens": 10, "output_tokens": 2}, total_cost_usd=0.1)
+        return port_loop.PortResult(ok=True, attempts=1, snr_db=143.0)
+
+    monkeypatch.setattr(runner, "run_port_loop", counted_port)
+    monkeypatch.setattr(
+        runner,
+        "run_optimize",
+        # No ``llm_usage_complete``: the ledger below stops at the loop's last checkpoint.
+        lambda *args, **kwargs: {
+            "best_ms": 0.5,
+            "terminated_for_deadline": True,
+            "llm_usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "total_cost_usd": 1.0,
+                "cost_available": True,
+                "cost_source": "provider",
+                "calls": 3,
+            },
+        },
+    )
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert out["llm_usage"]["input_tokens"] == 110
+    assert out["llm_usage"]["calls"] == 4
+    assert out["llm_usage"]["total_cost_usd"] == 1.1
+    assert out["llm_usage"]["cost_available"] is False
+    assert out["llm_usage"]["cost_source"] == "partial"
+    assert "did not report a final token ledger" in capsys.readouterr().out
+
+
+def test_run_rewrite_reports_provider_usage_when_optimize_never_started(
+    tmp_path,
+    monkeypatch,
+):
+    """Skipping forge-loop leaves nothing unaccounted, so the in-process ledger stands on its own."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    clock = {"now": 0.0}
+    monkeypatch.setattr(runner.time, "time", lambda: clock["now"])
+    _stub_preflight(monkeypatch)
+
+    async def port_until_cutoff(*args, **kwargs):
+        kwargs["usage"].add_usage({"input_tokens": 10, "output_tokens": 2}, total_cost_usd=0.1)
+        clock["now"] = 101.0
+        return port_loop.PortResult(ok=True, attempts=1, snr_db=100.0)
+
+    def unexpected_optimize(*args, **kwargs):
+        raise AssertionError("forge-loop must not start in the finalization reserve")
+
+    monkeypatch.setattr(runner, "run_port_loop", port_until_cutoff)
+    monkeypatch.setattr(runner, "_ensure_git_committed", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "run_optimize", unexpected_optimize)
+    monkeypatch.setattr(
+        runner,
+        "generate_applyback_patch",
+        lambda *a, **k: ApplybackResult(ok=True, patch_path="/tmp/forge.patch"),
+    )
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+        deadline_unix=1300.0,
+    )
+
+    assert out["llm_usage"]["calls"] == 1
+    assert out["llm_usage"]["cost_available"] is True
+    assert out["llm_usage"]["cost_source"] == "provider"
+
+
 def test_run_rewrite_keeps_the_candidate_out_of_the_workspace_root(
     tmp_path,
     monkeypatch,
@@ -970,8 +1380,213 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
 
     assert out["port_ok"] is True
     assert len(writes) == 2
-    assert writes[0]["allow_non_improving"] is True
+    # The port is slower than the source it replaces (1.5 ms against 1.0 ms) and is published anyway: correctness is
+    # what makes it reusable, and banking it is what lets the next run skip PORT.
     assert writes[0]["flydsl_best_ms"] == 1.5
+    assert writes[0]["source_ms"] == 1.0
+
+
+def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypatch):
+    """Each KEEP is banked, from the commit, under one name for the run.
+
+    The workspace still belongs to the running agent while OPTIMIZE is going, so the kernel has to come out of the
+    commit that was kept. The run's publications share a name, or an identity's history would be buried under one
+    run's worth of KEEPs.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+
+    def fake_git(_workspace, *args):
+        if args and args[0] == "show":
+            commit = str(args[1]).split(":")[0]
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"import flydsl\n# kept at {commit}\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_git", fake_git)
+
+    def fake_optimize(*_args, **kwargs):
+        publish = kwargs["on_new_best"]
+        publish({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
+        publish({"experiment_id": "EXP", "best_ms": 0.7, "best_commit": "c2"})
+        return {"best_ms": 0.7, "best_commit": "c2", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    # The PORT publish, then one per KEEP, then the run's final result.
+    port, first_keep, second_keep, final = writes
+    assert port["best_commit"] == ""
+    # PORT names its record after its own session. With no commit to name it here, the artifact does.
+    assert port["session_key"] == ""
+
+    assert [first_keep["best_commit"], second_keep["best_commit"]] == ["c1", "c2"]
+    assert first_keep["content_override"] == b"import flydsl\n# kept at c1\n"
+    assert second_keep["content_override"] == b"import flydsl\n# kept at c2\n"
+    assert [first_keep["flydsl_best_ms"], second_keep["flydsl_best_ms"]] == [0.9, 0.7]
+
+    # One name for the whole OPTIMIZE session, so each publication replaces the last rather than filing a sibling.
+    run_key = hashlib.sha256(b"EXP").hexdigest()
+    assert first_keep["session_key"] == run_key
+    assert second_keep["session_key"] == run_key
+    assert final["session_key"] == run_key
+
+
+def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
+    tmp_path,
+    monkeypatch,
+):
+    """A record's SNR has to be a reading of the kernel the record is about.
+
+    PORT measures the ported kernel; every KEEP after it is a different artifact, with a reading the rewrite layer
+    never sees. Reusing PORT's number would file accuracy evidence about one kernel against another, and the record
+    does not say which kernel it came from, so a later warm start reads it as belonging to the one it adopts.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+
+    def fake_git(_workspace, *args):
+        if args and args[0] == "show":
+            return subprocess.CompletedProcess(args, 0, stdout="import flydsl\n", stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_git", fake_git)
+
+    def fake_optimize(*_args, **kwargs):
+        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
+        return {"best_ms": 0.9, "best_commit": "c1", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    port, keep, final = writes
+    assert port["snr_db"] == 143.0
+    # OPTIMIZE moved the best onto c1, which nothing on this path has measured.
+    assert keep["snr_db"] is None
+    assert final["snr_db"] is None
+
+
+def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
+    tmp_path,
+    monkeypatch,
+):
+    """A fallback to the ported commit still describes the artifact PORT measured.
+
+    With no best of its own the run's final record names the port commit and, sharing that name, replaces the record
+    PORT wrote. Dropping the reading here would erase a measurement that was genuinely taken.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    # The default OPTIMIZE stub reports no best_commit, so the run falls back.
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    port, final = writes
+    assert final["best_commit"] == port["best_commit"]
+    assert final["snr_db"] == port["snr_db"] == 143.0
+
+
+def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkeypatch):
+    """An unreadable commit costs the publication, not the run."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+    monkeypatch.setattr(
+        runner,
+        "_git",
+        lambda *args: subprocess.CompletedProcess(args, 128, stdout="", stderr="bad object"),
+    )
+
+    def fake_optimize(*_args, **kwargs):
+        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "gone"})
+        return {"best_ms": 0.9, "best_commit": "gone", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert out["port_ok"] is True
+    # The PORT publish and the final one; the KEEP had nothing to publish, so the run's final result belongs to the
+    # PORT session and lands on its record rather than beside it.
+    assert len(writes) == 2
+    assert writes[1]["session_key"] == writes[0]["session_key"]
 
 
 def test_run_rewrite_port_failure_short_circuits(tmp_path, monkeypatch, capsys):

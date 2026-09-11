@@ -14,20 +14,22 @@ from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import provider_model_defaults
+
+# Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
+# can read the same numbers without importing this module, which would close a
+# cycle. Only the ones this module quotes in help text are pulled in here.
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_PRECISION,
+    DEFAULT_TP,
+)
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
-
-# Workload knob fallbacks applied when the operator passes neither the CLI flag nor an inherited value.
-DEFAULT_ISL = 1024
-DEFAULT_OSL = 1024
-DEFAULT_CONC = 64
-DEFAULT_TP = 1
-DEFAULT_EP = 1
-DEFAULT_PRECISION = "bf16"
-
 
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
 _SECRET_NAME_HINTS = (
@@ -1184,17 +1186,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
         "from a blank SharedState. Recipe KB is NOT touched.",
-    )
-    # observability
-    opt.add_argument(
-        "--breakdown-include-transcripts",
-        dest="breakdown_include_transcripts",
-        type=str,
-        choices=("true", "false"),
-        default="false",
-        help="Inline specialist transcript bodies into "
-        "``specialist_runs`` (true) or reference them by path "
-        "only (false, default). KB_design §3.12 §7.",
     )
     # plateau threshold tuning: override defaults; locked at session start.
     opt.add_argument(

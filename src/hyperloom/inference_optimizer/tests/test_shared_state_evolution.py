@@ -134,7 +134,7 @@ def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
         assert not hasattr(loaded, dropped)
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
     assert isinstance(loaded.explore_search, dict)
-    for key in ("tested", "accepted", "rejected", "winners_history", "synergy_attempted"):
+    for key in ("tested", "accepted", "rejected", "winners_history"):
         assert key in loaded.explore_search
 
 

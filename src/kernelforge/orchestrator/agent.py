@@ -20,7 +20,7 @@ from kernelforge.agent_backends import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -114,7 +114,10 @@ def make_agent_fn(
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             agent_backend,
-            model=config.agent_model,
+            # ``config.agent_model`` belongs to the provider that was resolved,
+            # not to the one being switched to; carrying it across the switch
+            # is how a Claude model id reaches the OpenAI-protocol gateway.
+            model=resolve_agent_model(agent_backend),
             executable=config.agent_cli,
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
@@ -573,7 +576,18 @@ Make your change(s) now.
             allow_dirty_baseline=True,
             ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
-            hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
+            # Built only for a provider that runs them. A backend which ignores
+            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
+            # attaching one anyway makes this call site read as protection the
+            # session does not have -- the confusion the outer gate below
+            # exists to answer. Keyed on the backend that was resolved rather
+            # than the one that was asked for, so a provider fallback carries
+            # the decision with it.
+            hooks=(
+                gate.make_agent_hooks(stop_check=gate_stop_check)
+                if gate is not None and backend.capabilities.stop_hooks
+                else None
+            ),
             mcp_servers=pr_mcp_servers,
             progress_log=progress_log,
         )
