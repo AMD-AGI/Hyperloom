@@ -35,10 +35,10 @@ DEAD = "dead"
 UNKNOWN = "unknown"
 
 #: How long a tick may go without advancing before it counts as wedged. Well
-#: above a legitimately slow tick -- role turns are capped at five minutes each
-#: and long actions run as dispatched tasks the tick does not wait on -- and
-#: well inside the default session, which a window it cannot fit in would make
-#: unreachable.
+#: above a legitimately slow tick -- each role turn is capped at
+#: :data:`~..loop.coordinator.REACTOR_TURN_BUDGET_SEC` and long actions run as
+#: dispatched tasks the tick does not wait on -- and well inside the default
+#: session, which a window it cannot fit in would make unreachable.
 DEFAULT_TICK_STALL_SEC: float = 3600.0
 
 #: How long the coordinator is given to act on the stop it was asked for before

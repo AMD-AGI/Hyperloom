@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     supervisor_status_path,
 )
 from hyperloom.orchestrator.supervisor import store, tick_stall_sec
+from hyperloom.orchestrator.supervisor.launcher import _TICK_STALL_FLOOR_SEC
 from hyperloom.orchestrator.supervisor.watch import (
     ALIVE,
     DEAD,
@@ -82,13 +83,19 @@ def _supervisor(session_dir, **kw) -> Supervisor:
     return Supervisor(session_dir, **kw)
 
 
-def test_the_stall_window_always_fits_inside_the_session_it_watches():
-    """A window the session cannot outlast is a watch that never fires."""
-    two_hours = 2 * 3600.0
-    assert tick_stall_sec(two_hours) <= two_hours / 2
-    assert tick_stall_sec(3600.0) <= 3600.0 / 2
+def test_the_stall_window_fits_inside_any_session_long_enough_to_hold_a_tick():
+    """A window the session cannot outlast is a watch that never fires.
+
+    The floor is one legal tick, so only a session with room for two of them
+    can carry a window that is both armed and inside its own budget; a shorter
+    session is watched by a window it cannot outlast, which is the honest
+    trade for never calling a legal tick wedged.
+    """
+    shortest = 2 * _TICK_STALL_FLOOR_SEC
+    assert tick_stall_sec(shortest) <= shortest / 2
+    assert tick_stall_sec(4 * 3600.0) <= 4 * 3600.0 / 2
     # And never so short that a slow tick reads as a stopped one.
-    assert tick_stall_sec(60.0) == tick_stall_sec(3600.0)
+    assert tick_stall_sec(60.0) == _TICK_STALL_FLOOR_SEC
 
 
 def test_a_ticking_coordinator_is_left_alone(tmp_path):

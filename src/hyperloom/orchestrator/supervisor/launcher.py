@@ -28,9 +28,10 @@ SUPERVISOR_STALL_ENV = "HYPERLOOM_SUPERVISOR_TICK_STALL_SEC"
 #: How long the supervisor is given to exit after being asked to.
 _STOP_GRACE_SEC: float = 5.0
 
-#: The shortest stall window worth arming. One tick can legitimately spend two
-#: role turns at their five-minute cap, plus a retry each.
-_TICK_STALL_FLOOR_SEC: float = 1800.0
+#: The shortest stall window worth arming: one whole legal tick, which is a
+#: reactor turn at :data:`~..loop.coordinator.REACTOR_TURN_BUDGET_SEC` for each
+#: of the three roles. A shorter window would call a working tick wedged.
+_TICK_STALL_FLOOR_SEC: float = 2880.0
 
 __all__ = [
     "SUPERVISOR_ENABLE_ENV",

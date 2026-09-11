@@ -31,11 +31,18 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     run_with_session_kill,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop import coordinator as coordinator_module
+from hyperloom.orchestrator.loop.coordinator import (
+    CANONICAL_TICK_ROLES,
+    REACTOR_TURN_BUDGET_SEC,
+    Coordinator,
+)
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
 )
+from hyperloom.orchestrator.roles.base import RetryPolicy
+from hyperloom.orchestrator.supervisor.launcher import _TICK_STALL_FLOOR_SEC
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
@@ -1269,9 +1276,31 @@ class TestATickCannotOutliveTheSessionBound:
         assert started == [True]
 
     @pytest.mark.asyncio
-    async def test_a_reactor_turn_uses_the_backend_call_timeout(self, coord: Coordinator):
+    async def test_a_reactor_turn_outlives_the_backends_idle_budget(self, coord: Coordinator):
+        """``call_timeout_s`` bounds the silence between streamed messages, not the turn.
+
+        A turn that keeps streaming is healthy however long it runs, so reading
+        that field as a wall-clock cap cancels working agents mid-flight.
+        """
         coord._run_deadline = Deadline.after(60.0)
         coord.backends["orchestration"].call_timeout_s = 0.01
+        finished: list[bool] = []
+
+        async def _slower_than_the_idle_budget() -> None:
+            await asyncio.sleep(0.2)
+            finished.append(True)
+
+        await coord._await_within_session_bound(
+            _slower_than_the_idle_budget,
+            stage="reactor:orchestration",
+        )
+
+        assert finished == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_reactor_turn_is_bounded_by_the_turn_budget(self, coord: Coordinator, monkeypatch):
+        monkeypatch.setattr(coordinator_module, "REACTOR_TURN_BUDGET_SEC", 0.01)
+        coord._run_deadline = Deadline.after(60.0)
 
         await asyncio.wait_for(
             coord._await_within_session_bound(
@@ -1281,9 +1310,40 @@ class TestATickCannotOutliveTheSessionBound:
             timeout=0.5,
         )
 
-    def test_only_reactor_steps_gain_a_new_stage_timeout(self, coord: Coordinator):
+    @pytest.mark.asyncio
+    async def test_a_turn_cancelled_at_its_ceiling_counts_as_a_crash(self, coord: Coordinator, monkeypatch):
+        """Cancelling the turn lets the tick advance, which hides the wedge from the watchdog.
+
+        Nothing downstream would otherwise see it, and the session would spend
+        the rest of its budget re-cancelling the same turn.
+        """
+        monkeypatch.setattr(coordinator_module, "REACTOR_TURN_BUDGET_SEC", 0.01)
+        coord._run_deadline = Deadline.after(60.0)
+        before = coord.shared_state.recent_crash_count(window_sec=3600.0)
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            timeout=0.5,
+        )
+
+        assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before + 1
+
+    @pytest.mark.asyncio
+    async def test_a_step_the_session_bound_cut_short_is_not_a_crash(self, coord: Coordinator):
+        """A session running out is how a run ends, not a fault the emergency stop should count."""
+        coord._run_deadline = Deadline.after(0.01)
+        before = coord.shared_state.recent_crash_count(window_sec=3600.0)
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            timeout=0.5,
+        )
+
+        assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before
+
+    def test_only_reactor_steps_are_bounded_by_the_turn_budget(self, coord: Coordinator):
         assert coord._stage_timeout_sec("advance_phase") is None
-        assert coord._stage_timeout_sec("reactor:not-registered") is None
+        assert coord._stage_timeout_sec("reactor:orchestration") == REACTOR_TURN_BUDGET_SEC
 
     @pytest.mark.asyncio
     async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):
@@ -1297,6 +1357,28 @@ class TestATickCannotOutliveTheSessionBound:
 
         await coord._await_within_session_bound(_ok, stage="close")
         assert started == [True]
+
+
+class TestTheTurnBudgetComposesWithTheStallWindow:
+    """One turn, one tick, one stall window: three numbers that must nest.
+
+    Sized the wrong way round, the cap is not a wedge detector but a way to
+    cancel healthy agents, or a window the watchdog fires inside a legal tick.
+    """
+
+    def test_the_budget_covers_a_backend_spending_all_of_its_retries(self):
+        # Codex bounds each attempt at 300s of wall clock; the shared policy
+        # allows three, with 1s and 2s of backoff plus jitter between them.
+        policy = RetryPolicy()
+        chain = policy.max_attempts * 300.0 + sum(policy.delay_for(n) for n in range(1, policy.max_attempts))
+        assert REACTOR_TURN_BUDGET_SEC >= chain
+
+    def test_a_whole_tick_of_turns_fits_inside_the_stall_window(self):
+        """A tick runs every role in turn, so the window has to hold all of them."""
+        assert _TICK_STALL_FLOOR_SEC >= len(CANONICAL_TICK_ROLES) * REACTOR_TURN_BUDGET_SEC
+
+    def test_the_roles_a_tick_runs_are_the_ones_the_window_was_sized_for(self, coord: Coordinator):
+        assert coord._tick_roles == CANONICAL_TICK_ROLES
 
 
 class TestTheSessionBudgetIsSummedForwardOverLegs:

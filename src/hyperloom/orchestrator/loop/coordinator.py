@@ -33,6 +33,16 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
 MAINTENANCE_INTERVAL_SEC: int = 1800
 
+# The roles a tick runs a reactor turn for, in order.
+CANONICAL_TICK_ROLES: tuple[str, ...] = ("orchestration", "critic", "robustness")
+
+# Wall-clock ceiling on one inline reactor turn, so a wedged turn cannot hold
+# the tick open indefinitely. Sized above the longest legal turn -- a backend
+# spending all three attempts of its retry policy at the 300s per-attempt cap,
+# plus the backoff between them -- because a backend's own ``call_timeout_s``
+# is an idle budget between streamed messages, not a bound on the turn.
+REACTOR_TURN_BUDGET_SEC: float = 960.0
+
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
@@ -668,8 +678,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry.
-        _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
-        self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
+        self._tick_roles: tuple[str, ...] = tuple(r for r in CANONICAL_TICK_ROLES if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
         _inline_raw = (
@@ -1444,13 +1453,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return bound.remaining()
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
-        """Return the backend cap for an inline reactor turn."""
-        prefix = "reactor:"
-        if not stage.startswith(prefix):
-            return None
-        backend = self.backends.get(stage.removeprefix(prefix))
-        timeout = getattr(backend, "call_timeout_s", None)
-        return None if timeout is None else max(0.0, float(timeout))
+        """Return the wall-clock ceiling for an inline reactor turn."""
+        return REACTOR_TURN_BUDGET_SEC if stage.startswith("reactor:") else None
 
     def _stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
@@ -1497,12 +1501,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
             return
         try:
             await asyncio.wait_for(factory(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             log.warning(
                 "Coordinator: %s hit its %.1fs bound; cancelled so the tick can close",
                 stage,
                 timeout,
             )
+            if stage_timeout is not None and timeout == stage_timeout:
+                # Cancelling the turn lets the tick advance, which reads as a
+                # healthy loop to the supervisor; the crash count is the only
+                # channel left that can end a session wedged on one role.
+                self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
     async def run(
