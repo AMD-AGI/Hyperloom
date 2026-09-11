@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge import rtk
 from kernelforge.knowledge import local_index
 from kernelforge.knowledge.local_index import _strip_frontmatter, build_forge_knowledge
 
@@ -52,26 +51,6 @@ def test_rendered_knowledge_carries_no_yaml_metadata(tmp_path: Path) -> None:
     assert "secret-metadata-marker" not in rendered
     assert "# Hardware map" in rendered
     assert "routing" in rendered
-
-
-def test_a_missing_output_filter_is_reportable_not_silent(monkeypatch) -> None:
-    """rtk degrading silently is by design; degrading invisibly is not.
-
-    Verified absent in the CI environment that produced those 316 runs: no
-    rtk binary anywhere on the shared filesystem and zero occurrences in the
-    end-to-end run logs, so every ninja and git dump reached the agent's
-    context in full.
-    """
-    monkeypatch.setattr(rtk, "_RTK_PATH", None)
-    warning = rtk.unavailable_warning()
-    assert "rtk is not on PATH" in warning
-    # The warning names the in-tree installer rather than the upstream URL:
-    # a reader who follows the URL lands on `cargo install`, while
-    # `kernelforge install-rtk` is the path this repository supports and tests.
-    assert "kernelforge install-rtk" in warning
-
-    monkeypatch.setattr(rtk, "_RTK_PATH", "/usr/bin/rtk")
-    assert rtk.unavailable_warning() == ""
 
 
 def _lang_section(block: str, name: str) -> str:

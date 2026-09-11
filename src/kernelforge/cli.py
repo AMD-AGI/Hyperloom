@@ -449,34 +449,6 @@ def main():
     pass
 
 
-@main.command("install-rtk")
-@click.option(
-    "--dest",
-    default=None,
-    help="Directory to install into (default: this interpreter's scripts dir, which already holds `kernelforge`)",
-)
-@click.option("--force", is_flag=True, help="Download even when the pinned version is already on PATH")
-def install_rtk_command(dest: str | None, force: bool) -> None:
-    """Install the pinned `rtk` output filter, which forge uses to trim tool output.
-
-    Forge routes shell output through `rtk` when it is on PATH and silently runs
-    unfiltered when it is not, so a campaign that never installed it pays full
-    price for output the code reads as trimmed. Hyperloom's `install.sh` calls
-    this command; a standalone `pip install -e ".[forge]"` -- how the kernel
-    arena reaches forge -- has to run it once itself.
-    """
-    from kernelforge.rtk_install import RTK_VERSION, RtkInstallError, install_rtk
-
-    try:
-        path, outcome = install_rtk(Path(dest) if dest else None, force=force)
-    except RtkInstallError as error:
-        raise click.ClickException(str(error)) from error
-    if outcome == "present":
-        click.echo(f"rtk {RTK_VERSION} already on PATH at {path}")
-    else:
-        click.echo(f"rtk {RTK_VERSION} installed at {path}")
-
-
 def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label: str) -> str:
     """Rebind one canonical workspace path onto a lane's own copy of it."""
     workspace_root = Path(workspace_dir).resolve()

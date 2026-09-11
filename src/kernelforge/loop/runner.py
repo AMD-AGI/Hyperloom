@@ -105,7 +105,6 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher
-from kernelforge.rtk import err_wrap, unavailable_warning as rtk_unavailable_warning
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
@@ -252,9 +251,7 @@ def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
     Only stderr used to be read. ninja prints the compiler's own output on
     stdout, so a ninja failure was reported to the agent as ``BUILD FAILED:``
     and nothing else -- the one line that would have told it what to fix went
-    to the stream nobody looked at. ``rtk err`` keeps each diagnostic on the
-    stream it arrived on, which makes reading both the fix as well as the
-    precondition.
+    to the stream nobody looked at. Both streams are read now.
     """
     combined = b"\n".join(part.strip() for part in (stdout or b"", stderr or b"") if part.strip())
     text = combined.decode("utf-8", errors="replace").strip()
@@ -2510,7 +2507,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *err_wrap(list(self.ic.build_command)),
+                *self.ic.build_command,
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -3608,13 +3605,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         iter_start = time.time()
         force_jit_rebuild(self._jit_source_files())
 
-        # Step 1: Build (if configured), through `rtk err` so the tail the agent is
-        # handed below is diagnostics rather than progress chatter. Bare `rtk` was
-        # wrapped here before and did nothing: rtk ships no ninja/cmake filter and
-        # passes an unknown command through (see kernelforge.rtk).
+        # Step 1: Build (if configured).
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *err_wrap(list(self.ic.build_command)),
+                *self.ic.build_command,
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -5656,12 +5650,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self.llm_usage.get("calls"):
             for line in llm_spend_lines(self.llm_usage):
                 print(line)
-            # Printed next to the bill because that is where a reader asking
-            # "why was this expensive" is looking. rtk degrades silently by
-            # design; the degradation should not also be invisible.
-            rtk_warning = rtk_unavailable_warning()
-            if rtk_warning:
-                print(f"  NOTE: {rtk_warning}")
         print(f"  Experiment: {self.experiment.experiment_id}")
 
         return self.results

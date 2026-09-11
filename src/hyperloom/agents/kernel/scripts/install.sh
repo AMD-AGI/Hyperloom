@@ -1327,31 +1327,6 @@ ensure_geak() {
   fi
 }
 
-# `rtk` filters verbose shell output before it reaches the model's context.
-# kernelforge routes through it whenever it is on PATH and runs unfiltered when
-# it is not, silently -- which is what had been happening everywhere: the filter
-# was wired in and never installed, so campaigns paid full price for output the
-# code reads as trimmed. The download, digest check and platform table live in
-# `kernelforge install-rtk`, because forge is also installed standalone (pip
-# install -e ".[forge]") and that path never runs this script.
-ensure_forge_rtk() {
-  log "ensuring rtk output filter for the forge backend"
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    command -v rtk >/dev/null 2>&1 || warn "rtk missing; forge tool output reaches the model unfiltered"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run kernelforge install-rtk"
-    return 0
-  fi
-  # WARN-only, like the claude CLI above: an unreachable github.com must not
-  # abort an install whose GPU-side work has already succeeded. Forge runs
-  # correctly without rtk; it just runs more expensively.
-  if ! python3 -m kernelforge.cli install-rtk; then
-    warn "rtk install failed; forge tool output reaches the model unfiltered"
-  fi
-}
-
 # The forge backend drives the `claude` CLI inside its autonomous loop
 # (see forge_submit._apply_kernel_backend_env), so it needs Node/npm, the claude npm
 # CLI, and ~/.claude auth.
@@ -1503,7 +1478,6 @@ main() {
   ensure_geak
   _prune_dep_cache "TraceLens" "GEAK"
   ensure_forge_claude_cli
-  ensure_forge_rtk
   write_env_file
 
   report_status

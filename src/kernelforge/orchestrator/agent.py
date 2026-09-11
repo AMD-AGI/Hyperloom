@@ -29,7 +29,6 @@ from kernelforge.loop.scoring import (
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
-from kernelforge import rtk
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -192,43 +191,6 @@ def make_agent_fn(
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
-    # `rtk` (token filter) is advertised to the agent ONLY when it's actually on PATH; otherwise the agent would
-    # prefix every shell command with a missing binary (command not found). Mirrors kernelforge.rtk.wrap_command,
-    # which no-ops the same way.
-    #
-    # The commands named below are the ones rtk 0.48 actually has a filter for, with savings measured on this
-    # repository -- not the list this paragraph used to carry. `ninja`, `cmake` and `rocprofv3` are NOT among them:
-    # rtk passes an unknown command straight through, so `rtk ninja -j4` was a no-op the prompt spent tokens asking
-    # for. Builds and test runs are served by the two wrappers that do not care what the inner command is: `rtk err`
-    # (keep only errors and warnings) and `rtk test` (keep only failures). Both tee the full output to a log whose
-    # path they print, so nothing is lost -- the agent reads it only when it needs to.
-    if rtk.is_available():
-        _rtk_guidance = (
-            "Run noisy shell commands through `rtk`, which trims their output before it\n"
-            "enters this context. Two wrappers cover anything, whatever the inner command:\n"
-            "  - `rtk err <cmd>` — keeps only errors and warnings (~99% smaller on a build).\n"
-            "    Use it for every compile: `rtk err ninja -j4`, `rtk err cmake --build .`,\n"
-            "    `rtk err python setup.py build_ext --inplace`.\n"
-            "  - `rtk test <cmd>` — keeps only failures (~86% smaller on a pytest run).\n"
-            "    Use it for the driver and the correctness suite: `rtk test pytest -q`.\n"
-            "Plus per-command filters: `rtk find …` (~93%), `rtk ls -laR …` (~99%),\n"
-            "`rtk git status` (~78%), `rtk grep -r foo .` (~28%), `rtk tree`, `rtk read`,\n"
-            "`rtk wc`. Both wrappers and the filters tee the full output to a log file and\n"
-            "print its path, so read that only if the trimmed output is not enough.\n"
-            "An unknown command (a profiler, a build tool) is passed through unchanged,\n"
-            "so a bare `rtk` in front of one buys nothing — reach for `rtk err` there.\n"
-        )
-        _rtk_guidance_terse = (
-            "Run noisy shell commands through `rtk`: `rtk err <cmd>` for builds (keeps only\n"
-            "errors/warnings), `rtk test <cmd>` for test runs (keeps only failures), and\n"
-            "`rtk find`/`rtk ls`/`rtk git`/`rtk grep` for those. Both wrappers tee the full\n"
-            "output to a log and print its path. An unknown command passes through\n"
-            "unchanged, so wrapping one in bare `rtk` buys nothing. "
-        )
-    else:
-        _rtk_guidance = ""
-        _rtk_guidance_terse = ""
-
     workspace_hygiene_rule = (
         "Do NOT create or leave new non-ignored files in the workspace. Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
@@ -338,7 +300,7 @@ keep exploring until you are done rather than reserving effort for a summary.
 {self_profiling_section}
 ## Tool usage — token discipline
 Every Bash invocation's stdout/stderr is billed back to you on the next turn.
-{_rtk_guidance}Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
+Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
 """
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
@@ -446,7 +408,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 
 {self_profiling_section}
 ## Tool usage — token discipline
-{_rtk_guidance_terse}Never `cat` a whole file — use the Read tool.
+Never `cat` a whole file — use the Read tool.
 """
 
     async def agent_fn(
