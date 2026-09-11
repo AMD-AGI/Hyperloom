@@ -125,6 +125,16 @@ ast = [
 claude = [
     "claude-agent-sdk>=0.2.110",
 ]
+# InferaSim (Infera) serving-projection benchmark backend
+# (HYPERLOOM_BENCHMARK_BACKEND=inferasim). Lazy-imported by
+# ``orchestrator.actions.executors.inferasim_bridge``; not needed unless the
+# inferasim backend is selected. Infera is not yet on PyPI, so most deployments
+# instead point HYPERLOOM_INFERASIM_ROOT at an Infera checkout (or
+# HYPERLOOM_INFERASIM_PYTHON at an interpreter that can import ``infera``); this
+# extra is a convenience for when it is pip-installable.
+inferasim = [
+    "amd-infera",
+]
 # Local dev tooling: pre-commit hooks, formatters, type checker.
 dev = [
     "pre-commit>=4.0",
@@ -236,6 +246,8 @@ hyperloom = [
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
     "assets/agentx/*.py",
+    # InferaSim serving-projection benchmark backend workload template.
+    "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.

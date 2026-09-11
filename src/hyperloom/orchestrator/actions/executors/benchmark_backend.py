@@ -1,7 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark backend seam."""
+"""Benchmark backend seam.
+
+Central place that builds the benchmark subprocess command line so the
+optimizer can run against different benchmark engines without every executor
+knowing which engine is active. The default backend is Magpie, whose command is
+``python -m Magpie -v benchmark --benchmark-config CFG --output-dir OUT
+--run-mode local``.
+
+The bypass backend implements the same contract (same input YAML, same
+workspace/report artifacts) and is selected via
+HYPERLOOM_BENCHMARK_BACKEND=bypass without touching the executors.
+
+The inferasim backend implements the same contract but produces the report from
+Infera's ``inferasim`` serving projection (analytical / anchor-calibrated, no
+GPU) instead of a real server + client. It is selected via
+HYPERLOOM_BENCHMARK_BACKEND=inferasim and lets an entire optimization session
+run without a GPU, reserving real GPU time for the final validation. See
+:mod:`inferasim_runner`.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +30,7 @@ from typing import Protocol
 # Backend selection env var.
 BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
-KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass"})
+KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass", "inferasim"})
 
 
 class BenchmarkBackend(Protocol):
@@ -93,11 +111,17 @@ class BypassBackend:
         except (TypeError, ValueError):
             port = 8888
         verdict = {"eligible": False, "framework": framework, "port": port, "reason": ""}
-        # The reuse protocol boots a local server and re-attaches a client round to it; that only holds single-node.
-        from ._multi_node_env import is_multi_node
+        # The reuse protocol boots a local server and re-attaches a client
+        # round to it; that only holds single-node. Mirror the Magpie path's
+        # multi-node gate (see _server_lifecycle.resolve_lifecycle_params),
+        # which our non-None verdict would otherwise short-circuit past.
+        from ._multi_node_env import is_multi_node, uses_external_server
 
         if is_multi_node():
             verdict["reason"] = "multi-node (server_lifecycle is local-only)"
+            return verdict
+        if uses_external_server():
+            verdict["reason"] = "external server (client-only; nothing local to boot or reuse)"
             return verdict
         if framework not in self._LIFECYCLE_FRAMEWORKS:
             verdict["reason"] = f"framework {framework!r} is not a serving framework"
@@ -131,6 +155,68 @@ class BypassBackend:
         ]
 
 
+class InferasimBackend:
+    """InferaSim backend: projects serving metrics instead of running a server.
+
+    Accepts the same CLI flags as Magpie/bypass and writes the same
+    workspace/report contract, but every measurement comes from Infera's
+    analytical (optionally anchor-calibrated) serving projection, so no server
+    is booted and no GPU is used. See :mod:`inferasim_runner`.
+    """
+
+    name = "inferasim"
+
+    def resolve_interpreter(self) -> str:
+        """Return the interpreter used to run the InferaSim projection.
+
+        Prefers ``HYPERLOOM_INFERASIM_PYTHON`` (an interpreter that can import
+        ``infera``), then the current interpreter, then a PATH ``python3``.
+        InferaSim is analytical and never needs Magpie's canonical venv.
+        """
+        import shutil
+        import sys
+
+        explicit = (os.environ.get("HYPERLOOM_INFERASIM_PYTHON") or "").strip()
+        if explicit:
+            return explicit
+        return sys.executable or shutil.which("python3") or "python3"
+
+    def lifecycle_eligibility(self, bench: dict) -> dict | None:
+        """A projection has no persistent server, so lifecycle reuse is off.
+
+        Returning an ineligible verdict routes run_grid through single-shot
+        ``phase=all`` calls (the projection is cheap and stateless), mirroring
+        the Magpie non-lifecycle path.
+        """
+        return {
+            "eligible": False,
+            "framework": str(bench.get("framework") or "").lower(),
+            "port": 0,
+            "reason": "inferasim projection has no server to reuse",
+        }
+
+    def build_command(
+        self,
+        *,
+        python_exe: str,
+        config_path: Path,
+        output_dir: Path,
+    ) -> list[str]:
+        """Return the InferaSim runner argv mirroring Magpie's flags."""
+        return [
+            python_exe,
+            "-m",
+            "hyperloom.orchestrator.actions.executors.inferasim_runner",
+            "benchmark",
+            "--benchmark-config",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--run-mode",
+            "local",
+        ]
+
+
 def resolve_backend_name() -> str:
     """Resolve the active backend name from the environment."""
     raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
@@ -140,10 +226,20 @@ def resolve_backend_name() -> str:
 
 
 def resolve_backend() -> BenchmarkBackend:
-    """Resolve the active benchmark backend instance."""
+    """Resolve the active benchmark backend instance.
+
+    ``bypass`` selects the Hyperloom runner; ``inferasim`` selects the analytical
+    projection runner; ``magpie`` (the default) and any unknown value fall back
+    to Magpie so a typo cannot silently disable benchmarking.
+
+    Returns:
+        The selected BenchmarkBackend implementation.
+    """
     name = resolve_backend_name()
     if name == "bypass":
         return BypassBackend()
+    if name == "inferasim":
+        return InferasimBackend()
     return MagpieBackend()
 
 
