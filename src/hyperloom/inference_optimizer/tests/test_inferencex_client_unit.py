@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 
 from hyperloom.inference_optimizer.baseline_comparison import inferencex_client as ix
@@ -240,3 +244,158 @@ def test_find_reference_rows_missing_topology_fields_treated_single_node():
 
 def test_find_reference_rows_empty_when_no_shape_match():
     assert ix.find_reference_rows([_bench_row()], hardware="b300", isl=2048, osl=2048) == []
+
+
+@pytest.mark.parametrize("isl,osl", [(None, None), (1024, 8192)])
+def test_agentx_matches_explicit_agentic_rows_without_fixed_lengths(isl, osl):
+    agentic = _bench_row(benchmark_type="agentic_traces", isl=None, osl=None)
+    rows = [agentic, _bench_row(benchmark_type="single_turn"), _bench_row(isl=None, osl=None)]
+
+    assert ix.find_reference_rows(rows, hardware="b300", isl=isl, osl=osl, benchmark_mode="agentx") == [agentic]
+
+
+def test_agentx_still_filters_hardware_precision_and_topology():
+    matching = _bench_row(benchmark_type="agentic_traces", isl=None, osl=None, precision="fp4")
+    rows = [
+        matching,
+        *(
+            {**matching, **change}
+            for change in (
+                {"hardware": "h100"},
+                {"precision": "fp8"},
+                {"is_multinode": True},
+                {"disagg": True},
+            )
+        ),
+    ]
+
+    assert ix.find_reference_rows(
+        rows, hardware="B300", isl=None, osl=None, precision="FP4", benchmark_mode="agentx"
+    ) == [matching]
+
+
+def test_synthetic_keeps_legacy_rows_but_excludes_other_workloads():
+    legacy = _bench_row()
+    single_turn = _bench_row(benchmark_type="single_turn")
+    rows = [legacy, single_turn, _bench_row(benchmark_type="agentic_traces"), _bench_row(benchmark_type="unknown")]
+
+    assert ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024) == [legacy, single_turn]
+
+
+# ---- fetch_agentic_interactivity -------------------------------------------
+def test_agentic_interactivity_joins_by_normalized_id_not_response_order(monkeypatch):
+    calls = []
+    payload = {
+        "20": {"id": 20, "p90_e2e_norm_intvty": 8.5, "p75_e2e_norm_intvty": 99},
+        "10": {"id": 10, "p90_e2e_norm_intvty": 4.25},
+        "999": {"id": 999, "p90_e2e_norm_intvty": 1000},
+    }
+
+    def fetch(url):
+        calls.append(url)
+        return json.dumps(payload).encode()
+
+    monkeypatch.setenv("INFERENCEX_BASE_URL", "https://reference.test/api/v1")
+    monkeypatch.setattr(ix, "_fetch_raw", fetch)
+    assert ix.fetch_agentic_interactivity(["0010", 20, "20"]) == {"10": 4.25, "20": 8.5}
+    assert len(calls) == 1
+    assert urlsplit(calls[0]).path == "/api/v1/derived-agentic-metrics"
+    assert parse_qs(urlsplit(calls[0]).query) == {"ids": ["10,20"]}
+
+
+@pytest.mark.parametrize("invalid", [None, 0, -1, True, "12.0", float("nan"), float("inf")])
+def test_agentic_interactivity_keeps_unavailable_values_missing(monkeypatch, invalid):
+    payload = {"1": {"id": 1, "p90_e2e_norm_intvty": invalid, "p90_intvty": 100, "mean_tpot": 0.01}}
+    monkeypatch.setattr(ix, "_fetch_raw", lambda url: json.dumps(payload).encode())
+
+    assert ix.fetch_agentic_interactivity([1, 2]) == {"1": None}
+
+
+def test_agentic_interactivity_batches_no_more_than_200_ids(monkeypatch):
+    requested = []
+
+    def fetch(url):
+        ids = parse_qs(urlsplit(url).query)["ids"][0].split(",")
+        requested.append(ids)
+        return json.dumps({key: {"id": int(key), "p90_e2e_norm_intvty": float(key)} for key in ids}).encode()
+
+    monkeypatch.setattr(ix, "_fetch_raw", fetch)
+    ids = list(range(1, 402))
+    result = ix.fetch_agentic_interactivity([*ids, "1"])
+    assert [len(batch) for batch in requested] == [200, 200, 1]
+    assert result == {str(key): float(key) for key in ids}
+
+
+def test_agentic_interactivity_empty_input_does_not_fetch(monkeypatch):
+    monkeypatch.setattr(ix, "_fetch_raw", lambda url: pytest.fail("empty input must not request the API"))
+    assert ix.fetch_agentic_interactivity([]) == {}
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "1.0", "1,2", "", "abc"])
+def test_agentic_interactivity_rejects_invalid_request_ids(monkeypatch, value):
+    monkeypatch.setattr(ix, "_fetch_raw", lambda url: pytest.fail("invalid IDs must not request the API"))
+    with pytest.raises(ValueError, match="benchmark ID"):
+        ix.fetch_agentic_interactivity([value])
+
+
+def test_agentic_interactivity_retries_transport_then_parses_gzip(monkeypatch):
+    calls = []
+    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "2")
+
+    def fetch(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise ix.InferenceXFetchError("HTTP 503")
+        return gzip.compress(json.dumps({"1": {"id": 1, "p90_e2e_norm_intvty": 8.0}}).encode())
+
+    monkeypatch.setattr(ix, "_fetch_raw", fetch)
+    assert ix.fetch_agentic_interactivity([1]) == {"1": 8.0}
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b"[]",
+        b'{"error":"unavailable"}',
+        b'{"1":{"id":2,"p90_e2e_norm_intvty":8}}',
+        b'{"1":8}',
+    ],
+)
+def test_agentic_interactivity_distinguishes_invalid_response_from_no_data(monkeypatch, body):
+    monkeypatch.setattr(ix, "_fetch_raw", lambda url: body)
+    assert ix.fetch_agentic_interactivity([1]) is None
+
+
+def test_agentic_interactivity_empty_response_is_valid_no_data(monkeypatch):
+    monkeypatch.setattr(ix, "_fetch_raw", lambda url: b"{}")
+    assert ix.fetch_agentic_interactivity([1]) == {}
+
+
+def test_agentic_interactivity_failed_batch_does_not_return_partial_success(monkeypatch):
+    calls = []
+    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "2")
+
+    def fetch(url):
+        calls.append(url)
+        if parse_qs(urlsplit(url).query)["ids"] == ["201"]:
+            raise ix.InferenceXFetchError("HTTP 503")
+        return json.dumps({"1": {"id": 1, "p90_e2e_norm_intvty": 8.0}}).encode()
+
+    monkeypatch.setattr(ix, "_fetch_raw", fetch)
+    assert ix.fetch_agentic_interactivity(list(range(1, 202))) is None
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("encoding", ["", "gzip"])
+def test_agentic_interactivity_rejects_truncated_gzip_response(monkeypatch, encoding):
+    body = gzip.compress(b'{"1":{"id":1,"p90_e2e_norm_intvty":8.0}}')[:-8]
+    monkeypatch.setattr(ix.urllib.request, "urlopen", lambda req, **kwargs: _FakeResp(body=body, encoding=encoding))
+    assert ix.fetch_agentic_interactivity([1]) is None
+
+
+def test_agentic_interactivity_rejects_non_http_base_url(monkeypatch):
+    monkeypatch.setenv("INFERENCEX_BASE_URL", "file:///reference")
+    monkeypatch.setattr(ix.urllib.request, "urlopen", lambda *args, **kwargs: pytest.fail("unsafe URL opened"))
+    assert ix.fetch_agentic_interactivity([1]) is None

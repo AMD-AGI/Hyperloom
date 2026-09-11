@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+BenchmarkMode = Literal["synthetic", "agentx"]
 
 
 @dataclass
@@ -17,8 +19,9 @@ class BaselineQuery:
     gpu: str
     framework: str = ""
     precision: str = ""
-    isl: int = 0
-    osl: int = 0
+    isl: int | None = 0
+    osl: int | None = 0
+    benchmark_mode: BenchmarkMode = "synthetic"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the query into a plain JSON-safe dict."""
@@ -29,6 +32,7 @@ class BaselineQuery:
             "precision": self.precision,
             "isl": self.isl,
             "osl": self.osl,
+            "benchmark_mode": self.benchmark_mode,
         }
 
 
@@ -44,6 +48,8 @@ class BaselinePoint:
     mean_tpot_ms: float
     mean_e2el_ms: float
     date: str = ""
+    benchmark_id: str | None = None
+    e2e_norm_intvty_p90: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the data point into a plain JSON-safe dict."""
@@ -56,6 +62,8 @@ class BaselinePoint:
             "mean_tpot_ms": self.mean_tpot_ms,
             "mean_e2el_ms": self.mean_e2el_ms,
             "date": self.date,
+            "benchmark_id": self.benchmark_id,
+            "e2e_norm_intvty_p90": self.e2e_norm_intvty_p90,
         }
 
 
@@ -89,6 +97,7 @@ class BaselineSummary:
 
 
 __all__ = [
+    "BenchmarkMode",
     "BaselineQuery",
     "BaselinePoint",
     "BaselineSummary",
