@@ -3,7 +3,7 @@ title: Integrating standalone assembly - lessons from Evolve AttnRes
 kind: guide
 gens: [gfx950]
 status: source-inspected; experimental gfx950 harness validated
-updated: 2026-09-09
+updated: 2026-09-11
 ---
 
 <!--
@@ -59,11 +59,13 @@ there is no destructor that could unexpectedly invalidate a graph.
 | --- | --- | --- |
 | Specialization | gfx950 support guard and fixed Kimi-K3 dimensions; some tensor properties are asserted. | Check the actual architecture, BF16/FP32 types, device, shapes, strides, and launch geometry. The inner H dimension must have the layout the ISA assumes; shape checks alone do not prove this. Preserve the authorized input domain. |
 | ABI and resources | Explicit ctypes argument packing, exported symbols, 1024-thread blocks, and shared-memory launch arguments. | Match argument order, widths, offsets, and pointer lifetime to metadata. Reconcile descriptor static LDS with additional dynamic shared memory instead of copying resource numbers blindly. |
+| Runtime scalars | The score metadata declares `eps`, but the published instructions use a hardcoded `1e-6`. | Trace each supported scalar argument to its consumer and vary it in correctness tests. Declaring or loading an argument does not prove the kernel uses it. The model's `1e-5` epsilon needs a separately validated correction. |
 | Candidate identity | `_load_fn` caches by `(co_path, kernel_name)` for the process lifetime. | Replacing bytes at the same path need not reload the module. Give each candidate a fresh object identity or isolated process; account for target and device/context as well as code content. |
 | Address arithmetic | The pinned combine source has nine low-half pointer adds without a high-half carry; a local correction passed valid tensors spanning a 4-GiB boundary. | Audit every complete address calculation, not only argument packing. Test valid boundary-spanning tensor views and multiple independent allocations. Keep pointer-faulting candidates rejected. |
 | Numerical conversion | The pinned combine source truncates FP32 to BF16; a nearest-rounding control substantially reduces error. | Compare against the driver's conversion contract and an independent oracle, not just a global SNR threshold. Record changes to numerical semantics separately from scheduling gains. |
 | Stream | `_launch` passes `None` for the HIP stream. | Propagate the driver's actual stream. Verify nondefault-stream execution and graph capture before accepting the wrapper. Load/build before timing or capture. |
 | Dispatch | Unsupported hardware or missing `.co` files cause the upstream suite to skip. | Record a skip as unevaluated. Verify the selected function is the assembly candidate, and use a disposable wrong-result edit to prove the unchanged oracle rejects it. |
+| Framework routing | Current SGLang's fused ROCm AttnRes path bypasses `_mix_fused`, where the published score replacement is inserted. | Profile the actual model path. Compare the complete fused caller, including add, snapshot and output norm; replacing an unused function cannot explain model speedup. |
 | Output contract | Score writes nine columns of a 16-column tensor; references initialize outputs. | Preserve required initialization and in-place behavior. Test reused, dirty outputs and changed input tensors to detect stale results or pointer binding. |
 
 An assembly build or launch failure must fail the attempt. A silent fallback

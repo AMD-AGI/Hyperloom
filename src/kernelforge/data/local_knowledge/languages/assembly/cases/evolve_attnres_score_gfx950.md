@@ -2,8 +2,8 @@
 title: Evolve AttnRes score on gfx950 - interleaved reductions
 kind: case
 gens: [gfx950]
-status: GPU-reproduced; slower than the tested Triton baseline
-updated: 2026-09-09
+status: GPU-reproduced; Forge improves the ASM seed but not the source Triton
+updated: 2026-09-11
 ---
 
 <!--
@@ -57,6 +57,74 @@ The source specializes Kimi-K3 decode: `T=64`, `NVB=8`, `H=7168`,
 `[T,H]` and bank `[T,NVB,H]`, plus FP32 weights `cw[H]`; scores are FP32
 `[T,MAX_ROWS]`. For each token and each of eight bank rows plus the prefix,
 it computes `dot(v, cw) * rsqrt(sum(v*v) / H + 1e-6)`.
+
+## Production baseline and runtime epsilon: September 11 remeasurement
+
+On MI355X with PyTorch 2.11 / ROCm 7.2 / Triton 3.7, a matched experiment
+compared the pinned ASM with both the AITER test reference and SGLang's
+production `_score_kernel`. These Triton implementations have different
+reduction structures: the production kernel reduces each H chunk before
+accumulating scalars (`num_warps=8`); the test reference accumulates vectors
+across chunks and reduces once (default four warps). Do not treat their
+latencies as interchangeable.
+
+At `T=64, NVB=8, H=7168, eps=1e-6`, seven interleaved rounds, five samples per
+round, and 100 calls per graph measured warm medians of **5.880 us production
+Triton, 2.828 us test-reference Triton, and 5.272 us Neha ASM**. The ASM reduces
+latency by about 10% relative to this production score, but remains slower
+than the test reference. This still does not reproduce the author's 34.78 us.
+
+Check scalar arguments against instructions, not only metadata. The published
+score declares `eps` at kernarg offset 36 and loads it into `s13`, but uses
+`v_mov_b32 v4, 0x358637BD` (hardcoded `1e-6`) in the final normalization.
+Passing `1e-5`, the local Kimi-K3 model's RMSNorm epsilon, failed the fixed
+FP64 score tolerance. A separate correctness repair replaces that move with
+`v_mov_b32 v4, s13`; tests at `eps=1e-5` passed for T=1,4,16,64,256. The
+minimal example intentionally keeps its documented `1e-6` specialization.
+The repair is not a scheduling speedup and does not authorize silently
+changing a verified launcher's input domain.
+
+SGLang 0.5.19's normal ROCm path for H=7168/NVB<=8 uses a single fused Triton
+kernel, bypassing the two-kernel `_mix_fused` branch where the published score
+replacement is installed. At T=64, mixture-only timing was **7.290 us fused
+Triton versus 8.578 us for Neha score plus repaired ASM combine**. The real
+fused path can also perform residual add, bank snapshot and output RMSNorm.
+Prove dispatch and compare the complete caller before making an E2E claim.
+
+## Verified Forge instruction-only campaign
+
+The minimal `examples/triton2asm-attnres/` was run with Forge revision
+`48bd5d730` (the `191d4c7f0` snapshot plus its GPU-verified example-driver fix),
+`--kernel-backend assembly`, one lane, and Codex `gpt-5.6-sol`. PORT copied
+the attributed seed and standalone launcher, passed correctness and the
+deliberate assembler-failure probe, then froze the launcher and driver.
+Two instruction-only iterations passed the unchanged four-case FP64 oracle,
+stream/graph checks, canonical suite and three independent measurements:
+
+1. After restricting `exec` to work item 0 for finalization, branch around
+   the scalar/LDS tail when `exec` is empty. Other waves still restore their
+   saved execution masks and retain the preceding workgroup barrier.
+2. Replace repeated full per-lane 64-bit address reconstruction in the
+   seven-chunk loop with `global_load_ushort v3, v5, s[20:21]` and
+   `global_load_dword v4, v6, s[8:9]`. Compute lane offsets once and advance
+   them by 2048/4096 bytes per chunk. The scalar base retains the full
+   address; this is not the combine kernel's incorrect low-half pointer add.
+
+The campaign measured approximately **3.1 us source Triton, 5.6 us initial
+ASM, and 4.3 us optimized ASM**. Its per-case score gives **1.314x incremental
+speedup over the ASM seed**, but **0.724x relative to the original source**.
+Both iterations were KEEP relative to the incumbent; the final result
+correctly records `incremental_improved=true` and `improved=false`.
+Do not relabel these KEEP decisions as wins over Triton or the model.
+
+Campaign `07ad340a` retained best workspace commit
+`68fad1d45b97893ca354f9ec7792c40fa872b1ab`; the launcher hash remained unchanged.
+Artifacts, the exact ASM-only patch, and raw measurements were preserved under
+`/shared_nfs/chenyi/forge-neha-repro-20260911/forge-score-campaign-ca/` and
+`recovery-134141/`. A clean candidate replay on a second MI355X node passed
+at SNR 137.377 dB and measured 4.041 us. Its source and seed were not remeasured
+there; do not combine those cross-node numbers into another speedup ratio.
+No model E2E improvement has been established by this campaign.
 
 ## What the source actually does
 
