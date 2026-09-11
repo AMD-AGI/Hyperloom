@@ -32,6 +32,8 @@ from .event_fields import (
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
 )
+from hyperloom.orchestrator.delivery.archive import ROLE_LAUNCH_CONFIG
+
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
@@ -249,6 +251,39 @@ def record_dispatch(
         note_failure(section="enablement_event", error=exc, detail="enablement event: dispatch record failed")
 
 
+def record_archive(*, task_id: str, attempt: int, files: Sequence[Mapping[str, str]]) -> None:
+    """Record which of a round's deliverables the archive took. Never raises.
+
+    Its own entry point rather than a field of the settle: the copies exist
+    only once ``snapshot_round`` has run, and only the coordinator ever sees
+    them. Nothing in the round's own result can stand in -- ``patches_applied``
+    names workspace originals the package does not hold, and cannot say whether
+    the size ceiling kept a copy at all.
+
+    Upserts onto the row the dispatch opened, so it wants the same
+    ``(task_id, attempt)``.
+    """
+    try:
+        sink = _sink()
+        if sink is None:
+            return
+        _open()
+        archived = _archived_files(files)
+        sink.record(
+            SECTION_ATTEMPT,
+            {
+                "attempt": int(attempt or 0),
+                "task_id": str(task_id or ""),
+                "files": archived,
+                "accepted_config_path": _text_or_none(_archived_path(archived, ROLE_LAUNCH_CONFIG)),
+            },
+            row_type="attempt",
+            natural_ids=_row_id(task_id, attempt),
+        )
+    except Exception as exc:  # noqa: BLE001
+        note_failure(section="enablement_event", error=exc, detail="enablement event: archive record failed")
+
+
 def record_round(
     *,
     task_id: str,
@@ -264,6 +299,9 @@ def record_round(
     dispatched opens its own row here, being still a round the lane spent.
     ``validation_pending`` means an eval-origin KEEP opened a revalidation
     window instead of landing.
+
+    What the archive took is :func:`record_archive`'s to write, not a field of
+    the verdict.
     """
     try:
         sink = _sink()
@@ -291,7 +329,6 @@ def record_round(
             "patches_dropped_by_grounding": [str(d) for d in _as_list(res.get("patches_dropped_by_grounding"))[:8]],
             "patches_span_multiple_roots": bool(res.get("patches_span_multiple_roots")),
             "framework_root": _text_or_none(res.get("framework_root")),
-            "accepted_config_path": _text_or_none(res.get("enablement_accepted_config_path")),
             "effective_config": _config_row(res.get("enablement_effective_config")),
             "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
             "runtime": _runtime_row(res.get("enablement_active_runtime")),
@@ -660,6 +697,21 @@ def _artifact_row(artifact: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _archived_files(files: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
+    """Project the copies a round's archive holds, path and role as recorded."""
+    return [
+        {"path": str(f.get("path") or ""), "role": str(f.get("role") or "")} for f in files if isinstance(f, Mapping)
+    ]
+
+
+def _archived_path(files: Sequence[Mapping[str, str]], role: str) -> str:
+    """Return the archived path recorded for a single-valued role, or ``""``."""
+    return next(
+        (str(f.get("path") or "") for f in files if isinstance(f, Mapping) and str(f.get("role") or "") == role),
+        "",
+    )
+
+
 def _config_row(config: Any) -> dict[str, Any] | None:
     """Project the env/arg layers a bench ran with."""
     row = _as_dict(config)
@@ -732,6 +784,7 @@ __all__ = [
     "assemble_enablement_ext",
     "enablement_event_id",
     "finish",
+    "record_archive",
     "record_build",
     "record_dispatch",
     "record_human_review",

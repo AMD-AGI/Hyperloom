@@ -620,6 +620,17 @@ class V6ConcSweepExt(TypedDict, total=False):
     superseded_sweeps: list[str]
 
 
+class V6ArchivedFile(TypedDict, total=False):
+    """One copy an enablement round's archive holds, and what it is.
+
+    ``role`` is a ``delivery.archive.ROLE_*`` value. It distinguishes a patch
+    the round applied from one it refused, which the round's own result cannot.
+    """
+
+    path: str
+    role: str
+
+
 class V6EnablementAttempt(TypedDict, total=False):
     """One authoring round of the enablement lane, keyed by its specialist.
 
@@ -633,7 +644,18 @@ class V6EnablementAttempt(TypedDict, total=False):
     ``next_launch_log_excerpt`` is what its patch uncovered underneath, which
     is the gap the *next* round will be pointed at. The projection kept one
     ``launch_log`` for the whole lane and every advance overwrote it, so the
-    export published the newest gap as the reason the lane had opened."""
+    export published the newest gap as the reason the lane had opened.
+
+    ``files`` and ``accepted_config_path`` are session-relative and name only
+    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
+    session that hit the file or byte cap ships a truncated package and a
+    consumer must tolerate a miss. ``patches_applied`` and
+    ``artifacts_applied[].target`` are the workspace originals the round
+    reported, which are never packaged -- they are identity, not a way to
+    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
+    which stays absolute because the revalidation baseline opens that one
+    directly."""
 
     attempt: int
     task_id: str
@@ -654,6 +676,7 @@ class V6EnablementAttempt(TypedDict, total=False):
     patches_dropped_by_grounding: list[str]
     patches_span_multiple_roots: bool
     framework_root: str | None
+    files: list[V6ArchivedFile]
     accepted_config_path: str | None
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
@@ -1754,6 +1777,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SCHEMA_VERSION_V6",
     "SessionBreakdown",
+    "V6ArchivedFile",
     "V6BaselineProgress",
     "V6Close",
     "V6CloseRobustness",

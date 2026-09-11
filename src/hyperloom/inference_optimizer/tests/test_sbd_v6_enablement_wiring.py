@@ -363,6 +363,54 @@ async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
     assert row["status"] == "kept"
     assert row["validation_pending"] is True
     assert row["landed"] is False
+    # Nothing was there to copy, so the row names nothing rather than the
+    # ``runs/`` path the round reported.
+    assert row["files"] == []
+    assert row["accepted_config_path"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_rearm_hands_the_round_its_archive(_bound_session):
+    lane = _lane(_bound_session)
+    lane.shared_state.enablement.last_specialist_task_id = "spec-1"
+    config = _bound_session / "runs" / "integrate_patch" / "spec-1" / "integrate_patch.with_envs.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("tp: 8\n", encoding="utf-8")
+
+    await lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "enablement_accepted_config_path": str(config),
+        }
+    )
+
+    rows = _ext()["attempts"]["rows"]
+    # The archive and the verdict are two calls on one tick, onto one row.
+    assert len(rows) == 1
+    assert {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"} in rows[0]["files"]
+    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
+    assert rows[0]["status"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monkeypatch):
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.enablement.lane.snapshot_round",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no space left on device")),
+    )
+    lane = _lane(_bound_session)
+    lane.shared_state.enablement.last_specialist_task_id = "spec-1"
+
+    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
+
+    # Absent, not empty: an archive that blew up did not establish that
+    # nothing landed. The round is still ruled.
+    row = _ext()["attempts"]["rows"][0]
+    assert "files" not in row
+    assert "accepted_config_path" not in row
+    assert row["status"] == "reverted"
 
 
 @pytest.mark.asyncio
