@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -411,6 +412,48 @@ def _reap_stale_engine_ports() -> None:
                     break
 
 
+# SGLang >= 0.5.18 uses the no-patch kernel_shape_tool (PYTHONPATH +
+# sitecustomize + TRACELENS_SHAPE_DISCOVERY) for shape discovery. This script is
+# standalone (no hyperloom import), so the gate is mirrored inline.
+_KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
+_SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
+
+
+def _sglang_shape_mode() -> str:
+    """Pod-side mirror of hyperloom's SGLang shape-mode gate (no hyperloom import)."""
+    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return "patched"
+    if override == "sitecustomize":
+        return "sitecustomize"
+    version = ""
+    try:
+        import sglang  # type: ignore
+
+        version = (getattr(sglang, "__version__", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
+    if not m:
+        return "patched"
+    vt = tuple(int(p) for p in m.group(1).split("."))
+    return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
+
+
+def _maybe_activate_kernel_shape_tool(env: dict[str, str]) -> None:
+    """SGLang >= 0.5.18: put the no-patch kernel_shape_tool on PYTHONPATH."""
+    root = (env.get("TRACELENS_ROOT") or os.environ.get("TRACELENS_ROOT") or "").strip()
+    if not root or _sglang_shape_mode() != "sitecustomize":
+        return
+    tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
+    if not tool.is_dir():
+        _log(f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled")
+        return
+    existing = (env.get("PYTHONPATH") or "").strip()
+    env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)
+    env.setdefault("TRACELENS_SHAPE_DISCOVERY", "1")
+
+
 def _build_sglang_cmd(
     a: argparse.Namespace,
     node_rank: int,
@@ -724,6 +767,7 @@ def main() -> int:
     if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
         log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
     if args.framework == "sglang":
+        _maybe_activate_kernel_shape_tool(env)
         cmd = _build_sglang_cmd(args, node_rank, leader, advertise_host=advertise_host)
         pid = _detach_launch(cmd, log_file, pid_file, env)
     else:

@@ -583,20 +583,27 @@ def _validate_trace_structure(
             skip_reason="main trace could not be sampled",
         )
     else:
+        # Shape discovery lands via one of two mechanisms and leaves either
+        # marker: the ``sglang_profiler::`` custom-op namespace (both the legacy
+        # patch and the no-patch kernel_shape_tool use it) or the
+        # ``kernel_shape_profiler`` module frame (present when with_stack is on).
+        _shape_markers = ("sglang_profiler::", "kernel_shape_profiler")
+        _shape_present = any(m in main_text for m in _shape_markers)
         _note_check(
             CHECK_SGLANG_SHAPE_PROFILER,
-            status="passed" if "kernel_shape_profiler" in main_text else "failed",
+            status="passed" if _shape_present else "failed",
             sampled_file=main_traces[0].name,
             sampled_bytes=_TRACE_INSPECT_BYTES,
         )
-        if "kernel_shape_profiler" not in main_text:
+        if not _shape_present:
             issues.append(
                 f"[5] sglang main trace ({main_traces[0].name}, sampled "
                 f"first {_TRACE_INSPECT_BYTES // 1_000_000} MB) lacks "
-                "kernel_shape_profiler events — shape-discovery "
-                "patch didn't reach the live SGLang. Verify "
-                "_server_patcher (PR #207) succeeded for the "
-                "deployed SGLang version (check log warnings)."
+                "kernel-shape events — shape discovery didn't reach the live "
+                "SGLang. For SGLang < 0.5.18 verify the _server_patcher "
+                "git-apply succeeded; for >= 0.5.18 verify the kernel_shape_tool "
+                "is on the server PYTHONPATH and TRACELENS_SHAPE_DISCOVERY=1 "
+                "(check log warnings)."
             )
 
     if issues:

@@ -1477,7 +1477,17 @@ def materialize_config_with_envs(
         # try to patch, fall back to the safe set on failure. Default-on
         # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
         tracelens_patch_ok = False
-        patch_attempted = _tracelens_patch_enabled() and not is_atom
+        # SGLang >= 0.5.18 uses the no-patch kernel_shape_tool (PYTHONPATH +
+        # sitecustomize + TRACELENS_SHAPE_DISCOVERY) instead of git-apply; older
+        # versions keep the patch mechanism. Imported function-locally (not at
+        # module top) so these symbols stay out of the module-level import cycle
+        # ``_workload_envs`` -> executors package __init__ -> baseline ->
+        # ``_workload_envs`` (matches ``_multi_node_server_lifecycle``).
+        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
+
+        is_sglang = not is_atom and "vllm" not in fw
+        sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
+        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
         if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
@@ -1572,39 +1582,67 @@ def materialize_config_with_envs(
                             "imprecise.",
                             _model,
                         )
-            # Both capture options are annotation-only and need TraceLens
-            # server-side support to land: without it the trace carries no
-            # ``kernel_shape_profiler`` events (trace-health check 5), so asking
-            # for them pays the capture cost for data nothing downstream reads.
-            # Keyed on the degraded *reason* rather than ``tracelens_patch_ok``:
-            # a patch that was never attempted (HYPERLOOM_ENABLE_PATCH=0) can
-            # still be baked into the image, and must keep the annotations.
-            _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
-            if _patch_degraded:
-                _shape_disc = False
-            extra_body["shape_discovery"] = _shape_disc
-            if _patch_degraded:
-                extra_body["detailed_annotations"] = False
-            else:
+            if sglang_sitecustomize:
+                # No-patch path (SGLang >= 0.5.18): shapes come from the
+                # kernel_shape_tool via PYTHONPATH + TRACELENS_SHAPE_DISCOVERY,
+                # NOT a request-body flag (unpatched SGLang has no
+                # ``shape_discovery`` field and would reject it), and NOT the
+                # --enable-shape-discovery-for-cuda-graph-profile arg (unpatched
+                # SGLang errors on it). ``detailed_annotations`` is upstream, so
+                # keep it.
+                extra_body.pop("shape_discovery", None)
                 extra_body.setdefault("detailed_annotations", True)
-            # NOTE: this write happens before the per-task ``extra_envs`` merge, so
-            # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
-            # start_step/num_steps the way ``args_mode="replace"`` used to drop
-            # vLLM's --profiler-config bounds. The vLLM side is re-asserted at the
-            # end of this function; SGLang is NOT, because deciding whether a
-            # non-positive num_steps means "unbounded" or "no capture" needs a
-            # SGLang-side answer this layer does not have. Every OOM observed so
-            # far was vLLM.
-            envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-            if tracelens_patch_ok and _shape_disc:
-                # TraceLens-patched SGLang exposes
-                # --enable-shape-discovery-for-cuda-graph-profile; unpatched
-                # SGLang errors on it.
-                existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
-                if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
-                    envs["EXTRA_SGLANG_ARGS"] = (
-                        f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
-                    ).strip()
+                _tool_dir = kernel_shape_tool_dir()
+                if _shape_disc and _tool_dir is not None:
+                    _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
+                    envs["PYTHONPATH"] = (
+                        f"{_tool_dir}{os.pathsep}{_existing_pp}"
+                        if _existing_pp
+                        else str(_tool_dir)
+                    )
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
+                else:
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
+                    if _shape_disc and _tool_dir is None:
+                        log.warning(
+                            "SGLang shape mode=sitecustomize but kernel_shape_tool "
+                            "not found under TRACELENS_ROOT; shapes will be absent "
+                            "(set TRACELENS_ROOT to an NFS path visible to the server).",
+                        )
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+            else:
+                # Legacy patched path (SGLang < 0.5.18). Both capture options are
+                # annotation-only and need the TraceLens git-apply patch to land:
+                # without it the trace carries no ``kernel_shape_profiler`` events
+                # (trace-health check 5). Keyed on the degraded *reason* rather
+                # than ``tracelens_patch_ok``: a patch that was never attempted
+                # (HYPERLOOM_ENABLE_PATCH=0) can still be baked into the image.
+                _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+                if _patch_degraded:
+                    _shape_disc = False
+                extra_body["shape_discovery"] = _shape_disc
+                if _patch_degraded:
+                    extra_body["detailed_annotations"] = False
+                else:
+                    extra_body.setdefault("detailed_annotations", True)
+                # NOTE: this write happens before the per-task ``extra_envs`` merge, so
+                # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
+                # start_step/num_steps the way ``args_mode="replace"`` used to drop
+                # vLLM's --profiler-config bounds. The vLLM side is re-asserted at the
+                # end of this function; SGLang is NOT, because deciding whether a
+                # non-positive num_steps means "unbounded" or "no capture" needs a
+                # SGLang-side answer this layer does not have. Every OOM observed so
+                # far was vLLM.
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+                if tracelens_patch_ok and _shape_disc:
+                    # TraceLens-patched SGLang exposes
+                    # --enable-shape-discovery-for-cuda-graph-profile; unpatched
+                    # SGLang errors on it.
+                    existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
+                    if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
+                        envs["EXTRA_SGLANG_ARGS"] = (
+                            f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
+                        ).strip()
 
     if not _is_scriptable_profile:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
