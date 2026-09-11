@@ -255,6 +255,27 @@ def test_select_skips_unavailable_model_owner(only_registered_providers) -> None
     assert result.availability() is True
 
 
+def test_a_plugin_does_not_outrank_a_provider_whose_credential_is_absent(
+    only_registered_providers,
+) -> None:
+    """A plugin declares no credential, so it must not take an unconfigured box.
+
+    The credential key leads the ranking, so answering it optimistically for a
+    provider that cannot be asked would hand ``auto`` to whichever plugin
+    happens to be installed on every box without a first-party key.
+    """
+    register_agent_provider(
+        AgentProvider(
+            name="firstparty",
+            factory=lambda runtime: _FakeBackend(name=runtime.provider),
+            default_model="firstparty-model",
+            credentialed=lambda env: False,
+        )
+    )
+    _register_fake("vendorcli")
+    assert registry.select_default_agent_provider().name == "firstparty"
+
+
 def test_select_unknown_model_uses_registration_order(
     only_registered_providers,
 ) -> None:

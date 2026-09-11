@@ -251,9 +251,18 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
-def test_openai_credential_requires_the_api_key_not_a_bare_base_url():
-    assert not llm_config.has_openai_credential({"OPENAI_BASE_URL": "https://gw/v1"})
-    assert llm_config.has_openai_credential({"OPENAI_API_KEY": "sk-test"})
+def test_openai_agent_credential_requires_the_api_key_not_a_bare_base_url():
+    assert not llm_config.openai_agent_credentialed({"OPENAI_BASE_URL": "https://gw/v1"})
+    assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
+
+
+@pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
+def test_a_managed_gateway_drives_the_claude_cli_without_naming_a_key(gateway):
+    """It authenticates the CLI, but hands no key to the callers that need one."""
+    env = {gateway: "1"}
+    assert llm_config.anthropic_agent_credentialed(env)
+    assert not llm_config.has_anthropic_credential(env)
+    assert not llm_config.has_anthropic_side(env)
 
 
 @pytest.mark.parametrize(
@@ -266,6 +275,14 @@ def test_openai_credential_requires_the_api_key_not_a_bare_base_url():
         (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
         (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
         (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
+        # The one shape a managed gateway decides: it holds the Anthropic side
+        # against a real OpenAI key that would otherwise win on its own.
+        (
+            True,
+            True,
+            {"CLAUDE_CODE_USE_BEDROCK": "1", "OPENAI_API_KEY": "sk"},
+            llm_config.AGENT_BACKEND_CLAUDE,
+        ),
     ],
 )
 def test_preferred_agent_backend_ranks_credentials_then_sdk(

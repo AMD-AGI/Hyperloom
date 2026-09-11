@@ -76,11 +76,13 @@ def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
 
 
 def has_anthropic_credential(env: Mapping[str, str] | None = None) -> bool:
-    """True when any Anthropic-side credential form is set for backend selection."""
-    source = env if env is not None else os.environ
-    if _first_set_value(ANTHROPIC_CREDENTIAL_ENV_ORDER, source):
-        return True
-    return any(is_truthy(source.get(name)) for name in ANTHROPIC_MANAGED_GATEWAY_ENVS)
+    """True when any Anthropic-side credential form is set."""
+    return bool(
+        _first_set_value(
+            ANTHROPIC_CREDENTIAL_ENV_ORDER,
+            env if env is not None else os.environ,
+        )
+    )
 
 
 def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
@@ -125,8 +127,8 @@ _HOST_DEFAULT_MODELS: dict[str, str] = {"api.deepseek.com": _DEEPSEEK_MODEL}
 _ANTHROPIC_SIDE_KEYS: tuple[str, ...] = ("ANTHROPIC_BASE_URL", *ANTHROPIC_CREDENTIAL_ENV_ORDER)
 _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
-# A managed gateway carries the credential itself, so it configures the Anthropic side without naming a key.
-ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+# A managed gateway carries the credential itself, so it can drive the Claude CLI without naming a key.
+_ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
 
 # The two agent CLIs that can drive this repository's agentic roles.
 AGENT_BACKEND_CLAUDE = "claude"
@@ -134,11 +136,9 @@ AGENT_BACKEND_CODEX = "codex"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
-    """True when an Anthropic-side endpoint, key or managed gateway is configured."""
+    """True when an Anthropic-side endpoint or key is configured."""
     source = env if env is not None else os.environ
-    if any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS):
-        return True
-    return any(is_truthy(source.get(name)) for name in ANTHROPIC_MANAGED_GATEWAY_ENVS)
+    return any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS)
 
 
 def has_openai_side(env: Mapping[str, str] | None = None) -> bool:
@@ -147,12 +147,27 @@ def has_openai_side(env: Mapping[str, str] | None = None) -> bool:
     return any((source.get(name) or "").strip() for name in _OPENAI_SIDE_KEYS)
 
 
-def has_openai_credential(env: Mapping[str, str] | None = None) -> bool:
-    """True when an OpenAI-side key is configured for agent backend selection.
+def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
+    """True when the Anthropic side can authenticate an agent CLI run.
+
+    Wider than :func:`has_anthropic_credential` by the managed gateways, which
+    carry the credential themselves and so name no key. It is a predicate of its
+    own rather than a widening of that one because the credential checks in
+    ``cli/credentials.py`` hand a key to the Anthropic Messages API or persist it
+    to ``~/.claude/config.json``, and a Bedrock or Vertex box satisfies neither.
+    """
+    source = env if env is not None else os.environ
+    if has_anthropic_credential(source):
+        return True
+    return any(is_truthy(source.get(name)) for name in _ANTHROPIC_MANAGED_GATEWAY_ENVS)
+
+
+def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
+    """True when the OpenAI side can authenticate an agent CLI run.
 
     A bare ``OPENAI_BASE_URL`` without ``OPENAI_API_KEY`` is an endpoint hint,
-    not a credential -- forge-fuse used to require the key explicitly, and
-    treating the URL alone as configured sends an unauthenticated Codex run.
+    not a credential, and treating the URL alone as configured is what sends an
+    unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
     return bool((source.get("OPENAI_API_KEY") or "").strip())
@@ -188,22 +203,21 @@ def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
     Two ranked keys, shared with
     :func:`kernelforge.agent_backends.registry.select_default_agent_provider`:
     a configured credential, then an installed SDK. Claude wins whenever both
-    providers tie. An OpenAI-only credential selects Codex; every other
-    credential shape keeps Claude, including dual-configured and unconfigured
-    deployments where a runtime logged in by other means carries no credential
-    this can see.
+    providers tie, so an OpenAI-only credential is the only shape that selects
+    Codex outright; a dual-configured deployment keeps Claude.
 
-    With no credential on either side, the installed SDK decides; when neither
-    extra is present, Claude is still the default so preflight can report what is
+    With no credential on either side -- a runtime logged in by other means
+    carries none this can see -- the installed SDK decides, and when neither
+    extra is present Claude is still the default so preflight can report what is
     missing rather than silently picking the other CLI.
     """
     source = env if env is not None else os.environ
     claude_rank = (
-        0 if has_anthropic_credential(source) else 1,
+        0 if anthropic_agent_credentialed(source) else 1,
         0 if _claude_agent_sdk_installed() else 1,
     )
     codex_rank = (
-        0 if has_openai_credential(source) else 1,
+        0 if openai_agent_credentialed(source) else 1,
         0 if _codex_agent_sdk_installed() else 1,
     )
     if codex_rank < claude_rank:
@@ -1059,7 +1073,6 @@ __all__ = [
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
-    "ANTHROPIC_MANAGED_GATEWAY_ENVS",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
@@ -1078,6 +1091,7 @@ __all__ = [
     "achat_completion",
     "anthropic_completion",
     "anthropic_messages",
+    "anthropic_agent_credentialed",
     "anthropic_synthesizable_key",
     "anthropic_transport",
     "anthropic_transport_ready",
@@ -1097,10 +1111,10 @@ __all__ = [
     "get_openai_client",
     "has_anthropic_credential",
     "has_anthropic_side",
-    "has_openai_credential",
     "has_openai_side",
     "is_anthropic_only",
     "is_openai_only",
+    "openai_agent_credentialed",
     "openai_client_kwargs",
     "parse_custom_headers",
     "preferred_agent_backend",

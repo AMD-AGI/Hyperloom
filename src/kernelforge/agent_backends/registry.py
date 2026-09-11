@@ -37,9 +37,15 @@ def _always_available() -> bool:
     return True
 
 
-def _always_credentialed(env: Mapping[str, str]) -> bool:
-    """Defer unknown external provider credentials to normal preflight."""
-    return True
+def _credential_unproven(env: Mapping[str, str]) -> bool:
+    """Default credential answer: an external provider proves nothing here.
+
+    The neutral value on a ranking key is the losing one. Answering ``True``
+    would let any installed plugin outrank both built-in providers on every box
+    whose first-party credential is absent, including the unconfigured box this
+    selection deliberately still resolves to Claude.
+    """
+    return False
 
 
 def _owns_no_model(model: str) -> bool:
@@ -56,7 +62,7 @@ class AgentProvider:
     default_model: str
     capabilities: AgentCapabilities = AgentCapabilities()
     availability: Callable[[], bool] = _always_available
-    credentialed: Callable[[Mapping[str, str]], bool] = _always_credentialed
+    credentialed: Callable[[Mapping[str, str]], bool] = _credential_unproven
     owns_model: Callable[[str], bool] = _owns_no_model
 
     def __post_init__(self) -> None:
@@ -346,17 +352,17 @@ def _codex_available() -> bool:
 
 
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
-    """Return whether an Anthropic-side credential is configured."""
+    """Return whether the Anthropic side can authenticate this CLI."""
     from hyperloom.common import llm_config
 
-    return llm_config.has_anthropic_credential(env)
+    return llm_config.anthropic_agent_credentialed(env)
 
 
 def _codex_credentialed(env: Mapping[str, str]) -> bool:
-    """Return whether an OpenAI-side credential is configured."""
+    """Return whether the OpenAI side can authenticate this CLI."""
     from hyperloom.common import llm_config
 
-    return llm_config.has_openai_credential(env)
+    return llm_config.openai_agent_credentialed(env)
 
 
 def _claude_owns_model(model: str) -> bool:
