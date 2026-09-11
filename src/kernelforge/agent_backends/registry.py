@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import warnings
 from dataclasses import dataclass, replace
 from importlib import metadata, util
-from typing import Callable
+from typing import Callable, Mapping
 
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
@@ -36,6 +37,17 @@ def _always_available() -> bool:
     return True
 
 
+def _credential_unproven(env: Mapping[str, str]) -> bool:
+    """Default credential answer: an external provider proves nothing here.
+
+    The neutral value on a ranking key is the losing one. Answering ``True``
+    would let any installed plugin outrank both built-in providers on every box
+    whose first-party credential is absent, including the unconfigured box this
+    selection deliberately still resolves to Claude.
+    """
+    return False
+
+
 def _owns_no_model(model: str) -> bool:
     """Default model ownership: external providers claim no model family."""
     return False
@@ -50,6 +62,7 @@ class AgentProvider:
     default_model: str
     capabilities: AgentCapabilities = AgentCapabilities()
     availability: Callable[[], bool] = _always_available
+    credentialed: Callable[[Mapping[str, str]], bool] = _credential_unproven
     owns_model: Callable[[str], bool] = _owns_no_model
 
     def __post_init__(self) -> None:
@@ -157,51 +170,63 @@ def list_agent_providers() -> tuple[str, ...]:
     return tuple(sorted(_providers))
 
 
-def _ordered_provider_candidates(preferred_model: str = "") -> list[AgentProvider]:
-    """Order providers by model ownership without checking availability."""
-    discover_agent_providers()
-    providers = list(_providers.values())
-    model = (preferred_model or "").strip()
-    if not model:
-        return providers
-
-    owners: list[AgentProvider] = []
-    for provider in providers:
-        try:
-            if provider.owns_model(model):
-                owners.append(provider)
-        except Exception:  # noqa: BLE001 - ownership is best-effort
-            continue
-    owner_names = {provider.name for provider in owners}
-    return [
-        *owners,
-        *(provider for provider in providers if provider.name not in owner_names),
-    ]
-
-
 def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
-    """Select an available provider, preferring the configured model's owner."""
+    """Select a provider by the one rule the whole repository shares.
+
+    Two ranked keys, shared with
+    :func:`hyperloom.common.llm_config.preferred_agent_backend`: a configured
+    credential, then an installed SDK. Providers that tie on both keep
+    registration order, which is what puts Claude ahead of Codex.
+
+    Credentials lead because ranking on the installed SDK alone is what let an
+    OpenAI-only box resolve to Claude whenever both extras happened to be
+    installed, and then fail to authenticate.
+
+    A named ``preferred_model`` narrows the candidates rather than joining the
+    ranking: ownership says which provider the caller's model belongs to, and no
+    credential shape should overrule that, while an owner that cannot run is
+    worse than a fallback that can.
+
+    A provider missing one of the two keys is still returned, so its own
+    preflight reports the absent extra or the failed login. Only a provider
+    missing both is refused.
+    """
     discover_agent_providers()
     failures: list[str] = []
+    model = (preferred_model or "").strip()
 
-    def _first_available(candidates: list[AgentProvider]) -> AgentProvider | None:
-        """Return the first candidate whose availability check succeeds."""
-        for provider in candidates:
-            try:
-                if provider.availability():
-                    return provider
-            except Exception as exc:  # noqa: BLE001 - availability is best-effort
-                failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
-        return None
+    def _holds(provider: AgentProvider, predicate: Callable[[], bool]) -> bool:
+        """Answer one provider predicate, counting a raising provider as a "no"."""
+        try:
+            return bool(predicate())
+        except Exception as exc:  # noqa: BLE001 - one provider must not decide the whole selection
+            failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+            return False
 
-    chosen = _first_available(_ordered_provider_candidates(preferred_model))
-    if chosen is not None:
+    providers = list(_providers.values())
+    if model:
+        runnable_owners = [
+            provider
+            for provider in providers
+            if _holds(provider, lambda: provider.owns_model(model)) and _holds(provider, provider.availability)
+        ]
+        providers = runnable_owners or providers
+    ranks = {
+        provider.name: (
+            0 if _holds(provider, lambda: provider.credentialed(os.environ)) else 1,
+            0 if _holds(provider, provider.availability) else 1,
+        )
+        for provider in providers
+    }
+    chosen = min(providers, key=lambda provider: ranks[provider.name], default=None)
+    if chosen is not None and ranks[chosen.name] != (1, 1):
         return chosen
     detail = f"; checks: {'; '.join(failures)}" if failures else ""
     raise AgentProviderUnavailableError(
-        "no Agent provider is available; install the 'claude' or 'codex' extra "
-        "of the distribution you installed (kernelforge provides both), or "
-        "configure an external provider"
+        "no Agent provider is configured or installed; install the 'claude' or "
+        "'codex' extra of the distribution you installed (kernelforge provides "
+        "both) and configure that provider's credentials, or configure an "
+        "external provider"
         f"{detail}"
     )
 
@@ -335,6 +360,20 @@ def _codex_available() -> bool:
     return util.find_spec("openai_codex") is not None
 
 
+def _claude_credentialed(env: Mapping[str, str]) -> bool:
+    """Return whether the Anthropic side can authenticate this CLI."""
+    from hyperloom.common import llm_config
+
+    return llm_config.anthropic_agent_credentialed(env)
+
+
+def _codex_credentialed(env: Mapping[str, str]) -> bool:
+    """Return whether the OpenAI side can authenticate this CLI."""
+    from hyperloom.common import llm_config
+
+    return llm_config.openai_agent_credentialed(env)
+
+
 def _claude_owns_model(model: str) -> bool:
     """Recognize Anthropic Claude model identifiers."""
     return model.strip().lower().startswith("claude")
@@ -370,6 +409,7 @@ register_agent_provider(
             workspace_guard=True,
         ),
         availability=_claude_available,
+        credentialed=_claude_credentialed,
         owns_model=_claude_owns_model,
     )
 )
@@ -392,6 +432,7 @@ register_agent_provider(
             workspace_guard=True,
         ),
         availability=_codex_available,
+        credentialed=_codex_credentialed,
         owns_model=_codex_owns_model,
     )
 )

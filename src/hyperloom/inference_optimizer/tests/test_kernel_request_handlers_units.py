@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
@@ -908,11 +909,13 @@ class TestForgeGemmHelperCoverage:
         with pytest.raises(ValueError, match="agent_backend"):
             krh._resolve_forge_agent({"agent_backend": "anthropic"})
 
-    def test_resolve_forge_agent_rejects_unconfigured_provider(self, monkeypatch):
+    def test_resolve_forge_agent_defaults_an_unconfigured_provider_to_claude(self, monkeypatch):
+        """A runtime logged in by other means carries no credential this can read."""
         _pin_fusion_provider_env(monkeypatch, {})
+        monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: True)
+        monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: True)
 
-        with pytest.raises(RuntimeError, match="no .*provider.*configured"):
-            krh._resolve_forge_agent({})
+        assert krh._resolve_forge_agent({}) == ("claude", DEFAULT_CLAUDE_MODEL)
 
     def test_resolve_forge_fusion_codex_sandbox_defaults_to_workspace_write(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
@@ -1170,34 +1173,6 @@ class TestForgeGemmHelperCoverage:
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["timeout"] == 10710
-
-    @pytest.mark.asyncio
-    async def test_run_forge_fusion_unconfigured_provider_fails_before_subprocess(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        trace = tmp_path / "decode.trace.json.gz"
-        trace.write_text("{}", encoding="utf-8")
-        SharedState(
-            framework="sglang",
-            model_path="/models/zaya",
-            last_profile_trace=str(trace),
-        ).save(tmp_path)
-        _pin_fusion_provider_env(monkeypatch, {})
-        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-
-        async def _should_not_run(*_args, **_kwargs):
-            raise AssertionError("forge-fusion must not run without a provider")
-
-        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
-
-        result = await krh._run_forge_fusion({}, session_dir=tmp_path)
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "llm_provider_unconfigured"
-        assert result["decision"] == "REVERT"
-        assert result["kept"] is False
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):

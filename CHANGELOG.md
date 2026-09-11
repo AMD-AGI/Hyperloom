@@ -5,6 +5,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **One rule now picks the agent backend, in both packages: a configured
+  credential first, then an installed SDK, with Claude ahead of Codex.** Four
+  places answered this question and three of them disagreed.
+  `select_default_agent_provider` read only whether `claude_agent_sdk` or
+  `openai_codex` was importable, so `forge-loop` on an OpenAI-only box resolved
+  to Claude whenever both extras happened to be installed and then failed to
+  authenticate. `forge-fuse` read only keys, through a credential set of its
+  own. The Hyperloom roles each re-derived "OpenAI-only means Codex" locally.
+
+  The credential shape is now `llm_config.preferred_agent_backend`'s for the
+  whole repository, and a provider declares its own side through the new
+  `AgentProvider.credentialed`, so the ranking is derived from registration
+  rather than restated as a chain of provider names. An explicitly named model
+  narrows the candidates instead of joining that ranking: ownership says which
+  provider the model belongs to, which no credential shape should overrule,
+  while an owner that cannot run is worse than a fallback that can.
+
+  What each side accepts as a credential is a question of its own, answered by
+  `anthropic_agent_credentialed` / `openai_agent_credentialed` rather than by
+  widening the predicates the credential preflight already uses. A bare
+  `OPENAI_BASE_URL` is an endpoint hint, not a Codex credential, so it no longer
+  selects an unauthenticated Codex run. `CLAUDE_CODE_USE_BEDROCK` and
+  `CLAUDE_CODE_USE_VERTEX` do authenticate the Claude CLI, so they hold the
+  Anthropic side for selection — and only for selection, because they hand no
+  key to the callers that need one.
+
+  One behaviour change follows: a deployment with no credential either package
+  can see is no longer refused up front — `forge-fuse` dropped its
+  `--agent-backend auto` usage error and forge-fusion dropped the
+  `llm_provider_unconfigured` result, because a runtime logged in by other means
+  carries no credential these can read, and its own preflight is what reports a
+  genuine authentication failure. A provider missing both a credential and its
+  SDK is still refused, now naming both.
+
+- **The Robustness Agent's RCA engine follows the same precedence.** It checked
+  the OpenAI side first unconditionally — the only place in the repository that
+  preferred Codex — so a dual-configured deployment ran RCA on GPT while every
+  other role ran on Claude. It now asks the configured side first and falls
+  through to the other one when that side carries no usable key: a subscription
+  token whose CLI transport is unavailable no longer claims the run, and a host
+  with no credential at all reports the OpenAI side it will not reach rather
+  than an Anthropic side it was never configured for. Whether that credential
+  can authenticate a call now follows the key rather than the provider name:
+  only the keyless Anthropic shape depends on the CLI transport, so an Anthropic
+  side that did resolve one — what a normalized `DEEPSEEK_API_KEY` produces —
+  keeps its RCA engine instead of being dropped to a silent `NoopRcaEngine` by
+  a probe for the CLI its HTTP engine never uses.
+
 ### Fixed
 
 - **The `=== Warm start ===` block told the model it was starting cold on top of
