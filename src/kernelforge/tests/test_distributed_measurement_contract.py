@@ -13,7 +13,15 @@ refused for that rather than for whichever of them it broke first.
 
 from __future__ import annotations
 
+import atexit
+import builtins
 import json
+import subprocess
+import sys
+import textwrap
+import types
+
+import pytest
 
 from kernelforge.loop import task_preparer
 from kernelforge.loop.task_preparer import (
@@ -178,7 +186,17 @@ def test_a_single_rank_probe_declares_no_rank_count(monkeypatch):
     assert "FORGE_NPROC_PER_NODE" not in captured
 
 
-def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch):
+@pytest.fixture
+def probe_runtime(monkeypatch):
+    original_import = builtins.__import__
+    monkeypatch.setattr(builtins, "__import__", original_import)
+    monkeypatch.setattr(atexit, "register", lambda callback: callback)
+    stub = types.ModuleType("torch")
+    monkeypatch.setitem(sys.modules, "torch", stub)
+    return stub
+
+
+def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch, probe_runtime):
     """The probe runs in every process on the path, so it may not raise from one.
 
     A module named torch with no ``cuda`` is a real shape -- a test stub, or a
@@ -186,10 +204,6 @@ def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch):
     turned the lazy install into an uncaught AttributeError in whatever process
     happened to import torch next.
     """
-    import sys
-    import types
-
-    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
     monkeypatch.setenv("GRAPH_PROBE_OUT", str(tmp_path / "probe"))
     namespace: dict = {}
 
@@ -200,7 +214,7 @@ def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch):
     assert namespace["_hooked"]("torch") is not None
 
 
-def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch):
+def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch, probe_runtime):
     """The shard's ``harness`` field is what the module under test actually writes.
 
     Asserting the field by hand everywhere else would let the probe and the
@@ -219,3 +233,71 @@ def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "dist_harness", _Harness)
 
     assert namespace["_harness_measured"]() is True
+
+
+def test_lazy_probe_imports_are_bounded_and_restore_the_hook(tmp_path):
+    script = textwrap.dedent(
+        """
+        import atexit
+        import builtins
+        import sys
+        import types
+
+        source = sys.argv[1]
+        original_import = builtins.__import__
+        atexit.register = lambda callback: callback
+        stub = types.ModuleType("torch")
+        sys.modules["torch"] = stub
+        sys.setrecursionlimit(80)
+        namespaces = [{}, {}]
+        for namespace in namespaces:
+            exec(compile(source, "sitecustomize.py", "exec"), namespace)
+        calls = [0]
+        def profile(frame, event, arg):
+            if event == "call" and frame.f_code.co_name == "_install":
+                calls[0] += 1
+        sys.setprofile(profile)
+        for _ in range(3):
+            assert builtins.__import__("torch") is stub
+        sys.setprofile(None)
+        assert calls[0] == 6, calls
+        builtins.__import__ = original_import
+
+        namespace = {}
+        exec(compile(source, "sitecustomize.py", "exec"), namespace)
+        class Graph:
+            def replay(self):
+                return "replayed"
+        stub.cuda = types.SimpleNamespace(CUDAGraph=Graph)
+        assert builtins.__import__("torch") is stub
+        assert namespace["_graph_ready"] is True
+        assert builtins.__import__ is original_import
+        replay = Graph.replay
+        for _ in range(3):
+            namespace["_hooked"]("torch")
+        assert Graph.replay is replay
+        assert Graph().replay() == "replayed"
+        assert namespace["_n"] == [1]
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, task_preparer._GRAPH_PROBE_SITECUSTOMIZE],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_probe_tests_restore_the_import_hook(tmp_path):
+    original_import = builtins.__import__
+    for test in (
+        test_the_probe_survives_a_torch_that_carries_no_cuda,
+        test_the_probe_reports_where_a_rank_measured,
+    ):
+        with pytest.MonkeyPatch.context() as patch:
+            stub = probe_runtime.__wrapped__(patch)
+            test(tmp_path, patch, stub)
+        assert builtins.__import__ is original_import
