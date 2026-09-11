@@ -797,3 +797,76 @@ def test_collect_phase_segments_empty_when_history_missing():
 
     assert collect_phase_segments({}, [], warnings=[]) == []
     assert collect_phase_segments({"phase_history": []}, [], warnings=[]) == []
+
+
+# ENABLEMENT phase predicate tests
+
+
+def _enablement_prelude_state(*, baseline_failure_streak: int = 0) -> SimpleNamespace:
+    """Minimal state sitting in PRELUDE for enablement entry tests."""
+    return SimpleNamespace(
+        phase="PRELUDE",
+        stop_reason="",
+        closing_phase=False,
+        baseline_tput=0.0,
+        baseline_failure_streak=baseline_failure_streak,
+        enablement=None,
+    )
+
+
+def _enablement_phase_state(*, tput: float = 0.0, validation_pending: bool = False) -> SimpleNamespace:
+    """Minimal state sitting in ENABLEMENT."""
+    enablement = SimpleNamespace(validation_pending=validation_pending)
+    return SimpleNamespace(
+        phase="ENABLEMENT",
+        stop_reason="",
+        closing_phase=False,
+        baseline_tput=tput,
+        baseline_failure_streak=1,
+        enablement=enablement,
+    )
+
+
+def test_prelude_enters_enablement_when_admitted_and_streak() -> None:
+    """A baseline failure streak routes PRELUDE to ENABLEMENT when the gate is open."""
+    state = _enablement_prelude_state(baseline_failure_streak=1)
+    result = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert result is not None
+    phase, reason, _ = result
+    assert phase == phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_entered"
+    assert phase_state.is_valid_phase_exit_reason(reason)
+
+
+def test_prelude_skips_enablement_when_not_admitted() -> None:
+    """The ENABLEMENT branch is bypassed when the gate is closed."""
+    state = _enablement_prelude_state(baseline_failure_streak=1)
+    # With enablement_enabled=False (the default) and a baseline tput of 0 there
+    # is no normal prelude exit yet, so compute_next_phase returns None.
+    result = phase_state.compute_next_phase(state, enablement_enabled=False)
+    assert result is None or result[0] != phase_state.PHASE_ENABLEMENT
+
+
+def test_enablement_exits_normally_when_work_drained() -> None:
+    """ENABLEMENT transitions out once tput is recorded, validation is clear, and no work is in flight."""
+    state = _enablement_phase_state(tput=1000.0, validation_pending=False)
+    result = phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=False)
+    assert result is not None
+    phase, reason, _ = result
+    assert phase != phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_done"
+    assert phase_state.is_valid_phase_exit_reason(reason)
+
+
+def test_enablement_holds_while_work_in_flight() -> None:
+    """ENABLEMENT stays when a build or probe task is still running."""
+    state = _enablement_phase_state(tput=1000.0, validation_pending=False)
+    result = phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True)
+    assert result is None
+
+
+def test_enablement_holds_while_validation_pending() -> None:
+    """ENABLEMENT stays after a KEEP while the accuracy revalidation baseline is outstanding."""
+    state = _enablement_phase_state(tput=1000.0, validation_pending=True)
+    result = phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=False)
+    assert result is None
