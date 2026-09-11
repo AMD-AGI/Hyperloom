@@ -33,6 +33,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
     kernel_event_id,
+    record_geak_attempts,
     reject_geak_attempts,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -1277,6 +1278,9 @@ class KernelPhase(PhaseHandler):
                 runner_timeout_sec=runner_timeout_s,
                 kill_timeout_sec=kill_timeout_s,
             )
+            previous = state.geak_result or {}
+            if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
+                result["kernel_event_id"] = previous["kernel_event_id"]
             state.geak_result = result
             self._record_geak_measurement(result)
             # Rebench-first: record the recovered win as an UNVALIDATED candidate;
@@ -2346,12 +2350,16 @@ class KernelPhase(PhaseHandler):
         if not journey:
             return
 
-        recorder = self._kernel_timeline()
-        if recorder is not None:
-            try:
-                recorder.record_geak_attempts(journey)
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: geak attempts record failed", exc_info=True)
+        try:
+            record_geak_attempts(
+                event=str(
+                    result.get("kernel_event_id")
+                    or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+                ),
+                journey=journey,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: geak attempts record failed", exc_info=True)
 
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
