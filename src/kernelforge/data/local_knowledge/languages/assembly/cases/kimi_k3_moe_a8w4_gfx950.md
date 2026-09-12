@@ -242,3 +242,26 @@ repetitions on the diverse prompts. The isolated operator's outputs and raw
 scales were byte exact, but these serving runs do not certify full-model
 determinism or model quality. The result remains bounded by the fixed prompt
 set, runtime versions, hardware and numerical checks described here.
+
+## Matched original FlyDSL source control
+
+The PORT-relative trials isolate the instruction change. A separate prospective
+source / candidate / source trial then compared the same frozen candidate with
+the original FlyDSL kernel through the same serving bridge. Input IDs, sampling,
+lengths, batch size, eight repetitions, warmup and launch settings were unchanged.
+There was no additional search or kernel edit.
+
+| Variant | Median batch-completion seconds | Mean seconds |
+| --- | ---: | ---: |
+| source_before | 13.882139 | 13.882214 |
+| optimized | 13.826238 | 13.825415 |
+| source_after | 13.849879 | 13.850798 |
+
+Median reductions against the two original-source controls were
+0.403% and 0.171%; mean reductions were
+0.409% and 0.183%. Both metrics improved against both
+controls. This measures the complete candidate integration relative to source;
+the preceding PORT controls separately attribute an incremental benefit to the
+ASM edit. Neither comparison establishes broad model-quality or workload gains.
+All source-control requests, worker binary records and candidate dispatch traces
+are retained in `e2e-diverse-source-control/` under the same evidence root.
