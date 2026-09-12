@@ -54,8 +54,8 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # io_struct.py between the two, and TraceLens' annotation patches need that field.
 # On the tag, three of the ten patches fail `git apply --check`, the atomic set
 # rolls back, and kernel-shape profiling is silently unavailable.
-# vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
-# vllm/vllm-openai-rocm:v0.27.1 Docker image. The rocm723 variant puts the
+# vLLM installs 0.28.0+rocm723 from the wheels.vllm.ai pip index, matching the
+# vllm/vllm-openai-rocm:v0.28.0 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
@@ -77,7 +77,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.4}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
+VLLM_VERSION="${VLLM_VERSION:-0.28.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 _VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
@@ -185,10 +185,9 @@ log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
-IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-* or \
-vllm/vllm-openai-rocm:v0.27.1, or install an equivalent ROCm torch + \
-framework stack), then re-run."
+IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-*; \
+vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
+vllm/vllm-openai-rocm:v0.28.0), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -803,6 +802,35 @@ link_vllm_into_shared_bin() {
   fi
 }
 
+host_glibc_version() {
+  getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+}
+
+_version_ge() {
+  [ "$(printf '%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
+}
+
+_vllm_semver_base() {
+  local ver="${VLLM_VERSION%%+*}"
+  ver="${ver%%-*}"
+  printf '%s' "$ver"
+}
+
+vllm_version_requires_glibc_239() {
+  _version_ge "$(_vllm_semver_base)" "0.28.0"
+}
+
+assert_vllm_glibc_compatible() {
+  vllm_version_requires_glibc_239 || return 0
+  local glibc="${1:-$(host_glibc_version)}"
+  if [ -z "$glibc" ]; then
+    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 on older hosts."
+  fi
+  if ! _version_ge "$glibc" "2.39"; then
+    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 before running setup."
+  fi
+}
+
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
@@ -836,6 +864,8 @@ PY
   log "VLLM_VERSION=${VLLM_VERSION}"
   log "VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT}"
   log "VLLM_ROCM_INDEX=${VLLM_ROCM_INDEX}"
+
+  assert_vllm_glibc_compatible
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ ! -x "$py" ]; then

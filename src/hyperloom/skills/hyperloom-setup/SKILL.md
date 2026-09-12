@@ -170,6 +170,12 @@ value.
    - Do not mark any option as recommended. Present the three options in the exact
      order above without a default selection.
 
+8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
+   briefly note that the installer enforces the vLLM 0.28.0 glibc floor
+   (glibc >= 2.39). If setup later fails with that error, explain it in plain
+   language and point the user to Docker mode or a pre-0.28 override — do not
+   implement a second version gate here.
+
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
@@ -262,6 +268,15 @@ defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+```
+
+Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
+that failed the glibc check:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+export VLLM_VERSION=0.27.1
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
