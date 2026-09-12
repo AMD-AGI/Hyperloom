@@ -14,19 +14,19 @@ MAX_ITERS="${MAX_ITERS:-100}"
 GPU_TARGET="${GPU_TARGET:-gfx950}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"
 
-: "${E2E_API_BASE:?E2E_API_BASE is required}"
-: "${E2E_API_KEY:?E2E_API_KEY is required}"
-: "${E2E_INFRA_TYPE:?E2E_INFRA_TYPE is required}"
+: "${DISPATRON_BASE_URL:?DISPATRON_BASE_URL is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
 : "${HEAD_SHA:?HEAD_SHA (immutable PR head commit) is required}"
-if [ "$E2E_INFRA_TYPE" != "kubernetes" ]; then
-  echo "Forge E2E supports only E2E_INFRA_TYPE=kubernetes; got '$E2E_INFRA_TYPE'" >&2
-  exit 2
-fi
 
-API_PREFIX="${CI_E2E_API_PREFIX:-/api/v1}"
-API="${E2E_API_BASE%/}${API_PREFIX}/orchestration/workloads"
-LOG_API="${E2E_API_BASE%/}${API_PREFIX}/workloads"
+# The infra-type check is gone with the endpoint that honoured it. Dispatron places a
+# run from its platform row, so "which infrastructure" is not the caller's to assert.
+
+# Checked by name rather than left to fail as `command not found`, which reads like a
+# broken workflow rather than a job that landed on a runner without the CLI.
+command -v dispatron-ci >/dev/null 2>&1 || {
+  echo "::error::dispatron-ci is not on PATH; this runner was not built from Dispatron's deploy/ci/runner.Dockerfile" >&2
+  exit 2
+}
 
 sanitize_repo_url() {
   # API-visible workload params must never contain the GitHub token.
@@ -52,13 +52,6 @@ POLL_MAX="${POLL_MAX:-$(awk -v d="$DEADLINE_SEC" -v i="$POLL_INTERVAL_S" \
 IMAGE="${CI_E2E_IMAGE:-harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.24.0}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
-auth=(-H "Authorization: Bearer ${E2E_API_KEY}")
-tls=()
-if [ -n "${CI_E2E_CACERT:-}" ]; then
-  tls=(--cacert "$CI_E2E_CACERT")
-elif [ "${CI_E2E_INSECURE:-0}" = "1" ]; then
-  tls=(-k)
-fi
 
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-300}"
 STATUS_CONTEXT="${STATUS_CONTEXT:-ci-e2e/kernelforge}"
@@ -93,23 +86,18 @@ gh_report_on() {
   [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]
 }
 
-fetch_forge_result() {
-  local payload result attempt
-  # Log ingestion can trail the terminal workload phase briefly. The report is
-  # best-effort and must never turn a successful GPU run red.
-  for attempt in 1 2 3 4 5 6; do
-    payload="$(curl -fsS "${tls[@]}" \
-      "$LOG_API/$UID_/logs?keywords=__FORGE_RESULT__&tail=50&since=2h" \
-      "${auth[@]}" 2>/dev/null || true)"
-    result="$(printf '%s' "$payload" | python3 .github/scripts/forge_e2e_report.py extract 2>/dev/null || true)"
-    if [ -n "$result" ]; then
-      printf '%s' "$result"
-      return 0
-    fi
-    [ "$attempt" -lt 6 ] && sleep 5
-  done
-  return 1
-}
+# `fetch_forge_result` was here. It read the run's stdout back through the retired
+# backend's log-search route -- GET /workloads/{uid}/logs?keywords=__FORGE_RESULT__ --
+# and Dispatron has no such route. The renderer already guards the whole performance
+# block on having a result, so `forge_result` stays empty and the comment loses the
+# baseline/best/speedup/validation rows.
+#
+# A real loss and a small one: those rows have not been produced for some time. The
+# fetch runs only on the Succeeded branch, and the last hundred workflow runs contain
+# no successful GPU job; further back, a green run's log carries no __FORGE_RESULT__
+# either, and nobody has said the numbers went missing. Restoring them needs a result
+# channel on the run record rather than a log scrape -- see Dispatron's TODO.md,
+# "A run's own result has nowhere to live".
 
 report_upsert() { # result
   gh_report_on || return 0
@@ -159,97 +147,128 @@ report_upsert() { # result
   fi
 }
 
-params="$(jq -n \
-  --arg ref "$HEAD_REF" --arg sha "$HEAD_SHA" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
-  --arg task_source "github-hyperloom-forge-ci" --arg pr_number "${PR_NUMBER:-}" \
-  --arg pullref "$PULL_REF" --arg deadline "$DEADLINE_SEC" \
-  --arg max_hours "$MAX_HOURS" --arg max_iters "$MAX_ITERS" --arg gpu_target "$GPU_TARGET" \
-  '{KERNELFORGE_SOURCE_REF:$ref, KERNELFORGE_SOURCE_SHA:$sha,
-    KERNELFORGE_SOURCE_REPO:$srcrepo, KF_SOURCE_DIR:$srcdir,
-    KERNELFORGE_SOURCE_PULL_REF:$pullref,
-    KF_TASK_SOURCE:$task_source, KF_SOURCE_PR:$pr_number,
-    KF_USE_GIT:"1", KF_ACTIVE_DEADLINE_SEC:$deadline,
-    MAX_HOURS:$max_hours, MAX_ITERS:$max_iters, GPU_TARGET:$gpu_target}')"
-body="$(jq -n \
-  --arg name "forge-ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
-  --arg uname "${CI_E2E_USER_NAME:-}" --arg itype "$E2E_INFRA_TYPE" \
-  --arg ws "$WORKSPACE" --arg img "$IMAGE" --arg git_token "${GITHUB_TOKEN:-}" \
-  --arg forge_model "${FORGE_MODEL:-}" \
-  --argjson gpus "$GPUS" --argjson params "$params" \
-  '{name:$name, infra_type:$itype, kind:"kernelforge", replicas:1,
-    gpu_per_replica:$gpus, namespace:$ws, workspace:$ws, image:$img,
-    template:{params:$params,
-      env:((if $git_token != "" then {GITHUB_TOKEN:$git_token} else {} end)
-           + (if $forge_model != "" then {FORGE_MODEL:$forge_model} else {} end))}}
-   + (if $uname == "" then {} else {user_name:$uname} end)')"
+# ---- run it ---------------------------------------------------------------
+# `dispatron-ci` submits and polls. The events file is one JSON object per poll, which
+# the live status refreshes from; the terminal event carries the verdict, the reason and
+# the timings. Neither is this script parsing the CLI's prose.
+WORK="$(mktemp -d)"
+EVENTS="$WORK/events.jsonl"
+# The CLI writes step outputs of its own. Pointed at a scratch file rather than the
+# job's, so what this step exposes stays this script's contract and not a union of two.
+OUTPUTS="$WORK/cli-outputs"
+: > "$EVENTS"; : > "$OUTPUTS"
+trap 'rm -rf "$WORK"' EXIT
 
-echo "[forge-ci-e2e] submitting: ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS max_hours=$MAX_HOURS" \
-  "deadline=${DEADLINE_SEC}s poll=${POLL_MAX}x${POLL_INTERVAL_S}s workspace=$WORKSPACE"
-resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
-  "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
-code="$(printf '%s' "$resp" | tail -n1)"
-json="$(printf '%s' "$resp" | sed '$d')"
-if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-  summary "❌ submit failed (HTTP $code): $(printf '%s' "$json" | head -c 500)"
-  exit 1
-fi
+insecure=()
+[ "${CI_E2E_INSECURE:-0}" = "1" ] && insecure=(--insecure)
 
-UID_="$(printf '%s' "$json" | jq -r '.uid // empty')"
-if [ -z "$UID_" ]; then
-  summary "❌ submit returned no uid: $(printf '%s' "$json" | head -c 500)"
-  exit 1
-fi
-summary "**session_id (workload uid):** \`$UID_\`"
-echo "session_id=$UID_" >> "${GITHUB_OUTPUT:-/dev/null}"
-echo "$UID_" > "${E2E_UID_FILE:-${RUNNER_TEMP:-/tmp}/forge_e2e_session_uid}" 2>/dev/null || true
+post_status "pending" "dispatching; sha=${HEAD_SHA:0:12}"
 
-post_status "pending" "submitted; uid=${UID_}; ref=${HEAD_REF}; sha=${HEAD_SHA:0:12}"
-last_push="$(date +%s)"
-cleanup() { curl -sS "${tls[@]}" -X DELETE "$API/$UID_" "${auth[@]}" >/dev/null 2>&1 || true; }
-trap 'echo "[forge-ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"; cleanup; exit 1' INT TERM
+GITHUB_OUTPUT="$OUTPUTS" \
+DISPATCH_EVENTS_FILE="$EVENTS" \
+dispatron-ci \
+  --base-url "$DISPATRON_BASE_URL" \
+  --kind kernelforge \
+  --image "$IMAGE" \
+  --name "forge-ci-pr-${PR_NUMBER:-manual}-${HEAD_SHA:0:12}" \
+  --source github-hyperloom-forge-ci \
+  --gpus "$GPUS" \
+  --max-hours "$MAX_HOURS" \
+  --user "${CI_E2E_USER_NAME:-}" \
+  --ref "$HEAD_REF" \
+  --sha "$HEAD_SHA" \
+  --source-repo "$SRC_REPO" \
+  --source-dir "$SRC_DIR" \
+  --pull-ref "$PULL_REF" \
+  --pr "${PR_NUMBER:-}" \
+  --poll-interval "$POLL_INTERVAL_S" \
+  --poll-max "$POLL_MAX" \
+  "${insecure[@]}" &
+cli=$!
 
-i=0
-prev_phase=""
-while [ "$i" -lt "$POLL_MAX" ]; do
-  i=$((i + 1))
-  detail="$(curl -sS "${tls[@]}" "$API/$UID_" "${auth[@]}" || true)"
-  phase="$(printf '%s' "$detail" | jq -r '.orchestration.phase // "Unknown"' 2>/dev/null || echo Unknown)"
-  jobref="$(printf '%s' "$detail" | jq -r '.dispatches[-1].platform_ref // "-"' 2>/dev/null || echo -)"
-  node="$(printf '%s' "$detail" | jq -r '.dispatches[-1].nodes // "-"' 2>/dev/null || echo -)"
-  echo "[forge-ci-e2e] poll $i/$POLL_MAX phase=$phase node=$node job=$jobref uid=$UID_"
-  if [ "$phase" != "$prev_phase" ]; then
-    echo "[forge-ci-e2e] phase ${prev_phase:-<start>} -> $phase"
-    prev_phase="$phase"
-  fi
-  case "$phase" in
-    Succeeded)
-      summary "✅ **PASS** — forge-loop smoke completed. session_id=\`$UID_\` job=\`$jobref\`"
-      post_status "success" "PASS — uid=${UID_}; job=${jobref}; sha=${HEAD_SHA:0:12}"
-      forge_result="$(fetch_forge_result || true)"
-      report_upsert "✅ Succeeded"
-      exit 0 ;;
-    Failed)
-      err="$(printf '%s' "$detail" | jq -r '.orchestration.last_error // (.orchestration.conditions[-1].message) // "unknown"' 2>/dev/null)"
-      summary "❌ **FAIL** — session_id=\`$UID_\` job=\`$jobref\` node=\`$node\`"
-      summary "reason: $err"
-      post_status "failure" "FAIL (${HEAD_SHA:0:12}): ${err:0:110}"
-      report_upsert "❌ Failed"
-      exit 1 ;;
-  esac
+# Refresh the commit status while the run is going, from the events file rather than
+# from a second poll of the API -- a status refresh must not add load to the thing it is
+# describing, nor disagree with it.
+last_push=0
+while kill -0 "$cli" 2>/dev/null; do
   now_s="$(date +%s)"
   if [ $((now_s - last_push)) -ge "$STATUS_INTERVAL_S" ]; then
-    post_status "pending" "running ${phase}; job=${jobref}; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    ev="$(jq -c 'select(.event=="phase")' "$EVENTS" 2>/dev/null | tail -1 || true)"
+    if [ -n "$ev" ]; then
+      ph="$(printf '%s' "$ev" | jq -r '.phase // "?"' 2>/dev/null || echo '?')"
+      jr="$(printf '%s' "$ev" | jq -r '.platform_ref // ""' 2>/dev/null || true)"
+      post_status "pending" "running ${ph}; job=${jr:--}; sha=${HEAD_SHA:0:12}"
+    fi
     last_push="$now_s"
   fi
-  sleep "$POLL_INTERVAL_S"
+  sleep 5
 done
+rc=0; wait "$cli" || rc=$?
 
-summary "❌ **FAIL (timeout)** — workload did not reach terminal state. session_id=\`$UID_\`"
-post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-report_upsert "❌ Timeout"
-if [ "${CI_E2E_DELETE_ON_TIMEOUT:-0}" = "1" ]; then
-  cleanup
-else
-  summary "workload \`$UID_\` kept for triage"
+# Read what the CLI decided, from the terminal event rather than the step-output file.
+# Both carry the same fields, but the event is JSON: a platform error containing a
+# newline needs no delimiter convention to survive.
+term="$(jq -c 'select(.event=="terminal")' "$EVENTS" 2>/dev/null | tail -1 || true)"
+field() { [ -n "$term" ] && printf '%s' "$term" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null || true; }
+
+UID_="$(field uid)"
+result="$(field result)"
+err="$(field reason)"
+explanation="$(field explanation)"
+jobref="$(field platform_ref)"
+node="$(field nodes)"
+[ -z "$UID_" ] && UID_="$(jq -r 'select(.event=="submitted")|.uid' "$EVENTS" 2>/dev/null | tail -1 || true)"
+
+# The CLI died before writing an outcome -- a refused submit, or the facade unreachable.
+# Not a run that failed, and saying so stops somebody debugging code that never ran.
+[ -z "$result" ] && result="dispatch-error"
+
+# The performance rows the renderer would add come from a result this path cannot fetch.
+forge_result=""
+
+# The renderer reads its timeline out of `detail.orchestration.conditions[]`, which used
+# to be the raw status body. The same three instants come back on the terminal event, so
+# they are put back into the shape it already reads rather than changing it -- otherwise
+# queue-to-dispatch, run time and total all render as "–" for want of a wrapper.
+detail="$(jq -nc --arg q "$(field queued_at)" --arg d "$(field dispatched_at)" \
+  --arg e "$(field ended_at)" --arg ph "$(field phase)" \
+  '{orchestration:{conditions:
+     ([{phase:"Queued",time:$q}]
+      + (if $d == "" then [] else [{phase:"Dispatched",time:$d}] end)
+      + (if $e == "" then [] else [{phase:$ph,time:$e}] end))}}' 2>/dev/null || echo '{}')"
+
+if [ -n "${GITHUB_OUTPUT:-}" ] && [ "${GITHUB_OUTPUT}" != "$OUTPUTS" ]; then
+  {
+    echo "session_id=${UID_}"
+    echo "result=${result}"
+    echo "platform_ref=${jobref}"
+  } >> "$GITHUB_OUTPUT"
 fi
-exit 1
+
+case "$result" in
+  succeeded)
+    summary "✅ **PASS** — forge-loop smoke completed. session_id=\`${UID_}\` job=\`${jobref:--}\`"
+    post_status "success" "PASS — uid=${UID_}; job=${jobref:--}; sha=${HEAD_SHA:0:12}"
+    report_upsert "✅ Succeeded" ;;
+  cancelled)
+    # Not a red build: a newer commit or a retest ended this one, and reporting it as a
+    # failure sends somebody looking for a bug that is not there.
+    summary "🚫 **CANCELLED** — session_id=\`${UID_}\`"
+    post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "🚫 Cancelled" ;;
+  timeout)
+    summary "❌ **FAIL (timeout)** — ${explanation:-gave up waiting}. session_id=\`${UID_}\`"
+    post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "⏱ Timed out" ;;
+  dispatch-error)
+    summary "❌ **FAIL** — the run was never dispatched; see the job log."
+    post_status "error" "could not dispatch; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Not dispatched" ;;
+  *)
+    summary "❌ **FAIL** — session_id=\`${UID_}\` job=\`${jobref:--}\` node=\`${node:--}\`"
+    summary "reason: ${explanation:-unknown}"
+    post_status "failure" "FAIL (${HEAD_SHA:0:12}): ${explanation:0:110}"
+    report_upsert "❌ Failed" ;;
+esac
+
+exit "$rc"
