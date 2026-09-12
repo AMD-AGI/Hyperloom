@@ -33,6 +33,7 @@ from hyperloom.common.llm_config import (
     has_anthropic_credential,
     provider_model_defaults,
 )
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -2300,6 +2301,18 @@ def _preflight(
         raise exc
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
+    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
+    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
+    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    inferencex_network_fs = is_network_fs(inferencex_path)
+    if inferencex_network_fs:
+        print(
+            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
+            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
+            f"HYPERLOOM_CACHE_DIR on local disk.",
+            file=sys.stderr,
+        )
     _record_install_step(
         install_event,
         step_id="clone_inferencex",
@@ -2312,6 +2325,7 @@ def _preflight(
             "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
             "dest": inferencex_path,
             "writable": os.access(inferencex_path, os.W_OK),
+            "network_fs": inferencex_network_fs,
             "exit_code": 0,
         },
     )
