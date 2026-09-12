@@ -108,6 +108,7 @@ def make_agent_fn(
     extra_protected_globs: list[str] | None = None,
     extra_protected_paths: list[str] | None = None,
     correctness_only: bool = False,
+    commit_new_paths: list[str] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Create an agent_fn callback for the autonomous iteration loop."""
     runtime = config.agent_runtime()
@@ -151,6 +152,18 @@ def make_agent_fn(
     source_files = [f for f in (source_files or []) if f]
     target_functions = [f for f in (target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
+    if kernel_backend_name == "assembly" and not correctness_only:
+        from kernelforge.assembly.port import frozen_paths
+
+        assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
+        if not assembly_files:
+            raise ValueError("assembly optimization requires a verified .s target from PORT")
+        extra_protected_paths = list(extra_protected_paths or []) + frozen_paths(config.workspace, assembly_files)
+        port_dir = Path(config.workspace) / "forge_experiments" / "assembly_port"
+        extra_protected_paths.extend(str(path) for path in port_dir.glob("*") if path.is_file())
+        commit_new_paths = []
+        source_files = assembly_files
+        is_repo_task = False
 
     def _bullets(items: list[str]) -> str:
         return "\n".join(f"  - {i}" for i in items)
@@ -195,7 +208,8 @@ def make_agent_fn(
         )
 
     workspace_hygiene_rule = (
-        "Do NOT create or leave new non-ignored files in the workspace. Run "
+        "Do NOT create or leave new non-ignored files outside the campaign's "
+        "explicit --commit-new-path allowlist. Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
         "under forge_experiments/ and remove it before ending the turn."
     )
@@ -385,7 +399,9 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   The loop stages and keeps/reverts ALL your tracked source edits together, so a
   cross-file change is validated and benchmarked as one unit.
 - Do NOT change the kernel's public function signature or delete needed imports.
-- Keep the kernel in its original backend/DSL (do not rewrite in another language).
+- Implementation language may change through the supported routes in the selected
+  backend expertise, unless the task explicitly restricts languages. Preserve the
+  public callable, launch ABI, and the unchanged driver's correctness contract.
 - Do NOT edit the test harness / driver (the files that measure your kernel);
   such edits are blocked. Optimize the kernel, not the measurement. That is the
   whole boundary: gaming means changing what measures you. Caching, memoization
@@ -455,6 +471,12 @@ Never `cat` a whole file — use the Read tool.
                 )
         else:
             target_section = f"## Target kernel\n{kernel_path}\n"
+        if kernel_backend_name == "assembly" and not correctness_only:
+            target_section = (
+                "## Editable assembly source\n"
+                + _bullets(source_files)
+                + "\nAll other tracked files are frozen, including the Python launcher and reference.\n"
+            )
 
         # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
         # and the stated cut can never disagree.
@@ -569,6 +591,7 @@ Make your change(s) now.
                 thinking_budget_tokens=3000,
             ),
             target_files=(source_files or [kernel_path]),
+            commit_new_paths=list(commit_new_paths or []),
             driver_script=driver_script or "",
             protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime

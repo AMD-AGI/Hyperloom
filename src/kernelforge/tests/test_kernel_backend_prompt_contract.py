@@ -75,8 +75,9 @@ def forge_loop_prompts(monkeypatch):
 # else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
+    "assembly": "1dd4391c3468f37a9e0f37955977bc3252a5aecb0618abd20fba51a3d16481f9",
     "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
-    "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
+    "flydsl": "4d5243fbaa2359693462baabcc1a7c24c102f895eda98cc2c10243f8ab8d26b9",
     "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
     "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
     "hip": "7399928977cf188ae30f49fc0087386285d0fd5c131cd70b3a9064095f03fba7",
@@ -154,14 +155,28 @@ _LOOP_FORM_CARD = "lever_loop_form.md"
 class TestEditSurfaceAndSweepContract:
     """The sweep contract is shared, always resident, and no longer self-erasing."""
 
-    def test_every_kernel_backend_points_at_the_sweep_card(self, forge_loop_prompts):
-        for backend, prompt in forge_loop_prompts.items():
+    @pytest.fixture()
+    def source_loop_prompts(self, forge_loop_prompts):
+        # Assembly has a fixed launcher and one editable .s; Python sweep knobs
+        # and the shared repository-wide edit contract do not apply to it.
+        return {name: prompt for name, prompt in forge_loop_prompts.items() if name != "assembly"}
+
+    def test_assembly_has_a_fixed_edit_surface(self, forge_loop_prompts):
+        prompt = forge_loop_prompts["assembly"]
+        assert "Only the task's declared .s file is editable" in prompt
+        assert "launcher, source reference, driver, ABI and specialization are frozen" in prompt
+        assert "Correctness is required; a speedup is not required during PORT" in prompt
+        assert "FLOOR, not a ceiling" not in prompt
+        assert "FORGE_SWEEP_" not in prompt
+
+    def test_every_kernel_backend_points_at_the_sweep_card(self, source_loop_prompts):
+        for backend, prompt in source_loop_prompts.items():
             assert _SWEEP_CARD in prompt, f"{backend}: prompt does not name the shared sweep card"
             assert "FORGE_SWEEP_" in prompt, f"{backend}: prompt does not carry the sweep-knob contract"
             assert "sweep_const" in prompt, f"{backend}: prompt does not carry the sweep echo contract"
 
-    def test_every_kernel_backend_points_at_the_edit_surface_card(self, forge_loop_prompts):
-        for backend, prompt in forge_loop_prompts.items():
+    def test_every_kernel_backend_points_at_the_edit_surface_card(self, source_loop_prompts):
+        for backend, prompt in source_loop_prompts.items():
             assert _EDIT_SURFACE_CARD in prompt, f"{backend}: prompt does not name the edit-surface card"
             assert "editable_sources" in prompt, f"{backend}: prompt never names the editable source list"
             assert "os.environ" in prompt, f"{backend}: prompt does not state the os.environ converse"
@@ -170,16 +185,16 @@ class TestEditSurfaceAndSweepContract:
             # its own assembly -- in the direction that lost the campaigns.
             assert "FLOOR, not a ceiling" in prompt, f"{backend}: prompt presents the editable list as a ceiling"
 
-    def test_every_kernel_backend_carries_the_boolean_parse_warning(self, forge_loop_prompts):
+    def test_every_kernel_backend_carries_the_boolean_parse_warning(self, source_loop_prompts):
         """A knob that cannot be turned off is the sweep bug the echo cannot catch."""
-        for backend, prompt in forge_loop_prompts.items():
+        for backend, prompt in source_loop_prompts.items():
             assert 'bool("0")' in prompt, (
                 f"{backend}: prompt does not warn that a bool-cast swept string is always True"
             )
 
-    def test_no_kernel_backend_tells_the_implementer_to_collapse_the_knobs(self, forge_loop_prompts):
+    def test_no_kernel_backend_tells_the_implementer_to_collapse_the_knobs(self, source_loop_prompts):
         """A knob deleted mid-campaign is an axis no later session re-opens."""
-        for backend, prompt in forge_loop_prompts.items():
+        for backend, prompt in source_loop_prompts.items():
             lowered = prompt.lower()
             assert "collapse the knobs back" not in lowered, (
                 f"{backend}: prompt still tells the implementer to delete its own sweep knobs"
