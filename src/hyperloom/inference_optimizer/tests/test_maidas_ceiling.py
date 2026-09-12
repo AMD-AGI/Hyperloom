@@ -92,6 +92,30 @@ def test_match_is_on_gbs_not_nbs(tmp_path):
     assert miss.peak_tok_per_sec == 0.0  # nbs=8 must not be matched
 
 
+def test_cross_model_projection_warns(tmp_path, caplog):
+    # Row is matched on hardware shape only; if the served model differs from the
+    # xlsx workload the ceiling is for a DIFFERENT model -> must warn loudly.
+    import logging
+    xlsx = _write_xlsx(tmp_path / "l.xlsx", avg_lat=23.32, nbs=16)  # workload=llama405b
+    st = _state(maidas_path=xlsx, conc=16)
+    st.model_path = "/models/gpt-oss-120b"  # clearly not llama405b
+    with caplog.at_level(logging.WARNING):
+        bd = compute_roofline_breakdown_from_state(st)
+    assert bd.peak_tok_per_sec == pytest.approx(16 * 1000.0 / 23.32)  # still returned
+    assert any("CROSS-MODEL" in r.message for r in caplog.records)
+
+
+def test_matching_model_does_not_warn(tmp_path, caplog):
+    # When the served model reconciles with the xlsx workload, no cross-model warn.
+    import logging
+    xlsx = _write_xlsx(tmp_path / "l.xlsx", avg_lat=23.32, nbs=16)  # workload=llama405b
+    st = _state(maidas_path=xlsx, conc=16)
+    st.model_path = "/models/llama405b"
+    with caplog.at_level(logging.WARNING):
+        compute_roofline_breakdown_from_state(st)
+    assert not any("CROSS-MODEL" in r.message for r in caplog.records)
+
+
 def test_precision_alias_mxfp4_matches_MX4(tmp_path):
     # MAIDAS emits bfp='MX4'; a Hyperloom run reporting precision='mxfp4' (as in
     # the Llama-405B-MXFP4 benchmark) must still match, not silently fall back.

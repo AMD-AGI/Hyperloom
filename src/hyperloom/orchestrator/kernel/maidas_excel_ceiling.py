@@ -15,6 +15,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -75,6 +76,11 @@ _PRECISION_ALIASES = {
 def _bfp_token(precision: str) -> str:
     p = (precision or "").strip().lower()
     return _PRECISION_ALIASES.get(p, p)  # passthrough: fp8/bf16/mx4/... already match
+
+
+def _norm_model(s: str) -> str:
+    """Normalize a model / workload label to bare alphanumerics for comparison."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 def _soc_token(gpu_type: str) -> str:
@@ -166,15 +172,30 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
     if peak <= 0:
         return None
 
+    row_workload = str(q.iloc[0].get("workload", "")) if "workload" in q.columns else ""
+    served = os.path.basename(str(getattr(runtime, "model_path", "") or "").rstrip("/"))
+    # Cross-model guard: the row is matched on hardware shape only (soc/bfp/hp/gbs/
+    # isl/osl), NOT on model. Applying a projection built for a DIFFERENT model
+    # yields an invalid ceiling (empirically the measured throughput can exceed
+    # it). Warn loudly when the xlsx workload cannot be reconciled with the served
+    # model so the mis-projection is visible rather than silent.
+    nm_served, nm_wl = _norm_model(served), _norm_model(row_workload)
+    if nm_served and nm_wl and nm_served not in nm_wl and nm_wl not in nm_served:
+        logger.warning(
+            "MAIDAS CROSS-MODEL projection: xlsx workload=%r does not match served "
+            "model=%r. The ceiling is for a DIFFERENT model (matched only on "
+            "hardware shape) and may be INVALID. Provide the MAIDAS xlsx for the "
+            "served model.", row_workload, served,
+        )
     logger.info(
         "MAIDAS PROJECTION USED for roofline ceiling | source=%s | "
         "matched row: workload=%s soc=%s bfp=%s hp(TP)=%s gbs(conc)=%s "
-        "prefill(ISL)=%s decode(OSL)=%s scenario=uct_decode | "
+        "prefill(ISL)=%s decode(OSL)=%s scenario=uct_decode | served_model=%s | "
         "data used: avg_lat(decode TPOT)=%.3f ms | "
         "computed ceiling: peak=%.2f tok/s (= gbs %s x 1000 / avg_lat, memory-bound)",
-        path,
-        str(q.iloc[0].get("workload", "?")) if "workload" in q.columns else "?",
-        soc, prec, runtime.tp, conc, runtime.isl, runtime.osl, lat_ms, peak, conc,
+        path, row_workload or "?",
+        soc, prec, runtime.tp, conc, runtime.isl, runtime.osl, served or "?",
+        lat_ms, peak, conc,
     )
     # Decode is memory-bound, so the memory ceiling *is* the peak. MAIDAS
     # AllScenarios carries no compute-bound side projection, so cmp is left
