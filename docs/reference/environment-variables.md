@@ -968,13 +968,13 @@ per-concurrency arm selection maintainers apply before submitting:
 The minimum `keep_threshold_pct` floor for AgentX sessions is 2% (`AGENTX_KEEP_THRESHOLD_FLOOR_PCT`).
 The slow-tail variance is unmeasured; this floor is a conservative placeholder.
 
-**E2E normalised interactivity P90** is defined per request as
-`r_i = E2EL_i / OSL_i` (seconds per output token), then
-`interactivity_P90 = 1 / P90({r_i})` in tok/s/user.  Upstream takes the
-percentile in seconds-per-token *before* inverting to preserve the slow-tail
-interpretation (`MODELS.md:78`).  In aiperf's export `e2e_output_token_throughput`
-is the per-request rate `OSL / E2EL_s` with `LARGER_IS_BETTER`; its **P10**
-(not P90) is therefore the slow tail — `1 / P90(ratio) = P10(rate)`.
+Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
+grading and advisory comparison. This is aiperf's summary **P10** of the
+per-request rate `OSL / E2EL_s`, representing the slow tail for a
+`LARGER_IS_BETTER` metric. Comparison does not recompute request-level metrics.
+The external reference uses `1 / P90(E2EL_s / OSL)`; finite-sample linear
+interpolation means the estimators need not be numerically identical.
+The comparison is advisory and does not change KEEP/REVERT.
 
 TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.

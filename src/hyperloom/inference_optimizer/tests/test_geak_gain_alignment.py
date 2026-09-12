@@ -360,6 +360,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.current_best["input_throughput"] == 800.0 - measured
         assert state.current_best["total_throughput"] == 800.0
         assert state.current_best["e2e_norm_intvty_p90"] == 8.0
+        assert state.current_best_measurement["tput"] == measured
         assert state.cumulative_gain_validated == pytest.approx(60.0)
         assert state.cumulative_gain_validated_stack_len == 2
         assert state.resume_pending_revalidation is False

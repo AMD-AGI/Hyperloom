@@ -12,9 +12,10 @@ from typing import Any
 
 from hyperloom.common.env import env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
-    _clear_competitor_target,
     analyze,
+    clear_competitor_target,
 )
+from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -90,27 +91,17 @@ class TargetAnalysisExecutor:
         """Run the external-baseline comparison and persist report artefacts."""
         params = dict(ctx.task.params or {})
 
-        # Upstream agentic rows carry null isl/osl by design, so the strict
-        # isl/osl match in ``find_reference_rows`` can never hit one. Fetching
-        # them would always return empty; report that instead of a false miss.
-        # Matching agentic rows is tracked in agentX-compareGPU.issue.md.
         from ._workload_envs import agentx_active
 
-        if agentx_active((getattr(ctx, "extra", None) or {}).get("shared_state")):
-            log.info("target_analysis_executor: AgentX has no comparable upstream row; skipping")
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": "skipped: upstream agentic rows carry null isl/osl",
-                "baseline_status": "skipped",
-                "reason": "agentx_not_supported",
-            }
+        state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+        benchmark_mode: BenchmarkMode = "agentx" if agentx_active(state) else "synthetic"
+        model_path = str(params.get("model_path") or getattr(state, "model_path", "") or env_str("MODEL_PATH"))
 
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
             if cleanup_dir is not None:
-                _clear_competitor_target(cleanup_dir)
+                clear_competitor_target(cleanup_dir)
             log.warning(
                 "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
             )
@@ -123,30 +114,8 @@ class TargetAnalysisExecutor:
             }
 
         compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
-        if not compare_against_gpu:
-            log.info(
-                "target_analysis_executor: no compare_against_gpu set; writing skipped summary and returning",
-            )
-            try:
-                summary = analyze(
-                    session_dir=session_dir,
-                    model_path=str(params.get("model_path") or env_str("MODEL_PATH")),
-                    compare_against_gpu="",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("target_analysis_executor: analyze() raised: %s", exc)
-                return {
-                    "status": "succeeded",
-                    "kind": ctx.task.kind,
-                    "note": f"analyzer crashed: {exc}",
-                    "baseline_status": "fetch_error",
-                    "reason": "analyzer_crash",
-                }
-            return self._format_result(ctx, summary, session_dir)
-
-        model_path = str(params.get("model_path") or env_str("MODEL_PATH"))
-        framework = str(params.get("framework") or env_str("FRAMEWORK"))
-        precision = str(params.get("precision") or env_str("PRECISION"))
+        framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
+        precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))
         isl = int(params.get("isl") or _env_int("ISL", 0))
         osl = int(params.get("osl") or _env_int("OSL", 0))
 
@@ -159,9 +128,11 @@ class TargetAnalysisExecutor:
                 precision=precision,
                 isl=isl,
                 osl=osl,
+                benchmark_mode=benchmark_mode,
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
+            clear_competitor_target(session_dir)
             return {
                 "status": "succeeded",
                 "kind": ctx.task.kind,
@@ -197,6 +168,9 @@ class TargetAnalysisExecutor:
             out["best_tput_per_gpu"] = best.tput_per_gpu
             out["best_conc"] = best.conc
             out["best_decode_tp"] = best.decode_tp
+            if getattr(getattr(summary, "query", None), "benchmark_mode", "synthetic") == "agentx":
+                out["best_e2e_norm_intvty_p90"] = best.e2e_norm_intvty_p90
+                out["best_benchmark_id"] = best.benchmark_id
         log.info(
             "target_analysis_executor: status=%s reason=%s rows=%d (%s)",
             out["baseline_status"],
