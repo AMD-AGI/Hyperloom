@@ -408,7 +408,8 @@ def _print_final_summary(
 
 def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     """Bank the phase time the stopped leg spent but never recorded."""
-    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    boundary = state.leg_ended_ts or state.stop_ts
+    stop_unix = min(to_unix(boundary, 0.0) or 0.0, time.time())
     if stop_unix <= 0.0:
         return
     bank_phase_segment(state, until_unix=stop_unix)
@@ -438,6 +439,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.resumed_ts = now_iso()
     state.stop_reason = ""
     state.stop_ts = ""
+    state.leg_ended_ts = ""
     state.closing_phase = False
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""

@@ -68,6 +68,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "current_best",
         "stop_reason",
         "stop_ts",
+        "leg_ended_ts",
         "last_tick_exception",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",

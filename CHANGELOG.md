@@ -155,6 +155,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   third-party provider plugins published before the rename are still
   discovered, and it is not a CLI surface.
 
+### Fixed
+
+- **Supervisor watchdog restarts are resumable and bounded.** A wedged
+  coordinator receives SIGHUP, preserving the interrupted phase segment without
+  creating a session outcome; repeated wedges become terminal after three
+  restart attempts, counted durably before the signal goes out. Inline role
+  turns now share an explicit total wall-clock timeout, independent of backend
+  streamed-message idle timeouts and retries. Reactor-stage boundaries refresh
+  supervisor progress, while a stage cancelled at the total timeout counts toward
+  the crash emergency stop. A failed restart-counter write refuses the resumable
+  restart and sends SIGTERM, and a cleanly ended leg can resume as soon as its
+  owner pid is gone instead of being held alive by the final state write.
+- **The robustness monitor reads the real stop-reason vocabulary.** It imported
+  a module that does not exist and silently fell back to a subset missing 16
+  terminal reasons, so a finished session could be relaunched.
+
 ## [v1.1.0] - 2026-09-09
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

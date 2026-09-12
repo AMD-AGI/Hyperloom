@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
 
 __all__ = [
     "TickStamp",
+    "read_status",
     "read_tick",
     "stamp_tick",
     "write_status",
@@ -100,6 +101,14 @@ def write_status(session_dir: Path | str, payload: dict) -> None:
         OSError: If the snapshot cannot be written.
     """
     _write(supervisor_status_path(Path(session_dir)), payload)
+
+
+def read_status(session_dir: Path | str) -> dict | None:
+    """Read the last supervisor status, if one exists."""
+    try:
+        return read_json(supervisor_status_path(Path(session_dir)), strict=True, require_dict=True)
+    except FileNotFoundError:
+        return None
 
 
 def _write(path: Path, payload: dict) -> None:

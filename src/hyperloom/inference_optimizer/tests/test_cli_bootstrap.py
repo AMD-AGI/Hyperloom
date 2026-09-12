@@ -569,6 +569,20 @@ def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
     assert state.stop_ts == ""
 
 
+def test_a_resume_banks_a_resumable_legs_own_boundary() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.leg_ended_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state)
+
+    assert state.phase_elapsed_totals == {"PRELUDE": 1800.0}
+    assert state.leg_ended_ts == ""
+    assert state.stop_ts == ""
+
+
 def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
     """The first leg's segment is already durable; re-banking it would double-charge the phase."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess  # nosec B404 - spawns a process purely so its pid can be signalled
 import sys
@@ -22,15 +23,18 @@ from hyperloom.inference_optimizer.session.session_paths import (
     supervisor_status_path,
 )
 from hyperloom.orchestrator.supervisor import store, tick_stall_sec
+from hyperloom.orchestrator.supervisor.launcher import _TICK_STALL_FLOOR_SEC
 from hyperloom.orchestrator.supervisor.watch import (
     ALIVE,
     DEAD,
+    DEFAULT_POLL_SEC,
     DIED_STOP_REASON,
     UNKNOWN,
     WEDGED,
     WEDGED_STOP_REASON,
     Supervisor,
 )
+from hyperloom.orchestrator.loop.coordinator_helpers import REACTOR_TURN_TIMEOUT_ENV
 
 _NOW = 1_000_000.0
 
@@ -66,7 +70,7 @@ def _a_pid_that_is_running(request, *, deaf: bool = False) -> int:
     Returns:
         int: The child's pid, once it has announced it is ready to be signalled.
     """
-    ignore = "signal.signal(signal.SIGTERM, signal.SIG_IGN); " if deaf else ""
+    ignore = "signal.signal(signal.SIGHUP, signal.SIG_IGN); " if deaf else ""
     program = f"import signal, sys, time; {ignore}sys.stdout.write('r'); sys.stdout.flush(); time.sleep(300)"
     child = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE)  # nosec B603
     request.addfinalizer(child.kill)
@@ -81,13 +85,25 @@ def _supervisor(session_dir, **kw) -> Supervisor:
     return Supervisor(session_dir, **kw)
 
 
-def test_the_stall_window_always_fits_inside_the_session_it_watches():
-    """A window the session cannot outlast is a watch that never fires."""
-    two_hours = 2 * 3600.0
-    assert tick_stall_sec(two_hours) <= two_hours / 2
-    assert tick_stall_sec(3600.0) <= 3600.0 / 2
+def test_the_stall_window_fits_inside_any_session_long_enough_to_hold_a_tick():
+    """A window the session cannot outlast is a watch that never fires.
+
+    The floor is one legal tick, so only a session with room for two of them
+    can carry a window that is both armed and inside its own budget; a shorter
+    session is watched by a window it cannot outlast, which is the honest
+    trade for never calling a legal tick wedged.
+    """
+    shortest = 2 * _TICK_STALL_FLOOR_SEC
+    assert tick_stall_sec(shortest) <= shortest / 2
+    assert tick_stall_sec(4 * 3600.0) <= 4 * 3600.0 / 2
     # And never so short that a slow tick reads as a stopped one.
-    assert tick_stall_sec(60.0) == tick_stall_sec(3600.0)
+    assert tick_stall_sec(60.0) == _TICK_STALL_FLOOR_SEC
+
+
+def test_the_default_stall_window_follows_a_raised_reactor_timeout():
+    timeout = 7200.0
+
+    assert tick_stall_sec(0.0, env={REACTOR_TURN_TIMEOUT_ENV: str(timeout)}) == timeout + DEFAULT_POLL_SEC
 
 
 def test_a_ticking_coordinator_is_left_alone(tmp_path):
@@ -152,6 +168,104 @@ async def test_a_wedged_coordinator_is_asked_to_stop_on_the_one_channel_that_rea
     assert [r.split(":")[0] for r in supervisor.report.asked] == [WEDGED_STOP_REASON]
     assert "tick 1 last advanced" in supervisor.report.asked[0]
     _wait_for_exit(pid)
+
+
+def _a_wedged_reading(**kw) -> mock.Mock:
+    """A complete wedged reading, so a status write over it round-trips as JSON."""
+    fields = {"verdict": WEDGED, "pid": 123, "detail": "stalled", "tick": 7, "tick_age_sec": 999.0}
+    fields.update(kw)
+    return mock.Mock(**fields)
+
+
+def test_a_wedged_coordinator_is_asked_to_restart_with_sighup(tmp_path):
+    """The restart intent is carried by the signal itself."""
+    supervisor = _supervisor(tmp_path)
+
+    with mock.patch.object(os, "kill") as kill:
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    kill.assert_called_once_with(123, signal.SIGHUP)
+
+
+def test_an_unreadable_restart_count_refuses_another_resumable_restart(tmp_path):
+    status = supervisor_status_path(tmp_path)
+    status.parent.mkdir(parents=True)
+    status.write_text("{", encoding="utf-8")
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+
+    with mock.patch.object(os, "kill") as kill:
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    kill.assert_called_once_with(123, signal.SIGTERM)
+
+
+def test_the_restart_is_spent_on_disk_before_the_signal_goes_out(tmp_path):
+    """The coordinator's stop path can outlive this supervisor.
+
+    A count banked only after the signal is a restart the next leg reads as
+    never spent, which is how a bounded limit becomes an unbounded loop.
+    """
+    store.write_status(tmp_path, {"restart_count": 2})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    banked: list[int] = []
+
+    def _read_status_at_signal_time(pid, sig):
+        banked.append(json.loads(supervisor_status_path(tmp_path).read_text(encoding="utf-8"))["restart_count"])
+
+    with mock.patch.object(os, "kill", _read_status_at_signal_time):
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    assert banked == [3]
+
+
+def test_restart_counter_write_failure_sends_terminal_sigterm(tmp_path):
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+
+    with (
+        mock.patch.object(store, "write_status", side_effect=OSError("disk full")),
+        mock.patch.object(os, "kill") as kill,
+    ):
+        supervisor._ask_to_stop(_a_wedged_reading())
+
+    kill.assert_called_once_with(123, signal.SIGTERM)
+    assert supervisor.report.refusals == ["restart counter write failed; resumable restart refused: disk full"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_within_the_limit_stays_resumable(tmp_path):
+    store.write_status(tmp_path, {"restart_count": 2})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    wedged = mock.Mock(verdict=WEDGED, pid=123, detail="stalled", tick=7, tick_age_sec=999.0)
+    dead = mock.Mock(verdict=DEAD, pid=123, detail="gone", tick=7, tick_age_sec=1000.0)
+
+    with mock.patch.object(os, "kill") as kill:
+        await supervisor.act(wedged)
+    kill.assert_called_once_with(123, signal.SIGHUP)
+    done = await supervisor.act(dead)
+
+    status = json.loads(supervisor_status_path(tmp_path).read_text(encoding="utf-8"))
+    assert done is True
+    assert status["restart_count"] == 3
+    assert not (reports_dir(tmp_path) / "final.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_past_the_limit_becomes_terminal(tmp_path):
+    store.write_status(tmp_path, {"restart_count": 3})
+    supervisor = _supervisor(tmp_path, max_restarts=3)
+    wedged = mock.Mock(verdict=WEDGED, pid=123, detail="stalled", tick=7, tick_age_sec=999.0)
+    dead = mock.Mock(verdict=DEAD, pid=123, detail="gone", tick=7, tick_age_sec=1000.0)
+
+    with mock.patch.object(os, "kill") as kill:
+        await supervisor.act(wedged)
+    kill.assert_called_once_with(123, signal.SIGTERM)
+    done = await supervisor.act(dead)
+
+    final = json.loads((reports_dir(tmp_path) / "final.json").read_text(encoding="utf-8"))
+    assert done is True
+    assert final["stop_reason"] == WEDGED_STOP_REASON
+    # The terminal ask is not a restart, so the count stays at the three spent.
+    assert final["supervisor"]["restart_count"] == 3
 
 
 @pytest.mark.asyncio

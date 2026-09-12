@@ -605,6 +605,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     stop_reason: str = ""
     # When the session first stopped, and therefore its end time for consumers.
     stop_ts: str = ""
+    # When the current run leg ended without ending the session.
+    leg_ended_ts: str = ""
     # When the current run leg began, i.e. the most recent ``--resume``; empty for a session that has only ever run
     # once.
     resumed_ts: str = ""

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -36,6 +37,8 @@ log = logging.getLogger(__name__)
 
 # Constants below are read from other modules; listed here to mark them as intentionally exported.
 __all__ = [
+    "DEFAULT_REACTOR_TURN_TIMEOUT_SEC",
+    "REACTOR_TURN_TIMEOUT_ENV",
     "TIME_BUDGET_EXEMPT_ACTIONS",
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
@@ -43,7 +46,32 @@ __all__ = [
     "coerce_needs_gpu",
     "expected_action_cost_minutes",
     "measured_baseline_runtime_sec",
+    "resolve_reactor_turn_timeout_sec",
 ]
+
+REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
+DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
+
+
+def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> float:
+    """Resolve the reactor turn's total wall-clock timeout."""
+    environ = os.environ if env is None else env
+    raw = environ.get(REACTOR_TURN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value > 0.0 and math.isfinite(value):
+        return value
+    log.warning(
+        "%s=%r is not a positive finite number; using default %.1fs",
+        REACTOR_TURN_TIMEOUT_ENV,
+        raw,
+        DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+    )
+    return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 
 
 def coerce_needs_gpu(value: Any) -> bool:
