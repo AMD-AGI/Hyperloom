@@ -1,8 +1,8 @@
 ---
-title: Kimi-K3 A8W4 MoE stage1 - instruction candidate screening
+title: Kimi-K3 A8W4 MoE stage1 - Forge ASM and model E2E
 kind: case
 gens: [gfx950]
-status: GPU-validated candidate screening; no stable gain or model E2E result
+status: GPU-validated Forge KEEP; small E2E reduction repeated on one workload
 updated: 2026-09-12
 ---
 
@@ -132,7 +132,113 @@ would require a new load-scheduling/liveness analysis; merely lowering the
 descriptor is invalid. Static resource counts do not establish the active
 occupancy or bandwidth bottleneck.
 
-No candidate was installed into the model and no MoE E2E gain was measured.
+In that initial screen, no candidate was installed into the model and no MoE
+E2E gain was measured.
 The next useful evidence is the model's actual routing plus memory/occupancy
 counters. Preserve synchronization when considering a new load schedule:
 moving VMEM instructions also changes the meaning of outstanding-count waits.
+
+## Actual Forge campaign: reduce allocation through verified liveness changes
+
+A later real `forge-loop --kernel-backend assembly` campaign used PR revision
+`ad99f06be07fe51033b6ca8902171bc0bc1d3553`, Codex / `gpt-5.6-sol`, and no
+fallback provider. Its verified PORT used Forge `assemble` and `HipKernel` for
+standalone loading. After PORT, the driver, fixture, frontend source, launch
+glue, grid, block size and ABI were frozen. Only `kernel.s` changed.
+
+The retained candidate reduced 134 VGPRs to 128 by shortening live ranges,
+not by lowering the descriptor alone. It placed transient weight loads in
+`v2:v5`, delayed one `ds_read_b128` so `v62:v65` could temporarily hold another
+weight fragment, and reconstructed four address temporaries before their
+next uses. Three reconstruction instructions occupied existing dependency
+latency slots. Arithmetic, cache policy, LDS size and synchronization semantics
+were retained; all register references and allocation metadata were updated.
+
+HIP's theoretical occupancy query reported three 256-thread blocks per CU for
+the seed and four for the candidate: 12 versus 16 waves. This is a residency
+upper bound, not measured active occupancy or proof of a bottleneck.
+
+The PORT commit was `72678ac9d7834cb698b65aa751ac972c0aeac742`; the actual Forge
+KEEP was `a945c8bbf0378e721f96d7147c6982126eb5235c`. The source-relative mean-case
+score was 1.052457x, versus 1.045174x for PORT. The incremental search score
+was therefore only 1.006968x. Do not attribute the entire 5.2% source-relative
+score to instruction changes.
+
+Independent validation covered 48 hidden inputs (tokens 2/3/7/9/15/16, expert
+pools 16/64/224/896, two seeds and additional runtime SiTUv2 parameters),
+changed-input nondefault-stream graph replay, and the exact source/seed/candidate
+serving bridge. Outputs and raw scales were byte exact. Thirteen randomized
+timing rounds showed that routing changes which resource regime benefits:
+
+| Tokens / expert pool | Warm PORT -> candidate | Evicted PORT -> candidate |
+| --- | ---: | ---: |
+| 8 / 16 | 20.520 -> 20.694 us | 25.881 -> 25.920 us |
+| 16 / 16 | 21.121 -> 21.252 us | 26.120 -> 26.200 us |
+| 16 / 64 | 40.451 -> 38.861 us | 45.201 -> 43.440 us |
+| 16 / 224 | 43.672 -> 41.968 us | 60.681 -> 59.681 us |
+| 16 / 896 | 52.104 -> 51.989 us | 73.921 -> 73.321 us |
+
+For token 16, pools 64 and 224 improved in all 13 paired rounds in both cache
+conditions. The concentrated pool-16 warm case regressed in all rounds.
+An expert pool is a synthetic routing generator parameter; it is not the
+observed number of active experts in a model request. Measure actual E2E
+before treating any one routing result as representative.
+
+The tested replacement domain is only 1-16 tokens. A 64-token concentrated
+preflight showed source repeatability differences whose cause was not resolved;
+it is excluded rather than silently relaxed. The standalone workspace has no
+arena `config.yaml` or `baseline_perf.yaml`, so its full custom driver and hidden
+tests are not arena canonical certification.
+
+Pass the current capture stream explicitly to the original FlyDSL callable
+when recording reference graphs. An earlier setup passed a stale default
+stream and timed an empty graph. Reject empty-graph warnings, clear outputs,
+replay and verify both output and scales before accepting timing data.
+
+Evidence: `/shared_nfs/chenyi/forge-neha-repro-20260911/moe-forge-r3b`.
+The candidate ASM SHA-256 is
+`1560bf7b471d08df69e5b325611348c2e8c4dbb1a3ed44de9240dc70aa889690`;
+its independently assembled code object SHA-256 is
+`cc59cf7b4d8263003560aa3b1024bbff7ab3e17eac8b628b381005fb1ccbff5c`.
+
+## Full-model measurements: a small workload-specific reduction
+
+The actual standalone candidate was installed through the fixed HIP launcher
+in Kimi-K3 on SGLang TP8, eight MI355X GPUs. Every measured server recorded the
+actual loaded image hash on all eight workers; short GPU traces verified target
+dispatch. No microbenchmark overlapped model inference, and the AITER source
+was restored after each trial. The measured Forge revision is pinned above;
+later PR documentation or main rebases are not the measured campaign revision.
+
+The first workload used sixteen 1024-token inputs differing at only one token,
+512 output tokens, and five repeats per batch. Batch 1 was effectively flat.
+At batch 16, PORT-before / candidate / PORT-after medians were 12.673587 /
+12.704876 / 12.787473 seconds: no stable additional E2E gain. Retain that result.
+
+A separate fixed workload used sixteen diverse topics/languages, the same
+1024/512 lengths, batch 16 and eight repetitions per server. Sampling was
+greedy with ignore-EOS and no prefix cache. Every timed sample was retained.
+
+| Trial | First server median | Middle server median | Last server median |
+| --- | ---: | ---: | ---: |
+| PORT / candidate / PORT | 13.874957 s | 13.831462 s | 13.874669 s |
+| Independent candidate / PORT / candidate | 13.820021 s | 13.879234 s | 13.825247 s |
+
+The exploratory candidate reduced latency by 0.313% and 0.311% against its two
+controls. A new reverse-order process-level repeat reproduced reductions of
+0.427% and 0.389%; mean latency improved as well. This establishes a small
+observed serving benefit for this fixed workload on this node, not a general
+Kimi-K3 improvement. Actual model routing counts were not recorded, so do not
+assert that its expert distribution equals a synthetic holdout pool.
+
+The exploratory effect did not meet the initial 0.5% prioritization threshold.
+Both controls agreed and every candidate sample was below both control ranges,
+which motivated a separately recorded small-signal protocol before the reverse
+repeat. Report that change and the small effect; do not claim the original
+threshold passed or omit the first workload's negative result.
+
+Complete generated token sequences differed even between unchanged PORT
+repetitions on the diverse prompts. The isolated operator's outputs and raw
+scales were byte exact, but these serving runs do not certify full-model
+determinism or model quality. The result remains bounded by the fixed prompt
+set, runtime versions, hardware and numerical checks described here.
