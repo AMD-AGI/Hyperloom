@@ -148,3 +148,32 @@ def test_conc_sweep_ceiling_uses_maidas_per_rung(tmp_path, monkeypatch):
     assert by_conc[8]["t_peak_tok_s"] == pytest.approx(round(8 * 1000.0 / 30.0, 2))
     assert by_conc[16]["bound_kind"] == "memory"
     assert by_conc[16]["t_peak_tok_s"] == pytest.approx(round(16 * 1000.0 / 23.32, 2))
+    # Provenance: both rungs priced from MAIDAS, surfaced per-row and top-level.
+    assert by_conc[8]["ceiling_source"] == "maidas"
+    assert by_conc[16]["ceiling_source"] == "maidas"
+    assert out["maidas_rungs"] == 2
+    assert out["rungs_total"] == 2
+
+
+def test_conc_sweep_records_source_per_rung_mixed(tmp_path, monkeypatch):
+    # A spilled rung (gbs=0) must fall back to native and be labelled as such,
+    # while a feasible rung is labelled maidas — provenance is per-rung.
+    import hyperloom.orchestrator.actions.executors  # noqa: F401
+    from hyperloom.orchestrator.kernel import conc_sweep as cs
+    # nbs=4 spills (gbs=0); nbs=8 is feasible.
+    xlsx = _write_multi(tmp_path / "m.xlsx",
+                        [{"nbs": 4, "gbs": 0, "avg_lat": 0.0},
+                         {"nbs": 8, "avg_lat": 30.0}])
+    dummy = SimpleNamespace(weight_bytes=1, active_weight_bytes=1, num_experts=0,
+                            experts_per_tok=0, expert_weight_bytes=0, num_layers=1,
+                            num_kv_heads=1, head_dim=1, weight_dtype_bytes=2)
+    monkeypatch.setattr(cs, "load_model_meta", lambda *a, **k: dummy)
+    out = cs._build_roofline_ceiling(
+        _state(maidas_path=xlsx), concs=[4, 8], isl=1024, osl=1024,
+        baseline_points=[], optimized_points=[],
+    )
+    by_conc = {r["conc"]: r for r in out["rows"]}
+    assert by_conc[4]["ceiling_source"] == "native"   # spill -> native
+    assert by_conc[8]["ceiling_source"] == "maidas"    # feasible -> maidas
+    assert out["maidas_rungs"] == 1
+    assert out["rungs_total"] == 2
