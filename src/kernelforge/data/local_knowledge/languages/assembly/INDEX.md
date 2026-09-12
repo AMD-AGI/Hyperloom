@@ -68,10 +68,16 @@ multiply experiment that passed correctness but produced no useful speedup.
 This is Forge validation evidence, separate from the Evolve source cases.
 
 For the FP8/MXFP4 SiTUv2 path, read the
-[Kimi-K3 MoE stage1 screening case](cases/kimi_k3_moe_a8w4_gfx950.md).
+[Kimi-K3 MoE stage1 case](cases/kimi_k3_moe_a8w4_gfx950.md).
 It validates one FlyDSL 0.3.2 roundtrip, explains the required sorted activation
-scale layout, and records five instruction candidates with no stable winner.
-Its routing holdouts show why a warm-cache gain can reverse after eviction.
+scale layout, and retains five initial instruction candidates with no stable
+winner. A later real Forge campaign reduced 134 VGPRs to 128 through liveness
+and load-scheduling changes. Independent routing holdouts and reverse-order
+Kimi-K3 serving trials measured a small 0.31%-0.43% latency reduction on one
+fixed diverse workload; near-identical prompts did not establish a stable gain.
+Read its scope, output-repeatability limits, and separate source/PORT/ASM
+attribution before transferring the result. Its earlier cache-policy holdouts
+also show why a warm-cache gain can reverse after eviction.
 
 ## Case knowledge: Qwen3 model integration
 

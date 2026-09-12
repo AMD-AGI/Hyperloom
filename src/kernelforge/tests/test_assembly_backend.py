@@ -80,18 +80,23 @@ def test_amdgpu_directive_mention_does_not_reclassify_python_kernel(tmp_path):
     assert infer_kernel_backend([source]) == "flydsl"
 
 
-def test_assembly_prompt_loads_frontend_and_assembly_knowledge(tmp_path):
+@pytest.mark.parametrize("defer_maps", [False, True])
+def test_assembly_prompt_loads_frontend_and_assembly_knowledge(tmp_path, defer_maps):
     languages = ("assembly", "flydsl", "triton", "gluon", "hip")
     for language in languages:
         directory = tmp_path / "languages" / language
         directory.mkdir(parents=True)
         (directory / "INDEX.md").write_text(f"{language} test knowledge map\n", encoding="utf-8")
-    config = Config(gpu_target="gfx950", local_knowledge_dir=tmp_path)
+    config = Config(gpu_target="gfx950", local_knowledge_dir=tmp_path, defer_knowledge_maps=defer_maps)
 
     assert resolve_language_dirs("assembly", tmp_path) == languages
     prompt = build_single_kernel_backend_prompt(config, "assembly")
     for language in languages:
-        assert f"{language} test knowledge map" in prompt
+        if defer_maps or language != "assembly":
+            assert str(tmp_path / "languages" / language / "INDEX.md") in prompt
+            assert f"{language} test knowledge map" not in prompt
+        else:
+            assert f"{language} test knowledge map" in prompt
     assert "gfx950" in prompt
 
 
